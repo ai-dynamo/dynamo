@@ -484,7 +484,58 @@ class TestNvVideosResponse:
 
 
 # =============================================================================
-# Part 5: Concurrency Safety Tests
+# Part 5: DiffusionEngine Unit Tests
+# =============================================================================
+
+
+class TestDiffusionEngineGenerate:
+    """Tests for DiffusionEngine.generate() logic."""
+
+    def _make_engine(self):
+        """Create a DiffusionEngine with mocked pipeline (no TRT-LLM needed)."""
+        from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
+
+        config = DiffusionConfig()
+        engine = DiffusionEngine(config=config)
+        engine._initialized = True
+        engine._pipeline = MagicMock()
+        engine._pipeline.infer.return_value = SimpleNamespace(
+            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
+            image=None,
+            audio=None,
+        )
+        return engine
+
+    def test_generate_wraps_prompt_as_list(self):
+        """Verify DiffusionEngine passes prompt as List[str] to DiffusionRequest."""
+        engine = self._make_engine()
+
+        captured = {}
+
+        class FakeDiffusionRequest:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        # DiffusionRequest is imported inside generate() via
+        #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
+        # so we inject a fake module into sys.modules.
+        fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
+        with patch.dict("sys.modules", {
+            "tensorrt_llm._torch.visual_gen.executor": fake_executor,
+        }):
+            engine.generate(prompt="a golden retriever", height=64, width=64,
+                            num_frames=4, num_inference_steps=1)
+
+        assert isinstance(captured["prompt"], list), (
+            f"Expected list, got {type(captured['prompt'])}"
+        )
+        assert captured["prompt"] == ["a golden retriever"]
+
+
+# =============================================================================
+# Part 6: Concurrency Safety Tests
 # =============================================================================
 
 
