@@ -669,6 +669,22 @@ impl KvbmWorker {
         self.block_transfer_handler_rx.take()
     }
 
+    pub async fn into_g4_storage_agent(
+        &mut self,
+        worker: G4StorageWorker,
+    ) -> anyhow::Result<G4StorageAgent> {
+        let handler_rx = self
+            .block_transfer_handler_rx
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("block transfer handler receiver already taken"))?;
+
+        let handler = handler_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("block transfer handler dropped before readiness"))?;
+
+        Ok(G4StorageAgent::new(worker.worker_id, Arc::new(handler)))
+    }
+
     fn make_layout<S: Storage, M: BlockMetadata>(
         mut layout: Box<dyn NixlLayout<StorageType = S>>,
         agent: &Option<NixlAgent>,

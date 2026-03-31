@@ -200,6 +200,7 @@ impl BlockTransferHandler {
             (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request).await,
             (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
             (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request).await,
+            (Disk, Host) => self.begin_transfer(&self.disk, &self.host, request).await,
             (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request).await,
             _ => {
                 return Err(anyhow::anyhow!("Invalid transfer type."));

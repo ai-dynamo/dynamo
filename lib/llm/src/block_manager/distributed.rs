@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod g4;
 mod transfer;
 mod utils;
 mod zmq;
@@ -8,6 +9,10 @@ mod zmq;
 mod leader;
 mod worker;
 
+pub use g4::{
+    G4Error, G4FetchedBlock, G4PutBlock, G4QueryHit, G4StorageAgent, G4StorageClient,
+    G4StorageWorker, select_g4_owner,
+};
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
 pub use utils::{

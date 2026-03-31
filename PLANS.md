@@ -1,10 +1,81 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 01:19:54 UTC
+Last updated: 2026-03-31 02:28:50 UTC
 
 Current run outcome:
 
+- Active execution run started on 2026-03-31 02:08:00 UTC.
+- Mandatory context read in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/block_manager/distributed/transfer.rs`
+  - `lib/llm/src/block_manager/offload/pending.rs`
+  - `lib/llm/src/block_manager/storage/disk.rs`
+  - `lib/llm/src/block_manager/state/local.rs`
+  - `lib/llm/src/block_manager/v2/physical/layout/builder.rs`
+  - `lib/llm/src/block_manager/block/transfer/strategy.rs`
+- Current implementation decision for this run:
+  - keep the first patch single-owner and exact-block only
+  - add the missing disk-to-host transfer leg needed for pinned-host staging
+  - add a small G4 storage-agent layer under `lib/llm/src/block_manager/distributed/`
+  - keep membership routing deterministic and local; do not add redundancy,
+    repair, event publication, or a global metadata service
+- Why this slice:
+  - the existing distributed path already has reusable worker/transfer
+    machinery for G1-G3
+  - `BlockTransferHandler` already owns the disk/host/device local data and
+    transfer context needed for the first G4 fetch path
+  - the repo does not already contain a ready-made G4 discovery/storage-agent
+    runtime, so the smallest viable patch is a local routing/storage-agent seam
+    with unit coverage
+- Meaningful milestones planned for this run:
+  1. extend `BlockTransferHandler` for the pinned-host disk fetch leg and cover
+     that path with targeted tests
+  2. add deterministic owner routing plus exact-block `query/put/fetch` G4
+     agent APIs under `lib/llm/src/block_manager/distributed/`
+  3. validate failure handling semantics and update docs/handoff
+- Validation policy for this run:
+  - run targeted tests after each meaningful milestone
+  - run at least one final targeted cargo test pass before stopping
+- Milestone 1 completed in this run:
+  - added `lib/llm/src/block_manager/distributed/g4.rs`
+  - added deterministic single-owner routing keyed by `sequence_hash`
+  - added a small block-indexed G4 storage-agent/client seam that reuses
+    `BlockTransferRequest` and `BlockTransferHandler`
+  - added the missing `Disk -> Host` transfer arm in
+    `lib/llm/src/block_manager/distributed/transfer.rs` for pinned-host staging
+  - added `KvbmWorker::into_g4_storage_agent(...)` to convert an initialized
+    worker transfer handler into the first-pass G4 agent wrapper
+- Validation completed after milestone 1:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`5 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml block_manager::distributed:: --lib`
+    -> pass (`5 passed`)
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - post-format validation:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`5 passed`)
+- Validation note:
+  - this workspace tried to refresh `Cargo.lock` entries for `jiff*` during
+    test invocation even though the feature work did not require dependency
+    changes; reverted that churn after each test run
+  - `--locked` is not currently usable with the repo-local `Cargo.lock` state;
+    cargo immediately errors that the lock would need an update, so validation
+    in this run stayed unlocked and the unrelated lockfile churn was reverted
+- Remaining work in this run:
+  - inspect whether any immediate cleanup is required around docs or API
+    comments before the checkpoint commit
+  - make a signed checkpoint commit for the first-pass G4 slice
+  - re-read this file after the commit and decide whether a second slice is
+    still feasible in the current run
+- Exact next file to touch:
+  - `PLANS.md`
+
 - Switched to branch `mf/kvbm-g4`.
+- HUMAN VETO: SHOULD BE BASED ON MAIN, not on mf/kvbm-trtllm. 
 - Scope for this run stayed planning-only. Do not treat this section as a code
   change summary; treat it as instructions for the next subagent that will do
   the implementation.
