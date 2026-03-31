@@ -1516,8 +1516,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
-    """Serve decode-phase generation requests from an already-prefilled prompt."""
-
     def __init__(
         self,
         runtime,
@@ -1752,8 +1750,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    """Serve prefill requests and forward decode state to downstream workers."""
-
     def __init__(
         self,
         runtime,
