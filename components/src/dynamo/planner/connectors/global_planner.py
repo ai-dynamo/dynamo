@@ -8,12 +8,11 @@ import os
 import time
 from typing import Optional
 
-from dynamo.planner.defaults import SubComponentType
-from dynamo.planner.kubernetes_connector import TargetReplica
-from dynamo.planner.planner_connector import PlannerConnector
-from dynamo.planner.remote_planner_client import RemotePlannerClient
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleStatus
-from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
+from dynamo.planner.connectors.remote_client import RemotePlannerClient
+from dynamo.planner.errors import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 

@@ -18,15 +18,10 @@ import logging
 import os
 from typing import Optional
 
-from pydantic import BaseModel
-
-from dynamo.planner.defaults import (
-    SubComponentType,
-    get_service_from_sub_component_type_or_name,
-)
-from dynamo.planner.kube import KubernetesAPI
-from dynamo.planner.planner_connector import PlannerConnector
-from dynamo.planner.utils.exceptions import (
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     EmptyTargetReplicasError,
@@ -34,17 +29,17 @@ from dynamo.planner.utils.exceptions import (
     PlannerError,
     UserProvidedModelNameMismatchError,
 )
-from dynamo.planner.worker_info import WorkerInfo, build_worker_info_from_defaults
+from dynamo.planner.monitoring.dgd_services import (
+    get_service_from_sub_component_type_or_name,
+)
+from dynamo.planner.monitoring.worker_info import (
+    WorkerInfo,
+    build_worker_info_from_defaults,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-class TargetReplica(BaseModel):
-    sub_component_type: SubComponentType
-    component_name: Optional[str] = None
-    desired_replicas: int
 
 
 class KubernetesConnector(PlannerConnector):
