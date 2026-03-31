@@ -1,6 +1,99 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 18:36:51 UTC
+Last updated: 2026-03-31 18:43:23 UTC
+
+Current in-progress run (2026-03-31 18:40:38 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
+- Current branch baseline observed in this run:
+  - detached `HEAD` at `51a42fc87d`
+  - worktree started clean
+- Current implementation slice for this run:
+  - keep compacting the stale top-of-file handoff now that the branch already
+    contains the shared offer-admission API and worker/block-manager runtime
+    helper noted by prior runs
+  - add a shared `offer_and_put(...)` metadata-admission helper on the G4
+    agent/client layer so callers can avoid duplicate routing/admission logic
+    when the next step is to register accepted blocks immediately after offer
+  - make the smoke HTTP backend reuse that new shared helper for the metadata
+    registration half of `/put_payload` after payload bytes are validated and
+    persisted
+- Why this slice:
+  - the design doc and existing plan both prefer metadata-first admission
+    before payload transfer, but the current code still requires callers to
+    manually sequence `offer` and `put` when they want accepted blocks
+    registered right away
+  - the smoke backend is the only in-tree payload path today, so it is the
+    smallest callsite where a shared helper reduces local duplication without
+    overstating real remote data-plane progress
+  - the container still has no `cargo` or `rustc` on `PATH`, so this run should
+    favor a narrow, reviewable slice plus explicit blocked-validation notes
+- Environment facts confirmed in this run:
+  - `rustc --version` fails with `/bin/bash: line 1: rustc: command not found`
+  - `which cargo` and `which rustc` both return no path in this container
+- In-progress edits:
+  - `PLANS.md`
+    - recorded the true current baseline and the missing-toolchain validation
+      blocker
+    - replaced the stale "next smallest slice" note with the concrete
+      `offer_and_put(...)` helper milestone for this run
+- Milestone completed in this run:
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+    - added `G4StorageAgent::offered_blocks(...)` so agent callers can reuse
+      the shared admission filter and preserve caller input order before any
+      payload-side action
+    - added `G4StorageAgent::offer_and_put_blocks(...)` as the shared
+      metadata-admission helper that filters and immediately registers accepted
+      blocks
+    - added `G4StorageClient::offer_and_put_blocks(...)` so owner-routed client
+      callers can reuse the same metadata-admission flow across workers
+    - added focused tests covering agent-level offer-and-register behavior and
+      client-level owner-routed offer-and-register behavior
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+    - changed `/put_payload` to reuse
+      `G4StorageAgent::offered_blocks(...)` for accepted-block filtering
+    - kept payload persistence before metadata publication so the smoke backend
+      does not advertise query hits before `fetch` can actually return bytes
+- Validation completed in this run:
+  - attempted environment check: `rustc --version`
+    -> failed before execution: `/bin/bash: line 1: rustc: command not found`
+  - attempted: `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> failed before execution: `/bin/bash: line 1: cargo: command not found`
+  - attempted: `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> failed before execution: `/bin/bash: line 1: cargo: command not found`
+  - attempted:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    -> failed before execution: `/bin/bash: line 1: cargo: command not found`
+- Validation notes from this run:
+  - `git diff --check` passed after the edits
+  - Rust formatting, tests, and compile checks remain blocked entirely by the
+    missing Rust toolchain in this container rather than by an observed source
+    error from these files
+- Commits made in this run:
+  - pending; create a signed-off commit after this plan update
+- Remaining work after this run:
+  - create the signed-off commit for this `offer_and_put(...)` helper slice
+  - rerun the blocked validation commands on the next host/container that has
+    `cargo` and `rustc` installed
+  - if those pass, decide whether the next smallest G4 slice should be
+    client-side/shared payload helpers or a more realistic multi-owner
+    smoke/runtime path
+- Exact next file or command to touch:
+  - command:
+    `git commit --signoff -am "Add G4 offer-and-put helpers"`
+  - then:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
 
 Current in-progress run (2026-03-31 18:33:59 UTC):
 

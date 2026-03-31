@@ -286,6 +286,24 @@ impl G4StorageAgent {
         self.block_index.offer_blocks(blocks)
     }
 
+    pub async fn offered_blocks(&self, blocks: Vec<G4PutBlock>) -> Vec<G4PutBlock> {
+        let accepted_hashes: HashSet<_> = self.offer_blocks(&blocks).await.into_iter().collect();
+        blocks
+            .into_iter()
+            .filter(|block| accepted_hashes.contains(&block.sequence_hash))
+            .collect()
+    }
+
+    pub async fn offer_and_put_blocks(&self, blocks: Vec<G4PutBlock>) -> Vec<G4PutBlock> {
+        let accepted_blocks = self.offered_blocks(blocks).await;
+
+        if !accepted_blocks.is_empty() {
+            self.put_blocks(accepted_blocks.clone()).await;
+        }
+
+        accepted_blocks
+    }
+
     pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G4QueryHit> {
         #[cfg(test)]
         if let Some(query_delay) = self.query_delay {
@@ -397,6 +415,41 @@ impl G4StorageClient {
                 .ok_or(G4Error::UnknownWorker { worker_id })?;
             let accepted = agent.offer_blocks(&owner_blocks).await;
             accepted_by_owner.insert(worker_id, accepted.into_iter().collect());
+        }
+
+        Ok(blocks
+            .into_iter()
+            .filter(|block| {
+                self.owner_for(block.sequence_hash)
+                    .ok()
+                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                    .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
+            })
+            .collect())
+    }
+
+    pub async fn offer_and_put_blocks(
+        &self,
+        blocks: Vec<G4PutBlock>,
+    ) -> Result<Vec<G4PutBlock>, G4Error> {
+        let mut routed: HashMap<WorkerID, Vec<G4PutBlock>> = HashMap::new();
+
+        for block in &blocks {
+            let owner = self.owner_for(block.sequence_hash)?;
+            routed.entry(owner.worker_id).or_default().push(block.clone());
+        }
+
+        let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
+        for (worker_id, owner_blocks) in routed {
+            let agent = self
+                .agents
+                .get(&worker_id)
+                .ok_or(G4Error::UnknownWorker { worker_id })?;
+            let accepted = agent.offer_and_put_blocks(owner_blocks).await;
+            accepted_by_owner.insert(
+                worker_id,
+                accepted.into_iter().map(|block| block.sequence_hash).collect(),
+            );
         }
 
         Ok(blocks
@@ -792,6 +845,115 @@ mod tests {
             offered.iter().map(|block| block.sequence_hash).collect::<Vec<_>>(),
             vec![1, 3]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_offer_and_put_registers_only_missing_blocks() {
+        let transfer = Arc::new(MockTransferExecutor::default());
+        let agent = G4StorageAgent::new(7, transfer);
+
+        agent
+            .put_blocks(vec![G4PutBlock {
+                sequence_hash: 11,
+                disk_block_idx: 4,
+                size_bytes: 1024,
+                checksum: None,
+            }])
+            .await;
+
+        let accepted = agent
+            .offer_and_put_blocks(vec![
+                G4PutBlock {
+                    sequence_hash: 11,
+                    disk_block_idx: 40,
+                    size_bytes: 1024,
+                    checksum: None,
+                },
+                G4PutBlock {
+                    sequence_hash: 12,
+                    disk_block_idx: 5,
+                    size_bytes: 2048,
+                    checksum: Some([7; 32]),
+                },
+            ])
+            .await;
+
+        assert_eq!(
+            accepted.iter().map(|block| block.sequence_hash).collect::<Vec<_>>(),
+            vec![12]
+        );
+
+        let hits = agent.query_blocks(&[11, 12]).await;
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits.iter()
+                .find(|hit| hit.sequence_hash == 12)
+                .map(|hit| (hit.disk_block_idx, hit.size_bytes, hit.checksum)),
+            Some((5, 2048, Some([7; 32])))
+        );
+    }
+
+    #[tokio::test]
+    async fn client_offer_and_put_routes_by_owner_and_preserves_input_order() {
+        let worker_list = workers();
+        let sequence_hashes = vec![1_u64, 2_u64, 3_u64];
+        let mut agents = HashMap::new();
+
+        for sequence_hash in &sequence_hashes {
+            let owner = select_g4_owner(*sequence_hash, &worker_list).unwrap();
+            agents.entry(owner.worker_id).or_insert_with(|| {
+                Arc::new(G4StorageAgent::new(
+                    owner.worker_id,
+                    Arc::new(MockTransferExecutor::default()),
+                ))
+            });
+        }
+
+        let existing_hash = sequence_hashes[1];
+        let existing_owner = select_g4_owner(existing_hash, &worker_list).unwrap();
+        agents
+            .get(&existing_owner.worker_id)
+            .unwrap()
+            .put_blocks(vec![G4PutBlock {
+                sequence_hash: existing_hash,
+                disk_block_idx: 99,
+                size_bytes: 4096,
+                checksum: None,
+            }])
+            .await;
+
+        let client = G4StorageClient::new(worker_list, agents.clone(), Duration::from_millis(50));
+        let accepted = client
+            .offer_and_put_blocks(
+                sequence_hashes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, sequence_hash)| G4PutBlock {
+                        sequence_hash: *sequence_hash,
+                        disk_block_idx: idx,
+                        size_bytes: 1024 * (idx + 1),
+                        checksum: Some([idx as u8; 32]),
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            accepted.iter().map(|block| block.sequence_hash).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let query_hashes = sequence_hashes.clone();
+        for sequence_hash in query_hashes {
+            let owner = select_g4_owner(sequence_hash, &workers()).unwrap();
+            let hits = agents
+                .get(&owner.worker_id)
+                .unwrap()
+                .query_blocks(&[sequence_hash])
+                .await;
+            assert_eq!(hits.len(), 1);
+        }
     }
 
     #[tokio::test]

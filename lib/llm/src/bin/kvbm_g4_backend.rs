@@ -240,18 +240,31 @@ async fn put_payload_blocks(
     State(state): State<AppState>,
     Json(request): Json<PutPayloadRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    {
-        let mut payloads = state.payloads.write().await;
-        for block in &request.blocks {
-            if block.payload.len() != block.meta.size_bytes {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            payloads.insert(block.meta.sequence_hash, block.clone());
+    for block in &request.blocks {
+        if block.payload.len() != block.meta.size_bytes {
+            return Err(StatusCode::BAD_REQUEST);
         }
     }
 
-    let metadata: Vec<G4PutBlock> = request.blocks.into_iter().map(|block| block.meta).collect();
-    state.agent.put_blocks(metadata).await;
+    let metadata: Vec<G4PutBlock> = request.blocks.iter().map(|block| block.meta.clone()).collect();
+    let accepted = state.agent.offered_blocks(metadata).await;
+
+    if accepted.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let accepted_hashes: std::collections::HashSet<_> =
+        accepted.iter().map(|block| block.sequence_hash).collect();
+
+    let mut payloads = state.payloads.write().await;
+    for block in request.blocks {
+        if accepted_hashes.contains(&block.meta.sequence_hash) {
+            payloads.insert(block.meta.sequence_hash, block);
+        }
+    }
+
+    state.agent.put_blocks(accepted).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
