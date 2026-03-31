@@ -4,9 +4,9 @@
 New steering direction update at bottom of plan. Step: G4 rename to G3PB. Aslo need to push to git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2 branch once commited.
 Condense the plan once finished with this stage.
 
-Last updated: 2026-03-31 20:45:39 UTC
+Last updated: 2026-03-31 20:46:55 UTC
 
-Current in-progress run (2026-03-31 20:45:39 UTC):
+Current in-progress run (2026-03-31 20:46:55 UTC):
 - Mandatory context re-read completed in this run:
   - `Agents.md`
   - `PLANS.md`
@@ -21,8 +21,10 @@ Current in-progress run (2026-03-31 20:45:39 UTC):
   - `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - Current branch baseline observed in this run:
   - started from `87d9607cc` (`add plan`)
-  - first milestone commit made in this run:
-    `9c2754d33` `Decouple G4 peer cache from disk offload`
+  - commits made in this run so far:
+    - `9c2754d33` `Decouple G4 peer cache from disk offload`
+    - `14fd0973c` `Rename G4 peer cache flow to G3PB`
+  - worktree is clean after commit `14fd0973c`
 - Implementation milestones completed in this run:
   - core decoupling
     - removed `G4BlockIndex` / disk-observer wiring from:
@@ -91,8 +93,7 @@ Current in-progress run (2026-03-31 20:45:39 UTC):
   - file:
     `PLANS.md`
   - next commands:
-    make the next signed commit for the `G3PB` rename/doc/runtime-fix slice,
-    then push:
+    push the current detached `HEAD` to the requested branch name:
     `git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2`
 - Remaining work after this run:
   - swap the in-memory `G3pbPeerStorage` backend for a `foyer`-backed hybrid
