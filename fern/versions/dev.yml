@@ -132,6 +132,8 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: ../pages-dev/agents/tool-calling.md
+      - page: Reasoning
+        path: ../pages-dev/agents/reasoning.md
       - page: LoRA Adapters
         path: ../pages-dev/features/lora/README.md
       - section: Agents
