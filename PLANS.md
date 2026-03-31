@@ -4,9 +4,9 @@
 New steering direction update at bottom of plan. Step: G4 rename to G3PB. Aslo need to push to git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2 branch once commited.
 Condense the plan once finished with this stage.
 
-Last updated: 2026-03-31 20:47:33 UTC
+Last updated: 2026-03-31 20:48:13 UTC
 
-Current in-progress run (2026-03-31 20:47:33 UTC):
+Current in-progress run (2026-03-31 20:48:13 UTC):
 - Mandatory context re-read completed in this run:
   - `Agents.md`
   - `PLANS.md`
@@ -25,8 +25,9 @@ Current in-progress run (2026-03-31 20:47:33 UTC):
     - `9c2754d33` `Decouple G4 peer cache from disk offload`
     - `14fd0973c` `Rename G4 peer cache flow to G3PB`
     - `dc91e06b3` `Refresh G3PB plan handoff`
+    - `9a188ebfe` `Update pushed G3PB handoff`
   - branch update completed:
-    - pushed `dc91e06b3` to `origin/mf/kvbm-g4-v2`
+    - pushed `9a188ebfe` to `origin/mf/kvbm-g4-v2`
 - Implementation milestones completed in this run:
   - core decoupling
     - removed `G4BlockIndex` / disk-observer wiring from:
