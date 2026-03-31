@@ -266,6 +266,83 @@ estimate_worker_vram() {
         }'
 }
 
+# Query GPU memory from the vendor tool available in the current environment.
+#
+# Prints memory in MiB to stdout.
+# Returns 1 if:
+#   - the metric is invalid,
+#   - the selected GPU cannot be queried,
+#   - or neither nvidia-smi nor xpu-smi is installed.
+#
+# Backend selection:
+#   nvidia-smi  Preferred when available. Queries CSV output directly.
+#   xpu-smi     Used as a fallback for Intel XPU environments. Queries JSON
+#               output and extracts the relevant byte field, then converts it
+#               to MiB.
+#
+# Supported metrics:
+#   total   Physical device memory size.
+#   free    Currently free device memory.
+#
+# Notes:
+#   - The function prefers nvidia-smi when both tools are present.
+#   - xpu-smi currently uses `discovery -j`, so the JSON field names are part
+#     of the contract here: total -> memory_physical_size_byte,
+#     free -> memory_free_size_byte.
+#   - The output is intended for downstream fraction calculations in
+#     gpu_gb_to_total_fraction and gpu_gb_to_free_fraction.
+#
+# Usage:
+#   _gpu_query_memory_mib total        # total MiB on GPU 0
+#   _gpu_query_memory_mib free 1       # free MiB on GPU 1
+_gpu_query_memory_mib() {
+    local metric="${1:?usage: _gpu_query_memory_mib <total|free> [gpu_index]}"
+    local gpu_idx="${2:-0}"
+
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        case "$metric" in
+            total)
+                nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "$gpu_idx" 2>/dev/null
+                return
+                ;;
+            free)
+                nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "$gpu_idx" 2>/dev/null
+                return
+                ;;
+            *)
+                echo "_gpu_query_memory_mib: unknown metric '$metric'" >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    if command -v xpu-smi >/dev/null 2>&1; then
+        local json_key
+        case "$metric" in
+            total) json_key="memory_physical_size_byte" ;;
+            free)  json_key="memory_free_size_byte" ;;
+            *)
+                echo "_gpu_query_memory_mib: unknown metric '$metric'" >&2
+                return 1
+                ;;
+        esac
+
+        xpu-smi discovery -d "$gpu_idx" -j 2>/dev/null | awk -F: -v key="$json_key" '
+            $1 ~ "\"" key "\"" {
+                gsub(/[",[:space:]]/, "", $2)
+                printf "%d\n", int($2 / (1024 * 1024))
+                found = 1
+                exit
+            }
+            END { if (!found) exit 1 }
+        '
+        return
+    fi
+
+    echo "_gpu_query_memory_mib: neither nvidia-smi nor xpu-smi is available" >&2
+    return 1
+}
+
 # gpu_worker_fraction <engine> <total_gib> <kv_gib> [gpu_index]
 #
 # Convert estimated GiB into the engine-appropriate GPU memory fraction.
@@ -361,7 +438,7 @@ gpu_gb_to_total_fraction() {
     local gpu_idx=${2:-0}
 
     local total_mib
-    total_mib=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "$gpu_idx" 2>/dev/null)
+    total_mib=$(_gpu_query_memory_mib total "$gpu_idx")
     if [[ -z "$total_mib" || "$total_mib" -eq 0 ]]; then
         echo "gpu_gb_to_total_fraction: failed to query GPU $gpu_idx total memory" >&2
         return 1
@@ -406,17 +483,18 @@ gpu_gb_to_total_fraction() {
 #   For larger models the error grows: a 30 GiB model leaves 18 GiB free,
 #   so 0.21 * 18 ≈ 3.8 GiB — far less than the 10 GiB intended.
 #
-# This function queries CURRENT free memory from nvidia-smi and computes
-# gib / free_mib. The result is a best-effort estimate: TensorRT-LLM will
-# see less free memory than we measure here (model weights haven't loaded
-# yet), so the actual KV cache allocation will be smaller than <gib>.
+# This function queries CURRENT free memory from the available GPU SMI
+# backend (nvidia-smi or xpu-smi) and computes gib / free_mib. The result 
+# is a best-effort estimate: TensorRT-LLM will see less free memory than 
+# we measure here (model weights haven't loaded yet), so the actual KV 
+# cache allocation will be smaller than <gib>. 
 # For rough sizing this is fine; for precise control use the YAML config
 # with a known model size.
 #
 # For disagg_same_gpu (two workers sharing one GPU), launch workers
 # sequentially: start the first, wait for it to finish loading (poll
-# nvidia-smi or logs), then query free memory again and compute the
-# fraction for the second worker. This gives predictable per-worker
+# nvidia-smi, xpu-smi, or logs), then query free memory again and compute
+# the fraction for the second worker. This gives predictable per-worker
 # KV cache sizes on any GPU.
 #
 # Override at launch via CLI or env var:
@@ -439,7 +517,7 @@ gpu_gb_to_free_fraction() {
     local gpu_idx=${2:-0}
 
     local free_mib
-    free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "$gpu_idx" 2>/dev/null)
+    free_mib=$(_gpu_query_memory_mib free "$gpu_idx")
     if [[ -z "$free_mib" || "$free_mib" -eq 0 ]]; then
         echo "gpu_gb_to_free_fraction: failed to query GPU $gpu_idx free memory" >&2
         return 1
