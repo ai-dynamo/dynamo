@@ -9,6 +9,7 @@ pub mod eviction;
 pub mod key;
 pub mod lease;
 pub mod metadata;
+pub mod metrics;
 pub mod storage;
 pub mod transport;
 pub mod value;
@@ -18,6 +19,7 @@ pub use error::{RegistryError, RegistryResult};
 
 // Lease management
 pub use lease::{LeaseInfo, LeaseManager};
+pub use metrics::{NoopRegistryMetricsSink, RegistryMetricsSink};
 
 // Storage & Eviction
 pub use eviction::{Eviction, NoEviction, PositionalEviction, TailEviction};
