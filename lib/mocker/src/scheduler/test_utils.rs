@@ -215,7 +215,7 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
 /// common prefix to exercise prefix caching / radix tree reuse.
 pub(crate) async fn assert_scheduler_completes_all(
     scheduler: &dyn SchedulerHandle,
-    output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: &mut mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     num_requests: usize,
     input_len: usize,
     max_output_tokens: usize,
@@ -254,18 +254,18 @@ pub(crate) async fn assert_scheduler_completes_all(
     let expected_tokens = num_requests * max_output_tokens;
     let mut received_tokens = 0;
 
-    let timeout = tokio::time::sleep(Duration::from_secs(2));
+    let timeout = tokio::time::sleep(Duration::from_millis(200));
     tokio::pin!(timeout);
 
     loop {
         tokio::select! {
             biased;
-            Some(_) = output_rx.recv() => {
-                received_tokens += 1;
+            Some(output_batch) = output_rx.recv() => {
+                received_tokens += output_batch.len();
                 if received_tokens >= expected_tokens {
                     break;
                 }
-                timeout.set(tokio::time::sleep(Duration::from_secs(2)));
+                timeout.set(tokio::time::sleep(Duration::from_millis(200)));
             }
             _ = &mut timeout => break,
         }
@@ -276,7 +276,6 @@ pub(crate) async fn assert_scheduler_completes_all(
         "Expected {expected_tokens} output signals, got {received_tokens}"
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let metrics = scheduler.metrics_receiver().borrow().clone();
     assert_eq!(
         metrics.active_decode_blocks, 0,

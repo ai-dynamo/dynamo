@@ -23,6 +23,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
 | `--router-queue-threshold` | `4.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
 
 ### Standalone Router
 

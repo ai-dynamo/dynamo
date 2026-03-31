@@ -279,6 +279,7 @@ def compute_block_hash_for_seq(
     kv_block_size: int,
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
+    is_eagle: Optional[bool] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -299,6 +300,9 @@ def compute_block_hash_for_seq(
                                }
                            ]
                        }
+        lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+        is_eagle: Optional Eagle mode flag. When true, hashes use overlapping
+                  `kv_block_size + 1` token windows with `kv_block_size` stride.
 
     Returns:
         List of block hashes (one per block)
@@ -475,9 +479,11 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    enable_eagle: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -634,7 +640,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -682,7 +688,7 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None
+        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -765,6 +771,7 @@ class KvEventPublisher:
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        is_eagle: Optional[bool] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -780,6 +787,8 @@ class KvEventPublisher:
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+            is_eagle: Optional Eagle mode flag. When true, stored blocks are
+                reconstructed using overlapping `kv_block_size + 1` token windows.
         """
         ...
 
@@ -832,11 +841,22 @@ class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
     Auto-discovers engine publishers via the discovery plane.
+
+    Two mutually exclusive usage modes:
+
+    1. **recv mode** (default): call ``recv()`` to pull individual messages.
+    2. **tracking mode**: call ``start_tracking()`` once, then poll
+       ``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
+       ``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+       workers are removed (via discovery watch).
     """
 
     def __init__(self, endpoint: Endpoint) -> None:
         """
         Create a subscriber that auto-discovers FPM publishers.
+
+        No background tasks are started until ``recv()`` or
+        ``start_tracking()`` is called.
 
         Args:
             endpoint: Dynamo component endpoint (provides runtime + discovery).
@@ -848,13 +868,48 @@ class FpmEventSubscriber:
         Blocking receive of the next message (raw msgspec bytes).
         Releases the GIL while waiting.
 
+        On the first call a background subscriber task is spawned (recv mode).
+        Cannot be used after ``start_tracking()``.
+
         Returns:
             Raw msgspec payload, or None if the stream is closed.
         """
         ...
 
+    def start_tracking(self) -> None:
+        """
+        Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        Spawns two background tasks:
+
+        1. Event consumption: subscribes to FPM events, extracts the composite
+           key (worker_id, dp_rank) from the msgpack payload, stores latest
+           raw bytes in an internal map.
+        2. MDC discovery watch: monitors ComponentModels for the target
+           component.  When a model is removed, all entries whose
+           worker_id matches the removed instance_id are purged.
+
+        After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def get_recent_stats(self) -> dict[tuple[str, int], bytes]:
+        """
+        Return the latest FPM bytes for every tracked (worker_id, dp_rank).
+
+        Cleanup of removed engines is handled by the MDC discovery watch
+        task spawned by ``start_tracking()``.
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``(worker_id, dp_rank)`` to raw msgspec bytes.
+            Decode each value with ``forward_pass_metrics.decode(data)``.
+        """
+        ...
+
     def shutdown(self) -> None:
-        """Shut down the subscriber."""
+        """Shut down the subscriber (all background tasks)."""
         ...
 
 
@@ -1071,6 +1126,7 @@ class RouterMode:
     """Router mode for load balancing requests across workers"""
     RoundRobin: "RouterMode"
     Random: "RouterMode"
+    PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
     ...
@@ -1123,7 +1179,6 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
-        min_initial_workers: int = 1,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1157,9 +1212,6 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues (default: 1). Ignored when
-                skip_initial_worker_wait is enabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
@@ -1207,6 +1259,7 @@ class MockEngineArgs:
         dp_size: int = 1,
         startup_time: Optional[float] = None,
         worker_type: str = "aggregated",
+        planner_profile_data: Optional[str | os.PathLike[str]] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
@@ -1228,6 +1281,8 @@ class MockEngineArgs:
     @staticmethod
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
+
+    def dump_json(self) -> str: ...
 
     @property
     def block_size(self) -> int: ...
@@ -1366,8 +1421,12 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
 def run_mocker_trace_replay(
     trace_file: str | os.PathLike[str],
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
@@ -1381,13 +1440,21 @@ def run_mocker_synthetic_trace_replay(
     output_tokens: int,
     request_count: int,
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     arrival_interval_ms: float = 1.0,
+    turns_per_session: int = 1,
+    shared_prefix_ratio: float = 0.0,
+    num_prefix_groups: int = 0,
+    inter_turn_delay_ms: float = 0.0,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
@@ -1703,6 +1770,7 @@ class KvRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
@@ -1715,6 +1783,10 @@ class KvRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            update_indexer: Whether to record the selected worker in the router's
+                           approximate indexer. This is only meaningful when
+                           `use_kv_events=False` and is independent from lifecycle
+                           state tracking via `request_id`.
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
@@ -1730,6 +1802,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
@@ -1737,6 +1810,9 @@ class KvRouter:
 
         Args:
             token_ids: List of token IDs to evaluate
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in hash computation
+                           for MM-aware potential-load estimation.
 
         Returns:
             A list of dictionaries, each containing:
@@ -1904,3 +1980,58 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
+
+
+# =============================================================================
+# Dynamo Exception Types
+#
+# Standardized exceptions for Dynamo error categories. All inherit from
+# DynamoException. The Rust error type mapping depends on the context in
+# which the exception is raised (e.g., backend context wraps as Backend.<*>).
+# =============================================================================
+
+class DynamoException(Exception):
+    """Base exception for all Dynamo error types."""
+
+    ...
+
+class Unknown(DynamoException):
+    """Uncategorized or unknown error."""
+
+    ...
+
+class InvalidArgument(DynamoException):
+    """Invalid input (e.g., prompt exceeds context length)."""
+
+    ...
+
+class CannotConnect(DynamoException):
+    """Failed to establish a connection."""
+
+    ...
+
+class Disconnected(DynamoException):
+    """An established connection was lost."""
+
+    ...
+
+class ConnectionTimeout(DynamoException):
+    """A connection or request timed out."""
+
+    ...
+
+class Cancelled(DynamoException):
+    """The request was cancelled."""
+
+    ...
+
+class EngineShutdown(DynamoException):
+    """The engine process has shut down or crashed."""
+
+    ...
+
+class StreamIncomplete(DynamoException):
+    """The response stream was terminated before completion."""
+
+    ...
+

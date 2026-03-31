@@ -8,6 +8,7 @@
 
 pub mod indexer;
 pub mod protocols;
+pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
 pub mod zmq_wire;

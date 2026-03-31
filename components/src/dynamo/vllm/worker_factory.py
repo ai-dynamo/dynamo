@@ -498,7 +498,10 @@ class WorkerFactory:
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
-        logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+        )
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -518,7 +521,7 @@ class WorkerFactory:
         if config.gms_shadow_mode:
             # Shadow mode: lock-driven activation.
             # Flow: sleep → startup probe passes → block on lock → wake → register.
-            await handler.sleep({"level": 1})
+            await handler._quiesce_controller.quiesce(1)
 
             runtime.set_health_status(True)
             logger.info(
@@ -533,7 +536,8 @@ class WorkerFactory:
             await lock.acquire(engine_id=f"engine-{engine_id}")
             logger.info("[Shadow] Lock acquired, waking engine")
 
-            await handler.wake_up({})
+            await handler._quiesce_controller.resume()
+            handler._quiesce_controller.mark_resumed()
             logger.info("[Shadow] Engine awake, registering with discovery")
 
         await self.register_vllm_model(
@@ -702,7 +706,10 @@ class WorkerFactory:
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
-        logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+        )
 
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 

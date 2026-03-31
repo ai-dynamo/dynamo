@@ -1659,6 +1659,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -1683,6 +1687,17 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromInt(8080),
 														},
 													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -1724,6 +1739,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "MODEL_EXPRESS_URL",
@@ -1781,13 +1800,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
-													},
-												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -2652,6 +2664,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -2676,6 +2692,17 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromInt(8080),
 														},
 													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2717,6 +2744,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
@@ -2766,13 +2797,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
-													},
-												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -3654,6 +3678,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
+												Ports: []corev1.ContainerPort{
+													{Name: commonconsts.DynamoMetricsPortName, ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort), Protocol: corev1.ProtocolTCP},
+													{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+												},
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -3679,12 +3707,16 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoMetricsPortName,
-														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
 													},
+													PeriodSeconds:    10,
+													TimeoutSeconds:   5,
+													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3726,6 +3758,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 													},
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",

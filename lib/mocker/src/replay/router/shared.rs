@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::future;
 use std::sync::Arc;
 
+use crate::common::protocols::MockEngineArgs;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
     ActiveLoad, ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -14,8 +15,6 @@ use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, RouterSchedulingPolicy,
     SequencePublisher,
 };
-
-use crate::common::protocols::MockEngineArgs;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -107,7 +106,7 @@ pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector 
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 
-pub(super) fn replay_router_config(
+pub(crate) fn replay_router_config(
     args: &MockEngineArgs,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
