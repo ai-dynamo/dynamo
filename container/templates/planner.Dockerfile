@@ -62,8 +62,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
 
-USER root
-
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and targeted planner/profiler unit tests.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
