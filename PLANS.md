@@ -21,13 +21,13 @@ Current in-progress run (2026-03-31 20:48:13 UTC):
   - `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - Current branch baseline observed in this run:
   - started from `87d9607cc` (`add plan`)
-  - commits made in this run so far:
+  - major implementation commits made in this run:
     - `9c2754d33` `Decouple G4 peer cache from disk offload`
     - `14fd0973c` `Rename G4 peer cache flow to G3PB`
-    - `dc91e06b3` `Refresh G3PB plan handoff`
-    - `9a188ebfe` `Update pushed G3PB handoff`
+  - handoff maintenance in this run:
+    - followed with small signed `PLANS.md` refresh commits after validation and push
   - branch update completed:
-    - pushed `9a188ebfe` to `origin/mf/kvbm-g4-v2`
+    - current `HEAD` from this run has been pushed to `origin/mf/kvbm-g4-v2`
 - Implementation milestones completed in this run:
   - core decoupling
     - removed `G4BlockIndex` / disk-observer wiring from:
