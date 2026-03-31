@@ -274,9 +274,10 @@ def dgd_restart_graph(
     )
 
     waited = 0
+    phase = "pending"
     while True:
         try:
-            state_json = get_json("dgd", dgd_name, namespace)
+            state_json = get_json("dgd", dgd_name, namespace, timeout=60)
             restart_status = state_json.get("status", {}).get("restart", {})
             observed = restart_status.get("observedID", "")
             phase = restart_status.get("phase", "")
@@ -289,11 +290,14 @@ def dgd_restart_graph(
                     raise RuntimeError(f"DGD restart {restart_id} ended with phase={phase}")
         except (KeyError, TypeError):
             pass
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+            # Transient kubectl timeout -- retry
+            print(f"  kubectl transient error, retrying... ({e.__class__.__name__})")
 
         time.sleep(5)
         waited += 5
         if waited >= 600:
             raise TimeoutError(f"Timed out waiting for DGD restart {restart_id}")
-        print(f"  Waiting for DGD restart ({waited}s / 600s)... phase={phase if 'phase' in dir() else 'pending'}")
+        print(f"  Waiting for DGD restart ({waited}s / 600s)... phase={phase}")
 
     dgd_wait_all_ready(dgd_name, namespace, endpoint, model_name)
