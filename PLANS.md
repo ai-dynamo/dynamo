@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:08:53 UTC
+Last updated: 2026-03-31 21:09:39 UTC
 
 ## Active state
 
@@ -35,8 +35,9 @@ Last updated: 2026-03-31 21:08:53 UTC
 
 - implementation commit recorded in this run:
   - `6b6326172` `Add foyer-backed G3PB peer storage`
-- worktree was clean immediately after that commit before this final handoff
-  refresh
+- final handoff commit recorded in this run:
+  - `f05a605b8` `Refresh G3PB foyer handoff`
+- worktree was clean immediately before and after the push
 - added a concrete `FoyerG3pbPeerStorage` behind the existing
   `G3pbPeerStorage` trait in
   `lib/llm/src/block_manager/distributed/g3pb.rs`
@@ -91,8 +92,6 @@ Last updated: 2026-03-31 21:08:53 UTC
 
 ### Remaining work after this run
 
-- push the detached `HEAD` to `origin/mf/kvbm-g4-v2`, per the standing branch
-  note
 - reconnect the remote data path to real NIXL/UCX `device <-> CPU` transfers
   instead of HTTP payload exchange
 - revalidate the next slice in layers:
@@ -100,15 +99,21 @@ Last updated: 2026-03-31 21:08:53 UTC
   - `kvbm_nixl_transfer_smoke`
   - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
 
-### Exact next step if this run stops before the final push
+### Branch update completed in this run
+
+- pushed detached `HEAD` to `origin/mf/kvbm-g4-v2`
+- push fast-forwarded remote `91704994b..f05a605b8`
+
+### Exact next step for the next run
 
 - next file:
-  `PLANS.md`
+  `lib/llm/src/block_manager/distributed/g3pb.rs`
 - next commands:
-  - `git status --short`
-  - `git add PLANS.md`
-  - `git commit --signoff -m "Refresh G3PB foyer handoff"`
-  - `git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2`
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - then start the NIXL/UCX transfer follow-up from
+    `lib/llm/src/block_manager/distributed/g3pb.rs`
+    and `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 
 ## Archived milestones (condensed)
 
