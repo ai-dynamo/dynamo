@@ -287,9 +287,13 @@ jobs:
           # Run the sanity check script inside the container
           # The script is located in /workspace/deploy/sanity_check.py in runtime containers
           export WORKSPACE=/workspace
+          SANITY_FLAGS="--runtime-check --no-gpu-check"
+          if [[ "${{ inputs.target }}" == "planner" ]]; then
+            SANITY_FLAGS="${SANITY_FLAGS} --no-framework-check"
+          fi
 
           set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py ${SANITY_FLAGS}
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -429,6 +433,7 @@ jobs:
           artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-${{ steps.images.outputs.image_variant_label }}-${{ steps.images.outputs.arch_suffix }}
           arch: ${{ matrix.arch }}
           framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
           cuda_version: ${{ inputs.cuda_version }}
 
 
