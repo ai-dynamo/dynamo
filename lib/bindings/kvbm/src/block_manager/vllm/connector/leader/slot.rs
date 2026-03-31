@@ -400,6 +400,7 @@ pub struct VllmConnectorSlot {
 }
 
 impl VllmConnectorSlot {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request_id: String,
         tokens: Tokens,

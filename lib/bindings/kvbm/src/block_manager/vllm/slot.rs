@@ -76,7 +76,8 @@ impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
 }
 
 impl<S: Storage, L: LocalityProvider> Slot<S, L> {
-    /// Creates a new slot.
+    /// Creates a new slot (text-only, no multimodal extra hashes).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(tokens: Tokens, block_size: usize, salt_hash: SaltHash) -> Self {
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
         let prefill_position = sequence.total_tokens();
