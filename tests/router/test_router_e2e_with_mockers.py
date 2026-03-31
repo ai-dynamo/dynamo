@@ -11,12 +11,14 @@
 import asyncio
 import logging
 import os
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
 import pytest
 
+from dynamo.llm import KvRouter, KvRouterConfig
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
@@ -30,10 +32,13 @@ from tests.router.common import (
     _test_router_two_routers,
 )
 from tests.router.helper import (
+    assert_event_dumps_equal,
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
+    send_request_via_python_kv_router,
     wait_for_indexer_workers_active,
+    wait_for_workers_ready,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -51,6 +56,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
+    pytest.mark.router,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -63,6 +69,11 @@ BLOCK_SIZE = 16
 PLANNER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[1] / "planner/profiling_results/H200_TP1P_TP1D"
 )
+
+
+class IndexerRole(str, Enum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
 
 
 def get_unique_ports(
@@ -101,6 +112,163 @@ TEST_PAYLOAD: Dict[str, Any] = {
     "stream": True,
     "max_tokens": 10,
 }
+
+
+def _indexer_event_sort_key(event: dict[str, Any]) -> tuple[int, int, int]:
+    data = event["event"]["data"]["stored"]
+    blocks = data["blocks"]
+    first_block = blocks[0]
+    return (
+        event["worker_id"],
+        first_block["tokens_hash"],
+        data["parent_hash"],
+    )
+
+
+async def _fetch_indexer_events(
+    indexer_url: str, model_name: str
+) -> list[dict[str, Any]]:
+    expected_key = f"{model_name}:default"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{indexer_url}/dump") as resp:
+            assert (
+                resp.status == 200
+            ), f"GET /dump failed for {indexer_url}: {resp.status}"
+            dump = await resp.json()
+
+    assert expected_key in dump, (
+        f"Expected dump key '{expected_key}' from {indexer_url}, "
+        f"got keys={list(dump.keys())}"
+    )
+    return sorted(dump[expected_key]["events"], key=_indexer_event_sort_key)
+
+
+async def _wait_for_indexer_dumps_equal(
+    indexer_a_url: str,
+    indexer_b_url: str,
+    model_name: str,
+    timeout_s: float = 30.0,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    last_error: Optional[Exception] = None
+
+    while loop.time() < deadline:
+        try:
+            events_a = await _fetch_indexer_events(indexer_a_url, model_name)
+            events_b = await _fetch_indexer_events(indexer_b_url, model_name)
+            assert_event_dumps_equal(events_a, events_b, "Indexer A", "Indexer B")
+            return
+        except (AssertionError, aiohttp.ClientError, KeyError, RuntimeError) as exc:
+            last_error = exc
+            await asyncio.sleep(0.5)
+
+    raise AssertionError(
+        "Timed out waiting for standalone indexer dumps to converge. "
+        f"Last error: {last_error}"
+    )
+
+
+async def _wait_for_indexer_recovery_in_progress(
+    source_indexer_url: str,
+    recovering_indexer_url: str,
+    model_name: str,
+    timeout_s: float = 15.0,
+) -> None:
+    """Wait until the recovering indexer has started ingesting state but has not converged yet."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    last_state = "recovery has not started yet"
+
+    while loop.time() < deadline:
+        try:
+            source_events = await _fetch_indexer_events(source_indexer_url, model_name)
+            recovering_events = await _fetch_indexer_events(
+                recovering_indexer_url, model_name
+            )
+
+            if not recovering_events:
+                last_state = "recovering indexer dump is still empty"
+            else:
+                try:
+                    assert_event_dumps_equal(
+                        source_events,
+                        recovering_events,
+                        "Indexer A",
+                        "Indexer B",
+                    )
+                    last_state = (
+                        "recovering indexer already converged "
+                        f"with {len(recovering_events)} events"
+                    )
+                except AssertionError:
+                    return
+        except (AssertionError, aiohttp.ClientError, KeyError, RuntimeError) as exc:
+            last_state = str(exc)
+
+        await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        "Timed out waiting for standalone indexer recovery to begin before "
+        f"forcing a restart. Last observed state: {last_state}"
+    )
+
+
+async def _create_kv_router_for_mockers(
+    mockers, store_backend: str, request_plane: str
+) -> tuple[Any, KvRouter]:
+    runtime = get_runtime(store_backend, request_plane)
+    endpoint = runtime.endpoint(
+        f"{mockers.namespace}.{mockers.component_name}.generate"
+    )
+    kv_router = KvRouter(
+        endpoint=endpoint,
+        block_size=BLOCK_SIZE,
+        kv_router_config=KvRouterConfig(min_initial_workers=mockers.num_workers),
+    )
+    await mockers.launch_mockers_with_indexer(endpoint)
+    await wait_for_workers_ready(
+        endpoint, kv_router, mockers.num_workers, mockers.model_name
+    )
+    return endpoint, kv_router
+
+
+def _build_request_token_ids(
+    request_idx: int,
+    block_size: int = BLOCK_SIZE,
+    num_blocks: int = 3,
+) -> list[int]:
+    start = 1000 + request_idx * block_size * num_blocks
+    return list(range(start, start + block_size * num_blocks))
+
+
+async def _send_light_kv_traffic(
+    kv_router: KvRouter,
+    model_name: str,
+    request_count: int,
+    start_idx: int = 0,
+) -> None:
+    for request_idx in range(start_idx, start_idx + request_count):
+        await send_request_via_python_kv_router(
+            kv_python_router=kv_router,
+            model_name=model_name,
+            token_ids=_build_request_token_ids(request_idx),
+            initial_wait=0.1,
+            max_retries=6,
+            stop_conditions={
+                "ignore_eos": True,
+                "max_tokens": 4,
+            },
+        )
+
+
+def _standalone_indexer_mocker_args(durable_kv_events: bool) -> dict[str, Any]:
+    return {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": durable_kv_events,
+        "dp_size": 2,
+    }
 
 
 def _build_mocker_command(
@@ -321,31 +489,94 @@ class MockerProcess:
             return f"http://localhost:{self._standalone_indexer_b_port}"
         return None
 
+    def _build_workers_arg(self) -> str:
+        if not self.worker_id_to_zmq_ports:
+            raise RuntimeError(
+                "workers must be registered before building indexer args"
+            )
+
+        worker_entries = []
+        for worker_id, zmq_addresses in self.worker_id_to_zmq_ports.items():
+            for dp_rank, zmq_endpoint in zmq_addresses.items():
+                worker_entries.append(f"{worker_id}:{dp_rank}={zmq_endpoint}")
+        return ",".join(worker_entries)
+
+    def _build_indexer_command(
+        self,
+        port: int,
+        *,
+        peers: Optional[str] = None,
+        include_workers: bool = False,
+    ) -> list[str]:
+        block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
+        command = [
+            *get_kv_indexer_command(),
+            "--block-size",
+            str(block_size),
+            "--port",
+            str(port),
+        ]
+        if peers:
+            command.extend(["--peers", peers])
+        if include_workers:
+            command.extend(
+                [
+                    "--workers",
+                    self._build_workers_arg(),
+                    "--model-name",
+                    self.model_name,
+                ]
+            )
+        return command
+
+    def _start_indexer_process(
+        self,
+        *,
+        port: int,
+        peers: Optional[str],
+        include_workers: bool,
+        display_name: str,
+    ) -> ManagedProcess:
+        indexer_cmd = self._build_indexer_command(
+            port,
+            peers=peers,
+            include_workers=include_workers,
+        )
+        process = ManagedProcess(
+            command=indexer_cmd,
+            timeout=120,
+            display_output=True,
+            health_check_ports=[port],
+            health_check_urls=[],
+            log_dir=self._request.node.name,
+            terminate_all_matching_process_names=False,
+            display_name=display_name,
+        )
+        process.__enter__()
+        return process
+
+    def _stop_indexer_process(
+        self, process: Optional[ManagedProcess], label: str
+    ) -> Optional[ManagedProcess]:
+        if process is None:
+            return None
+
+        logger.info("Stopping %s", label)
+        process.__exit__(None, None, None)
+        return None
+
     def __enter__(self):
         if self._standalone_indexer:
             # Launch the standalone indexer binary
-            block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
-            indexer_cmd = [
-                *get_kv_indexer_command(),
-                "--block-size",
-                str(block_size),
-                "--port",
-                str(self._standalone_indexer_port),
-            ]
-            self._indexer_process = ManagedProcess(
-                command=indexer_cmd,
-                timeout=120,
-                display_output=True,
-                health_check_ports=[self._standalone_indexer_port],
-                health_check_urls=[],
-                log_dir=self._request.node.name,
-                terminate_all_matching_process_names=False,
-                display_name="dynamo-kv-indexer",
-            )
             logger.info(
                 f"Starting standalone indexer on port {self._standalone_indexer_port}"
             )
-            self._indexer_process.__enter__()
+            self._indexer_process = self._start_indexer_process(
+                port=self._standalone_indexer_port,
+                peers=None,
+                include_workers=False,
+                display_name="dynamo-kv-indexer",
+            )
             # Don't start mocker processes yet — launch_mockers_with_indexer will do it
         else:
             logger.info(f"Starting mocker process with {self.num_workers} worker(s)")
@@ -476,46 +707,71 @@ class MockerProcess:
         """
         if not self._standalone_indexer or self._standalone_indexer_b_port is None:
             raise RuntimeError("launch_indexer requires standalone_indexer=True")
-        if not self.worker_id_to_zmq_ports:
-            raise RuntimeError("launch_indexer requires workers to be registered first")
-
-        block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
-
-        # Build --workers arg: "worker_id:dp_rank=zmq_addr,..."
-        worker_entries = []
-        for worker_id, zmq_addresses in self.worker_id_to_zmq_ports.items():
-            for dp_rank, zmq_endpoint in zmq_addresses.items():
-                worker_entries.append(f"{worker_id}:{dp_rank}={zmq_endpoint}")
-        workers_arg = ",".join(worker_entries)
-
-        indexer_b_cmd = [
-            *get_kv_indexer_command(),
-            "--block-size",
-            str(block_size),
-            "--port",
-            str(self._standalone_indexer_b_port),
-            "--peers",
-            f"http://localhost:{self._standalone_indexer_port}",
-            "--workers",
-            workers_arg,
-            "--model-name",
-            self.model_name,
-        ]
-        self._indexer_b_process = ManagedProcess(
-            command=indexer_b_cmd,
-            timeout=120,
-            display_output=True,
-            health_check_ports=[self._standalone_indexer_b_port],
-            health_check_urls=[],
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
+        self._indexer_b_process = self._start_indexer_process(
+            port=self._standalone_indexer_b_port,
+            peers=f"http://localhost:{self._standalone_indexer_port}",
+            include_workers=True,
             display_name="dynamo-kv-indexer-b",
         )
-        logger.info(
-            f"Starting standalone indexer B on port {self._standalone_indexer_b_port} "
-            f"with peer http://localhost:{self._standalone_indexer_port}"
+
+    def _indexer_role_config(self, role: IndexerRole) -> tuple[str, str, str, str]:
+        if role is IndexerRole.PRIMARY:
+            return (
+                "_indexer_process",
+                "_standalone_indexer_port",
+                "standalone indexer A",
+                "dynamo-kv-indexer",
+            )
+        if role is IndexerRole.SECONDARY:
+            return (
+                "_indexer_b_process",
+                "_standalone_indexer_b_port",
+                "standalone indexer B",
+                "dynamo-kv-indexer-b",
+            )
+        raise ValueError(f"Unknown indexer role: {role}")
+
+    def stop_indexer(self, role: IndexerRole) -> None:
+        process_attr, _port_attr, label, _display_name = self._indexer_role_config(role)
+        current_process = getattr(self, process_attr)
+        setattr(
+            self,
+            process_attr,
+            self._stop_indexer_process(current_process, label),
         )
-        self._indexer_b_process.__enter__()
+
+    def restart_indexer(
+        self, role: IndexerRole, peer_url: Optional[str] = None
+    ) -> None:
+        process_attr, port_attr, label, display_name = self._indexer_role_config(role)
+        port = getattr(self, port_attr)
+        if port is None:
+            raise RuntimeError(
+                f"restart_indexer({role.value!r}) requires standalone_indexer=True"
+            )
+
+        if role is IndexerRole.SECONDARY and peer_url is None:
+            if self._standalone_indexer_port is None:
+                raise RuntimeError(
+                    "restart_indexer('secondary') requires a primary indexer port"
+                )
+            peer_url = f"http://localhost:{self._standalone_indexer_port}"
+
+        self.stop_indexer(role)
+        logger.info(
+            f"Restarting {label} on port {port}"
+            + (f" with peer {peer_url}" if peer_url else "")
+        )
+        setattr(
+            self,
+            process_attr,
+            self._start_indexer_process(
+                port=port,
+                peers=peer_url,
+                include_workers=True,
+                display_name=display_name,
+            ),
+        )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("Stopping mocker process(es)")
@@ -650,6 +906,183 @@ class DisaggMockerProcess:
             deallocate_ports(self._bootstrap_ports)
             logger.info(f"Deallocated bootstrap ports {self._bootstrap_ports}")
             self._bootstrap_ports = []
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("request_plane", ["tcp"], ids=["tcp"], indirect=True)
+@pytest.mark.parametrize("durable_kv_events", [False], ids=["nats_core"], indirect=True)
+def test_standalone_indexer_secondary_restart_during_recovery(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    durable_kv_events,
+):
+    """Prototype chaos test: restarting indexer B after recovery starts still converges."""
+    store_backend = "etcd"
+
+    with MockerProcess(
+        request,
+        mocker_args=_standalone_indexer_mocker_args(durable_kv_events),
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+        request_plane=request_plane,
+        zmq_kv_events=True,
+        zmq_replay=True,
+        standalone_indexer=True,
+        model_name=MODEL_NAME,
+    ) as mockers:
+        assert mockers.standalone_indexer_url is not None
+        assert mockers.standalone_indexer_b_url is not None
+        _, kv_router = asyncio.run(
+            _create_kv_router_for_mockers(mockers, store_backend, request_plane)
+        )
+        asyncio.run(_send_light_kv_traffic(kv_router, MODEL_NAME, request_count=8))
+
+        mockers.launch_indexer()
+        asyncio.run(
+            _wait_for_indexer_recovery_in_progress(
+                mockers.standalone_indexer_url,
+                mockers.standalone_indexer_b_url,
+                MODEL_NAME,
+            )
+        )
+        mockers.stop_indexer(IndexerRole.SECONDARY)
+        mockers.restart_indexer(IndexerRole.SECONDARY)
+
+        asyncio.run(
+            wait_for_indexer_workers_active(
+                mockers.standalone_indexer_b_url, mockers.worker_id_to_zmq_ports
+            )
+        )
+        asyncio.run(
+            _wait_for_indexer_dumps_equal(
+                mockers.standalone_indexer_url,
+                mockers.standalone_indexer_b_url,
+                MODEL_NAME,
+            )
+        )
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("request_plane", ["tcp"], ids=["tcp"], indirect=True)
+@pytest.mark.parametrize("durable_kv_events", [False], ids=["nats_core"], indirect=True)
+def test_standalone_indexer_primary_restart_after_secondary_bootstrap(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    durable_kv_events,
+):
+    """Prototype chaos test: indexer A can recover from B after A is restarted."""
+    store_backend = "etcd"
+
+    with MockerProcess(
+        request,
+        mocker_args=_standalone_indexer_mocker_args(durable_kv_events),
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+        request_plane=request_plane,
+        zmq_kv_events=True,
+        zmq_replay=True,
+        standalone_indexer=True,
+        model_name=MODEL_NAME,
+    ) as mockers:
+        assert mockers.standalone_indexer_url is not None
+        assert mockers.standalone_indexer_b_url is not None
+        _, kv_router = asyncio.run(
+            _create_kv_router_for_mockers(mockers, store_backend, request_plane)
+        )
+        asyncio.run(_send_light_kv_traffic(kv_router, MODEL_NAME, request_count=8))
+
+        mockers.launch_indexer()
+        asyncio.run(
+            wait_for_indexer_workers_active(
+                mockers.standalone_indexer_b_url, mockers.worker_id_to_zmq_ports
+            )
+        )
+        asyncio.run(
+            _wait_for_indexer_dumps_equal(
+                mockers.standalone_indexer_url,
+                mockers.standalone_indexer_b_url,
+                MODEL_NAME,
+            )
+        )
+
+        mockers.stop_indexer(IndexerRole.PRIMARY)
+        asyncio.run(
+            _send_light_kv_traffic(
+                kv_router, MODEL_NAME, request_count=4, start_idx=100
+            )
+        )
+        mockers.restart_indexer(
+            IndexerRole.PRIMARY, peer_url=mockers.standalone_indexer_b_url
+        )
+
+        asyncio.run(
+            wait_for_indexer_workers_active(
+                mockers.standalone_indexer_url, mockers.worker_id_to_zmq_ports
+            )
+        )
+        asyncio.run(
+            _wait_for_indexer_dumps_equal(
+                mockers.standalone_indexer_url,
+                mockers.standalone_indexer_b_url,
+                MODEL_NAME,
+            )
+        )
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("request_plane", ["tcp"], ids=["tcp"], indirect=True)
+@pytest.mark.parametrize("durable_kv_events", [False], ids=["nats_core"], indirect=True)
+def test_standalone_indexer_recovery_converges_under_light_traffic(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    durable_kv_events,
+):
+    """Prototype chaos test: replay/recovery converges while requests are still flowing."""
+    store_backend = "etcd"
+
+    with MockerProcess(
+        request,
+        mocker_args=_standalone_indexer_mocker_args(durable_kv_events),
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+        request_plane=request_plane,
+        zmq_kv_events=True,
+        zmq_replay=True,
+        standalone_indexer=True,
+        model_name=MODEL_NAME,
+    ) as mockers:
+        assert mockers.standalone_indexer_url is not None
+        assert mockers.standalone_indexer_b_url is not None
+        _, kv_router = asyncio.run(
+            _create_kv_router_for_mockers(mockers, store_backend, request_plane)
+        )
+        asyncio.run(_send_light_kv_traffic(kv_router, MODEL_NAME, request_count=6))
+
+        mockers.launch_indexer()
+        asyncio.run(
+            _send_light_kv_traffic(
+                kv_router, MODEL_NAME, request_count=6, start_idx=200
+            )
+        )
+
+        asyncio.run(
+            wait_for_indexer_workers_active(
+                mockers.standalone_indexer_b_url, mockers.worker_id_to_zmq_ports
+            )
+        )
+        asyncio.run(
+            _wait_for_indexer_dumps_equal(
+                mockers.standalone_indexer_url,
+                mockers.standalone_indexer_b_url,
+                MODEL_NAME,
+            )
+        )
 
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
