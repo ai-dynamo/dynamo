@@ -18,13 +18,9 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from dynamo.planner.defaults import (
-    Service,
-    SubComponentType,
-    get_service_from_sub_component_type_or_name,
-)
-from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
-from dynamo.planner.utils.exceptions import (
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     DuplicateSubComponentError,
@@ -32,6 +28,10 @@ from dynamo.planner.utils.exceptions import (
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
     SubComponentNotFoundError,
+)
+from dynamo.planner.monitoring.dgd_services import (
+    Service,
+    get_service_from_sub_component_type_or_name,
 )
 
 
@@ -56,7 +56,7 @@ def mock_kube_api_class(mock_kube_api):
 def kubernetes_connector(mock_kube_api_class, monkeypatch):
     # Patch the KubernetesAPI class before instantiating the connector
     monkeypatch.setattr(
-        "dynamo.planner.kubernetes_connector.KubernetesAPI", mock_kube_api_class
+        "dynamo.planner.connectors.kubernetes.KubernetesAPI", mock_kube_api_class
     )
     with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
         connector = KubernetesConnector("test-dynamo-namespace")

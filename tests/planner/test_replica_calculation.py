@@ -15,15 +15,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.planner_core import (
-    PlannerSharedState,
-    _apply_global_gpu_budget,
-)
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
-from dynamo.planner.utils.prometheus import Metrics
-from dynamo.planner.worker_info import WorkerInfo
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.budget import _apply_global_gpu_budget
+from dynamo.planner.core.decode import DecodePlanner
+from dynamo.planner.core.prefill import PrefillPlanner
+from dynamo.planner.core.state import PlannerSharedState
+from dynamo.planner.monitoring.traffic_metrics import Metrics
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -176,7 +174,7 @@ def planner():
     mock_runtime = Mock()
 
     # Patch Prometheus Gauge to avoid registry conflicts
-    with patch("dynamo.planner.utils.planner_core.Gauge") as mock_gauge:
+    with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
 
         shared_state = PlannerSharedState()

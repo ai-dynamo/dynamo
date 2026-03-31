@@ -19,7 +19,10 @@ use crate::scheduler::RouterEventVisibility;
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use rustc_hash::FxHashMap;
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::{BinaryHeap, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -65,7 +68,7 @@ pub(super) struct AggRuntime {
     next_worker_idx: usize,
     next_event_seq: u64,
     admission: AdmissionSource,
-    requests: HashMap<Uuid, AggRequestState>,
+    requests: FxHashMap<Uuid, AggRequestState>,
     workers: Vec<OfflineWorkerState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
@@ -140,7 +143,7 @@ impl AggRuntime {
             next_worker_idx: 0,
             next_event_seq: 0,
             admission,
-            requests: HashMap::new(),
+            requests: FxHashMap::default(),
             workers: (0..num_workers)
                 .map(|worker_idx| {
                     OfflineWorkerState::new(worker_idx, args.clone(), capture_kv_events)
