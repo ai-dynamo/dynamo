@@ -16,8 +16,8 @@
 import argparse
 import logging
 
-from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
-from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.offline.dryrun import run_sla_planner_dryrun
 
 logger = logging.getLogger(__name__)
 

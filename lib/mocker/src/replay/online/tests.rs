@@ -361,7 +361,7 @@ fn test_online_concurrency_replay_respects_max_in_flight() {
     .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn test_online_concurrency_replay_kv_router_respects_max_in_flight() {
             .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]

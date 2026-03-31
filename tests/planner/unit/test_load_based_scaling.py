@@ -17,16 +17,16 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
     encode,
 )
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.fpm_regression import (
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.decode import DecodePlanner
+from dynamo.planner.core.load.fpm_regression import (
     AggRegressionModel,
     DecodeRegressionModel,
     PrefillRegressionModel,
 )
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.planner_core import PlannerSharedState
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
-from dynamo.planner.worker_info import WorkerInfo
+from dynamo.planner.core.prefill import PrefillPlanner
+from dynamo.planner.core.state import PlannerSharedState
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -233,7 +233,7 @@ class TestAggRegressionModel:
 
 @pytest.fixture(autouse=True)
 def mock_prometheus_metrics():
-    with patch("dynamo.planner.utils.planner_core.Gauge") as mock_gauge:
+    with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
         yield
 
