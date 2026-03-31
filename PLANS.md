@@ -14,11 +14,10 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
 - Current branch baseline observed in this run:
   - started this run detached at `2792612b5` (`Refresh G4 plan handoff`)
-  - current detached `HEAD` after the first milestone commit is `0680163fd`
-    (`Add local G4 smoke onboard path`)
-  - worktree is currently dirty only in
-    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs` for the follow-up portability
-    cleanup described below
+  - current detached `HEAD` after the two milestone commits is `3c4e483e7`
+    (`Make G4 smoke local runtime self-contained`)
+  - worktree was clean immediately after that commit; the only expected
+    post-commit diff for the next run is this final `PLANS.md` handoff refresh
 - Current implementation slice for this run:
   - make `kvbm_g4_worker_smoke` build a real local `KvBlockManager` so fetched
     remote hits can be registered into host blocks and onboarded into device
@@ -39,17 +38,9 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     routing, but they block truthful local registration because KVBM registration
     keys come from token-derived sequence hashes
 - In-progress edits:
-  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-    - rewired the smoke binary around a real local `KvBlockManager`
-    - switched demo block generation from fake monotonic hashes to
-      token-derived `sequence_hash` values
-    - added local host registration plus `onboard_blocks(...)` after remote
-      fetch so the smoke path now validates actual local KVBM reuse entry
-    - follow-up cleanup in progress:
-      replaced the local distributed leader/worker-backed block manager with a
-      plain local `KvBlockManager<Local, ...>` using explicit device/host
-      allocators and `disable_nixl()` so live smoke validation does not depend
-      on the extra distributed transport path
+  - `PLANS.md`
+    - final handoff-only refresh so the next run sees the latest commit IDs,
+      runtime validation result, and exact restart commands on disk
 - Milestones completed in this run:
   - local smoke `query -> fetch -> onboard` milestone
     - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
@@ -68,6 +59,9 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     - dropped the accidental local disk-layout dependency from the smoke
       validation path; local disk is not required for `query -> fetch -> onboard`
       validation in this binary
+  - commits made in this run:
+    - `0680163fd` `Add local G4 smoke onboard path`
+    - `3c4e483e7` `Make G4 smoke local runtime self-contained`
 - Validation completed so far in this run:
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
     -> pass
@@ -89,20 +83,17 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     then aborted in `cufile_worker_thread.h:57`
 - Exact next file or command to touch:
   - file:
-    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+    `PLANS.md`
   - next commands:
-    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
-  - then:
-    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_worker_smoke`
-  - then:
-    `git commit --signoff -am "Make G4 smoke local onboard runtime self-contained"`
-  - then:
     if the next machine supports the required GPU/NIXL/CUFile runtime, rerun:
     `target/debug/kvbm_g4_backend --listen 127.0.0.1:58181 --leader-pub-url tcp://127.0.0.1:56191 --leader-ack-url tcp://127.0.0.1:56192 --disk-blocks 0`
   - then:
     `target/debug/kvbm_g4_worker_smoke --backend-url http://127.0.0.1:58181 --disk-blocks 0`
+  - then:
+    capture whether the remaining abort happens before backend health, during
+    local device allocation, or during host->device onboard so the next fix is
+    scoped to the true runtime layer
 - Remaining work after this run:
-  - commit the portability cleanup now in the worktree
   - live end-to-end smoke validation remains blocked by this environment's
     GPU/NIXL/CUFile stack, not by the Rust compile/test surface
   - once runtime support exists, verify whether the remaining `VRAM_SEG` /
@@ -3137,3 +3128,119 @@ Implemented so far:
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 block::BlockType::DeviceOwned(block) => { some of them seem  a bit long.
+
+## 2026-03-31 20:10 UTC - G3PB migration plan
+
+### Goal
+
+- Replace the unlanded `G4` work with `G3PB` (`G3PeerBaseten`).
+- Treat `G3PB` as a remote peer-backed hybrid cache, not as remote disk with a
+  staging area.
+- Keep the diff to `main` small by reshaping only the unlanded `G4` surface
+  instead of renaming stable generic tier concepts across the whole repo.
+
+### Target architecture
+
+- Worker-side transfer path should be `device <-> remote CPU` using NIXL over
+  UCX.
+- The remote peer owns a hybrid CPU+disk cache implemented with `foyer`.
+- Disk is internal to the peer cache implementation and should not be exposed as
+  a transfer-visible remote tier.
+- Blocks remain immutable and keyed by `sequence_hash`.
+- Query / fetch / put stay block-based and best-effort; misses degrade to
+  recompute.
+- Deterministic ownership via rendezvous hashing remains the right routing
+  model.
+
+### What to keep from current G4 work
+
+- direct peer `query` / `fetch` / `put` flow
+- rendezvous-hash owner selection and per-owner routing helpers
+- cache-miss semantics
+- `kvbm_nixl_transfer_smoke` as the low-level transfer control path
+- the general worker-smoke structure for remote fetch + local onboard
+
+### What to remove from current G4 work
+
+- coupling remote availability to local disk offload registration
+- `G4BlockIndex` as the remote source of truth
+- `disk_block_idx` as part of the remote API identity
+- disk-first / RAID-first remote architecture assumptions
+- any requirement that remote disk be directly visible to GPU transfer logic
+- any remote-GDS assumption for the peer-backed path
+
+### Smallest-diff implementation plan
+
+1. Remove the local-disk coupling first.
+   - delete `G4BlockIndex` plumbing from:
+     - `lib/llm/src/block_manager.rs`
+     - `lib/llm/src/block_manager/state.rs`
+     - `lib/llm/src/block_manager/offload.rs`
+     - `lib/llm/src/block_manager/distributed/worker.rs`
+   - delete the tests that assert host/disk offload updates a remote index
+2. Replace the unlanded `distributed/g4.rs` module with a `g3pb.rs` or
+   `peer_cache.rs` module.
+   - rename the wire types and helpers:
+     - `G4StorageWorker` -> `G3pbPeer`
+     - `G4PutBlock` -> `G3pbPutBlock`
+     - `G4QueryHit` -> `G3pbQueryHit`
+     - `G4FetchRequest` -> `G3pbFetchRequest`
+     - `route_g4_*` -> `route_g3pb_*`
+     - `select_g4_owner` -> `select_g3pb_owner`
+3. Redefine the peer data model around cache entries keyed by `sequence_hash`.
+   - remove `disk_block_idx` from remote identity
+   - keep fields like:
+     - `sequence_hash`
+     - `size_bytes`
+     - `checksum`
+     - optional access/residency metadata
+4. Introduce a peer-local storage abstraction behind the remote backend.
+   - first trait should cover:
+     - `query_blocks`
+     - `fetch_blocks`
+     - `put_blocks`
+   - first concrete backend should be `foyer`-backed hybrid cache
+5. Standardize transfer semantics.
+   - upload path: local device/host -> remote CPU-visible buffer via NIXL/UCX
+   - fetch path: remote CPU-visible buffer -> local host/device
+   - local onboarding remains `host -> device`
+   - remote disk -> GPU direct transfer is not part of the `G3PB` path
+6. Rename the user-facing binaries and smokes.
+   - `lib/llm/src/bin/kvbm_g4_backend.rs` -> `kvbm_g3pb_backend.rs`
+   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs` -> `kvbm_g3pb_worker_smoke.rs`
+   - keep `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs` as the transport smoke
+7. Replace the design doc.
+   - remove or rewrite `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+   - add `docs/design-docs/kvbm-g3pb-plan.md`
+   - document:
+     - peer ownership
+     - `foyer` hybrid storage
+     - CPU-visible transfer staging
+     - NIXL/UCX `device <-> CPU`
+     - cache miss / recompute policy
+8. Revalidate in layers.
+   - host-only peer-cache smoke for `query/fetch/put`
+   - `kvbm_nixl_transfer_smoke` for `device <-> CPU`
+   - full worker/peer smoke with remote fetch and local onboard
+
+### Architecture decisions
+
+- `G3PB` should be a remote peer-cache implementation, not a new disk-centric
+  KVBM storage tier.
+- To keep the diff to `main` small, do not rename stable generic core tier enums
+  first.
+  - `CacheLevel::G4` and `LogicalLayoutHandle::G4` already exist on `main`
+  - if zero `G4` text everywhere becomes a hard requirement, do that as a
+    second, deliberate pass after the implementation settles
+- `foyer` should stay inside the peer storage backend.
+  - it should not leak into generic KVBM transfer abstractions
+  - KVBM should depend on a narrow peer-cache trait, not directly on `foyer`
+
+### First milestone
+
+- delete `G4BlockIndex` and disk observer wiring
+- rename the unlanded G4 module and binaries to `G3PB`
+- preserve routing / query / fetch behavior while replacing disk-centric remote
+  metadata with peer-cache metadata
+- add a minimal in-memory peer-cache implementation first, then swap in `foyer`
+  behind the same trait
