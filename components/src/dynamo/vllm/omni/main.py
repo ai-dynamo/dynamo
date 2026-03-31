@@ -20,6 +20,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.omni.tts_utils import ensure_dummy_tokenizer_for_tts
 
 from .args import OmniConfig, parse_omni_args
 
@@ -68,6 +69,12 @@ async def init_omni(
     model_type = get_output_modalities(config.output_modalities, config.model)
     if model_type is None:
         model_type = ModelType.Images
+
+    # Audio/TTS models (e.g., Qwen3-TTS) don't ship a standard tokenizer.json,
+    # which causes register_model to fail when building the ModelDeploymentCard.
+    # Create a minimal placeholder so the Rust card loader doesn't bail.
+    if "audio" in config.output_modalities:
+        ensure_dummy_tokenizer_for_tts(config.model)
 
     await register_model(
         ModelInput.Text,

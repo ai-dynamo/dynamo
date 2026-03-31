@@ -56,6 +56,8 @@ vllm = [
     # not include vllm-omni — install it separately from source if needed.
     "vllm-omni==0.18.0",
     "blake3>=1.0.0,<2.0.0",
+    "soundfile>=0.13.1",
+    "librosa>=0.10.0",
 ]
 
 sglang = [
@@ -411,6 +413,10 @@ module = [
     "pydantic_core",
     "aiconfigurator",
     "aiconfigurator.*",
+    "soundfile",
+    "soundfile.*",
+    "librosa",
+    "librosa.*",
 ]
 ignore_missing_imports = true
 
