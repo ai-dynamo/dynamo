@@ -33,8 +33,8 @@ class StageConnector(Protocol):
         self,
         from_stage: str,
         to_stage: str,
-        request_id: str,
-        payload: Any,
+        put_key: str,
+        data: Any,
     ) -> tuple[bool, int, Any]:
         """Write payload to transport. Returns (ok, serialized_size, metadata)."""
         ...

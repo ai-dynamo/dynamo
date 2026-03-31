@@ -27,7 +27,7 @@ class _MockEngine:
 
 
 class _MockConnector:
-    def put(self, from_stage, to_stage, request_id, payload):
+    def put(self, from_stage, to_stage, put_key, data):
         return True, 0, {}
 
     def cleanup(self, request_id):

@@ -148,12 +148,12 @@ async def worker():
     if config.stage_id is not None:
         from dynamo.vllm.omni.stage_worker import init_omni_stage
 
-        await init_omni_stage(runtime, config, shutdown_event)
+        await init_omni_stage(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
     elif config.omni_router:
         from dynamo.vllm.omni.stage_router import init_omni_stage_router
 
-        await init_omni_stage_router(runtime, config, shutdown_event)
+        await init_omni_stage_router(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage_router completed")
     else:
         await init_omni(runtime, config, shutdown_event)
