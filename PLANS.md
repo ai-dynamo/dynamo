@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:58:45 UTC
+Last updated: 2026-03-31 22:26:30 UTC
 
 ## Active state
 
@@ -147,9 +147,9 @@ Last updated: 2026-03-31 21:58:45 UTC
     mutable upload descriptors and immutable fetch descriptors
   - commits staged hashes into the metadata agent only after the transfer
     completion call so `query` stays visibility-safe
-- shared transport structs live in `distributed/g3pb.rs`, and
-  `BlockDescriptorList` now has a public constructor so the backend binary can
-  emit descriptor lists directly
+- shared transport structs live in `distributed/g3pb.rs`
+- the backend binary owns its `BlockDescriptorList` construction locally;
+  do not extend the shared block-manager API for that convenience
 - the backend also needs explicit remote-agent handshake:
   the worker must publish its local serialized blockset to each backend through
   `load_remote` before any `stage_put` / `fetch` transfer so the peer agent can
@@ -161,10 +161,12 @@ Last updated: 2026-03-31 21:58:45 UTC
   always targeting the local agent during `create_xfer_req`
 - the write path is therefore proven good enough for:
   local pinned host -> remote pinned host staging
-- the remaining read-path suspicion is that the selected remote agent name is
-  still not being held with a safe lifetime for the entire pending transfer,
-  or that the legacy `read_from_remote` helper still differs from the newer
-  flipped-read executor semantics in a way the backend/UCX stack cares about
+- the earlier wrapper-lifetime suspicion was incorrect:
+  the bug was in our code passing the local agent name instead of the remote
+  peer agent name into `create_xfer_req`
+- the remaining follow-up is only the separate teardown warning
+  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`, which is not currently treated
+  as evidence of a `nixl-sys` ownership bug
 
 ### Remaining work in this run
 
@@ -174,6 +176,8 @@ Last updated: 2026-03-31 21:58:45 UTC
   - the real transfer bug was passing the local agent name into
     `createXferReq` instead of the remote peer agent name
   - keep the current `block/transfer/nixl.rs` remote-agent fix; do not revert it
+  - the earlier `nixl-sys` / wrapper-lifetime suspicion was incorrect and
+    should not be used as the explanation for this slice
   - the post-transfer `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning is
     currently treated as a separate non-blocking cleanup issue because the
     end-to-end `G3PB` smoke succeeds with remote write, remote read, local
@@ -237,13 +241,14 @@ Last updated: 2026-03-31 21:58:45 UTC
 ### Exact next step
 
 - next file:
-  `lib/llm/src/block_manager/block/transfer/nixl.rs`
+  `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - next commands:
-  - keep the chosen remote agent string alive for the full pending transfer
-    lifecycle in the legacy NIXL helper
-  - if fetch still fails, compare the helper against the v2
-    `NixlReadFlipped` executor semantics and port the same descriptor ordering
-    behavior into `read_from_remote`
+  - trim remaining branch-only drift in the worker smoke binary before the
+    request-plane/discovery refactor
+  - keep the current remote-agent fix in
+    `lib/llm/src/block_manager/block/transfer/nixl.rs`
+  - treat the remaining `invalidateRemoteMD` warning as a separate follow-up,
+    not as evidence of a NIXL wrapper bug
   - rerun:
     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
     - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
