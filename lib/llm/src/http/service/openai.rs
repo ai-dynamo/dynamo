@@ -355,6 +355,12 @@ fn resolve_tokenizer_model_name(
         return Err(ErrorMessage::model_not_found());
     }
 
+    // Preserve this order: without an explicit model, prefer `model_display_names()` first because
+    // those names are known to the serving layer; only if that yields one choice do we fall back
+    // to `get_model_cards()`, whose card-only metadata may exist before a model is fully
+    // registered. This keeps tokenizer endpoints usable from cards alone, but card names may not
+    // map to serving-capable models, so explicit requests still gate on `has_model_any()` /
+    // `ErrorMessage::model_not_found()` and ambiguous fallback still returns `bad_request()`.
     let served_models = state.manager().model_display_names();
     if served_models.len() == 1 {
         return Ok(served_models.into_iter().next().unwrap());
