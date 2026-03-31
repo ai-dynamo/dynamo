@@ -115,15 +115,13 @@ In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.
 
 A Python worker may need to be shut down promptly, for example when the node running the worker is to be reclaimed and there isn't enough time to complete all ongoing requests before the shutdown deadline.
 
-In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
-
-<Warning>
-We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
-</Warning>
+In such cases, you can signal incomplete responses by raising an `EngineShutdown` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
 Here's an example of how to implement this in your `RequestHandler`:
 
 ```python
+from dynamo.llm.exceptions import EngineShutdown
+
 class RequestHandler:
 
     async def generate(self, request):
@@ -131,13 +129,13 @@ class RequestHandler:
         for result in self.engine.generate_streaming(request):
             # Check if we need to migrate before yielding each token
             if is_shutting_down():
-                # Raising GeneratorExit closes the stream and triggers migration
-                raise GeneratorExit("Worker shutting down, migrating request")
+                # Raising EngineShutdown closes the stream and triggers migration
+                raise EngineShutdown("Worker shutting down, migrating request")
 
             yield result
 ```
 
-When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
+When `EngineShutdown` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
 
 For more information about how request migration works, see the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation.
 
