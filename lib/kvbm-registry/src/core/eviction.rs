@@ -604,7 +604,7 @@ where
         {
             let mut positions = self.positions.write();
             let mut insertion_order = self.insertion_order.write();
-            for &(ref key, _) in &entries {
+            for (key, _) in &entries {
                 let position = key.position();
                 positions.insert(std::cmp::Reverse(position));
                 insertion_order.entry(position).or_default().push(*key);

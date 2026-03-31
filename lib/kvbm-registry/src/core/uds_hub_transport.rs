@@ -257,10 +257,10 @@ impl UdsClientTransport {
             use bytes::BytesMut;
             use tokio_util::codec::Decoder;
             let mut bm = BytesMut::from(buf.as_slice());
-            if let Some((msg_type, _header, payload)) = self.codec.decode(&mut bm)? {
-                if msg_type == MessageType::Response {
-                    return Ok(payload.to_vec());
-                }
+            if let Some((msg_type, _header, payload)) = self.codec.decode(&mut bm)?
+                && msg_type == MessageType::Response
+            {
+                return Ok(payload.to_vec());
             }
         }
     }
