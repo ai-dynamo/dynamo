@@ -214,9 +214,7 @@ def start_vllm_mm_services(
         count=4, start_port=10000
     )
 
-    with VLLMWorkerProcess(
-        request, system_port=vllm_port, kv_event_port=kv_event_port
-    ):
+    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
         time.sleep(10)
         with VLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
             time.sleep(3)
