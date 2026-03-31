@@ -1,43 +1,77 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Build, Test, and Copy Framework Image
+name: Copy Image
 
 on:
   workflow_call:
     inputs:
       framework:
         description: 'Framework name (vllm, sglang, trtllm)'
-        default: 'vllm'
+        required: true
+        type: string
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
         required: true
         type: string
       cuda_version:
-        description: 'CUDA version to build with'
-        default: '12.9'
+        description: 'CUDA versions to copy as a JSON array'
         required: true
         type: string
       platform:
-        description: 'Target platform (amd64 or arm64)'
-        default: 'amd64'
+        description: 'Target platforms to copy as a JSON array'
         required: true
         type: string
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy step'
+        required: false
+        type: number
+        default: 10
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
 
 jobs:
-  build:
+  copy-to-acr:
     strategy:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: ${{ matrix.cuda_version }}, ${{ matrix.platform }}
-    runs-on: ubuntu-latest
+    name: cuda${{ matrix.cuda_version }}, ${{ matrix.platform }}
+    runs-on: prod-default-small-v2
     env:
       FRAMEWORK: ${{ inputs.framework }}
-      CUDA_VERSION: ${{ matrix.cuda_version }}
-      PLATFORM: ${{ matrix.platform }}
     steps:
-      - name: Echo Build Parameters
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
         run: |
-          echo "Framework: $FRAMEWORK"
-          echo "CUDA version: $CUDA_VERSION"
-          echo "Platform: $PLATFORM"
+          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ inputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ inputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
