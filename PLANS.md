@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:48:30 UTC
+Last updated: 2026-03-31 21:58:45 UTC
 
 ## Active state
 
@@ -44,6 +44,14 @@ Last updated: 2026-03-31 21:48:30 UTC
   freeform prose about using a metadata-only `contains_key` path
 - because of that local edit, the first required baseline validation no longer
   matched the handoff state and failed to compile before any new changes
+- additional transport root-cause found while comparing the smoke path with the
+  newer physical transfer executor:
+  - `lib/llm/src/block_manager/block/transfer/nixl.rs` always calls
+    `create_xfer_req(..., &nixl_agent.name(), ...)`
+  - that is wrong for cross-agent transfers because `stage_put` writes target a
+    remote backend agent, not the local worker agent
+  - the newer v2 executor already selects the non-local agent name when
+    constructing the transfer request, so the legacy helper needs the same fix
 
 ### Validation completed in this run so far
 
@@ -100,8 +108,17 @@ Last updated: 2026-03-31 21:48:30 UTC
     `target/debug/kvbm_g3pb_worker_smoke --backend-url http://127.0.0.1:58183`
   - current status:
     fail
+  - observed progress after the shared `create_xfer_req` peer-selection fix:
+    - `offer`
+    - `stage_put`
+    - `commit_put`
+    - duplicate-offer rejection
+    all pass
+  - current terminal error now occurs only during the remote fetch/read leg
   - current terminal error:
     `createXferReq: no specified or potential backend had the required registrations to be able to do the transfer`
+  - additional NIXL warning on teardown:
+    `invalidateRemoteMD: error invalidating remote metadata for agent '53Н'`
 
 ### Decisions confirmed in this run so far
 
@@ -139,16 +156,48 @@ Last updated: 2026-03-31 21:48:30 UTC
   load the worker’s UCX metadata
 - the worker now builds its transfer context from the block manager’s exported
   NIXL agent state instead of a separate sibling agent instance
+- first transport fix landed in this run:
+  `block/transfer/nixl.rs` now chooses the non-local worker/agent instead of
+  always targeting the local agent during `create_xfer_req`
+- the write path is therefore proven good enough for:
+  local pinned host -> remote pinned host staging
+- the remaining read-path suspicion is that the selected remote agent name is
+  still not being held with a safe lifetime for the entire pending transfer,
+  or that the legacy `read_from_remote` helper still differs from the newer
+  flipped-read executor semantics in a way the backend/UCX stack cares about
 
 ### Remaining work in this run
 
 - resolve the last NIXL backend-registration failure for
   `PinnedStorage(local host) -> remote host staging` transfer creation
+- revised NIXL diagnosis for the current `G3PB` slice:
+  - the real transfer bug was passing the local agent name into
+    `createXferReq` instead of the remote peer agent name
+  - keep the current `block/transfer/nixl.rs` remote-agent fix; do not revert it
+  - the post-transfer `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning is
+    currently treated as a separate non-blocking cleanup issue because the
+    end-to-end `G3PB` smoke succeeds with remote write, remote read, local
+    host registration, and device onboard
+  - do not mix this slice with speculative transport additions like the
+    unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or
+    `disk_block_observer` surface
 - add KVBM-side `G3PB` admission policy wiring:
   - default admission when a block has been reused at least once
   - environment override `G3PB_OFFLOAD_ALL` for eager admission of every block
   - keep `G1 -> G3PB` semantics as copy/replication, not ownership transfer
+- refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
+  - register `G3PB` as a Dynamo component endpoint and discover remotes via the discovery backend
+  - remove manual `--listen` / `--backend-url` control-plane wiring from the long-term path
+  - keep bulk data movement on NIXL/UCX; use request-plane only for metadata/handshake RPCs
+  - assume request-plane control traffic should comfortably handle at least ~100 RPS for `offer` / `query` / `stage_put` / `commit_put` / `fetch` metadata calls, then validate with measurement after the refactor
+  - do not add the speculative unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or `disk_block_observer` surface in this slice; keep those deferred unless a concrete requirement appears
 - revalidate the next slice in layers:
+  - repeated `kvbm_g3pb_worker_smoke` loop against a stable backend to see
+    whether the `invalidateRemoteMD` warning remains harmless under repetition
+  - multi-backend ownership/routing smoke with multiple `G3PB` peers
+  - larger block-count staged transfer smoke
+  - backend restart/reload validation across `load_remote` plus subsequent
+    `query` / `fetch`
   - worker-side compile/tests after the smoke rewrite
   - `kvbm_nixl_transfer_smoke`
   - host-only `G3PB` backend smoke with `stage_put` / `commit_put` / descriptor
@@ -188,16 +237,13 @@ Last updated: 2026-03-31 21:48:30 UTC
 ### Exact next step
 
 - next file:
-  `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
+  `lib/llm/src/block_manager/block/transfer/nixl.rs`
 - next commands:
-  - compare the failing host-staging path with the already-working
-    leader/worker and offload registration setup in:
-    - `lib/llm/src/block_manager/distributed/worker.rs`
-    - `lib/llm/src/block_manager/offload.rs`
-  - determine whether remote host-host transfer requires:
-    - `SystemStorage` instead of `PinnedStorage`
-    - additional NIXL backends or registration changes
-    - or reuse of an existing KVBM transfer helper
+  - keep the chosen remote agent string alive for the full pending transfer
+    lifecycle in the legacy NIXL helper
+  - if fetch still fails, compare the helper against the v2
+    `NixlReadFlipped` executor semantics and port the same descriptor ordering
+    behavior into `read_from_remote`
   - rerun:
     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
     - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`

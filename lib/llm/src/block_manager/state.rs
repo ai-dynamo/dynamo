@@ -164,7 +164,6 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             host_pool.clone(),
             device_pool.clone(),
             offload_filters,
-            None,
             offload_config,
         )?;
 
@@ -290,7 +289,6 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             host_pool.clone(),
             device_pool.clone(),
             offload_filters,
-            None,
             offload_config,
         )?;
 
