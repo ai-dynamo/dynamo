@@ -37,7 +37,6 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateMPI(&config.MPI, field.NewPath("mpi"))...)
 	allErrs = append(allErrs, validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure"))...)
 	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
-	allErrs = append(allErrs, validateCheckpoint(&config.Checkpoint, field.NewPath("checkpoint"))...)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
@@ -125,14 +124,6 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 	}
 
 	return allErrs
-}
-
-func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldPath *field.Path) field.ErrorList {
-	if !checkpoint.Enabled {
-		return nil
-	}
-
-	return nil
 }
 
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.
