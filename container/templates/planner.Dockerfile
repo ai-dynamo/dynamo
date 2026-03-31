@@ -65,21 +65,12 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wh
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and targeted planner/profiler unit tests.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
-COPY --chmod=775 --chown=dynamo:0 tests/planner /workspace/tests/planner
-COPY --chmod=775 --chown=dynamo:0 tests/profiler /workspace/tests/profiler
-COPY --chmod=775 --chown=dynamo:0 tests/utils /workspace/tests/utils
-COPY --chmod=664 --chown=dynamo:0 tests/conftest.py /workspace/tests/conftest.py
+COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-
-# Pytest loads /workspace/tests/conftest.py, which imports tests.utils.
-# Make tests a real package so that import resolves reliably in the test image.
-RUN touch /workspace/tests/__init__.py /workspace/tests/utils/__init__.py && \
-    chown dynamo:0 /workspace/tests/__init__.py /workspace/tests/utils/__init__.py && \
-    chmod 664 /workspace/tests/__init__.py /workspace/tests/utils/__init__.py
 
 USER dynamo
 
