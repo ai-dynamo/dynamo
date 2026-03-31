@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:07:02 UTC
+Last updated: 2026-03-31 21:08:53 UTC
 
 ## Active state
 
@@ -33,6 +33,10 @@ Last updated: 2026-03-31 21:07:02 UTC
 
 ### Milestone completed in working tree
 
+- implementation commit recorded in this run:
+  - `6b6326172` `Add foyer-backed G3PB peer storage`
+- worktree was clean immediately after that commit before this final handoff
+  refresh
 - added a concrete `FoyerG3pbPeerStorage` behind the existing
   `G3pbPeerStorage` trait in
   `lib/llm/src/block_manager/distributed/g3pb.rs`
@@ -87,9 +91,8 @@ Last updated: 2026-03-31 21:07:02 UTC
 
 ### Remaining work after this run
 
-- make and record the implementation commit hash
-- push the detached `HEAD` to `origin/mf/kvbm-g4-v2` after the commit, per the
-  standing branch note
+- push the detached `HEAD` to `origin/mf/kvbm-g4-v2`, per the standing branch
+  note
 - reconnect the remote data path to real NIXL/UCX `device <-> CPU` transfers
   instead of HTTP payload exchange
 - revalidate the next slice in layers:
@@ -97,14 +100,14 @@ Last updated: 2026-03-31 21:07:02 UTC
   - `kvbm_nixl_transfer_smoke`
   - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
 
-### Exact next step if this run stops before commit/push
+### Exact next step if this run stops before the final push
 
 - next file:
   `PLANS.md`
 - next commands:
   - `git status --short`
-  - `git add Cargo.lock PLANS.md lib/llm/Cargo.toml lib/llm/src/bin/kvbm_g3pb_backend.rs lib/llm/src/block_manager/distributed.rs lib/llm/src/block_manager/distributed/g3pb.rs`
-  - `git commit --signoff -m "Add foyer-backed G3PB peer storage"`
+  - `git add PLANS.md`
+  - `git commit --signoff -m "Refresh G3PB foyer handoff"`
   - `git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2`
 
 ## Archived milestones (condensed)
