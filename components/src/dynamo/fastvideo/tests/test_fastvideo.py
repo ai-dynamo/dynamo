@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -158,9 +157,9 @@ async def test_fastvideo_handler_generates_minimal_video_response():
     assert response["status"] == "completed"
     assert response["progress"] == 100
     assert response["error"] is None
-    assert response["data"] == [
-        {"url": None, "b64_json": base64.b64encode(b"fake-mp4-bytes").decode("utf-8")}
-    ]
+    context_id = _FakeContext().id()
+    expected_url = f"{config.media_output_fs_url}/videos/{context_id}.mp4"
+    assert response["data"] == [{"url": expected_url, "b64_json": None}]
 
 
 def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_generator_args_json(
