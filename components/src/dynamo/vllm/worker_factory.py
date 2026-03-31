@@ -537,7 +537,6 @@ class WorkerFactory:
             logger.info("[Shadow] Lock acquired, waking engine")
 
             await handler._quiesce_controller.resume()
-            handler._quiesce_controller.mark_resumed()
             logger.info("[Shadow] Engine awake, registering with discovery")
 
         await self.register_vllm_model(
