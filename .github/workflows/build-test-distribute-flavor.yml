@@ -118,6 +118,11 @@ on:
         required: false
         type: boolean
         default: false
+      fresh_builder:
+        description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -207,6 +212,7 @@ jobs:
           no_load: ${{ inputs.no_load }}
           no_cache: ${{ inputs.no_cache }}
           make_efa: ${{ inputs.make_efa }}
+          fresh_builder: ${{ inputs.fresh_builder }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
 

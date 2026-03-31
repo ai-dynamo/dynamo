@@ -1980,3 +1980,58 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
+
+
+# =============================================================================
+# Dynamo Exception Types
+#
+# Standardized exceptions for Dynamo error categories. All inherit from
+# DynamoException. The Rust error type mapping depends on the context in
+# which the exception is raised (e.g., backend context wraps as Backend.<*>).
+# =============================================================================
+
+class DynamoException(Exception):
+    """Base exception for all Dynamo error types."""
+
+    ...
+
+class Unknown(DynamoException):
+    """Uncategorized or unknown error."""
+
+    ...
+
+class InvalidArgument(DynamoException):
+    """Invalid input (e.g., prompt exceeds context length)."""
+
+    ...
+
+class CannotConnect(DynamoException):
+    """Failed to establish a connection."""
+
+    ...
+
+class Disconnected(DynamoException):
+    """An established connection was lost."""
+
+    ...
+
+class ConnectionTimeout(DynamoException):
+    """A connection or request timed out."""
+
+    ...
+
+class Cancelled(DynamoException):
+    """The request was cancelled."""
+
+    ...
+
+class EngineShutdown(DynamoException):
+    """The engine process has shut down or crashed."""
+
+    ...
+
+class StreamIncomplete(DynamoException):
+    """The response stream was terminated before completion."""
+
+    ...
+

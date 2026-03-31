@@ -3,247 +3,43 @@
 
 import asyncio
 import logging
-import math
 import time
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Union
 
-from prometheus_client import Gauge, start_http_server
+from prometheus_client import start_http_server
 
-from dynamo.planner import (
-    KubernetesConnector,
-    SubComponentType,
-    TargetReplica,
-    VirtualConnector,
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.connectors.virtual import VirtualConnector
+from dynamo.planner.core.budget import (
+    _apply_component_gpu_budget,
+    _initialize_gpu_counts,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
-from dynamo.planner.global_planner_connector import GlobalPlannerConnector
-from dynamo.planner.utils.exceptions import DeploymentValidationError
+from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
+from dynamo.planner.core.state import PlannerSharedState
+from dynamo.planner.core.throughput.interpolation import (
+    DecodeInterpolator,
+    PrefillInterpolator,
+)
+from dynamo.planner.core.throughput.pre_swept_results import PreSweptResultsHelper
+from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
+from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
+from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
+from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
 
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
     from dynamo.llm import FpmEventSubscriber
-from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
-from dynamo.planner.utils.perf_interpolation import (
-    DecodeInterpolator,
-    PrefillInterpolator,
-)
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import Metrics, PrometheusAPIClient
-from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
-from dynamo.planner.worker_info import WorkerInfo, resolve_worker_info
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-# Union of all connector types used by the planner
 ConnectorType = Union[GlobalPlannerConnector, KubernetesConnector, VirtualConnector]
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-class PlannerPrometheusMetrics:
-    """Container for all Planner Prometheus metrics."""
-
-    def __init__(self, prefix: str = "planner"):
-        # Worker counts
-        self.num_p_workers = Gauge(
-            f"{prefix}:num_p_workers", "Number of prefill workers"
-        )
-        self.num_d_workers = Gauge(
-            f"{prefix}:num_d_workers", "Number of decode workers"
-        )
-
-        # Observed metrics
-        self.observed_ttft = Gauge(
-            f"{prefix}:observed_ttft", "Observed time to first token (ms)"
-        )
-        self.observed_itl = Gauge(
-            f"{prefix}:observed_itl", "Observed inter-token latency (ms)"
-        )
-        self.observed_request_rate = Gauge(
-            f"{prefix}:observed_request_rate", "Observed request rate (req/s)"
-        )
-        self.observed_request_duration = Gauge(
-            f"{prefix}:observed_request_duration", "Observed request duration (s)"
-        )
-        self.observed_isl = Gauge(
-            f"{prefix}:observed_isl", "Observed input sequence length"
-        )
-        self.observed_osl = Gauge(
-            f"{prefix}:observed_osl", "Observed output sequence length"
-        )
-
-        # Correction factors
-        self.p_correction_factor = Gauge(
-            f"{prefix}:p_correction_factor", "Prefill correction factor"
-        )
-        self.d_correction_factor = Gauge(
-            f"{prefix}:d_correction_factor", "Decode correction factor"
-        )
-
-        # Predicted metrics
-        self.predicted_request_rate = Gauge(
-            f"{prefix}:predicted_request_rate", "Predicted request rate (req/s)"
-        )
-        self.predicted_isl = Gauge(
-            f"{prefix}:predicted_isl", "Predicted input sequence length"
-        )
-        self.predicted_osl = Gauge(
-            f"{prefix}:predicted_osl", "Predicted output sequence length"
-        )
-        self.predicted_num_p = Gauge(
-            f"{prefix}:predicted_num_p", "Predicted number of prefill replicas"
-        )
-        self.predicted_num_d = Gauge(
-            f"{prefix}:predicted_num_d", "Predicted number of decode replicas"
-        )
-
-        # Cumulative GPU usage
-        self.gpu_hours = Gauge(f"{prefix}:gpu_hours", "Cumulative GPU hours used")
-
-
-@dataclass
-class PlannerSharedState:
-    last_metrics: Metrics = field(default_factory=Metrics)
-    num_p_workers: int = 0
-    num_d_workers: int = 0
-    cumulative_gpu_hours: float = 0.0
-    last_adjustment_time: float = 0.0
-    # Lower bounds from throughput-based scaling (used when both modes enabled)
-    throughput_lower_bound_p: int = 1
-    throughput_lower_bound_d: int = 1
-    # Separate timestamp for load-based adjustment loop
-    last_load_adjustment_time: float = 0.0
-
-
-def _apply_global_gpu_budget(
-    next_num_p: int, next_num_d: int, config: PlannerConfig
-) -> tuple[int, int]:
-    """Apply GPU budget constraint to both prefill and decode replicas.
-
-    When total GPUs required (num_p * prefill_gpus + num_d * decode_gpus) exceeds the
-    budget, scale down both proportionally using scale = budget / total_required. Prefill
-    replicas are clamped to [min_endpoint, max_prefill] where max_prefill reserves enough
-    GPUs for min_endpoint decode replicas. Remaining budget is then allocated to decode.
-    Returns (0, 0) if budget cannot satisfy min_endpoint for both components.
-    """
-    if config.max_gpu_budget < 0:
-        return next_num_p, next_num_d
-    assert config.prefill_engine_num_gpu is not None
-    assert config.decode_engine_num_gpu is not None
-    total_gpu_required = (
-        next_num_p * config.prefill_engine_num_gpu
-        + next_num_d * config.decode_engine_num_gpu
-    )
-    if total_gpu_required <= config.max_gpu_budget:
-        return next_num_p, next_num_d
-    min_required = (
-        config.min_endpoint * config.prefill_engine_num_gpu
-        + config.min_endpoint * config.decode_engine_num_gpu
-    )
-    if config.max_gpu_budget < min_required:
-        logger.warning(
-            f"max_gpu_budget ({config.max_gpu_budget}) is below the minimum required "
-            f"for min_endpoint ({min_required}); enforcing zero replicas"
-        )
-        return 0, 0
-    scale = config.max_gpu_budget / total_gpu_required
-    max_prefill = math.floor(
-        (config.max_gpu_budget - config.min_endpoint * config.decode_engine_num_gpu)
-        / config.prefill_engine_num_gpu
-    )
-    next_num_p = max(
-        config.min_endpoint, min(max_prefill, math.floor(next_num_p * scale))
-    )
-    remaining = config.max_gpu_budget - next_num_p * config.prefill_engine_num_gpu
-    next_num_d = max(
-        config.min_endpoint, math.floor(remaining / config.decode_engine_num_gpu)
-    )
-    logger.warning(
-        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({config.max_gpu_budget}), "
-        f"scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
-    )
-    return next_num_p, next_num_d
-
-
-def _apply_component_gpu_budget(
-    desired_replicas: int, engine_num_gpu: int, config: PlannerConfig
-) -> int:
-    """Apply GPU budget constraint to a single component (prefill-only or decode-only).
-
-    When total GPUs required (replicas * gpus_per_replica) exceeds the budget, scale down
-    using scale = budget / total_required, floored and clamped to at least min_endpoint.
-    Returns 0 if budget cannot satisfy min_endpoint replicas.
-    """
-    if config.max_gpu_budget < 0:
-        return desired_replicas
-    total_gpu_required = desired_replicas * engine_num_gpu
-    if total_gpu_required <= config.max_gpu_budget:
-        return desired_replicas
-    min_required = config.min_endpoint * engine_num_gpu
-    if config.max_gpu_budget < min_required:
-        logger.warning(
-            f"max_gpu_budget ({config.max_gpu_budget}) is below the minimum required "
-            f"for min_endpoint ({min_required}); enforcing zero replicas"
-        )
-        return 0
-    scale = config.max_gpu_budget / total_gpu_required
-    next_num = max(config.min_endpoint, math.floor(desired_replicas * scale))
-    logger.warning(
-        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({config.max_gpu_budget}), "
-        f"scaling down to {next_num} replicas"
-    )
-    return next_num
-
-
-def _initialize_gpu_counts(
-    config: PlannerConfig,
-    connector,
-    require_prefill: bool,
-    require_decode: bool,
-) -> None:
-    """Initialize GPU counts from DGD (Kubernetes) or config (virtual).
-
-    In Kubernetes mode: reads from DGD, falls back to CLI flags if not found
-    (useful for mockers that don't specify GPU resources).
-    In virtual mode: requires CLI flags, errors if not provided.
-
-    Raises:
-        DeploymentValidationError: If GPU counts cannot be determined
-    """
-    # Try to read from DGD in Kubernetes mode
-    if hasattr(connector, "get_gpu_counts"):
-        try:
-            prefill_gpu, decode_gpu = connector.get_gpu_counts(
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
-            config.prefill_engine_num_gpu = prefill_gpu
-            config.decode_engine_num_gpu = decode_gpu
-            logger.info(
-                f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
-            )
-            return
-        except Exception as e:
-            # Fall back to CLI flags (e.g., for mockers without GPU resources in DGD)
-            logger.warning(
-                f"Could not read GPU counts from DGD ({e}), falling back to CLI flags"
-            )
-
-    # Use CLI flags (virtual mode, or K8s fallback when DGD lacks GPU resources)
-    errors = []
-    if require_prefill and config.prefill_engine_num_gpu is None:
-        errors.append("Missing prefill_engine_num_gpu in config")
-    if require_decode and config.decode_engine_num_gpu is None:
-        errors.append("Missing decode_engine_num_gpu in config")
-    if errors:
-        raise DeploymentValidationError(errors)
-    logger.info(
-        f"Using GPU counts from CLI: prefill={config.prefill_engine_num_gpu}, "
-        f"decode={config.decode_engine_num_gpu}"
-    )
 
 
 class BasePlanner:
@@ -429,7 +225,7 @@ class BasePlanner:
             self.no_correction = config.no_correction
 
         if self.enable_load:
-            from dynamo.planner.utils.fpm_regression import (
+            from dynamo.planner.core.load.fpm_regression import (
                 DecodeRegressionModel,
                 PrefillRegressionModel,
             )
@@ -755,7 +551,6 @@ class BasePlanner:
 
     def predict_load(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         try:
-            # predict the next load
             next_num_req = self.num_req_predictor.predict_next()
             next_isl = self.isl_predictor.predict_next()
             next_osl = self.osl_predictor.predict_next()
@@ -775,7 +570,6 @@ class BasePlanner:
         self.osl_predictor.add_data_point(osl_avg)
 
     def plan_adjustment(self) -> Optional[int]:
-        # Skip adjustment if no traffic
         if not self.last_metrics.is_valid():
             logger.info(
                 "Metrics contain None or NaN values (no active requests), skipping adjustment"

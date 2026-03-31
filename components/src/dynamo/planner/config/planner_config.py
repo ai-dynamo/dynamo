@@ -23,7 +23,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from dynamo.planner.defaults import SLAPlannerDefaults
+from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
 

@@ -23,6 +23,7 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
@@ -541,7 +542,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             context: Context object for cancellation handling.
 
         Raises:
-            GeneratorExit: If shutdown event was triggered.
+            EngineShutdown: If shutdown event was triggered.
         """
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
@@ -600,9 +601,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
                 )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during token generation")
+                raise EngineShutdown("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
@@ -626,7 +627,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID
