@@ -20,7 +20,7 @@ datasources:
         filterByTraceID: false
         filterBySpanID: false
         customQuery: true
-        query: '{service_name=~".+"} | trace_id = "$${__trace.traceId}"'
+        query: '{service_name=~".+"} | json | trace_id = "$${__span.traceId}"'
         spanStartTimeShift: "-1h"
         spanEndTimeShift: "1h"
       search:
