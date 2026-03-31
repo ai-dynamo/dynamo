@@ -1042,7 +1042,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
-	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+	if r.Config.Checkpoint.Enabled &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint != nil &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")

@@ -49,6 +49,8 @@ spec:
               - "dynamo.vllm"
               - "--model"
               - "Qwen/Qwen3-0.6B"
+              - "--dtype"
+              - "bfloat16"
               - "--tensor-parallel-size"
               - "1"
               - "--max-model-len"

@@ -60,6 +60,9 @@ func PrepareRestorePodSpec(
 	if placeholder {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
+		container.StartupProbe = nil
+		container.LivenessProbe = nil
+		container.ReadinessProbe = nil
 	}
 }
 
@@ -71,20 +74,22 @@ func ValidateRestorePodSpec(
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	if len(podSpec.Containers) == 0 {
-		return fmt.Errorf("restore target container is missing")
+	if len(podSpec.Containers) != 1 {
+		return fmt.Errorf("restore target must have exactly one container, got %d", len(podSpec.Containers))
 	}
 	container := &podSpec.Containers[0]
 	if storage.PVCName != "" {
 		hasVolume := false
 		for _, volume := range podSpec.Volumes {
-			if volume.Name == CheckpointVolumeName {
+			if volume.Name == CheckpointVolumeName &&
+				volume.PersistentVolumeClaim != nil &&
+				volume.PersistentVolumeClaim.ClaimName == storage.PVCName {
 				hasVolume = true
 				break
 			}
 		}
 		if !hasVolume {
-			return fmt.Errorf("missing %s volume", CheckpointVolumeName)
+			return fmt.Errorf("missing %s volume for PVC %s", CheckpointVolumeName, storage.PVCName)
 		}
 	}
 	if storage.BasePath != "" {

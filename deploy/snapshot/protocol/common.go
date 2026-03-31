@@ -75,6 +75,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
+	delete(annotations, CheckpointStatusAnnotation)
+	delete(annotations, RestoreStatusAnnotation)
+	delete(annotations, RestoreContainerIDAnnotation)
 
 	if !enabled {
 		return

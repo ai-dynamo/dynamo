@@ -1,6 +1,8 @@
 package types
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -137,4 +139,27 @@ func TestNewCRIUDumpManifest(t *testing.T) {
 			t.Errorf("expected nil ExtMnt when all entries are empty/nil, got %v", m.ExtMnt)
 		}
 	})
+}
+
+func TestWriteManifestRejectsMissingCheckpointID(t *testing.T) {
+	dir := t.TempDir()
+
+	err := WriteManifest(dir, &CheckpointManifest{})
+	if err == nil || err.Error() != "checkpoint manifest is missing checkpointId" {
+		t.Fatalf("expected missing checkpointId error, got %v", err)
+	}
+}
+
+func TestReadManifestRejectsMissingCheckpointID(t *testing.T) {
+	dir := t.TempDir()
+
+	content := []byte("createdAt: 2026-03-31T00:00:00Z\n")
+	if err := os.WriteFile(filepath.Join(dir, manifestFilename), content, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := ReadManifest(dir)
+	if err == nil || err.Error() != "checkpoint manifest is missing checkpointId" {
+		t.Fatalf("expected missing checkpointId error, got %v", err)
+	}
 }

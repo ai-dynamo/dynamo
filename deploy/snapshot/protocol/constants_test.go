@@ -12,6 +12,9 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	}
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation: "old",
+		CheckpointStatusAnnotation:          "completed",
+		RestoreStatusAnnotation:             "failed",
+		RestoreContainerIDAnnotation:        "dead-container",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
@@ -28,6 +31,15 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation, got %#v", annotations)
 	}
+	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
+		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreStatusAnnotation]; ok {
+		t.Fatalf("restore status annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
+		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
+	}
 }
 
 func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
@@ -37,6 +49,9 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation: "2",
+		CheckpointStatusAnnotation:          "completed",
+		RestoreStatusAnnotation:             "failed",
+		RestoreContainerIDAnnotation:        "dead-container",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
@@ -49,5 +64,14 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[CheckpointArtifactVersionAnnotation]; ok {
 		t.Fatalf("checkpoint artifact version annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
+		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreStatusAnnotation]; ok {
+		t.Fatalf("restore status annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
+		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
 	}
 }

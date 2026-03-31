@@ -55,6 +55,9 @@ func runCheckpoint(args []string) error {
 	if len(flags.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	if *manifest == "" {
+		return fmt.Errorf("--manifest is required")
+	}
 
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
 	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
@@ -95,6 +98,9 @@ func runRestore(args []string) error {
 	}
 	if len(flags.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if (*manifest == "") == (*podName == "") {
+		return fmt.Errorf("must specify exactly one of --manifest or --pod")
 	}
 
 	snapshotctlLog.Info("Running restore", "manifest", *manifest, "pod", *podName, "namespace", *namespace, "checkpoint_id", *checkpointID)

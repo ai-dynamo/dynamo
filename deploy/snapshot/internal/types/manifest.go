@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -140,6 +141,13 @@ func (m CUDAManifest) IsEmpty() bool {
 
 // WriteManifest writes a checkpoint manifest file in the checkpoint directory.
 func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
+	if data == nil {
+		return fmt.Errorf("checkpoint manifest is required")
+	}
+	if strings.TrimSpace(data.CheckpointID) == "" {
+		return fmt.Errorf("checkpoint manifest is missing checkpointId")
+	}
+
 	content, err := yaml.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal checkpoint manifest: %w", err)
@@ -165,6 +173,9 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	var data CheckpointManifest
 	if err := yaml.Unmarshal(content, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
+	}
+	if strings.TrimSpace(data.CheckpointID) == "" {
+		return nil, fmt.Errorf("checkpoint manifest is missing checkpointId")
 	}
 
 	return &data, nil

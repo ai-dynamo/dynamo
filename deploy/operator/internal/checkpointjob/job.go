@@ -4,6 +4,8 @@
 package checkpointjob
 
 import (
+	"fmt"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
@@ -56,7 +58,11 @@ func BuildCheckpointJob(
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
 	hash := ckpt.Status.IdentityHash
 	if hash == "" {
-		hash, _ = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		var err error
+		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+		}
 	}
 
 	if podTemplate.Labels == nil {

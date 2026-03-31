@@ -31,7 +31,7 @@ title: Snapshot
 1. Build a placeholder image
 2. Install the snapshot chart
 3. Create a `DynamoCheckpoint` and wait for it to become ready
-5. Deploy a `DynamoGraphDeployment` that restores from the corresponding `checkpointRef`
+4. Deploy a `DynamoGraphDeployment` that restores from the corresponding `checkpointRef`
 
 ### 1. Build and push a placeholder image
 
@@ -263,7 +263,7 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 ## Lower-Level Testing With `snapshotctl`
 
-It is possible to checkpoint and restore pods without the Dynamo operator via the lower level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet running in the namesapce with the checkpoint PVC mounted.
+It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
 
 ### Checkpoint from a worker pod manifest
 

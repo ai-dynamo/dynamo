@@ -17,10 +17,13 @@ func TestNewRestorePod(t *testing.T) {
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
-				Name:    "main",
-				Image:   "test:latest",
-				Command: []string{"python3", "-m", "dynamo.vllm"},
-				Args:    []string{"--model", "Qwen"},
+				Name:           "main",
+				Image:          "test:latest",
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "Qwen"},
+				ReadinessProbe: &corev1.Probe{},
+				LivenessProbe:  &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
 			}},
 		},
 	}, PodOptions{
@@ -56,6 +59,15 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.Containers[0].Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", restorePod.Spec.Containers[0].Args)
 	}
+	if restorePod.Spec.Containers[0].ReadinessProbe != nil {
+		t.Fatalf("expected readiness probe to be cleared: %#v", restorePod.Spec.Containers[0].ReadinessProbe)
+	}
+	if restorePod.Spec.Containers[0].LivenessProbe != nil {
+		t.Fatalf("expected liveness probe to be cleared: %#v", restorePod.Spec.Containers[0].LivenessProbe)
+	}
+	if restorePod.Spec.Containers[0].StartupProbe != nil {
+		t.Fatalf("expected startup probe to be cleared: %#v", restorePod.Spec.Containers[0].StartupProbe)
+	}
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
 	}
@@ -70,8 +82,11 @@ func TestNewRestorePod(t *testing.T) {
 func TestPrepareRestorePodSpec(t *testing.T) {
 	podSpec := corev1.PodSpec{}
 	container := corev1.Container{
-		Command: []string{"python3", "-m", "dynamo.vllm"},
-		Args:    []string{"--model", "Qwen"},
+		Command:        []string{"python3", "-m", "dynamo.vllm"},
+		Args:           []string{"--model", "Qwen"},
+		ReadinessProbe: &corev1.Probe{},
+		LivenessProbe:  &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
 	}
 
 	storage := Storage{
@@ -97,6 +112,9 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if container.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
 	}
+	if container.ReadinessProbe != nil || container.LivenessProbe != nil || container.StartupProbe != nil {
+		t.Fatalf("expected probes to be cleared: %#v %#v %#v", container.ReadinessProbe, container.LivenessProbe, container.StartupProbe)
+	}
 }
 
 func TestValidateRestorePodSpec(t *testing.T) {
@@ -110,6 +128,11 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		},
 		Volumes: []corev1.Volume{{
 			Name: CheckpointVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "snapshot-pvc",
+				},
+			},
 		}},
 		Containers: []corev1.Container{{
 			Name: "main",
@@ -131,7 +154,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 
 	badSpec := podSpec.DeepCopy()
 	badSpec.Volumes = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
+	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume for PVC snapshot-pvc" {
 		t.Fatalf("expected missing volume error, got %v", err)
 	}
 
@@ -148,7 +171,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 }
 
-func TestValidateRestorePodSpecUsesFirstContainer(t *testing.T) {
+func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
 	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
@@ -159,6 +182,11 @@ func TestValidateRestorePodSpecUsesFirstContainer(t *testing.T) {
 		},
 		Volumes: []corev1.Volume{{
 			Name: CheckpointVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "snapshot-pvc",
+				},
+			},
 		}},
 		Containers: []corev1.Container{
 			{
@@ -178,7 +206,7 @@ func TestValidateRestorePodSpecUsesFirstContainer(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("expected restore pod spec to validate against first container, got %v", err)
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "restore target must have exactly one container, got 2" {
+		t.Fatalf("expected multi-container restore target to be rejected, got %v", err)
 	}
 }

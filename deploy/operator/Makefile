@@ -193,10 +193,9 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
-	$(CONTAINER_TOOL) buildx use project-v3-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-context snapshot=../snapshot --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm project-v3-builder
-	rm Dockerfile.cross
+	trap '$(CONTAINER_TOOL) buildx rm project-v3-builder >/dev/null 2>&1 || true; rm -f Dockerfile.cross' EXIT; \
+	$(CONTAINER_TOOL) buildx use project-v3-builder; \
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-context snapshot=../snapshot --tag ${IMG} -f Dockerfile.cross .
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.

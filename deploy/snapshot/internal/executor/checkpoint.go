@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -43,6 +44,9 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
+	if strings.TrimSpace(req.CheckpointID) == "" {
+		return fmt.Errorf("checkpoint ID is required")
+	}
 	if req.CheckpointLocation == "" {
 		return fmt.Errorf("checkpoint location is required")
 	}
