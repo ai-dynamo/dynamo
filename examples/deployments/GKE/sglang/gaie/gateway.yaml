@@ -1,0 +1,11 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: dynamo-system
+spec:
+  gatewayClassName: gke-l7-rilb
+  listeners:
+  - protocol: HTTP
+    port: 80
+    name: http
