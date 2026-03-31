@@ -7,7 +7,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 # XPU-specific environment
 export VLLM_TARGET_DEVICE=xpu
