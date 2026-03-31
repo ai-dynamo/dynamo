@@ -14,11 +14,16 @@
 # limitations under the License.
 
 import logging
+import os
 from typing import Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# All HTTP tuning lives here — single source of truth
+MAX_CONNECTIONS: int = int(os.environ.get("DYN_MM_HTTP_MAX_CONNECTIONS", "100"))
+MAX_KEEPALIVE: int = int(os.environ.get("DYN_MM_HTTP_MAX_KEEPALIVE", "20"))
 
 # Global HTTP client instance
 _global_http_client: Optional[httpx.AsyncClient] = None
@@ -40,8 +45,16 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
         _global_http_client = httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            limits=httpx.Limits(
+                max_keepalive_connections=MAX_KEEPALIVE,
+                max_connections=MAX_CONNECTIONS,
+            ),
         )
-        logger.info(f"Shared HTTP client initialized with timeout={timeout}s")
+        logger.info(
+            f"Shared HTTP client initialized: "
+            f"max_connections={MAX_CONNECTIONS}, "
+            f"max_keepalive={MAX_KEEPALIVE}, "
+            f"timeout={timeout}s"
+        )
 
     return _global_http_client
