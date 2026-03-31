@@ -102,9 +102,10 @@ pub async fn completion_response_stream(
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model_name, "grpc_completions");
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                crate::http::service::metrics::Endpoint::Completions,
+            );
             return Status::resource_exhausted(e.to_string());
         }
         Status::internal(format!("Failed to generate completions: {}", e))

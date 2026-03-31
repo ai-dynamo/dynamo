@@ -443,7 +443,9 @@ async fn completions_single(
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(&model, "completions");
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -595,7 +597,9 @@ async fn completions_batch(
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
             if super::metrics::request_was_rejected(e.as_ref()) {
-                state.metrics_clone().inc_rejection(&model, "completions");
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -756,7 +760,7 @@ async fn embeddings(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, "embeddings");
+                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -1165,7 +1169,7 @@ async fn chat_completions(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, "chat_completions");
+                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1568,7 +1572,9 @@ async fn responses(
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(&model, "responses");
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1948,7 +1954,9 @@ async fn images(
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(&model, "images");
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Images);
         }
         ErrorMessage::from_anyhow(e, "Failed to generate images")
     })?;
@@ -2031,7 +2039,9 @@ async fn videos(
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(&model, "videos");
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         ErrorMessage::from_anyhow(e, "Failed to generate videos")
     })?;
@@ -2093,7 +2103,9 @@ async fn video_stream(
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(&model, "videos");
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         ErrorMessage::from_anyhow(e, "Failed to start video stream")
     })?;

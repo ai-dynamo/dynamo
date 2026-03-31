@@ -916,16 +916,16 @@ impl Metrics {
     }
 
     /// Increment the rejection counter for a request rejected due to resource exhaustion
-    pub fn inc_rejection(&self, model: &str, endpoint: &str) {
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
         self.model_rejection_total
-            .with_label_values(&[model, endpoint])
+            .with_label_values(&[model, &endpoint.to_string()])
             .inc();
     }
 
     /// Get the current rejection count for a model and endpoint
-    pub fn get_rejection_count(&self, model: &str, endpoint: &str) -> u64 {
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
         self.model_rejection_total
-            .with_label_values(&[model, endpoint])
+            .with_label_values(&[model, &endpoint.to_string()])
             .get()
     }
 
