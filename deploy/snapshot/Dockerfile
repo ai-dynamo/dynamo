@@ -107,7 +107,10 @@ RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git checkout FETCH_HEAD
+
+RUN python3 -c 'from pathlib import Path; path = Path("/tmp/criu/criu/sk-tcp.c"); text = path.read_text(); marker = "#ifndef IN_LOOPBACK\n#define IN_LOOPBACK(addr) ((((long int)(addr)) & 0xff000000) == 0x7f000000)\n#endif\n"; path.write_text(text if "#ifndef IN_LOOPBACK" in text else text.replace("#include <netinet/in.h>\n", "#include <netinet/in.h>\n" + marker, 1))' \
+    && cd /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 

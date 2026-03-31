@@ -3,12 +3,16 @@
 
 """Unit tests for SGLang backend components."""
 
+import importlib
+import os
 import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
 import yaml
+import sglang.srt.distributed.device_communicators as device_communicators
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 from dynamo.sglang.args import parse_args
@@ -16,6 +20,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang import patches as sglang_patches
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -36,6 +41,43 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_snapshot_patches_force_file_dist_init_and_pynccl(monkeypatch):
+    """Checkpoint mode should avoid TCPStore listeners and keep PyNccl enabled."""
+
+    class FakePyNcclCommunicator:
+        def __init__(self, *args, **kwargs):
+            self.available = kwargs.get("available", True)
+            self.world_size = kwargs.get("world_size", 2)
+            self.disabled = True
+
+    fake_pynccl_module = types.SimpleNamespace(PyNcclCommunicator=FakePyNcclCommunicator)
+    stale_store_path = Path("/tmp/dynamo-sglang-dist-init-test-pod")
+    stale_store_path.write_text("stale", encoding="utf-8")
+
+    monkeypatch.setenv("POD_UID", "test-pod")
+    monkeypatch.setenv("SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE", "tcp://127.0.0.1:1234")
+    monkeypatch.setattr(device_communicators, "pynccl", fake_pynccl_module, raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.distributed.device_communicators.pynccl",
+        fake_pynccl_module,
+    )
+
+    patches = importlib.reload(sglang_patches)
+    patches.apply_snapshot_patches()
+
+    assert os.environ["SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE"] == (
+        "file:///tmp/dynamo-sglang-dist-init-test-pod"
+    )
+    assert not stale_store_path.exists()
+
+    communicator = fake_pynccl_module.PyNcclCommunicator(world_size=2, available=True)
+    assert communicator.disabled is False
+
+    single_rank = fake_pynccl_module.PyNcclCommunicator(world_size=1, available=True)
+    assert single_rank.disabled is True
 
 
 @pytest.mark.asyncio
