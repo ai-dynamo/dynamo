@@ -452,7 +452,12 @@ impl ModelDeploymentCard {
             }
             None => {
                 anyhow::bail!(
-                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                    "ModelDeploymentCard for '{}' does not have a tokenizer. \
+                     Provide a supported tokenizer file (tokenizer.json, tiktoken.model, \
+                     or *.tiktoken), use --use-<framework>-tokenizer to delegate \
+                     tokenization to the backend, or use a non-Rust chat processor \
+                     (e.g. --dyn-chat-processor vllm).",
+                    self.display_name
                 );
             }
         }
