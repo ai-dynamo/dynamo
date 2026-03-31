@@ -284,10 +284,7 @@ def _run_aic_static_point(isl: int, osl: int, batch_size: int):
     database = aiconfigurator.sdk.perf_database.get_database(
         system="h200_sxm",
         backend="vllm",
-        version=aiconfigurator.sdk.perf_database.get_latest_database_version(
-            "h200_sxm",
-            "vllm",
-        ),
+        version="0.12.0",
     )
     backend = aiconfigurator.sdk.backends.factory.get_backend("vllm")
     model = aiconfigurator.sdk.models.get_model(
