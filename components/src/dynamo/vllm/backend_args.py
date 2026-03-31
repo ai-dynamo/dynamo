@@ -258,6 +258,13 @@ class DynamoVllmConfig(ConfigBase):
                     DeprecationWarning,
                     stacklevel=2,
                 )
+                if (
+                    self.disaggregation_mode is not None
+                    and self.disaggregation_mode != DisaggregationMode.DECODE
+                ):
+                    raise ValueError(
+                        f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
+                    )
                 self.disaggregation_mode = DisaggregationMode.DECODE
             if self.multimodal_encode_worker:
                 warnings.warn(
@@ -265,6 +272,13 @@ class DynamoVllmConfig(ConfigBase):
                     DeprecationWarning,
                     stacklevel=2,
                 )
+                if (
+                    self.disaggregation_mode is not None
+                    and self.disaggregation_mode != DisaggregationMode.ENCODE
+                ):
+                    raise ValueError(
+                        f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
+                    )
                 self.disaggregation_mode = DisaggregationMode.ENCODE
             if self.multimodal_worker:
                 warnings.warn(
@@ -272,6 +286,14 @@ class DynamoVllmConfig(ConfigBase):
                     DeprecationWarning,
                     stacklevel=2,
                 )
+                if (
+                    self.disaggregation_mode is not None
+                    and self.disaggregation_mode != DisaggregationMode.AGGREGATED
+                    and self.disaggregation_mode != DisaggregationMode.PREFILL
+                ):
+                    raise ValueError(
+                        f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
+                    )
                 # NO-OP here, '--multimodal-worker' may be specified with '--disaggregation-mode=prefill'
                 # as prefill workers in P/D disaggregation or without for aggregation. In both cases,
                 # 'self.disaggregation_mode' will be properly setup.

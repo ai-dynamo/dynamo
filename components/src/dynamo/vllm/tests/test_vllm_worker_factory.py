@@ -112,7 +112,7 @@ class TestCreate:
 
         await factory.create(Mock(), config, shutdown_event, [])
 
-        factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.parametrize("route_to_encode", [True, False])
     async def test_routes_multimodal_decode_worker(
@@ -125,7 +125,7 @@ class TestCreate:
 
         await factory.create(Mock(), config, shutdown_event, [])
 
-        factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_called_once()  # type: ignore[union-attr]
 
     async def test_raises_error_for_invalid_config(
         self, factory: WorkerFactory
@@ -138,7 +138,7 @@ class TestCreate:
 
         with pytest.raises(
             ValueError,
-            match="Multimodal decode worker with PREFILL disaggregation mode is not supported.",
+            match="Multimodal decode worker with PREFILL disaggregation mode is not supported",
         ):
             await factory.create(Mock(), config, shutdown_event, [])
 
@@ -147,7 +147,7 @@ class TestCreate:
         )
         with pytest.raises(
             ValueError,
-            match="Multimodal worker with DECODE disaggregation mode is not supported.",
+            match="Multimodal worker with DECODE disaggregation mode is not supported",
         ):
             await factory.create(Mock(), config, shutdown_event, [])
 
