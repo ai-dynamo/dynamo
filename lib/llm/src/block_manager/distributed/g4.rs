@@ -193,6 +193,24 @@ where
     Ok(routed)
 }
 
+fn filter_first_sequence_hash_matches<T, F>(
+    items: Vec<T>,
+    mut sequence_hash: F,
+    accepted_hashes: &HashSet<SequenceHash>,
+) -> Vec<T>
+where
+    F: FnMut(&T) -> SequenceHash,
+{
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| {
+            let sequence_hash = sequence_hash(item);
+            accepted_hashes.contains(&sequence_hash) && seen.insert(sequence_hash)
+        })
+        .collect()
+}
+
 pub fn route_g4_sequence_hashes_by_owner(
     sequence_hashes: &[SequenceHash],
     workers: &[G4StorageWorker],
@@ -239,10 +257,13 @@ impl G4BlockIndex {
 
     pub fn offer_blocks(&self, blocks: &[G4PutBlock]) -> Vec<SequenceHash> {
         let guard = self.blocks.read().expect("g4 block index poisoned");
+        let mut seen = HashSet::new();
         blocks
             .iter()
             .filter_map(|block| {
-                (!guard.contains_key(&block.sequence_hash)).then_some(block.sequence_hash)
+                let sequence_hash = block.sequence_hash;
+                (!guard.contains_key(&sequence_hash) && seen.insert(sequence_hash))
+                    .then_some(sequence_hash)
             })
             .collect()
     }
@@ -395,10 +416,7 @@ impl G4StorageAgent {
 
     pub async fn offered_blocks(&self, blocks: Vec<G4PutBlock>) -> Vec<G4PutBlock> {
         let accepted_hashes: HashSet<_> = self.offer_blocks(&blocks).await.into_iter().collect();
-        blocks
-            .into_iter()
-            .filter(|block| accepted_hashes.contains(&block.sequence_hash))
-            .collect()
+        filter_first_sequence_hash_matches(blocks, |block| block.sequence_hash, &accepted_hashes)
     }
 
     pub async fn offer_and_put_blocks(&self, blocks: Vec<G4PutBlock>) -> Vec<G4PutBlock> {
@@ -422,10 +440,11 @@ impl G4StorageAgent {
         let metadata: Vec<_> = blocks.iter().map(|block| block.meta.clone()).collect();
         let accepted_hashes: HashSet<_> = self.offer_blocks(&metadata).await.into_iter().collect();
 
-        Ok(blocks
-            .into_iter()
-            .filter(|block| accepted_hashes.contains(&block.meta.sequence_hash))
-            .collect())
+        Ok(filter_first_sequence_hash_matches(
+            blocks,
+            |block| block.meta.sequence_hash,
+            &accepted_hashes,
+        ))
     }
 
     pub async fn offer_and_put_payload_blocks(
@@ -552,13 +571,24 @@ impl G4StorageClient {
 
         Ok(blocks
             .into_iter()
-            .filter(|block| {
-                self.owner_for(block.sequence_hash)
-                    .ok()
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
-                    .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
-            })
-            .collect())
+            .fold(
+                (Vec::new(), HashSet::new()),
+                |(mut accepted_blocks, mut seen), block| {
+                    let sequence_hash = block.sequence_hash;
+                    let is_accepted = self
+                        .owner_for(sequence_hash)
+                        .ok()
+                        .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                        .is_some_and(|accepted| accepted.contains(&sequence_hash));
+
+                    if is_accepted && seen.insert(sequence_hash) {
+                        accepted_blocks.push(block);
+                    }
+
+                    (accepted_blocks, seen)
+                },
+            )
+            .0)
     }
 
     pub async fn offer_and_put_blocks(
@@ -585,13 +615,24 @@ impl G4StorageClient {
 
         Ok(blocks
             .into_iter()
-            .filter(|block| {
-                self.owner_for(block.sequence_hash)
-                    .ok()
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
-                    .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
-            })
-            .collect())
+            .fold(
+                (Vec::new(), HashSet::new()),
+                |(mut accepted_blocks, mut seen), block| {
+                    let sequence_hash = block.sequence_hash;
+                    let is_accepted = self
+                        .owner_for(sequence_hash)
+                        .ok()
+                        .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                        .is_some_and(|accepted| accepted.contains(&sequence_hash));
+
+                    if is_accepted && seen.insert(sequence_hash) {
+                        accepted_blocks.push(block);
+                    }
+
+                    (accepted_blocks, seen)
+                },
+            )
+            .0)
     }
 
     pub async fn offer_payload_blocks(
@@ -618,13 +659,24 @@ impl G4StorageClient {
 
         Ok(blocks
             .into_iter()
-            .filter(|block| {
-                self.owner_for(block.meta.sequence_hash)
-                    .ok()
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
-                    .is_some_and(|accepted| accepted.contains(&block.meta.sequence_hash))
-            })
-            .collect())
+            .fold(
+                (Vec::new(), HashSet::new()),
+                |(mut accepted_blocks, mut seen), block| {
+                    let sequence_hash = block.meta.sequence_hash;
+                    let is_accepted = self
+                        .owner_for(sequence_hash)
+                        .ok()
+                        .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                        .is_some_and(|accepted| accepted.contains(&sequence_hash));
+
+                    if is_accepted && seen.insert(sequence_hash) {
+                        accepted_blocks.push(block);
+                    }
+
+                    (accepted_blocks, seen)
+                },
+            )
+            .0)
     }
 
     pub async fn offer_and_put_payload_blocks(
@@ -651,13 +703,24 @@ impl G4StorageClient {
 
         Ok(blocks
             .into_iter()
-            .filter(|block| {
-                self.owner_for(block.meta.sequence_hash)
-                    .ok()
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
-                    .is_some_and(|accepted| accepted.contains(&block.meta.sequence_hash))
-            })
-            .collect())
+            .fold(
+                (Vec::new(), HashSet::new()),
+                |(mut accepted_blocks, mut seen), block| {
+                    let sequence_hash = block.meta.sequence_hash;
+                    let is_accepted = self
+                        .owner_for(sequence_hash)
+                        .ok()
+                        .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                        .is_some_and(|accepted| accepted.contains(&sequence_hash));
+
+                    if is_accepted && seen.insert(sequence_hash) {
+                        accepted_blocks.push(block);
+                    }
+
+                    (accepted_blocks, seen)
+                },
+            )
+            .0)
     }
 
     pub async fn query_blocks(
@@ -1006,6 +1069,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_offer_and_put_blocks_rejects_duplicate_hashes_within_batch() {
+        let agent = G4StorageAgent::new(7, Arc::new(MockTransferExecutor::default()));
+
+        let accepted = agent
+            .offer_and_put_blocks(vec![
+                G4PutBlock {
+                    sequence_hash: 12,
+                    disk_block_idx: 5,
+                    size_bytes: 2048,
+                    checksum: None,
+                },
+                G4PutBlock {
+                    sequence_hash: 12,
+                    disk_block_idx: 6,
+                    size_bytes: 4096,
+                    checksum: Some([9; 32]),
+                },
+            ])
+            .await;
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].sequence_hash, 12);
+        assert_eq!(accepted[0].disk_block_idx, 5);
+
+        let hits = agent.query_blocks(&[12]).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].disk_block_idx, 5);
+        assert_eq!(hits[0].size_bytes, 2048);
+        assert_eq!(hits[0].checksum, None);
+    }
+
+    #[tokio::test]
     async fn client_offer_routes_by_owner_and_preserves_input_order() {
         let worker_list = workers();
         let sequence_hashes = vec![1_u64, 2_u64, 3_u64];
@@ -1058,6 +1153,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3]
         );
+    }
+
+    #[tokio::test]
+    async fn client_offer_and_put_blocks_rejects_duplicate_hashes_within_batch() {
+        let worker_list = workers();
+        let sequence_hash = 1234_u64;
+        let owner = select_g4_owner(sequence_hash, &worker_list).unwrap();
+        let agent = Arc::new(G4StorageAgent::new(
+            owner.worker_id,
+            Arc::new(MockTransferExecutor::default()),
+        ));
+
+        let client = G4StorageClient::new(
+            worker_list,
+            HashMap::from([(owner.worker_id, agent.clone())]),
+            Duration::from_millis(50),
+        );
+
+        let accepted = client
+            .offer_and_put_blocks(vec![
+                G4PutBlock {
+                    sequence_hash,
+                    disk_block_idx: 1,
+                    size_bytes: 1024,
+                    checksum: None,
+                },
+                G4PutBlock {
+                    sequence_hash,
+                    disk_block_idx: 2,
+                    size_bytes: 2048,
+                    checksum: Some([3; 32]),
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].disk_block_idx, 1);
+
+        let hits = agent.query_blocks(&[sequence_hash]).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].disk_block_idx, 1);
+        assert_eq!(hits[0].size_bytes, 1024);
+        assert_eq!(hits[0].checksum, None);
     }
 
     #[tokio::test]
@@ -1274,6 +1413,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3]
         );
+    }
+
+    #[tokio::test]
+    async fn client_offer_and_put_payload_rejects_duplicate_hashes_within_batch() {
+        let worker_list = workers();
+        let sequence_hash = 4321_u64;
+        let owner = select_g4_owner(sequence_hash, &worker_list).unwrap();
+        let agent = Arc::new(G4StorageAgent::new(
+            owner.worker_id,
+            Arc::new(MockTransferExecutor::default()),
+        ));
+
+        let client = G4StorageClient::new(
+            worker_list,
+            HashMap::from([(owner.worker_id, agent.clone())]),
+            Duration::from_millis(50),
+        );
+
+        let accepted = client
+            .offer_and_put_payload_blocks(vec![
+                G4TransferBlock {
+                    meta: G4PutBlock {
+                        sequence_hash,
+                        disk_block_idx: 1,
+                        size_bytes: 4,
+                        checksum: None,
+                    },
+                    payload: vec![1; 4],
+                },
+                G4TransferBlock {
+                    meta: G4PutBlock {
+                        sequence_hash,
+                        disk_block_idx: 2,
+                        size_bytes: 4,
+                        checksum: Some([8; 32]),
+                    },
+                    payload: vec![2; 4],
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].meta.disk_block_idx, 1);
+        assert_eq!(accepted[0].payload, vec![1; 4]);
+
+        let hits = agent.query_blocks(&[sequence_hash]).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].disk_block_idx, 1);
+        assert_eq!(hits[0].checksum, None);
     }
 
     #[tokio::test]

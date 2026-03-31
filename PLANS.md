@@ -1,6 +1,71 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:13:49 UTC
+Last updated: 2026-03-31 19:34:14 UTC
+
+Current in-progress run (2026-03-31 19:28:54 UTC):
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+- Current branch baseline observed in this run:
+  - detached `HEAD` at `759958a29` (`Add multi-backend G4 smoke routing`)
+  - worktree was clean before starting this run
+- Current implementation slice for this run:
+  - tighten shared G4 offer/payload admission so duplicate `sequence_hash`
+    values within one caller batch are treated as duplicates, not as multiple
+    accepted writes
+  - make the smoke worker exercise a more realistic `query -> fetch` path by
+    explicitly carrying misses forward as cache-miss fallback instead of trying
+    to pretend every requested block should fetch
+  - add an explicit duplicate-case smoke/demo check so the binary validates the
+    first-pass duplicate policy instead of only the happy path
+- Why this slice:
+  - the prior run already completed multi-owner HTTP routing; the next honest
+    gap is behavior, not more endpoint plumbing
+  - the design doc treats `G4` as a cache where misses are acceptable, so the
+    smoke path should model query-discovered misses clearly
+  - duplicate single-batch offers are a real correctness bug in the current
+    shared helpers because the first accepted hash can currently admit later
+    same-hash entries from the same batch
+- In-progress edits:
+  - `PLANS.md`
+    - replaced the stale top-of-file handoff with the actual current detached
+      `HEAD` and this run's narrower behavior/correctness slice
+- Milestones completed in this run:
+  - shared G4 duplicate-admission correctness
+    - `lib/llm/src/block_manager/distributed/g4.rs`
+      now rejects duplicate `sequence_hash` values within one offer/payload
+      batch at the index, agent, and client layers while preserving the first
+      accepted entry in caller order
+    - added focused regression tests covering duplicate metadata batches and
+      duplicate payload batches for both agent and client flows
+  - repo-state unblock
+    - removed the malformed plain-text line that had been inserted into the
+      workspace root `Cargo.toml` and was preventing all cargo-based validation
+      from parsing the workspace manifest
+- Validation completed so far in this run:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`18 passed`)
+- Exact next file or command to touch:
+  - file:
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - then:
+    `PLANS.md`
+  - then:
+    `lib/llm/src/block_manager/distributed/g4.rs`
+  - next commands:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
 
 Current in-progress run (2026-03-31 19:07:10 UTC):
 - Mandatory context re-read completed in this run:
