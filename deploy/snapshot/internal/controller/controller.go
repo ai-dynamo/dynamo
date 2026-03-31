@@ -32,17 +32,6 @@ import (
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
-const (
-	kubeLabelIsCheckpointSource         = snapshotworkload.CheckpointSourceLabel
-	kubeLabelCheckpointID               = snapshotworkload.CheckpointIDLabel
-	kubeLabelIsRestoreTarget            = snapshotworkload.RestoreTargetLabel
-	kubeAnnotationCheckpointLocation    = snapshotworkload.CheckpointLocationAnnotation
-	kubeAnnotationCheckpointStorageType = snapshotworkload.CheckpointStorageAnnotation
-	kubeAnnotationCheckpointStatus      = snapshotworkload.CheckpointStatusAnnotation
-	kubeAnnotationRestoreStatus         = snapshotworkload.RestoreStatusAnnotation
-	kubeAnnotationRestoreContainerID    = snapshotworkload.RestoreContainerIDAnnotation
-)
-
 // NodeController watches local-node pods with checkpoint metadata and reconciles
 // snapshot execution for checkpoint and restore requests.
 type NodeController struct {
@@ -89,8 +78,8 @@ func NewNodeController(
 func (w *NodeController) Run(ctx context.Context) error {
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"checkpoint", kubeLabelIsCheckpointSource,
-		"restore", kubeLabelIsRestoreTarget,
+		"checkpoint", snapshotworkload.CheckpointSourceLabel,
+		"restore", snapshotworkload.RestoreTargetLabel,
 	)
 
 	var nsOptions []informers.SharedInformerOption
@@ -105,7 +94,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	// Checkpoint informer
 	checkpointSelector := labels.SelectorFromSet(labels.Set{
-		kubeLabelIsCheckpointSource: "true",
+		snapshotworkload.CheckpointSourceLabel: "true",
 	}).String()
 
 	ckptFactoryOpts := append([]informers.SharedInformerOption{
@@ -142,7 +131,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	// Restore informer
 	restoreSelector := labels.SelectorFromSet(labels.Set{
-		kubeLabelIsRestoreTarget: "true",
+		snapshotworkload.RestoreTargetLabel: "true",
 	}).String()
 
 	restoreFactoryOpts := append([]informers.SharedInformerOption{
@@ -197,7 +186,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
-	checkpointID, ok := pod.Labels[kubeLabelCheckpointID]
+	checkpointID, ok := pod.Labels[snapshotworkload.CheckpointIDLabel]
 	if !ok || checkpointID == "" {
 		w.log.Info("Pod has checkpoint label but no checkpoint-id label", "pod", podKey)
 		return
@@ -209,7 +198,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 
-	jobStatus := job.Annotations[kubeAnnotationCheckpointStatus]
+	jobStatus := job.Annotations[snapshotworkload.CheckpointStatusAnnotation]
 	if jobStatus == "completed" || jobStatus == "failed" {
 		return
 	}
@@ -263,7 +252,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	checkpointID, ok := pod.Labels[kubeLabelCheckpointID]
+	checkpointID, ok := pod.Labels[snapshotworkload.CheckpointIDLabel]
 	if !ok || checkpointID == "" {
 		w.log.Info("Restore pod has no checkpoint-id label", "pod", podKey)
 		return
@@ -303,8 +292,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	annotationStatus := pod.Annotations[kubeAnnotationRestoreStatus]
-	annotationContainerID := pod.Annotations[kubeAnnotationRestoreContainerID]
+	annotationStatus := pod.Annotations[snapshotworkload.RestoreStatusAnnotation]
+	annotationContainerID := pod.Annotations[snapshotworkload.RestoreContainerIDAnnotation]
 	if annotationContainerID == containerID && (annotationStatus == "completed" || annotationStatus == "in_progress") {
 		return
 	}
@@ -359,7 +348,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 
 	setCheckpointStatus := func(value string) error {
 		if err := annotateJob(ctx, w.clientset, log, job, map[string]string{
-			kubeAnnotationCheckpointStatus: value,
+			snapshotworkload.CheckpointStatusAnnotation: value,
 		}); err != nil {
 			releasePodOnExit = false
 			releaseLeaseOnExit = false
@@ -485,8 +474,8 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
 		annotations := map[string]string{
-			kubeAnnotationRestoreStatus:      value,
-			kubeAnnotationRestoreContainerID: containerID,
+			snapshotworkload.RestoreStatusAnnotation:      value,
+			snapshotworkload.RestoreContainerIDAnnotation: containerID,
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == "completed" {
@@ -499,8 +488,8 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 
 	if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
-		kubeAnnotationRestoreStatus:      "in_progress",
-		kubeAnnotationRestoreContainerID: containerID,
+		snapshotworkload.RestoreStatusAnnotation:      "in_progress",
+		snapshotworkload.RestoreContainerIDAnnotation: containerID,
 	}); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
@@ -591,14 +580,14 @@ func (w *NodeController) release(podKey string) {
 }
 
 func checkpointStorageFromPod(pod *corev1.Pod) (string, string, error) {
-	checkpointLocation := strings.TrimSpace(pod.Annotations[kubeAnnotationCheckpointLocation])
+	checkpointLocation := strings.TrimSpace(pod.Annotations[snapshotworkload.CheckpointLocationAnnotation])
 	if checkpointLocation == "" {
-		return "", "", fmt.Errorf("missing %s annotation", kubeAnnotationCheckpointLocation)
+		return "", "", fmt.Errorf("missing %s annotation", snapshotworkload.CheckpointLocationAnnotation)
 	}
 
-	checkpointStorageType := strings.TrimSpace(pod.Annotations[kubeAnnotationCheckpointStorageType])
+	checkpointStorageType := strings.TrimSpace(pod.Annotations[snapshotworkload.CheckpointStorageAnnotation])
 	if checkpointStorageType == "" {
-		return "", "", fmt.Errorf("missing %s annotation", kubeAnnotationCheckpointStorageType)
+		return "", "", fmt.Errorf("missing %s annotation", snapshotworkload.CheckpointStorageAnnotation)
 	}
 	if checkpointStorageType != "pvc" {
 		return "", "", fmt.Errorf("checkpoint storage type %q is not supported", checkpointStorageType)

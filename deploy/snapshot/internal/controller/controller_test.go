@@ -18,6 +18,7 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
 const testNodeName = "test-node"
@@ -187,11 +188,11 @@ func TestReconcileCheckpointPod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			labels := map[string]string{
-				kubeLabelIsCheckpointSource:    "true",
-				"batch.kubernetes.io/job-name": "checkpoint-job",
+				snapshotworkload.CheckpointSourceLabel: "true",
+				"batch.kubernetes.io/job-name":         "checkpoint-job",
 			}
 			if tc.hash != "" {
-				labels[kubeLabelCheckpointID] = tc.hash
+				labels[snapshotworkload.CheckpointIDLabel] = tc.hash
 			}
 
 			job := &batchv1.Job{
@@ -202,15 +203,15 @@ func TestReconcileCheckpointPod(t *testing.T) {
 			}
 			if tc.annotation != "" {
 				job.Annotations = map[string]string{
-					kubeAnnotationCheckpointStatus: tc.annotation,
+					snapshotworkload.CheckpointStatusAnnotation: tc.annotation,
 				}
 			}
 
 			var annotations map[string]string
 			if tc.hash != "" {
 				annotations = map[string]string{
-					kubeAnnotationCheckpointLocation:    "/checkpoints/" + tc.hash,
-					kubeAnnotationCheckpointStorageType: "pvc",
+					snapshotworkload.CheckpointLocationAnnotation: "/checkpoints/" + tc.hash,
+					snapshotworkload.CheckpointStorageAnnotation:  "pvc",
 				}
 			}
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
@@ -382,10 +383,10 @@ func TestReconcileRestorePod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			labels := map[string]string{
-				kubeLabelIsRestoreTarget: "true",
+				snapshotworkload.RestoreTargetLabel: "true",
 			}
 			if tc.hash != "" {
-				labels[kubeLabelCheckpointID] = tc.hash
+				labels[snapshotworkload.CheckpointIDLabel] = tc.hash
 			}
 
 			w := makeTestController(t)
@@ -394,16 +395,16 @@ func TestReconcileRestorePod(t *testing.T) {
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					kubeAnnotationRestoreStatus:      tc.annotationStatus,
-					kubeAnnotationRestoreContainerID: tc.annotationContainerID,
+					snapshotworkload.RestoreStatusAnnotation:      tc.annotationStatus,
+					snapshotworkload.RestoreContainerIDAnnotation: tc.annotationContainerID,
 				}
 			}
 			if tc.hash != "" {
 				if annotations == nil {
 					annotations = make(map[string]string)
 				}
-				annotations[kubeAnnotationCheckpointLocation] = filepath.Join(checkpointDir, tc.hash)
-				annotations[kubeAnnotationCheckpointStorageType] = "pvc"
+				annotations[snapshotworkload.CheckpointLocationAnnotation] = filepath.Join(checkpointDir, tc.hash)
+				annotations[snapshotworkload.CheckpointStorageAnnotation] = "pvc"
 			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
