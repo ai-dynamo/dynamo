@@ -94,7 +94,7 @@ runs:
             echo "🔄 Forcing fresh K8s builder: removing existing '${{ inputs.builder_name }}'."
             docker buildx rm ${{ inputs.builder_name }} || true
           fi
-          echo "K8s Builder '${{ inputs.builder_name }}' does not exist (or fresh creation forced). Creating it."
+          echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
           docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
           '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
           '--driver-opt=namespace=${{ inputs.namespace }}' \
