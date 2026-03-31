@@ -676,18 +676,17 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                match TokenizerKind::from_disk(local_path) {
-                    Ok(tk) => Some(tk),
-                    Err(e) => {
+                {
+                    let tk = TokenizerKind::from_disk(local_path)?;
+                    if tk.is_none() {
                         tracing::warn!(
-                            %e,
                             "No supported tokenizer found in {} \
                              (expected tokenizer.json or a tiktoken file). \
                              Features that depend on the Rust tokenizer will not be available.",
                             local_path.display()
                         );
-                        None
                     }
+                    tk
                 },
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
@@ -1029,15 +1028,21 @@ impl PromptFormatterArtifact {
 }
 
 impl TokenizerKind {
-    pub fn from_disk(directory: &Path) -> Result<Self> {
+    /// Try to discover a tokenizer in the given directory.
+    ///
+    /// Returns `Ok(Some(..))` when a supported tokenizer is found,
+    /// `Ok(None)` when no tokenizer files are present (e.g. models that
+    /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
+    /// layouts or filesystem failures that should be treated as hard errors.
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
         // 1. Try tokenizer.json (HuggingFace)
         if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
-            return Ok(Self::HfTokenizerJson(f));
+            return Ok(Some(Self::HfTokenizerJson(f)));
         }
 
         // 2. Try tiktoken.model
         if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
-            return Ok(Self::TikTokenModel(f));
+            return Ok(Some(Self::TikTokenModel(f)));
         }
 
         // 3. Search for any *.tiktoken file
@@ -1050,7 +1055,7 @@ impl TokenizerKind {
 
         if tiktoken_files.len() == 1 {
             if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
-                return Ok(Self::TikTokenModel(f));
+                return Ok(Some(Self::TikTokenModel(f)));
             }
         } else if tiktoken_files.len() > 1 {
             let names: Vec<_> = tiktoken_files
@@ -1064,10 +1069,7 @@ impl TokenizerKind {
             );
         }
 
-        anyhow::bail!(
-            "No tokenizer.json or tiktoken model file found in {}",
-            directory.display()
-        )
+        Ok(None)
     }
 }
 
