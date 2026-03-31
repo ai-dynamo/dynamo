@@ -36,6 +36,7 @@ def _make_handler() -> _TestWorkerHandler:
     )
     handler._quiesce_controller = VllmEngineQuiesceController(handler.engine_client)
     handler._quiesce_lock = asyncio.Lock()
+    handler._endpoint_needs_registration = False
     return handler
 
 
@@ -95,6 +96,7 @@ async def test_quiesce_without_level_uses_vllm_default_sleep():
 async def test_wake_up_passes_explicit_tags_from_request():
     handler = _make_handler()
     await handler._quiesce_controller.quiesce(1)
+    handler._endpoint_needs_registration = True
 
     result = await handler.wake_up({"tags": ["weights"]})
 
@@ -122,6 +124,7 @@ async def test_sleep_returns_error_for_unregister_failure():
 async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
     await handler._quiesce_controller.quiesce(1)
+    handler._endpoint_needs_registration = True
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )
@@ -131,4 +134,23 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
-    assert handler._quiesce_controller.is_quiesced is True
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._endpoint_needs_registration is True
+
+
+@pytest.mark.asyncio
+async def test_wake_up_retries_registration_without_rewaking_engine():
+    handler = _make_handler()
+    await handler.sleep({"level": 1})
+    handler.generate_endpoint.register_endpoint_instance = AsyncMock(
+        side_effect=[RuntimeError("discovery write timeout"), None]
+    )
+
+    first_result = await handler.wake_up({})
+    second_result = await handler.wake_up({})
+
+    assert first_result["status"] == "error"
+    assert second_result["status"] == "ok"
+    handler.engine_client.wake_up.assert_awaited_once_with()
+    handler.engine_client.resume_generation.assert_awaited_once()
+    assert handler.generate_endpoint.register_endpoint_instance.await_count == 2

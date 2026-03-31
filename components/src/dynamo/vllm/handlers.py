@@ -67,6 +67,13 @@ logger = logging.getLogger(__name__)
 
 
 class VllmEngineQuiesceController:
+    """Manage vLLM engine sleep and wake transitions.
+
+    This controller only tracks engine state. Discovery registration is kept in
+    the request handler because registration can fail after the engine is already
+    awake.
+    """
+
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
         self._is_quiesced = False
@@ -76,6 +83,7 @@ class VllmEngineQuiesceController:
         return self._is_quiesced
 
     async def quiesce(self, *args: object) -> bool:
+        """Pause generation and put the engine into sleep mode."""
         if self._is_quiesced:
             return False
 
@@ -89,6 +97,7 @@ class VllmEngineQuiesceController:
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
+        """Wake the engine and resume generation."""
         if not self._is_quiesced:
             return False
 
@@ -97,10 +106,8 @@ class VllmEngineQuiesceController:
         else:
             await self._engine_client.wake_up(tags)
         await self._engine_client.resume_generation()
-        return True
-
-    def mark_resumed(self) -> None:
         self._is_quiesced = False
+        return True
 
 
 @dataclass(frozen=True)
@@ -395,6 +402,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+        # Discovery can fail after the engine state has already changed.
+        self._endpoint_needs_registration = False
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -473,8 +482,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
-                if self.generate_endpoint is not None:
+                if (
+                    self.generate_endpoint is not None
+                    and not self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    self._endpoint_needs_registration = True
                     logger.info(
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
@@ -582,18 +595,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            if (
+                not self._quiesce_controller.is_quiesced
+                and not self._endpoint_needs_registration
+            ):
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume(tags)
-                if self.generate_endpoint is not None:
+                if self._quiesce_controller.is_quiesced:
+                    await self._quiesce_controller.resume(tags)
+                if (
+                    self.generate_endpoint is not None
+                    and self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.register_endpoint_instance()
+                    self._endpoint_needs_registration = False
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -1496,6 +1516,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
+    """Serve decode-phase generation requests from an already-prefilled prompt."""
+
     def __init__(
         self,
         runtime,
@@ -1730,6 +1752,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
+    """Serve prefill requests and forward decode state to downstream workers."""
+
     def __init__(
         self,
         runtime,

@@ -61,6 +61,7 @@ def _make_handler() -> _TestWorkerHandler:
     )
     handler._quiesce_controller = SGLangEngineQuiesceController(handler.engine)
     handler._quiesce_lock = asyncio.Lock()
+    handler._endpoint_needs_registration = False
     return handler
 
 
@@ -192,7 +193,7 @@ async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
 
 
 @pytest.mark.asyncio
-async def test_resume_keeps_quiesced_state_when_register_fails():
+async def test_resume_tracks_awake_state_when_register_fails():
     handler = _make_handler()
     await handler.release_memory_occupation({})
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
@@ -203,4 +204,23 @@ async def test_resume_keeps_quiesced_state_when_register_fails():
 
     assert result["status"] == "error"
     assert handler._quiesce_controller is not None
-    assert handler._quiesce_controller.is_quiesced is True
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._endpoint_needs_registration is True
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_registration_without_rewaking_engine():
+    handler = _make_handler()
+    await handler.release_memory_occupation({})
+    handler.generate_endpoint.register_endpoint_instance = AsyncMock(
+        side_effect=[RuntimeError("discovery write timeout"), None]
+    )
+
+    first_result = await handler.resume_memory_occupation({})
+    second_result = await handler.resume_memory_occupation({})
+
+    assert first_result["status"] == "error"
+    assert second_result["status"] == "ok"
+    handler.engine.tokenizer_manager.resume_memory_occupation.assert_awaited_once()
+    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
+    assert handler.generate_endpoint.register_endpoint_instance.await_count == 2
