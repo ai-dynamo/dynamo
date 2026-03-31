@@ -261,6 +261,10 @@ impl RegistryClientConfig {
         self
     }
 
+    /// Create a velo TCP transport connected to the hub.
+    pub async fn create_transport(&self) -> Result<super::core::VeloClientTransport> {
+        super::core::VeloClientTransport::connect(self.hub_addr).await
+    }
 }
 
 #[cfg(test)]
