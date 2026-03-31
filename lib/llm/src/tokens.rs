@@ -376,6 +376,22 @@ impl TokenBlockChunk {
             block_hash,
         }
     }
+
+    /// Creates a new chunk from a slice of `&[Token]` with an optional extra hash for multimodal
+    /// content. Uses a two-stage hash: stage 1 hashes tokens, stage 2 combines with extra_hash.
+    /// When extra_hash is None, behaves identically to [`from_tokens`].
+    fn from_tokens_with_extra(tokens: &[Token], salt_hash: SaltHash, extra_hash: Option<u64>) -> Self {
+        let token_hash = compute_hash_v2(cast_slice(tokens), salt_hash);
+        let block_hash = match extra_hash {
+            Some(extra) => compute_hash_v2(cast_slice(&[token_hash, extra]), salt_hash),
+            None => token_hash,
+        };
+        Self {
+            tokens: tokens.into(),
+            salt_hash,
+            block_hash,
+        }
+    }
 }
 
 /// Represents a completed, immutable block of tokens with associated hashes.
@@ -904,6 +920,74 @@ impl TokenBlockSequence {
             salt_hash,
             block_size: block_size as usize,
         }
+    }
+
+    /// Creates a new [`TokenBlockSequence`] with optional per-block extra hashes for multimodal
+    /// content. When `extra_block_hashes` is `None` or all entries are `None`, behaves identically
+    /// to [`new`].
+    pub fn new_with_extra_hashes(
+        tokens: Tokens,
+        block_size: u32,
+        salt_hash: Option<SaltHash>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let salt_hash = salt_hash.unwrap_or(0);
+        let (blocks, current_block) = match extra_block_hashes {
+            Some(ref hashes) => Self::split_tokens_mm(&tokens, block_size, salt_hash, hashes),
+            None => Self::split_tokens(&tokens, block_size, salt_hash),
+        };
+
+        Self {
+            blocks,
+            current_block,
+            salt_hash,
+            block_size: block_size as usize,
+        }
+    }
+
+    /// Like [`split_tokens`] but applies per-block extra hashes for multimodal blocks.
+    /// Blocks whose index has a `Some` entry in `extra_block_hashes` use two-stage hashing;
+    /// blocks with `None` use the standard single-stage hash.
+    pub fn split_tokens_mm(
+        tokens: &[Token],
+        block_size: u32,
+        salt_hash: u64,
+        extra_block_hashes: &[Option<u64>],
+    ) -> (Vec<TokenBlock>, PartialTokenBlock) {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let chunks: Vec<TokenBlockChunk> = tokens
+            .as_ref()
+            .par_chunks_exact(block_size as usize)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let extra = extra_block_hashes.get(i).copied().flatten();
+                TokenBlockChunk::from_tokens_with_extra(chunk, salt_hash, extra)
+            })
+            .collect();
+
+        let mut result_blocks = Vec::with_capacity(chunks.len());
+        let mut last_sequence_hash: Option<SequenceHash> = None;
+
+        for chunk in chunks {
+            let new_block = TokenBlock::from_chunk(chunk, last_sequence_hash);
+            last_sequence_hash = Some(new_block.sequence_hash());
+            result_blocks.push(new_block);
+        }
+
+        let remainder = tokens
+            .as_ref()
+            .chunks_exact(block_size as usize)
+            .remainder();
+
+        let current_block = PartialTokenBlock {
+            tokens: remainder.into(),
+            block_size,
+            salt_hash,
+            parent_sequence_hash: last_sequence_hash,
+        };
+
+        (result_blocks, current_block)
     }
 }
 

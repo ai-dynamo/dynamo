@@ -95,6 +95,35 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         }
     }
 
+    /// Creates a new slot with optional per-block extra hashes for multimodal content.
+    pub fn new_with_extra_hashes(
+        tokens: Tokens,
+        block_size: usize,
+        salt_hash: SaltHash,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> Self {
+        let sequence = TokenBlockSequence::new_with_extra_hashes(
+            tokens,
+            block_size as u32,
+            Some(salt_hash),
+            extra_block_hashes,
+        );
+        let prefill_position = sequence.total_tokens();
+
+        Self {
+            computed_position: 0,
+            prefill_position,
+            sequence,
+            immutable: Vec::new(),
+            mutable: VecDeque::new(),
+            onboard_from_host: None,
+            onboard_from_disk: None,
+            blocks_cached_from_device: 0,
+            blocks_cached_from_host: 0,
+            blocks_cached_from_disk: 0,
+        }
+    }
+
     pub fn first_allocation(&self) -> bool {
         self.immutable.is_empty() && self.mutable.is_empty()
     }

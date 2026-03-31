@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from kvbm import KvbmLeader
 from kvbm.utils import is_dyn_runtime_enabled
+from kvbm.vllm_integration.mm_block_hashes import compute_mm_block_hashes
 from kvbm.vllm_integration.rust import KvbmRequest
 from kvbm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -251,15 +252,21 @@ class KvConnectorLeader:
         if self._connector.has_slot(request.request_id):
             return None
 
-        if bool(getattr(request, "mm_features", None)) or bool(
-            getattr(request, "mm_positions", None)
-        ):
-            raise ValueError("Unsupported request - requires mm extra keys")
-
         all_token_ids = request.all_token_ids
 
+        mm_positions = getattr(request, "mm_positions", None)
+        mm_features = getattr(request, "mm_features", None)
+        extra_block_hashes = None
+        if mm_positions or mm_features:
+            extra_block_hashes = compute_mm_block_hashes(
+                mm_positions=mm_positions,
+                mm_features=mm_features,
+                num_tokens=len(all_token_ids),
+                block_size=self.vllm_config.cache_config.block_size,
+            )
+
         # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
+        kvbm_request = KvbmRequest(
             request_id=request.request_id,
             lora_name=request.lora_request.lora_name()
             if request.lora_request
@@ -267,4 +274,4 @@ class KvConnectorLeader:
             salt_hash=request.cache_salt,
         )
 
-        self._connector.create_slot(request, all_token_ids)
+        self._connector.create_slot(kvbm_request, all_token_ids, extra_block_hashes)
