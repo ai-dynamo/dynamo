@@ -23,8 +23,8 @@ use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::{UnixListener as TokioUnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_util::codec::FramedRead;
-use velo_transports::tcp::TcpFrameCodec;
 use velo_transports::MessageType;
+use velo_transports::tcp::TcpFrameCodec;
 
 use super::hub_transport::{ClientId, HubMessage, HubTransport};
 
@@ -180,7 +180,9 @@ impl HubTransport for UdsHubTransport {
                     client: envelope.client,
                     data: envelope.payload,
                 }),
-                MessageType::Ack => Ok(HubMessage::Publish { data: envelope.payload }),
+                MessageType::Ack => Ok(HubMessage::Publish {
+                    data: envelope.payload,
+                }),
                 MessageType::Response | MessageType::Event | MessageType::ShuttingDown => {
                     tracing::debug!(
                         msg_type = ?envelope.msg_type,
@@ -202,7 +204,10 @@ impl HubTransport for UdsHubTransport {
         TcpFrameCodec::encode_frame_sync(&mut frame, MessageType::Response, &[], data)
             .map_err(|e| anyhow!("UdsHubTransport: encode error: {e}"))?;
 
-        entry.write_all(&frame).await.map_err(|e| anyhow!("UdsHubTransport: write error: {e}"))
+        entry
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow!("UdsHubTransport: write error: {e}"))
     }
 
     fn name(&self) -> &'static str {
@@ -224,7 +229,10 @@ impl UdsClientTransport {
         let stream = UnixStream::connect(path)
             .await
             .map_err(|e| anyhow!("UdsClientTransport: failed to connect to {:?}: {e}", path))?;
-        Ok(Self { stream, codec: TcpFrameCodec::new() })
+        Ok(Self {
+            stream,
+            codec: TcpFrameCodec::new(),
+        })
     }
 
     /// Send a request (query) and wait for the response.
@@ -263,7 +271,10 @@ impl UdsClientTransport {
         TcpFrameCodec::encode_frame_sync(&mut frame, MessageType::Ack, &[], data)
             .map_err(|e| anyhow!("UdsClientTransport: encode error: {e}"))?;
         use tokio::io::AsyncWriteExt;
-        self.stream.write_all(&frame).await.map_err(|e| anyhow!("{e}"))
+        self.stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow!("{e}"))
     }
 }
 

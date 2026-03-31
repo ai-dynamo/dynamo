@@ -26,8 +26,8 @@ use tokio::net::TcpListener as TokioTcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::FramedRead;
-use velo_transports::tcp::TcpFrameCodec;
 use velo_transports::MessageType;
+use velo_transports::tcp::TcpFrameCodec;
 
 use super::hub_transport::{ClientId, HubMessage, HubTransport};
 
@@ -72,7 +72,11 @@ impl VeloHubTransport {
             Self::accept_loop(listener, tx, writers_clone).await;
         });
 
-        Ok(Self { rx, writers, _accept_handle: accept_handle })
+        Ok(Self {
+            rx,
+            writers,
+            _accept_handle: accept_handle,
+        })
     }
 
     /// Bind on `127.0.0.1:<port>` (convenience for tests / single-host setups).
@@ -170,7 +174,9 @@ impl HubTransport for VeloHubTransport {
                     client: envelope.client,
                     data: envelope.payload,
                 }),
-                MessageType::Ack => Ok(HubMessage::Publish { data: envelope.payload }),
+                MessageType::Ack => Ok(HubMessage::Publish {
+                    data: envelope.payload,
+                }),
                 // Skip unexpected frame types (shouldn't arrive at hub, but be defensive)
                 MessageType::Response | MessageType::Event | MessageType::ShuttingDown => {
                     tracing::debug!(
@@ -193,7 +199,10 @@ impl HubTransport for VeloHubTransport {
         TcpFrameCodec::encode_frame_sync(&mut frame, MessageType::Response, &[], data)
             .map_err(|e| anyhow!("VeloHubTransport: encode error: {e}"))?;
 
-        entry.write_all(&frame).await.map_err(|e| anyhow!("VeloHubTransport: write error: {e}"))
+        entry
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow!("VeloHubTransport: write error: {e}"))
     }
 
     fn name(&self) -> &'static str {
@@ -218,7 +227,10 @@ impl VeloClientTransport {
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| anyhow!("VeloClientTransport: failed to connect to {addr}: {e}"))?;
-        Ok(Self { stream, codec: TcpFrameCodec::new() })
+        Ok(Self {
+            stream,
+            codec: TcpFrameCodec::new(),
+        })
     }
 
     /// Connect to `127.0.0.1:<port>`.
@@ -262,7 +274,10 @@ impl VeloClientTransport {
         let mut frame = Vec::new();
         TcpFrameCodec::encode_frame_sync(&mut frame, MessageType::Ack, &[], data)
             .map_err(|e| anyhow!("VeloClientTransport: encode error: {e}"))?;
-        self.stream.write_all(&frame).await.map_err(|e| anyhow!("{e}"))
+        self.stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -272,16 +287,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_velo_hub_query_response() {
-        let _hub = VeloHubTransport::bind_local(0)
-            .await
-            .expect("bind failed");
+        let _hub = VeloHubTransport::bind_local(0).await.expect("bind failed");
 
         // Get the actual bound port by peeking at the TcpListener
         // (We use port 17891 in a retry loop for tests)
-        let hub = VeloHubTransport::bind_local(17891).await.unwrap_or_else(|_| {
-            // Skip test if port is in use
-            panic!("Port 17891 in use — run tests sequentially");
-        });
+        let hub = VeloHubTransport::bind_local(17891)
+            .await
+            .unwrap_or_else(|_| {
+                // Skip test if port is in use
+                panic!("Port 17891 in use — run tests sequentially");
+            });
         let _ = hub;
     }
 

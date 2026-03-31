@@ -18,8 +18,8 @@ pub mod persistence;
 pub mod registry;
 pub mod storage;
 pub mod transport;
-pub mod value;
 pub mod uds_hub_transport;
+pub mod value;
 pub mod velo_hub_transport;
 
 #[cfg(test)]
@@ -54,7 +54,9 @@ pub use velo_hub_transport::{VeloClientTransport, VeloHubTransport};
 
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
-pub use hub_transport::{ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport};
+pub use hub_transport::{
+    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport,
+};
 
 // Builder
 pub use builder::{ClientBuilder, HubBuilder, client, hub};

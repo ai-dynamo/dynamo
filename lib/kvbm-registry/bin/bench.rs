@@ -16,9 +16,9 @@ use anyhow::Result;
 use clap::Parser;
 use kvbm_bench::{BenchTable, LatencyStats, OutputFormat, SweepRunner};
 use kvbm_registry::{
-    BinaryCodec, HashMapStorage, InProcessHub, NoMetadata, RegistryCodec,
-    Storage, UdsClientTransport, UdsHubTransport, VeloClientTransport, VeloHubTransport,
-    hub, OffloadStatus, QueryType, ResponseType,
+    BinaryCodec, HashMapStorage, InProcessHub, NoMetadata, OffloadStatus, QueryType, RegistryCodec,
+    ResponseType, Storage, UdsClientTransport, UdsHubTransport, VeloClientTransport,
+    VeloHubTransport, hub,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -234,7 +234,9 @@ async fn run_single(params: RegistryBenchParams, warmup_secs: u64) -> Result<Reg
                 let hub_obj = Arc::new(InProcessHub::new());
 
                 // Pre-populate a DashMap for the handler (avoids needing Arc<Storage>)
-                let store: Arc<dashmap::DashMap<u64, u64>> = Arc::new(dashmap::DashMap::with_capacity(params.storage_size as usize));
+                let store: Arc<dashmap::DashMap<u64, u64>> = Arc::new(
+                    dashmap::DashMap::with_capacity(params.storage_size as usize),
+                );
                 for i in 0..params.storage_size {
                     store.insert(i, i * 100);
                 }
@@ -247,27 +249,43 @@ async fn run_single(params: RegistryBenchParams, warmup_secs: u64) -> Result<Reg
                             let mut buf = Vec::new();
                             match query {
                                 QueryType::CanOffload(keys) => {
-                                    let statuses: Vec<_> = keys.iter().map(|k| {
-                                        if store2.contains_key(k) {
-                                            OffloadStatus::AlreadyStored
-                                        } else {
-                                            OffloadStatus::Granted
-                                        }
-                                    }).collect();
-                                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).ok();
+                                    let statuses: Vec<_> = keys
+                                        .iter()
+                                        .map(|k| {
+                                            if store2.contains_key(k) {
+                                                OffloadStatus::AlreadyStored
+                                            } else {
+                                                OffloadStatus::Granted
+                                            }
+                                        })
+                                        .collect();
+                                    codec
+                                        .encode_response(
+                                            &ResponseType::CanOffload(statuses),
+                                            &mut buf,
+                                        )
+                                        .ok();
                                 }
                                 QueryType::Match(keys) => {
-                                    let entries: Vec<_> = keys.iter()
+                                    let entries: Vec<_> = keys
+                                        .iter()
                                         .filter_map(|k| store2.get(k).map(|v| (*k, *v, NoMetadata)))
                                         .collect();
-                                    codec.encode_response(&ResponseType::Match(entries), &mut buf).ok();
+                                    codec
+                                        .encode_response(&ResponseType::Match(entries), &mut buf)
+                                        .ok();
                                 }
                                 QueryType::Remove(keys) => {
-                                    let count = keys.iter().filter(|k| store2.contains_key(k)).count();
-                                    codec.encode_response(&ResponseType::Remove(count), &mut buf).ok();
+                                    let count =
+                                        keys.iter().filter(|k| store2.contains_key(k)).count();
+                                    codec
+                                        .encode_response(&ResponseType::Remove(count), &mut buf)
+                                        .ok();
                                 }
                                 QueryType::Touch(keys) => {
-                                    codec.encode_response(&ResponseType::Touch(keys.len()), &mut buf).ok();
+                                    codec
+                                        .encode_response(&ResponseType::Touch(keys.len()), &mut buf)
+                                        .ok();
                                 }
                             }
                             buf
@@ -304,15 +322,23 @@ async fn run_single(params: RegistryBenchParams, warmup_secs: u64) -> Result<Reg
             let keys = query_keys.clone();
             warmup_set.spawn(async move {
                 let codec = BinaryCodec::<u64, u64, NoMetadata>::new();
+                let mut warmup_idx = 0u64;
                 while !stop.load(Ordering::Relaxed) {
+                    if warmup_idx & 255 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    warmup_idx += 1;
                     let mut buf = Vec::new();
-                    codec.encode_query(&QueryType::CanOffload(keys.clone()), &mut buf).ok();
+                    codec
+                        .encode_query(&QueryType::CanOffload(keys.clone()), &mut buf)
+                        .ok();
                     client.request(&buf).await.ok();
                 }
             });
         }
-        tokio::time::sleep(Duration::from_secs(warmup_secs)).await;
-        warmup_set.abort_all();
+        // Wait for warmup tasks to exit cleanly (they exit at top of loop after
+        // stop_warmup fires). Do NOT abort_all() — cancelling a task mid-request
+        // leaves the shared transport stream in a corrupted state for measurement.
         while warmup_set.join_next().await.is_some() {}
     }
 
@@ -345,6 +371,12 @@ async fn run_single(params: RegistryBenchParams, warmup_secs: u64) -> Result<Reg
             let mut op_idx = 0u64;
 
             while !stop.load(Ordering::Relaxed) {
+                // Yield every 256 ops so timer/control tasks can run.
+                // Necessary for InProcess mode which is pure-CPU with no I/O yields.
+                if op_idx & 255 == 0 {
+                    tokio::task::yield_now().await;
+                }
+
                 let do_query = match mode {
                     BenchMode::Query => true,
                     BenchMode::Register => false,
@@ -355,16 +387,17 @@ async fn run_single(params: RegistryBenchParams, warmup_secs: u64) -> Result<Reg
                 if do_query {
                     let t0 = Instant::now();
                     let mut buf = Vec::new();
-                    codec.encode_query(&QueryType::CanOffload(keys.clone()), &mut buf).ok();
+                    codec
+                        .encode_query(&QueryType::CanOffload(keys.clone()), &mut buf)
+                        .ok();
                     match client.request(&buf).await {
                         Ok(_) => query_samples.push(t0.elapsed().as_micros() as u64),
                         Err(_) => errors += 1,
                     }
                 } else {
                     let t0 = Instant::now();
-                    let entries: Vec<(u64, u64, NoMetadata)> = (0..batch as u64)
-                        .map(|i| (i, i * 10, NoMetadata))
-                        .collect();
+                    let entries: Vec<(u64, u64, NoMetadata)> =
+                        (0..batch as u64).map(|i| (i, i * 10, NoMetadata)).collect();
                     let mut buf = Vec::new();
                     codec.encode_register(&entries, &mut buf).ok();
                     match client.publish(&buf).await {
@@ -437,17 +470,35 @@ fn make_table_row(r: &RegistryBenchResult) -> Vec<String> {
         r.params.mode.to_string(),
         format!("{:.0}", r.query_rps),
         format!("{:.0}", r.register_rps),
-        r.query_latency.as_ref().map_or("-".into(), |l| l.p50_us.to_string()),
-        r.query_latency.as_ref().map_or("-".into(), |l| l.p99_us.to_string()),
-        r.query_latency.as_ref().map_or("-".into(), |l| l.p999_us.to_string()),
+        r.query_latency
+            .as_ref()
+            .map_or("-".into(), |l| l.p50_us.to_string()),
+        r.query_latency
+            .as_ref()
+            .map_or("-".into(), |l| l.p99_us.to_string()),
+        r.query_latency
+            .as_ref()
+            .map_or("-".into(), |l| l.p999_us.to_string()),
         format!("{:.1}", r.rss_delta_mb),
         format!("{:.2}", r.cpu_efficiency),
     ]
 }
 
 const TABLE_HEADERS: &[&str] = &[
-    "transport", "threads", "clients", "storage", "batch", "query_sz",
-    "mode", "q_rps", "r_rps", "q_p50µs", "q_p99µs", "q_p999µs", "rss_δMB", "cpu_eff",
+    "transport",
+    "threads",
+    "clients",
+    "storage",
+    "batch",
+    "query_sz",
+    "mode",
+    "q_rps",
+    "r_rps",
+    "q_p50µs",
+    "q_p99µs",
+    "q_p999µs",
+    "rss_δMB",
+    "cpu_eff",
 ];
 
 fn print_results(results: &[RegistryBenchResult], format: &OutputFormat) {
@@ -467,7 +518,10 @@ fn print_results(results: &[RegistryBenchResult], format: &OutputFormat) {
             print!("{}", table.to_csv());
         }
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(results).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(results).unwrap_or_default()
+            );
         }
     }
 }
@@ -506,8 +560,14 @@ fn main() -> Result<()> {
     for params in sweep_points {
         eprintln!(
             "Running: transport={} threads={} clients={} storage={} batch={} query_sz={} mode={} duration={}s",
-            params.transport, params.threads, params.clients, params.storage_size,
-            params.batch_size, params.query_size, params.mode, params.duration_secs
+            params.transport,
+            params.threads,
+            params.clients,
+            params.storage_size,
+            params.batch_size,
+            params.query_size,
+            params.mode,
+            params.duration_secs
         );
 
         let threads = params.threads;

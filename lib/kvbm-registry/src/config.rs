@@ -54,7 +54,10 @@ impl Default for RegistryHubConfig {
 impl RegistryHubConfig {
     /// Create a new config with specified capacity.
     pub fn with_capacity(capacity: u64) -> Self {
-        Self { capacity, ..Default::default() }
+        Self {
+            capacity,
+            ..Default::default()
+        }
     }
 
     /// Create config listening on a specific port on all interfaces.
@@ -307,8 +310,9 @@ mod tests {
 
     #[test]
     fn test_client_config_builder() {
-        let config =
-            RegistryClientConfig::default().with_local_cache(10_000).with_batch_size(50);
+        let config = RegistryClientConfig::default()
+            .with_local_cache(10_000)
+            .with_batch_size(50);
         assert_eq!(config.local_cache_capacity, 10_000);
         assert_eq!(config.batch_size, 50);
     }
