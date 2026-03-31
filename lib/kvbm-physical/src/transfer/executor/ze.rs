@@ -12,29 +12,32 @@
 //! Async completion is tracked via [`ZeEvent`] signals and polled by the
 //! notification subsystem, mirroring the CUDA event pattern.
 //!
-//! # SYCL kernel override
+//! # Kernel backends
 //!
-//! By default, D2D FC↔LW transfers use the raw Level Zero SPIR-V kernel
-//! (`vectorized_copy.spv` via `ZeModule::from_spirv`), which has the
-//! lowest host-side dispatch latency.
+//! By default, D2D FC↔LW transfers use the SYCL kernel
+//! (`libvectorized_copy_sycl.so` dispatched via `sycl::queue`), which
+//! matches the performance of the raw L0 SPIR-V kernel while avoiding
+//! the tpb=32 DEVICE_LOST bug on BMG discrete GPUs.
 //!
-//! An alternative SYCL runtime path is available behind the `sycl-kernel`
-//! feature. When enabled, set `KVBM_USE_SYCL_KERNEL=1` at runtime to
-//! dispatch through `sycl::queue` instead of raw L0 APIs. This exercises
-//! the full SYCL stack while sharing the same L0 context and device memory.
+//! An alternative raw Level Zero SPIR-V path is available behind the
+//! `ocl-kernel` feature. When enabled, set `KVBM_USE_L0_KERNEL=1` at
+//! runtime to dispatch through raw L0 APIs instead of SYCL.
 //!
 //! ```sh
 //! # 1. Build the SYCL shared library (requires icpx -fsycl):
 //! make -C lib/kvbm-kernels/sycl
 //!
-//! # 2. Build Rust with the sycl-kernel feature:
-//! cargo build -p kvbm-physical --features sycl-kernel
+//! # 2. Build with level-zero feature (SYCL kernel is the default):
+//! cargo build -p kvbm-physical --features level-zero
 //!
-//! # 3. At runtime, opt in and point to the .so:
-//! export KVBM_USE_SYCL_KERNEL=1
+//! # 3. Point to the .so at runtime:
 //! export LD_LIBRARY_PATH=lib/kvbm-kernels/sycl:$LD_LIBRARY_PATH
 //! # Or specify the exact path:
 //! export SYCL_VC_LIB_PATH=lib/kvbm-kernels/sycl/libvectorized_copy_sycl.so
+//!
+//! # Optional: enable L0 SPIR-V kernel (requires ocl-kernel feature):
+//! # cargo build -p kvbm-physical --features level-zero,ocl-kernel
+//! # KVBM_USE_L0_KERNEL=1 ./target/release/...
 //! ```
 
 use super::TransferContext;
@@ -44,8 +47,12 @@ use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
 use dynamo_memory::ZeMemPool;
+#[cfg(feature = "ocl-kernel")]
 use kvbm_kernels::ze_vectorized_copy as vc;
-use syclrc::level_zero::ze::safe::{ZeDevice, ZeImmediateCmdList, ZeKernel, ZeModule};
+use syclrc::level_zero::ze::safe::{ZeDevice, ZeImmediateCmdList};
+#[cfg(feature = "ocl-kernel")]
+use syclrc::level_zero::ze::safe::{ZeKernel, ZeModule};
+#[cfg(feature = "ocl-kernel")]
 use syclrc::level_zero::ze::sys;
 use syclrc::{ZeEvent, ZeEventPool, event_pool_flags};
 use std::collections::HashMap;
@@ -58,20 +65,25 @@ struct ZeDeviceResources {
     /// BCS (copy engine) immediate command list.
     cmd_copy: Arc<ZeImmediateCmdList>,
     /// CCS (compute engine) immediate command list for kernel dispatch.
+    #[cfg(feature = "ocl-kernel")]
     cmd_compute: Arc<ZeImmediateCmdList>,
     event_pool: Arc<ZeEventPool>,
     /// Next event index within the pool (wraps around).
     next_event_idx: u32,
-    /// SPIR-V vectorized_copy kernel (loaded lazily on first use).
+    /// SPIR-V vectorized_copy kernel (requires `ocl-kernel` feature).
+    #[cfg(feature = "ocl-kernel")]
     kernel: Arc<ZeKernel>,
     /// Indirect-args kernel variant — reads params from a device buffer.
+    #[cfg(feature = "ocl-kernel")]
     kernel_indirect: Arc<ZeKernel>,
     /// Persistent 32-byte device buffer for indirect kernel arguments.
     /// Uploaded via BCS each dispatch; eliminates per-dispatch `set_arg`.
+    #[cfg(feature = "ocl-kernel")]
     args_dev: u64,
     /// Scratch memory pool for pointer arrays.
     pool: Arc<ZeMemPool>,
     /// Module kept alive so kernel handle remains valid.
+    #[cfg(feature = "ocl-kernel")]
     _module: Arc<ZeModule>,
 }
 
@@ -95,29 +107,32 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
     let cmd_copy = ZeImmediateCmdList::new_copy(Arc::clone(&dev))
         .map_err(|e| anyhow!("Failed to create BCS cmd list for device {}: {}", device_ordinal, e))?;
 
+    #[cfg(feature = "ocl-kernel")]
     let cmd_compute = ZeImmediateCmdList::new_compute(Arc::clone(&dev))
         .map_err(|e| anyhow!("Failed to create CCS cmd list for device {}: {}", device_ordinal, e))?;
 
     let event_pool = ZeEventPool::new(Arc::clone(&dev), EVENT_POOL_SIZE, event_pool_flags::HOST_VISIBLE)
         .map_err(|e| anyhow!("Failed to create ZeEventPool for device {}: {}", device_ordinal, e))?;
 
-    // Compile SPIR-V module and create vectorized_copy kernel.
-    let module = Arc::new(
-        ZeModule::from_spirv(&dev, vc::SPIRV, None)
-            .map_err(|e| anyhow!("Failed to compile SPIR-V module for device {}: {}", device_ordinal, e))?,
-    );
-    let kernel = ZeKernel::new(&module, vc::KERNEL_NAME)
-        .map_err(|e| anyhow!("Failed to create ZeKernel for device {}: {}", device_ordinal, e))?;
-    kernel
-        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
-        .map_err(|e| anyhow!("Failed to set kernel group size for device {}: {}", device_ordinal, e))?;
-
-    // Indirect-args kernel: same SPIR-V module, different entry point.
-    let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
-        .map_err(|e| anyhow!("Failed to create indirect ZeKernel for device {}: {}", device_ordinal, e))?;
-    kernel_indirect
-        .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
-        .map_err(|e| anyhow!("Failed to set indirect kernel group size for device {}: {}", device_ordinal, e))?;
+    // Compile SPIR-V module and create vectorized_copy kernel (ocl-kernel only).
+    #[cfg(feature = "ocl-kernel")]
+    let (module, kernel, kernel_indirect) = {
+        let module = Arc::new(
+            ZeModule::from_spirv(&dev, vc::SPIRV, None)
+                .map_err(|e| anyhow!("Failed to compile SPIR-V module for device {}: {}", device_ordinal, e))?,
+        );
+        let kernel = ZeKernel::new(&module, vc::KERNEL_NAME)
+            .map_err(|e| anyhow!("Failed to create ZeKernel for device {}: {}", device_ordinal, e))?;
+        kernel
+            .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+            .map_err(|e| anyhow!("Failed to set kernel group size for device {}: {}", device_ordinal, e))?;
+        let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
+            .map_err(|e| anyhow!("Failed to create indirect ZeKernel for device {}: {}", device_ordinal, e))?;
+        kernel_indirect
+            .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
+            .map_err(|e| anyhow!("Failed to set indirect kernel group size for device {}: {}", device_ordinal, e))?;
+        (module, kernel, kernel_indirect)
+    };
 
     // Scratch memory pool (16 MB reserve, 64 MB release threshold).
     let pool = ZeMemPool::builder(Arc::clone(&dev), 16 * 1024 * 1024)
@@ -127,24 +142,33 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
 
     // Persistent device buffer for indirect kernel args (32 bytes).
     // Allocated once; contents updated via BCS memcpy each dispatch.
-    let args_dev = pool
-        .alloc(vc::INDIRECT_ARGS_BYTES)
-        .map_err(|e| anyhow!("ZeMemPool alloc for indirect args failed: {}", e))?;
-    unsafe {
-        kernel_indirect
-            .set_arg(0, &args_dev)
-            .map_err(|e| anyhow!("set_arg(0) for indirect kernel failed: {}", e))?;
-    }
+    #[cfg(feature = "ocl-kernel")]
+    let args_dev = {
+        let args_dev = pool
+            .alloc(vc::INDIRECT_ARGS_BYTES)
+            .map_err(|e| anyhow!("ZeMemPool alloc for indirect args failed: {}", e))?;
+        unsafe {
+            kernel_indirect
+                .set_arg(0, &args_dev)
+                .map_err(|e| anyhow!("set_arg(0) for indirect kernel failed: {}", e))?;
+        }
+        args_dev
+    };
 
     let res = Arc::new(Mutex::new(ZeDeviceResources {
         cmd_copy: Arc::new(cmd_copy),
+        #[cfg(feature = "ocl-kernel")]
         cmd_compute: Arc::new(cmd_compute),
         event_pool: Arc::new(event_pool),
         next_event_idx: 0,
+        #[cfg(feature = "ocl-kernel")]
         kernel: Arc::new(kernel),
+        #[cfg(feature = "ocl-kernel")]
         kernel_indirect: Arc::new(kernel_indirect),
+        #[cfg(feature = "ocl-kernel")]
         args_dev,
         pool: Arc::new(pool),
+        #[cfg(feature = "ocl-kernel")]
         _module: module,
     }));
 
@@ -156,7 +180,6 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
 ///
 /// The SYCL state shares the same Level Zero context as `ze_resources()`,
 /// so device memory allocated by `ZeMemPool` is directly accessible.
-#[cfg(feature = "sycl-kernel")]
 fn sycl_vc_state(
     device_ordinal: u32,
 ) -> Result<Arc<kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy>> {
@@ -275,9 +298,11 @@ pub fn execute_ze_transfer(
 
     let caller_manages_sync = ze_cmdlist.is_some();
     let cmd_copy = ze_cmdlist.unwrap_or_else(|| resources.cmd_copy.clone());
+    #[cfg(feature = "ocl-kernel")]
     let cmd_compute = resources.cmd_compute.clone();
-    let kernel = resources.kernel.clone();
+    #[cfg(feature = "ocl-kernel")]
     let kernel_indirect = resources.kernel_indirect.clone();
+    #[cfg(feature = "ocl-kernel")]
     let args_dev = resources.args_dev;
     let pool = resources.pool.clone();
     let signal_event = allocate_event(&mut resources)?;
@@ -316,53 +341,54 @@ pub fn execute_ze_transfer(
                 // Vectorized kernel: only for D2D (CCS kernel cannot
                 // dereference host-pinned pointers on discrete GPUs).
                 //
-                // Default: raw L0 SPIR-V kernel (lowest latency).
-                // Override: set KVBM_USE_SYCL_KERNEL=1 to dispatch via SYCL runtime.
-                #[cfg(feature = "sycl-kernel")]
-                let use_sycl = std::env::var("KVBM_USE_SYCL_KERNEL").is_ok();
-                #[cfg(not(feature = "sycl-kernel"))]
-                let use_sycl = false;
+                // Default: SYCL kernel (always available).
+                // Override: set KVBM_USE_L0_KERNEL=1 to dispatch via raw
+                // L0 SPIR-V kernel (requires `ocl-kernel` feature).
+                #[cfg(feature = "ocl-kernel")]
+                let use_l0 = std::env::var("KVBM_USE_L0_KERNEL").is_ok();
+                #[cfg(not(feature = "ocl-kernel"))]
+                let use_l0 = false;
 
-                if use_sycl {
-                    #[cfg(feature = "sycl-kernel")]
+                if use_l0 {
+                    #[cfg(feature = "ocl-kernel")]
                     {
-                        // Lazily init SYCL state using the same L0 context.
-                        let sycl_vc = sycl_vc_state(device_ordinal)?;
                         tracing::debug!(
                             strategy = strategy_name,
                             num_blocks = src_block_ids.len(),
                             num_layers = layers.len(),
-                            "Using SYCL vectorized_copy kernel (D2D)"
+                            "Using L0 SPIR-V vectorized_copy kernel (D2D)"
                         );
-                        execute_fc_lw_vectorized_sycl_ze(
+                        execute_fc_lw_vectorized_ze(
                             src,
                             dst,
                             src_block_ids,
                             dst_block_ids,
                             layers,
                             &cmd_copy,
-                            &sycl_vc,
+                            &cmd_compute,
+                            &kernel_indirect,
+                            args_dev,
                             &pool,
                             &signal_event,
                         )?;
                     }
                 } else {
+                    // Lazily init SYCL state using the same L0 context.
+                    let sycl_vc = sycl_vc_state(device_ordinal)?;
                     tracing::debug!(
                         strategy = strategy_name,
                         num_blocks = src_block_ids.len(),
                         num_layers = layers.len(),
-                        "Using XPU vectorized_copy kernel (D2D)"
+                        "Using SYCL vectorized_copy kernel (D2D)"
                     );
-                    execute_fc_lw_vectorized_ze(
+                    execute_fc_lw_vectorized_sycl_ze(
                         src,
                         dst,
                         src_block_ids,
                         dst_block_ids,
                         layers,
                         &cmd_copy,
-                        &cmd_compute,
-                        &kernel_indirect,
-                        args_dev,
+                        &sycl_vc,
                         &pool,
                         &signal_event,
                     )?;
@@ -476,6 +502,7 @@ fn execute_whole_block_ze(
 /// 4. Dispatches `vectorized_copy` kernel via CCS (`cmd_compute`).
 /// 5. Signals `signal_event` after kernel completion.
 /// 6. Frees scratch allocations.
+#[cfg(feature = "ocl-kernel")]
 fn execute_fc_lw_vectorized_ze(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -695,9 +722,8 @@ fn execute_fc_lw_ze(
 /// identical to the L0 version. Step 4 calls `SyclVectorizedCopy::run()`
 /// instead of `append_launch_kernel()`.
 ///
-/// Requires the `sycl-kernel` feature and `libvectorized_copy_sycl.so`
-/// to be built and loadable at runtime (`make -C lib/kvbm-kernels/sycl`).
-#[cfg(feature = "sycl-kernel")]
+/// Requires `libvectorized_copy_sycl.so` to be built and loadable
+/// at runtime (`make -C lib/kvbm-kernels/sycl`).
 fn execute_fc_lw_vectorized_sycl_ze(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
