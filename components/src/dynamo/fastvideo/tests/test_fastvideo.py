@@ -99,19 +99,20 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
     assert config.output_modalities == ["video"]
 
 
-def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation():
+def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation(tmp_path):
+    tmp_file = tmp_path / "nonexistent-generator-args.json"
     config = parse_fastvideo_args(
         [
             "--model-path",
             "org/model",
             "--extra-generator-args-file",
-            "/tmp/nonexistent-generator-args.json",
+            str(tmp_file),
             "--override-generator-args-json",
             '["not", "an", "object"]',
         ]
     )
 
-    assert config.extra_generator_args_file == "/tmp/nonexistent-generator-args.json"
+    assert config.extra_generator_args_file == str(tmp_file)
     assert config.override_generator_args_json == '["not", "an", "object"]'
 
 
@@ -233,13 +234,13 @@ def test_fastvideo_handler_rejects_non_object_override_generator_args_json():
         handler._build_generator_kwargs()
 
 
-def test_fastvideo_handler_rejects_missing_generator_args_file():
+def test_fastvideo_handler_rejects_missing_generator_args_file(tmp_path):
     config = parse_fastvideo_args(
         [
             "--model-path",
             "org/model",
             "--extra-generator-args-file",
-            "/tmp/definitely-missing-generator-args.yaml",
+            str(tmp_path / "definitely-missing-generator-args.yaml"),
         ]
     )
     handler = FastVideoHandler(config, generator=_FakeGenerator())

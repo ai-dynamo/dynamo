@@ -270,14 +270,17 @@ def parse_fastvideo_args(argv: Sequence[str] | None = None) -> FastVideoConfig:
         description="Dynamo FastVideo backend",
         formatter_class=argparse.RawTextHelpFormatter,
         allow_abbrev=False,
+        conflict_handler="resolve",
     )
     DynamoRuntimeArgGroup().add_arguments(parser)
     FastVideoArgGroup().add_arguments(parser)
+    # Re-declare to hide from help; FastVideo always produces video.
+    parser.add_argument(
+        "--output-modalities", default=["video"], nargs="*", help=argparse.SUPPRESS
+    )
 
     args = parser.parse_args(None if argv is None else list(argv))
-
-    if not args.output_modalities or args.output_modalities == ["text"]:
-        args.output_modalities = ["video"]
+    args.output_modalities = ["video"]
 
     config = FastVideoConfig.from_cli_args(args)
     config.validate()

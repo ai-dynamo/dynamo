@@ -49,18 +49,18 @@ async def run_fastvideo(argv: Sequence[str] | None = None) -> None:
     shutdown_endpoints[:] = [endpoint]
 
     handler = FastVideoHandler(config)
-    await handler.initialize()
-    await register_fastvideo_model(endpoint, config)
-
-    logger.info(
-        "Serving FastVideo on %s.%s.%s for model %s",
-        config.namespace,
-        config.component,
-        config.endpoint,
-        config.served_model_name,
-    )
-
     try:
+        await handler.initialize()
+        await register_fastvideo_model(endpoint, config)
+
+        logger.info(
+            "Serving FastVideo on %s.%s.%s for model %s",
+            config.namespace,
+            config.component,
+            config.endpoint,
+            config.served_model_name,
+        )
+
         await endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,

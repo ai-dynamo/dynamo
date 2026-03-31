@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STAGE_LOGGING = "1"
 DEFAULT_RMSNORM_FP4_PREQUANT = "0"
-DEFAULT_RESPONSE_FORMAT = "b64_json"
+DEFAULT_RESPONSE_FORMAT = "url"
 
 
 def _coerce_optional_float(value: object) -> float | None:
@@ -355,9 +355,9 @@ class FastVideoHandler:
             response_format = self._resolve_response_format(req.response_format)
 
             logger.info(
-                "[%s] prompt='%s...' size=%dx%d frames=%d fps=%d steps=%d",
+                "[%s] prompt_len=%d size=%dx%d frames=%d fps=%d steps=%d",
                 request_id,
-                req.prompt[:60],
+                len(req.prompt),
                 width,
                 height,
                 num_frames,
