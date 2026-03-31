@@ -623,17 +623,9 @@ log "Published leader key (put result: $PUT_OUT)"
 KEEPALIVE_PID=$!
 log "Keepalive PID: $KEEPALIVE_PID"
 
-cleanup() {
-    log "Cleanup: killing all (pids: keepalive=$KEEPALIVE_PID engine=${ENGINE_PID:-none} watch_leader=${WATCH_LEADER_PID:-none} watch_workers=${WATCH_WORKERS_PID:-none})"
-    kill -9 $KEEPALIVE_PID 2>/dev/null
-    [ -n "$ENGINE_PID" ] && kill -9 $ENGINE_PID 2>/dev/null
-    [ -n "$WATCH_LEADER_PID" ] && kill -9 $WATCH_LEADER_PID 2>/dev/null
-    [ -n "$WATCH_WORKERS_PID" ] && kill -9 $WATCH_WORKERS_PID 2>/dev/null
-    REVOKE_OUT=$($ETCDCTL lease revoke "$LEASE_ID" 2>&1)
-    log "Cleanup: lease revoke result: $REVOKE_OUT"
-    wait 2>/dev/null
-}
-trap cleanup EXIT
+# No trap/cleanup: when exit 1 runs, PID 1 (this script) exits,
+# the container dies, and the kernel kills all remaining processes
+# in the container's PID namespace. The lease expires via TTL.
 
 # Formation: polling OK here, no engine running yet
 log "Waiting for $((NNODES - 1)) worker(s) to join..."
@@ -788,16 +780,9 @@ log "Registered under leader hash (put result: $PUT_OUT)"
 KEEPALIVE_PID=$!
 log "Keepalive PID: $KEEPALIVE_PID"
 
-cleanup() {
-    log "Cleanup: killing all (pids: keepalive=$KEEPALIVE_PID engine=${ENGINE_PID:-none} watch_leader=${WATCH_LEADER_PID:-none})"
-    kill -9 $KEEPALIVE_PID 2>/dev/null
-    [ -n "$ENGINE_PID" ] && kill -9 $ENGINE_PID 2>/dev/null
-    [ -n "$WATCH_LEADER_PID" ] && kill -9 $WATCH_LEADER_PID 2>/dev/null
-    REVOKE_OUT=$($ETCDCTL lease revoke "$LEASE_ID" 2>&1)
-    log "Cleanup: lease revoke result: $REVOKE_OUT"
-    wait 2>/dev/null
-}
-trap cleanup EXIT
+# No trap/cleanup: when exit 1 runs, PID 1 (this script) exits,
+# the container dies, and the kernel kills all remaining processes
+# in the container's PID namespace. The lease expires via TTL.
 
 # Wait for go signal (polling OK, no engine running yet)
 log "Waiting for go signal..."
