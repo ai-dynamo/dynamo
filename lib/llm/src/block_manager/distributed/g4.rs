@@ -174,6 +174,48 @@ fn rendezvous_score(sequence_hash: SequenceHash, worker_id: WorkerID) -> u64 {
     compute_hash_v2(&bytes, 0)
 }
 
+fn route_items_by_g4_owner<T, F>(
+    items: impl IntoIterator<Item = T>,
+    workers: &[G4StorageWorker],
+    sequence_hash: F,
+) -> Result<HashMap<WorkerID, Vec<T>>, G4Error>
+where
+    F: Fn(&T) -> SequenceHash,
+{
+    let mut routed = HashMap::<WorkerID, Vec<T>>::new();
+
+    for item in items {
+        let owner =
+            select_g4_owner(sequence_hash(&item), workers).ok_or(G4Error::NoStorageWorkers)?;
+        routed.entry(owner.worker_id).or_default().push(item);
+    }
+
+    Ok(routed)
+}
+
+pub fn route_g4_sequence_hashes_by_owner(
+    sequence_hashes: &[SequenceHash],
+    workers: &[G4StorageWorker],
+) -> Result<HashMap<WorkerID, Vec<SequenceHash>>, G4Error> {
+    route_items_by_g4_owner(sequence_hashes.iter().copied(), workers, |sequence_hash| {
+        *sequence_hash
+    })
+}
+
+pub fn route_g4_put_blocks_by_owner(
+    blocks: Vec<G4PutBlock>,
+    workers: &[G4StorageWorker],
+) -> Result<HashMap<WorkerID, Vec<G4PutBlock>>, G4Error> {
+    route_items_by_g4_owner(blocks, workers, |block| block.sequence_hash)
+}
+
+pub fn route_g4_transfer_blocks_by_owner(
+    blocks: Vec<G4TransferBlock>,
+    workers: &[G4StorageWorker],
+) -> Result<HashMap<WorkerID, Vec<G4TransferBlock>>, G4Error> {
+    route_items_by_g4_owner(blocks, workers, |block| block.meta.sequence_hash)
+}
+
 #[derive(Default)]
 pub struct G4BlockIndex {
     blocks: RwLock<HashMap<SequenceHash, G4PutBlock>>,
@@ -482,12 +524,7 @@ impl G4StorageClient {
     }
 
     pub async fn put_blocks(&self, blocks: Vec<G4PutBlock>) -> Result<(), G4Error> {
-        let mut routed: HashMap<WorkerID, Vec<G4PutBlock>> = HashMap::new();
-
-        for block in blocks {
-            let owner = self.owner_for(block.sequence_hash)?;
-            routed.entry(owner.worker_id).or_default().push(block);
-        }
+        let routed = route_g4_put_blocks_by_owner(blocks, &self.workers)?;
 
         for (worker_id, blocks) in routed {
             let agent = self
@@ -501,15 +538,7 @@ impl G4StorageClient {
     }
 
     pub async fn offer_blocks(&self, blocks: Vec<G4PutBlock>) -> Result<Vec<G4PutBlock>, G4Error> {
-        let mut routed: HashMap<WorkerID, Vec<G4PutBlock>> = HashMap::new();
-
-        for block in &blocks {
-            let owner = self.owner_for(block.sequence_hash)?;
-            routed
-                .entry(owner.worker_id)
-                .or_default()
-                .push(block.clone());
-        }
+        let routed = route_g4_put_blocks_by_owner(blocks.clone(), &self.workers)?;
 
         let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
         for (worker_id, owner_blocks) in routed {
@@ -536,15 +565,7 @@ impl G4StorageClient {
         &self,
         blocks: Vec<G4PutBlock>,
     ) -> Result<Vec<G4PutBlock>, G4Error> {
-        let mut routed: HashMap<WorkerID, Vec<G4PutBlock>> = HashMap::new();
-
-        for block in &blocks {
-            let owner = self.owner_for(block.sequence_hash)?;
-            routed
-                .entry(owner.worker_id)
-                .or_default()
-                .push(block.clone());
-        }
+        let routed = route_g4_put_blocks_by_owner(blocks.clone(), &self.workers)?;
 
         let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
         for (worker_id, owner_blocks) in routed {
@@ -577,15 +598,7 @@ impl G4StorageClient {
         &self,
         blocks: Vec<G4TransferBlock>,
     ) -> Result<Vec<G4TransferBlock>, G4Error> {
-        let mut routed: HashMap<WorkerID, Vec<G4TransferBlock>> = HashMap::new();
-
-        for block in &blocks {
-            let owner = self.owner_for(block.meta.sequence_hash)?;
-            routed
-                .entry(owner.worker_id)
-                .or_default()
-                .push(block.clone());
-        }
+        let routed = route_g4_transfer_blocks_by_owner(blocks.clone(), &self.workers)?;
 
         let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
         for (worker_id, owner_blocks) in routed {
@@ -618,15 +631,7 @@ impl G4StorageClient {
         &self,
         blocks: Vec<G4TransferBlock>,
     ) -> Result<Vec<G4TransferBlock>, G4Error> {
-        let mut routed: HashMap<WorkerID, Vec<G4TransferBlock>> = HashMap::new();
-
-        for block in &blocks {
-            let owner = self.owner_for(block.meta.sequence_hash)?;
-            routed
-                .entry(owner.worker_id)
-                .or_default()
-                .push(block.clone());
-        }
+        let routed = route_g4_transfer_blocks_by_owner(blocks.clone(), &self.workers)?;
 
         let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
         for (worker_id, owner_blocks) in routed {
@@ -659,15 +664,8 @@ impl G4StorageClient {
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> HashMap<SequenceHash, G4QueryHit> {
-        let mut grouped = HashMap::<WorkerID, Vec<SequenceHash>>::new();
-        for sequence_hash in sequence_hashes {
-            if let Ok(owner) = self.owner_for(*sequence_hash) {
-                grouped
-                    .entry(owner.worker_id)
-                    .or_default()
-                    .push(*sequence_hash);
-            }
-        }
+        let grouped =
+            route_g4_sequence_hashes_by_owner(sequence_hashes, &self.workers).unwrap_or_default();
 
         let queries = grouped
             .into_iter()
@@ -694,15 +692,15 @@ impl G4StorageClient {
         target_pool: BlockTransferPool,
         target_block_start_idx: usize,
     ) -> Vec<G4FetchedBlock> {
-        let mut grouped = HashMap::<WorkerID, Vec<(usize, SequenceHash)>>::new();
-        for (offset, sequence_hash) in sequence_hashes.iter().enumerate() {
-            if let Ok(owner) = self.owner_for(*sequence_hash) {
-                grouped
-                    .entry(owner.worker_id)
-                    .or_default()
-                    .push((offset, *sequence_hash));
-            }
-        }
+        let grouped = route_items_by_g4_owner(
+            sequence_hashes
+                .iter()
+                .enumerate()
+                .map(|(offset, sequence_hash)| (offset, *sequence_hash)),
+            &self.workers,
+            |(_, sequence_hash)| *sequence_hash,
+        )
+        .unwrap_or_default();
 
         let mut fetched = Vec::new();
         for (worker_id, entries) in grouped {
@@ -795,6 +793,25 @@ mod tests {
         let owner_b = select_g4_owner(sequence_hash, &reversed).unwrap();
 
         assert_eq!(owner_a, owner_b);
+    }
+
+    #[test]
+    fn route_sequence_hashes_groups_by_owner_and_preserves_owner_order() {
+        let worker_list = workers();
+        let sequence_hashes = vec![1_u64, 2_u64, 3_u64, 4_u64];
+
+        let routed = route_g4_sequence_hashes_by_owner(&sequence_hashes, &worker_list).unwrap();
+
+        for hashes in routed.values() {
+            let mut expected = hashes.clone();
+            expected.sort_by_key(|sequence_hash| {
+                sequence_hashes
+                    .iter()
+                    .position(|candidate| candidate == sequence_hash)
+                    .unwrap()
+            });
+            assert_eq!(*hashes, expected);
+        }
     }
 
     #[tokio::test]

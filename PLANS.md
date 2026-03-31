@@ -1,6 +1,78 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:02:45 UTC
+Last updated: 2026-03-31 19:12:49 UTC
+
+Current in-progress run (2026-03-31 19:07:10 UTC):
+- NEXT STEP: NEED TO make this a change on GIT! We need to add the commit to branch of mf/kvbm-g4-v2 (or similar name!)
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+- Current branch baseline observed in this run:
+  - detached `HEAD` at `786f3bcd1` (`Deduplicate smoke G4 API types`)
+  - worktree was clean before starting this run
+- Current implementation slice for this run:
+  - replace the single fixed smoke backend target with a discovered backend set
+    so the smoke worker can talk to more than one storage agent
+  - move the owner-grouping/routing logic needed by that smoke path into shared
+    `distributed::g4` helpers instead of re-deriving routing ad hoc in the
+    binary
+  - keep the transfer path HTTP-based and smoke-only; do not claim runtime
+    discovery or real remote KVBM onboard are complete
+- Why this slice:
+  - the previous run finished the API-type cleanup and explicitly called out a
+    more realistic multi-owner smoke path as the next useful step
+  - the design doc centers deterministic owner routing from a live worker set,
+    and the current smoke worker still assumes one fixed backend URL
+  - the smallest honest next step is to reuse shared owner routing while
+    keeping transport simple enough to validate quickly
+- In-progress edits:
+  - `PLANS.md`
+    - recorded this run's multi-backend smoke-routing scope before code edits
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+    - added shared owner-routing helpers for sequence hashes, put metadata, and
+      payload-bearing transfer blocks
+    - refactored `G4StorageClient` to reuse those helpers so the in-process
+      client and the smoke path follow the same owner-grouping rules
+  - `lib/llm/src/block_manager/distributed.rs`
+    - re-exported the new shared G4 owner-routing helpers for binary consumers
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+    - replaced the single fixed backend target with repeated `--backend-url`
+      discovery and per-owner HTTP routing driven by the shared G4 helpers
+    - now fans out `offer`, `put_payload`, `query`, and `fetch` across the
+      discovered owner set while preserving caller-visible verification order
+- Validation completed in this run:
+  - environment check:
+    `cargo --version`
+    -> pass (`cargo 1.93.1`)
+  - environment check:
+    `rustc --version`
+    -> pass (`rustc 1.93.1`)
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`15 passed`)
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    -> pass
+  - `git diff --check`
+    -> pass
+- Remaining work after this run:
+  - commit this validated multi-backend smoke-routing milestone with
+    `--signoff`
+  - re-read `PLANS.md` after that commit and decide whether the next smallest
+    slice should stay in smoke-land
+    (`query -> fetch -> onboard` realism, fallback behavior, explicit duplicate
+    cases) or move toward actual runtime discovery ownership
+- Exact next file or command to touch:
+  - command:
+    `git add PLANS.md lib/llm/src/block_manager/distributed/g4.rs lib/llm/src/block_manager/distributed.rs lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - then:
+    `git commit --signoff -m "Add multi-backend G4 smoke routing"`
 
 Current in-progress run (2026-03-31 19:02:45 UTC):
 
