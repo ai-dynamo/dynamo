@@ -74,30 +74,36 @@ impl PromptFormatter {
                         })?;
 
                     // If the file is JSON (e.g. chat_template.json from Qwen3-Omni),
-                    // extract the "chat_template" field rather than using raw content as Jinja.
-                    let chat_template =
+                    // extract the "chat_template" field. The value may be a plain
+                    // string or a structured array of {name, template} objects —
+                    // deserialize it as ChatTemplateValue to handle both.
+                    let chat_template_value =
                         if chat_template_file.extension().is_some_and(|ext| ext == "json") {
-                            let json: serde_json::Value =
+                            let wrapper: serde_json::Value =
                                 serde_json::from_str(&raw_content).with_context(|| {
                                     format!(
                                         "Failed to parse '{}' as JSON",
                                         chat_template_file.display()
                                     )
                                 })?;
-                            json.get("chat_template")
-                                .and_then(|v| v.as_str())
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "'{}' does not contain a 'chat_template' string field",
+                            let field = wrapper.get("chat_template").ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "'{}' does not contain a 'chat_template' field",
+                                    chat_template_file.display()
+                                )
+                            })?;
+                            serde_json::from_value::<ChatTemplateValue>(field.clone())
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to deserialize 'chat_template' in '{}'",
                                         chat_template_file.display()
                                     )
                                 })?
-                                .to_string()
                         } else {
-                            raw_content
+                            ChatTemplateValue(either::Left(raw_content))
                         };
 
-                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                    config.chat_template = Some(chat_template_value);
                 }
                 Self::from_parts(
                     config,
