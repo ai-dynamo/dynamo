@@ -80,9 +80,7 @@ def start_frontend() -> subprocess.Popen[Any]:
     process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
 
     try:
-        wait_for_http_ready(
-            f"{FRONTEND_URL}/health", name="Frontend", timeout_s=30
-        )
+        wait_for_http_ready(f"{FRONTEND_URL}/health", name="Frontend", timeout_s=30)
         return process
     except Exception:
         if process.poll() is None:
@@ -167,7 +165,9 @@ def assert_final_chunk_has_routed_experts(chunks: list[dict[str, Any]]) -> None:
             routed_expert_positions.append(idx)
             validate_routed_experts(nvext["routed_experts"])
 
-    assert routed_expert_positions, "Expected routed_experts in at least one nvext chunk"
+    assert (
+        routed_expert_positions
+    ), "Expected routed_experts in at least one nvext chunk"
     assert routed_expert_positions == [len(chunks) - 1], (
         "Expected routed_experts only on the final streamed chunk, got positions "
         f"{routed_expert_positions} out of {len(chunks)} chunks"
