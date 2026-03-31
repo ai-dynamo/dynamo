@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoModel

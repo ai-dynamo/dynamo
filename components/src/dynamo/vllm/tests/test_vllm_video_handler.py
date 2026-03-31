@@ -7,8 +7,6 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-pytest.importorskip("vllm")
-
 from dynamo.vllm.handlers import BaseWorkerHandler
 
 pytestmark = [
@@ -122,7 +120,11 @@ async def test_extract_multimodal_data_rejects_requests_when_disabled():
 
     with pytest.raises(ValueError, match="multimodal processing is not enabled"):
         await handler._extract_multimodal_data(
-            {"multi_modal_data": {"video_url": [{"Url": "https://example.com/video.mp4"}]}},
+            {
+                "multi_modal_data": {
+                    "video_url": [{"Url": "https://example.com/video.mp4"}]
+                }
+            },
             "req-4",
             context=None,
         )
