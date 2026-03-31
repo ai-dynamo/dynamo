@@ -3,11 +3,14 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.utils.planner_config import PlannerConfig
+
+if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.planner.utils.planner_core import (
     BasePlanner,
     PlannerPrometheusMetrics,
@@ -15,7 +18,6 @@ from dynamo.planner.utils.planner_core import (
     _apply_component_gpu_budget,
     _initialize_gpu_counts,
 )
-from dynamo.planner.utils.prometheus import CachedLoadMetrics
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -24,24 +26,24 @@ logger = logging.getLogger(__name__)
 
 
 class AggPlanner:
-    """Aggregated planner: load-based scaling only, single engine type.
+    """Aggregated planner: FPM-driven load-based scaling, single engine type.
 
     In aggregated mode, engines handle both prefill and decode (chunked prefill).
-    Engine metrics are labeled "decode" by the router.
+    A single AggRegressionModel maps (sum_prefill_tokens, sum_decode_kv_tokens)
+    to wall_time using 2D linear regression.
 
     Scaling logic:
-    - TTFT and ITL regression models are both maintained.
-    - Regression uses per-worker time-averaged metrics (not latest snapshot)
-      because chunked prefill adds noise to instantaneous TTFT/ITL.
-    - Scale up if either prefill or decode target is exceeded.
-    - Scale down if both prefill and decode are below their boundaries.
+    - Estimate next TTFT per engine by simulating prefill chunking with
+      piggybacked decode (steady-state decode load).
+    - Estimate next ITL per engine by predicting decode iteration time with
+      average piggybacked prefill load.
+    - Scale up if (ALL TTFT > SLA) OR (ALL ITL > SLA).
+    - Scale down if (ALL TTFT < SLA * sensitivity) AND (ALL ITL < SLA * sensitivity).
     """
-
-    # Engine metrics from agg workers are labeled "decode" by the router
-    ENGINE_WORKER_TYPE = "decode"
 
     def __init__(self, runtime: DistributedRuntime, config: PlannerConfig) -> None:
         self.config = config
+        self.runtime = runtime
         self.shared_state = PlannerSharedState()
 
         if config.enable_throughput_scaling:
@@ -56,8 +58,6 @@ class AggPlanner:
 
         prometheus_metrics = PlannerPrometheusMetrics()
 
-        # Use a single BasePlanner instance for infra (connector, prometheus, etc.)
-        # We use DECODE component_type because engine metrics are labeled "decode"
         self.planner = BasePlanner(
             runtime,
             config,
@@ -67,28 +67,27 @@ class AggPlanner:
             component_type=SubComponentType.DECODE,
         )
 
-        # Create both regression models (agg needs both TTFT and ITL)
-        self.ttft_regression = LoadBasedRegressionModel(
-            window_size=config.load_learning_window,
-            min_observations=config.load_min_observations,
-        )
-        self.itl_regression = LoadBasedRegressionModel(
-            window_size=config.load_learning_window,
-            min_observations=config.load_min_observations,
-        )
+        from dynamo.planner.utils.fpm_regression import AggRegressionModel
 
-        self.cached_load_metrics = CachedLoadMetrics()
+        self.regression = AggRegressionModel(
+            window_size=config.load_learning_window,
+            min_observations=config.load_min_observations,
+        )
 
     async def _async_init(self):
-        await self.planner._async_init()
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
-    async def run(self):
         if not self.config.no_operation:
+            connector = getattr(self.planner, "connector", None)
+            if connector and hasattr(connector, "_async_init"):
+                await connector._async_init()
+
             logger.info("Validating deployment...")
-            # Agg mode: only decode component exists (engines serve both P and D)
             await self.planner.connector.validate_deployment(
                 prefill_component_name=None,
-                decode_component_name=self.planner.decode_component_name,
+                decode_component_name=(
+                    defaults.decode_worker_k8s_name if defaults else None
+                ),
                 require_prefill=False,
                 require_decode=True,
             )
@@ -101,208 +100,102 @@ class AggPlanner:
                 require_decode=True,
             )
 
-            await self.planner.connector.wait_for_deployment_ready()
-
-        # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
-            model_name = await self.planner._get_model_name(
-                require_prefill=False, require_decode=True
+            await self.planner.connector.wait_for_deployment_ready(
+                include_planner=False
             )
-            logger.info(f"Detected model name from deployment: {model_name}")
-            self.planner.model_name = model_name.lower()
-        else:
-            if not self.config.model_name:
-                raise ValueError(
-                    "Model name is required in no-operation mode. "
-                    "Please set model_name in the config."
-                )
-            self.planner.model_name = self.config.model_name.lower()
 
-        loops = [
-            self._load_loop(),
-            self.planner.prometheus_engine_client.run_sampling_loop(
-                self.config.load_metric_samples,
-                self.config.load_adjustment_interval,
-            ),
-        ]
-        await asyncio.gather(*loops)
+        await self.planner._init_worker_info(require_prefill=False, require_decode=True)
 
-    async def _observe_engine_load_stats(self) -> None:
-        """Fetch metrics and update regression models using per-worker time-averaged data."""
-        result = self.planner.prometheus_engine_client.get_recent_and_averaged_metrics(
-            self.ENGINE_WORKER_TYPE
-        )
-        if result is None:
-            logger.warning(
-                f"No per-worker metrics available yet for {self.ENGINE_WORKER_TYPE} (buffer empty)"
-            )
-            return
+        # Delegate FPM tracking to the inner BasePlanner (component_type=DECODE).
+        if self.runtime is not None:
+            await self.planner._init_fpm_subscriber()
 
-        recent, per_worker_averaged, cluster_averaged = result
-        self.cached_load_metrics = CachedLoadMetrics(
-            recent=recent,
-            per_worker_averaged=per_worker_averaged,
-            cluster_averaged=cluster_averaged,
-        )
-
-        # Agg uses per-worker time-averaged metrics for regression
-        # because chunked prefill adds noise to instantaneous TTFT/ITL
-        for wid, m in per_worker_averaged.items():
-            # TTFT regression: (active_prefill_tokens + ISL) -> TTFT
-            active_prefill = m.get("active_prefill_tokens", 0.0)
-            last_isl = m.get("last_isl", 0.0)
-            last_ttft = m.get("last_ttft", 0.0)
-            if last_ttft > 0 and last_isl > 0:
-                x = active_prefill + last_isl
-                y = last_ttft * 1000  # seconds -> ms
-                logger.info(
-                    f"Agg Worker {wid} prefill observation: TTFT {y:.2f}ms @ tokens {x:.2f}"
-                )
-                self.ttft_regression.add_observation(x, y)
-
-            # ITL regression: active_decode_blocks -> ITL
-            active_decode = m.get("active_decode_blocks", 0.0)
-            last_itl = m.get("last_itl", 0.0)
-            if last_itl > 0 and active_decode > 0:
-                x = active_decode
-                y = last_itl * 1000  # seconds -> ms
-                logger.info(
-                    f"Agg Worker {wid} decode observation: ITL {y:.2f}ms @ blocks {x:.2f}"
-                )
-                self.itl_regression.add_observation(x, y)
-
-    def _prefill_scaling_decision(self, num_workers: int) -> Optional[str]:
-        """Returns "up", "down", or None for prefill dimension."""
-        if not self.cached_load_metrics.recent:
-            return None
-        if not self.ttft_regression.has_sufficient_data():
-            logger.info(
-                f"TTFT regression: insufficient data ({self.ttft_regression.num_observations}"
-                f"/{self.ttft_regression.min_observations}), skipping"
-            )
-            return None
-
-        x_sla = self.ttft_regression.predict_x_from_sla(self.config.ttft)
-        if x_sla is None:
-            return None
-
-        recent = self.cached_load_metrics.recent
-        cluster_averaged = self.cached_load_metrics.cluster_averaged
-        avg_isl = cluster_averaged.get("last_isl", 0.0)
-        target = x_sla - avg_isl
-
-        if target <= 0:
-            logger.warning(
-                f"Agg TTFT SLA unachievable at current ISL: x_sla={x_sla:.1f}, "
-                f"avg_isl={avg_isl:.1f}, skipping prefill scaling decision"
-            )
-            return None
-
-        logger.info(
-            f"Agg prefill: x_sla={x_sla:.1f}, avg_isl={avg_isl:.1f}, "
-            f"target_active_tokens={target:.1f}, workers={num_workers}"
-        )
-
-        # Scale up: ALL workers above target
-        if all(m.get("active_prefill_tokens", 0.0) > target for m in recent.values()):
-            return "up"
-
-        # Scale down: ALL workers below boundary
-        if num_workers > self.config.min_endpoint:
-            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
-            boundary = target * (num_workers - 1) / num_workers * sensitivity
-            if all(
-                m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
-            ):
-                return "down"
-
-        return None
-
-    def _decode_scaling_decision(self, num_workers: int) -> Optional[str]:
-        """Returns "up", "down", or None for decode dimension."""
-        if not self.cached_load_metrics.recent:
-            return None
-        if not self.itl_regression.has_sufficient_data():
-            logger.info(
-                f"ITL regression: insufficient data ({self.itl_regression.num_observations}"
-                f"/{self.itl_regression.min_observations}), skipping"
-            )
-            return None
-
-        x_sla = self.itl_regression.predict_x_from_sla(self.config.itl)
-        if x_sla is None:
-            return None
-
-        if x_sla <= 0:
-            logger.warning(
-                f"Agg ITL SLA unachievable: x_sla={x_sla:.1f}, "
-                "skipping decode scaling decision"
-            )
-            return None
-
-        recent = self.cached_load_metrics.recent
-
-        logger.info(f"Agg decode: x_sla={x_sla:.1f}, workers={num_workers}")
-
-        # Scale up: ALL workers above target
-        if all(m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()):
-            return "up"
-
-        # Scale down: ALL workers below boundary
-        # TODO: should we strictly enforce all workers below boundary?
-        # how about user-configurable percentage?
-        if num_workers > self.config.min_endpoint:
-            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
-            boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
-            if all(
-                m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
-            ):
-                return "down"
-
-        return None
+    async def run(self):
+        """Main scaling loop. Call _async_init() before this."""
+        await asyncio.gather(self._load_loop())
 
     async def _load_loop(self) -> None:
-        """Load-based scaling loop for aggregated mode."""
+        """FPM-driven load-based scaling loop for aggregated mode."""
+        pending_desired: Optional[int] = None
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New agg load-based adjustment interval started!")
 
-            # Query DGD for fresh worker counts
             _, num_d, _ = await self.planner.get_workers_info(
                 require_prefill=False, require_decode=True
             )
             self.shared_state.num_d_workers = num_d
             num_workers = num_d
 
-            # Observe per-worker metrics
-            await self._observe_engine_load_stats()
+            # Always observe FPM stats and update regression, even during scaling.
+            fpm_stats = self.planner._get_fpm_stats()
+            if not fpm_stats:
+                logger.warning("No FPM data available for agg engines")
+                continue
 
-            # Reconcile worker counts
-            prom_count = len(self.cached_load_metrics.recent)
-            if prom_count != num_workers:
-                logger.warning(
-                    f"Worker count mismatch: DGD reports {num_workers}, "
-                    f"router metrics reports {prom_count}. Skipping."
+            for (wid, dp), fpm in fpm_stats.items():
+                BasePlanner._log_fpm(wid, dp, fpm, "agg")
+                self.regression.add_observation(fpm)
+
+            # If a previous scaling action is still in progress, skip decisions.
+            if pending_desired is not None:
+                if num_workers == pending_desired:
+                    logger.info(
+                        f"Scaling to {pending_desired} complete, resuming decisions"
+                    )
+                    pending_desired = None
+                else:
+                    logger.info(
+                        f"Scaling in progress ({num_workers} -> {pending_desired}), "
+                        "observing only"
+                    )
+                    continue
+
+            if not BasePlanner._reconcile_fpm_worker_count(
+                fpm_stats, num_workers, "agg"
+            ):
+                continue
+
+            if not self.regression.has_sufficient_data():
+                logger.info(
+                    f"Agg regression: insufficient data "
+                    f"({self.regression.num_observations}/{self.regression.min_observations})"
                 )
                 continue
 
-            if not self.cached_load_metrics.recent:
+            max_num_batched_tokens = getattr(
+                self.planner.decode_worker_info, "max_num_batched_tokens", None
+            )
+            if not max_num_batched_tokens or max_num_batched_tokens <= 0:
+                logger.warning(
+                    "max_num_batched_tokens not available from WorkerInfo, "
+                    "skipping agg scaling"
+                )
                 continue
 
-            # Make scaling decisions separately for prefill and decode
-            p_decision = self._prefill_scaling_decision(num_workers)
-            d_decision = self._decode_scaling_decision(num_workers)
+            p_desired = self._prefill_scaling_decision(
+                fpm_stats, num_workers, max_num_batched_tokens
+            )
+            d_desired = self._decode_scaling_decision(fpm_stats, num_workers)
 
             logger.info(
-                f"Agg scaling decisions: prefill={p_decision}, decode={d_decision}"
+                f"Agg scaling decisions: prefill={p_desired}, decode={d_desired} "
+                f"(current={num_workers})"
             )
 
-            # Scale up if EITHER needs scale up
-            # Scale down if BOTH need scale down
-            if p_decision == "up" or d_decision == "up":
-                desired = num_workers + 1
-            elif p_decision == "down" and d_decision == "down":
-                desired = num_workers - 1
+            # Scale up if EITHER dimension wants more workers.
+            # Scale down only if BOTH dimensions agree on fewer.
+            if p_desired is not None and p_desired > num_workers:
+                desired = p_desired
+            elif d_desired is not None and d_desired > num_workers:
+                desired = d_desired
+            elif (
+                p_desired is not None
+                and p_desired < num_workers
+                and d_desired is not None
+                and d_desired < num_workers
+            ):
+                desired = max(p_desired, d_desired)
             else:
                 logger.info("Agg scaling: no scaling needed")
                 continue
@@ -322,13 +215,54 @@ class AggPlanner:
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
             if not self.config.no_operation:
+                pending_desired = desired
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,
-                        component_name=self.planner.decode_component_name,
+                        component_name=self.planner.decode_worker_info.k8s_name,
                         desired_replicas=desired,
                     )
                 ]
                 await self.planner.connector.set_component_replicas(
-                    target_replicas, blocking=True
+                    target_replicas, blocking=False
                 )
+
+    def _prefill_scaling_decision(
+        self,
+        fpm_stats: "dict[tuple[str, int], ForwardPassMetrics]",
+        num_workers: int,
+        max_num_batched_tokens: int,
+    ) -> Optional[int]:
+        """Returns desired replica count for the prefill (TTFT) dimension, or None."""
+        estimated_ttfts: list[float] = []
+        for (wid, dp), fpm in fpm_stats.items():
+            est = self.regression.estimate_next_ttft(
+                queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
+                max_num_batched_tokens=max_num_batched_tokens,
+                current_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
+            )
+            if est is not None:
+                estimated_ttfts.append(est * 1000)
+
+        return self.planner._load_based_scaling_decision_from_estimates(
+            estimated_ttfts, self.config.ttft, num_workers, "agg TTFT"
+        )
+
+    def _decode_scaling_decision(
+        self,
+        fpm_stats: "dict[tuple[str, int], ForwardPassMetrics]",
+        num_workers: int,
+    ) -> Optional[int]:
+        """Returns desired replica count for the decode (ITL) dimension, or None."""
+        estimated_itls: list[float] = []
+        for (wid, dp), fpm in fpm_stats.items():
+            est = self.regression.estimate_next_itl(
+                scheduled_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
+                queued_decode_kv=fpm.queued_requests.sum_decode_kv_tokens,
+            )
+            if est is not None:
+                estimated_itls.append(est * 1000)
+
+        return self.planner._load_based_scaling_decision_from_estimates(
+            estimated_itls, self.config.itl, num_workers, "agg ITL"
+        )

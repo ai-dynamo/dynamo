@@ -25,7 +25,8 @@ type CheckpointContainerSnapshot struct {
 	NetNSInode     uint64
 	StdioFDs       []string // readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]")
 	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup
-	CUDAPIDs       []int    // PIDs with CUDA state in the container
+	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
+	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
 	GPUUUIDs       []string // source GPU UUIDs from kubelet PodResources API
 }
 

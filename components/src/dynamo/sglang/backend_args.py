@@ -43,13 +43,6 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_SGL_MULTIMODAL_PROCESSOR",
-            default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--multimodal-encode-worker",
             env_var="DYN_SGL_MULTIMODAL_ENCODE_WORKER",
             default=False,
@@ -114,7 +107,6 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
-    multimodal_processor: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     embedding_transfer_mode: EmbeddingTransferMode
