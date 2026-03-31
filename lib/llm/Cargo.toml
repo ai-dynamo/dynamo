@@ -67,6 +67,7 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+foyer = { version = "0.22.3", features = ["serde"] }
 hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }

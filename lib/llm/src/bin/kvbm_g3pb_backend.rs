@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,15 +13,18 @@ use axum::{
     routing::{get, post},
 };
 use dynamo_llm::block_manager::distributed::{
-    G3pbError, G3pbFetchRequest, G3pbFetchResponse, G3pbHealthResponse, G3pbOfferRequest,
-    G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
-    G3pbStorageAgent,
+    FoyerG3pbPeerStorage, G3pbError, G3pbFetchRequest, G3pbFetchResponse, G3pbFoyerStorageConfig,
+    G3pbHealthResponse, G3pbOfferRequest, G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest,
+    G3pbQueryHit, G3pbQueryRequest, G3pbStorageAgent,
 };
 
 #[derive(Clone, Debug)]
 struct Args {
     listen: SocketAddr,
     worker_id: u64,
+    foyer_dir: Option<PathBuf>,
+    foyer_memory_bytes: usize,
+    foyer_disk_bytes: usize,
 }
 
 impl Default for Args {
@@ -28,6 +32,9 @@ impl Default for Args {
         Self {
             listen: "127.0.0.1:58080".parse().unwrap(),
             worker_id: 41,
+            foyer_dir: None,
+            foyer_memory_bytes: G3pbFoyerStorageConfig::DEFAULT_MEMORY_CAPACITY_BYTES,
+            foyer_disk_bytes: G3pbFoyerStorageConfig::DEFAULT_DISK_CAPACITY_BYTES,
         }
     }
 }
@@ -48,11 +55,30 @@ impl Args {
                         .context("missing value for --worker-id")?
                         .parse()?
                 }
+                "--foyer-dir" => {
+                    args.foyer_dir =
+                        Some(it.next().context("missing value for --foyer-dir")?.into())
+                }
+                "--foyer-memory-bytes" => {
+                    args.foyer_memory_bytes = it
+                        .next()
+                        .context("missing value for --foyer-memory-bytes")?
+                        .parse()?
+                }
+                "--foyer-disk-bytes" => {
+                    args.foyer_disk_bytes = it
+                        .next()
+                        .context("missing value for --foyer-disk-bytes")?
+                        .parse()?
+                }
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g3pb_backend
   --listen <addr>                 HTTP listen address (default 127.0.0.1:58080)
-  --worker-id <id>                backend worker id (default 41)"
+  --worker-id <id>                backend worker id (default 41)
+  --foyer-dir <path>              enable foyer-backed peer storage at this path
+  --foyer-memory-bytes <bytes>    foyer memory cache capacity
+  --foyer-disk-bytes <bytes>      foyer disk cache capacity"
                     );
                     std::process::exit(0);
                 }
@@ -136,6 +162,19 @@ async fn fetch_blocks(
 }
 
 async fn build_backend(args: &Args) -> Result<Arc<G3pbStorageAgent>> {
+    if let Some(dir) = &args.foyer_dir {
+        let mut config = G3pbFoyerStorageConfig::new(dir.clone());
+        config.name = format!("g3pb-peer-cache-{}", args.worker_id);
+        config.memory_capacity_bytes = args.foyer_memory_bytes;
+        config.disk_capacity_bytes = args.foyer_disk_bytes;
+
+        let storage = Arc::new(FoyerG3pbPeerStorage::new(config).await?);
+        return Ok(Arc::new(G3pbStorageAgent::new_with_storage(
+            args.worker_id,
+            storage,
+        )));
+    }
+
     Ok(Arc::new(G3pbStorageAgent::new(args.worker_id)))
 }
 

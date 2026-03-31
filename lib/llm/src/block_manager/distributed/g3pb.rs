@@ -4,10 +4,13 @@
 use crate::block_manager::WorkerID;
 use crate::tokens::{SequenceHash, compute_hash_v2};
 
+use anyhow::Result;
 use async_trait::async_trait;
+use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::RwLock;
 #[cfg(test)]
@@ -135,6 +138,12 @@ struct InMemoryG3pbEntry {
     payload: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct G3pbStoredBlock {
+    meta: G3pbPutBlock,
+    payload: Option<Vec<u8>>,
+}
+
 #[derive(Default)]
 pub struct InMemoryG3pbPeerStorage {
     blocks: RwLock<HashMap<SequenceHash, InMemoryG3pbEntry>>,
@@ -224,6 +233,170 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
                     };
                     blocks.push(G3pbTransferBlock {
                         meta: entry.meta.clone(),
+                        payload,
+                    });
+                }
+                None => missing.push(*sequence_hash),
+            }
+        }
+
+        if !missing.is_empty() {
+            return Err(G3pbError::NotFound {
+                worker_id,
+                sequence_hashes: missing,
+            });
+        }
+
+        Ok(blocks)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct G3pbFoyerStorageConfig {
+    pub dir: PathBuf,
+    pub memory_capacity_bytes: usize,
+    pub disk_capacity_bytes: usize,
+    pub name: String,
+}
+
+impl G3pbFoyerStorageConfig {
+    pub const DEFAULT_MEMORY_CAPACITY_BYTES: usize = 64 * 1024 * 1024;
+    pub const DEFAULT_DISK_CAPACITY_BYTES: usize = 256 * 1024 * 1024;
+
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            memory_capacity_bytes: Self::DEFAULT_MEMORY_CAPACITY_BYTES,
+            disk_capacity_bytes: Self::DEFAULT_DISK_CAPACITY_BYTES,
+            name: "g3pb-peer-cache".to_string(),
+        }
+    }
+}
+
+pub struct FoyerG3pbPeerStorage {
+    cache: HybridCache<SequenceHash, G3pbStoredBlock>,
+}
+
+impl FoyerG3pbPeerStorage {
+    pub async fn new(config: G3pbFoyerStorageConfig) -> Result<Self> {
+        tokio::fs::create_dir_all(&config.dir).await?;
+
+        let device = FsDeviceBuilder::new(Path::new(&config.dir))
+            .with_capacity(config.disk_capacity_bytes)
+            .build()?;
+
+        let cache = HybridCacheBuilder::new()
+            .with_name(config.name)
+            .memory(config.memory_capacity_bytes)
+            .storage()
+            .with_engine_config(BlockEngineConfig::new(device))
+            .build()
+            .await?;
+
+        Ok(Self { cache })
+    }
+
+    async fn get_stored_block(&self, sequence_hash: SequenceHash) -> Option<G3pbStoredBlock> {
+        match self.cache.get(&sequence_hash).await {
+            Ok(Some(entry)) => Some(entry.value().clone()),
+            Ok(None) | Err(_) => None,
+        }
+    }
+}
+
+#[async_trait]
+impl G3pbPeerStorage for FoyerG3pbPeerStorage {
+    async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) {
+        for block in blocks {
+            let payload = self
+                .get_stored_block(block.sequence_hash)
+                .await
+                .and_then(|entry| entry.payload);
+
+            self.cache.insert(
+                block.sequence_hash,
+                G3pbStoredBlock {
+                    meta: block,
+                    payload,
+                },
+            );
+        }
+    }
+
+    async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash> {
+        let mut accepted = Vec::new();
+        let mut seen = HashSet::new();
+
+        for block in blocks {
+            let sequence_hash = block.sequence_hash;
+            if !seen.insert(sequence_hash) {
+                continue;
+            }
+
+            if self.get_stored_block(sequence_hash).await.is_none() {
+                accepted.push(sequence_hash);
+            }
+        }
+
+        accepted
+    }
+
+    async fn put_payload_blocks(&self, blocks: Vec<G3pbTransferBlock>) -> Result<(), G3pbError> {
+        for block in blocks {
+            block.validate_payload_size()?;
+            self.cache.insert(
+                block.meta.sequence_hash,
+                G3pbStoredBlock {
+                    meta: block.meta.clone(),
+                    payload: Some(block.payload),
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn query_blocks(
+        &self,
+        worker_id: WorkerID,
+        sequence_hashes: &[SequenceHash],
+    ) -> Vec<G3pbQueryHit> {
+        let mut hits = Vec::new();
+
+        for sequence_hash in sequence_hashes {
+            let Some(entry) = self.get_stored_block(*sequence_hash).await else {
+                continue;
+            };
+
+            hits.push(G3pbQueryHit {
+                worker_id,
+                sequence_hash: *sequence_hash,
+                size_bytes: entry.meta.size_bytes,
+                checksum: entry.meta.checksum,
+            });
+        }
+
+        hits
+    }
+
+    async fn fetch_blocks(
+        &self,
+        worker_id: WorkerID,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
+        let mut missing = Vec::new();
+        let mut blocks = Vec::with_capacity(sequence_hashes.len());
+
+        for sequence_hash in sequence_hashes {
+            match self.get_stored_block(*sequence_hash).await {
+                Some(entry) => {
+                    let Some(payload) = entry.payload else {
+                        missing.push(*sequence_hash);
+                        continue;
+                    };
+
+                    blocks.push(G3pbTransferBlock {
+                        meta: entry.meta,
                         payload,
                     });
                 }
@@ -669,6 +842,8 @@ where
 mod tests {
     use super::*;
 
+    use anyhow::Result;
+    use tempfile::tempdir;
     use tokio::time::Instant;
 
     fn peers() -> Vec<G3pbPeer> {
@@ -1089,5 +1264,39 @@ mod tests {
             G3pbStorageClient::new(peer_list, HashMap::from_iter([(owner.worker_id, agent)]));
         let fetched = client.fetch_blocks(&[1234]).await;
         assert!(fetched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn foyer_storage_supports_agent_query_and_fetch() -> Result<()> {
+        let dir = tempdir()?;
+        let mut config = G3pbFoyerStorageConfig::new(dir.path());
+        config.name = "g3pb-foyer-test".to_string();
+        config.memory_capacity_bytes = 1024 * 1024;
+        config.disk_capacity_bytes = 8 * 1024 * 1024;
+
+        let storage = Arc::new(FoyerG3pbPeerStorage::new(config).await?);
+        let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
+        agent
+            .offer_and_put_payload_blocks(vec![G3pbTransferBlock {
+                meta: G3pbPutBlock {
+                    sequence_hash: 9001,
+                    size_bytes: 4,
+                    checksum: Some([7; 32]),
+                },
+                payload: vec![1, 2, 3, 4],
+            }])
+            .await?;
+
+        let hits = agent.query_blocks(&[9001]).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].worker_id, 77);
+        assert_eq!(hits[0].checksum, Some([7; 32]));
+
+        let fetched = agent.fetch_blocks(&[9001]).await?;
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].meta.sequence_hash, 9001);
+        assert_eq!(fetched[0].payload, vec![1, 2, 3, 4]);
+
+        Ok(())
     }
 }
