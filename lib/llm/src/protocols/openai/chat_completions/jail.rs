@@ -495,8 +495,9 @@ impl JailedStream {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         let jail_mode = self.jail_mode.clone();
+        let named_tool_active = self.named_tool_name.is_some();
         let jailed_stream = self.apply(stream);
-        JailedStream::fix_finish_reason(jailed_stream, jail_mode)
+        JailedStream::fix_finish_reason(jailed_stream, jail_mode, named_tool_active)
     }
 
     /// Apply the jail transformation to a stream of chat completion responses
@@ -1038,6 +1039,7 @@ impl JailedStream {
     fn fix_finish_reason<S>(
         input_stream: S,
         jail_mode: JailMode,
+        named_tool_active: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1066,10 +1068,10 @@ impl JailedStream {
 
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
-                                        // Traditional: if tool calls emitted, change to ToolCalls
-                                        if has_tool_calls {
+                                        if has_tool_calls && !named_tool_active {
                                             choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
+                                        // When named_tool_active, keep Stop (OpenAI spec for tool_choice=named)
                                     }
                                     JailMode::Immediate { format } => {
                                         // tool_choice mode: apply specific finish_reason logic
