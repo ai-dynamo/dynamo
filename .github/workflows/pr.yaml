@@ -190,7 +190,7 @@ jobs:
       builder_flavor: general
       target: planner
       platform: 'linux/amd64'
-      cuda_version: '12.9'
+      cpu_only: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
       run_cpu_only_tests: true
