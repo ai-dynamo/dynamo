@@ -68,18 +68,22 @@ fn test_memory_descriptor() {
 #[cfg(feature = "testing-cuda")]
 mod cuda_tests {
     use super::*;
+    use crate::block_manager::v2::device::{DeviceBackend, DeviceContext};
+    use std::sync::Arc;
 
     #[test]
     fn test_pinned_storage() {
-        let storage = PinnedStorage::new(2048).unwrap();
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap());
+        let storage = PinnedStorage::new(2048, ctx).unwrap();
         assert_eq!(storage.size(), 2048);
         assert_eq!(storage.storage_kind(), StorageKind::Pinned);
-        assert!(storage.addr() != 0);
+        assert!(storage.host_ptr() != 0);
     }
 
     #[test]
     fn test_pinned_storage_zero_size() {
-        let storage = PinnedStorage::new(0);
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap());
+        let storage = PinnedStorage::new(0, ctx);
         assert!(storage.is_err());
         assert!(matches!(
             storage.unwrap_err(),
@@ -89,16 +93,18 @@ mod cuda_tests {
 
     #[test]
     fn test_device_storage() {
-        let storage = DeviceStorage::new(4096, 0).unwrap();
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap());
+        let storage = DeviceStorage::new(4096, ctx).unwrap();
         assert_eq!(storage.size(), 4096);
         assert_eq!(storage.storage_kind(), StorageKind::Device(0));
-        assert!(storage.addr() != 0);
+        assert!(storage.device_ptr() != 0);
         assert_eq!(storage.device_id(), 0);
     }
 
     #[test]
     fn test_device_storage_zero_size() {
-        let result = DeviceStorage::new(0, 0);
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap());
+        let result = DeviceStorage::new(0, ctx);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -110,13 +116,73 @@ mod cuda_tests {
 #[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 mod nixl_tests {
     use super::*;
+    use crate::block_manager::v2::device::{DeviceBackend, DeviceContext};
     use nixl_sys::Agent as NixlAgent;
+    use std::sync::Arc;
 
     #[test]
     fn test_nixl_registration() {
-        let pinned = PinnedStorage::new(2048).unwrap();
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap());
+        let pinned = PinnedStorage::new(2048, ctx).unwrap();
         let agent = NixlAgent::new("test_agent").unwrap();
         let registered = register_with_nixl(pinned, &agent, None).unwrap();
         assert_eq!(registered.agent_name(), "test_agent");
+    }
+}
+
+#[cfg(feature = "hpu")]
+mod hpu_tests {
+    use super::*;
+    use crate::block_manager::v2::device::{DeviceBackend, DeviceContext};
+    use std::sync::Arc;
+
+    fn is_hpu_available() -> bool {
+        DeviceBackend::Hpu.is_available()
+    }
+
+    #[test]
+    fn test_hpu_pinned_storage() {
+        if !is_hpu_available() {
+            println!("Skipping test: HPU not available");
+            return;
+        }
+
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Hpu, 0).unwrap());
+        let storage = PinnedStorage::new(2048, ctx).unwrap();
+        assert_eq!(storage.size(), 2048);
+        assert_eq!(storage.storage_kind(), StorageKind::Pinned);
+        assert!(storage.host_ptr() != 0);
+    }
+
+    #[test]
+    fn test_hpu_device_storage() {
+        if !is_hpu_available() {
+            println!("Skipping test: HPU not available");
+            return;
+        }
+
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Hpu, 0).unwrap());
+        let storage = DeviceStorage::new(4096, ctx).unwrap();
+        assert_eq!(storage.size(), 4096);
+        assert_eq!(storage.storage_kind(), StorageKind::Device(0));
+        assert!(storage.device_ptr() != 0);
+        assert_eq!(storage.device_id(), 0);
+        assert_eq!(storage.backend(), DeviceBackend::Hpu);
+    }
+
+    #[test]
+    fn test_hpu_device_storage_zero_size() {
+        if !is_hpu_available() {
+            println!("Skipping test: HPU not available");
+            return;
+        }
+
+        let ctx = Arc::new(DeviceContext::new(DeviceBackend::Hpu, 0).unwrap());
+        let result = DeviceStorage::new(0, ctx);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            StorageError::AllocationFailed(_)
+        ));
     }
 }
