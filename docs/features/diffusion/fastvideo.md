@@ -293,7 +293,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `dynamo.fastvideo` reads this as the default for `--attention-backend` and then exports the resolved value to FastVideo |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
 | `FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT` | `0` | Preserved FastVideo toggle for pre-quantized RMSNorm behavior |
-| `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` to default Dynamo logging to debug when `DYN_LOG` is unset |
+| `FASTVIDEO_LOG_LEVEL` | — | FastVideo-specific log level override; when unset, `dynamo.fastvideo` derives it from `DYN_LOG` |
 
 ## Troubleshooting
 

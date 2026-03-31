@@ -20,11 +20,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from .args import parse_fastvideo_args
 from .backend import FastVideoHandler, register_fastvideo_model
 
-# TODO: See how other backends handle this but I think FastVideoLogLevel should rather be set from DYN_LOG and not the other way around.
-if "DYN_LOG" not in os.environ:
-    fastvideo_log_level = os.environ.get("FASTVIDEO_LOG_LEVEL")
-    if fastvideo_log_level:
-        os.environ["DYN_LOG"] = fastvideo_log_level.lower()
+if "FASTVIDEO_LOG_LEVEL" not in os.environ:
+    if dyn_log_level := os.environ.get("DYN_LOG"):
+        os.environ["FASTVIDEO_LOG_LEVEL"] = dyn_log_level.upper()
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
