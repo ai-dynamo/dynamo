@@ -71,6 +71,8 @@ flowchart TB
 | `backend-policy.yaml` | GCPBackendPolicy | Backend timeout 300s for both pools (default 30s is too short for inference) |
 | `epp-configmap-patch.yaml` | ConfigMap | EPP plugin config with `dyn-decode-scorer`, `label-filter`, `max-score-picker`, and scheduling profiles |
 | `perf-pod.yaml` | Pod | Standalone pod for running `aiperf` benchmarks |
+| `cloudbuild.yaml` | Cloud Build config | Builds the custom EPP image via GCP Cloud Build |
+| `Dockerfile.epp-cloudbuild` | Dockerfile | 3-stage build: Rust FFI lib, Go EPP binary, minimal runtime |
 
 ---
 
@@ -116,38 +118,25 @@ The `dynamo-frontend:1.0.0` EPP image does not include a recent fix for the `dyn
 
 ## Building the Custom EPP Image
 
-### Option 1: GCP Cloud Build (recommended)
+This folder includes `cloudbuild.yaml` and `Dockerfile.epp-cloudbuild` for building the EPP image with GCP Cloud Build. The Dockerfile is a 3-stage build: Rust FFI library, Go EPP binary, and a minimal runtime image.
 
 ```bash
 git clone --depth 1 https://github.com/ai-dynamo/dynamo.git
 cd dynamo
 
+# Copy the Cloud Build files into the repo root
+cp /path/to/gaie/cloudbuild.yaml .
+cp /path/to/gaie/Dockerfile.epp-cloudbuild .
+
 gcloud builds submit \
-  --config=deploy/inference-gateway/epp/cloudbuild.yaml \
-  --substitutions=_EPP_IMAGE=REGION-docker.pkg.dev/<PROJECT>/<REPO>/dynamo-epp:latest \
-  --timeout=3600s \
-  --region=REGION \
-  --machine-type=e2-highcpu-32
+  --config=cloudbuild.yaml \
+  --substitutions=_EPP_IMAGE=REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest \
+  --region=REGION
 ```
 
 Set `REGION` to your Artifact Registry location and Cloud Build region (for example `asia-southeast1` or `us-central1`). The hostname prefix must match: `REGION-docker.pkg.dev/...`.
 
-### Option 2: Custom Dockerfile with Cloud Build
-
-If the upstream `cloudbuild.yaml` path is not available, use the workspace-local config:
-
-```bash
-cd /path/to/dynamo  # root of your ai-dynamo/dynamo clone
-
-gcloud builds submit \
-  --config=cloudbuild.yaml \
-  --timeout=3600s \
-  --region=REGION
-```
-
-This builds from `Dockerfile.epp-cloudbuild` and pushes to your Artifact Registry (for example `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest`).
-
-Update the EPP image in `dgd.yaml` and `dgd-disagg.yaml` under `services.Epp.extraPodSpec.mainContainer.image`.
+After the build completes, update the EPP image in `dgd.yaml` and `dgd-disagg.yaml` under `services.Epp.extraPodSpec.mainContainer.image`.
 
 ---
 
@@ -316,17 +305,13 @@ Update `--artifact-dir` to reflect the concurrency level (e.g., `concurrency_50`
 
 ## Key Design Decisions
 
-### Frontend Sidecar Workaround
-
-The Dynamo operator 1.0.0 CRD does not support the `frontendSidecar` field (available in newer versions). The frontend sidecar is injected manually via `extraPodSpec.containers` with explicit Dynamo discovery env vars (`DYN_DISCOVERY_BACKEND=kubernetes`, `DYN_NAMESPACE_PREFIX`, etc.).
-
 ### InferencePool v1 Bridge
 
 The Dynamo operator creates an **alpha** InferencePool (`inference.networking.x-k8s.io`). GKE Gateway watches **v1** InferencePool (`inference.networking.k8s.io`). The operator auto-creates a v1 InferencePool with `extensionRef` pointing to the EPP Service. Both API groups coexist.
 
 ### Double Tokenization Overhead
 
-The EPP tokenizes the prompt to compute KV-cache routing scores, then the frontend sidecar re-tokenizes the same prompt for inference. This adds ~170ms to TTFT at low concurrency (amortized at higher concurrency).
+The EPP tokenizes the prompt to compute KV-cache routing scores, then the frontend sidecar re-tokenizes the same prompt for inference. This adds to TTFT at low concurrency (amortized at higher concurrency).
 
 **Future fix**: GAIE v1.5 introduces a Pluggable Parser Framework ([PR #2359](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/2359)) that allows the EPP to directly mutate the request body, injecting `nvext.token_data` to skip re-tokenization.
 
