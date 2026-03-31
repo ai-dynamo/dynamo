@@ -2,84 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::mem::ManuallyDrop;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use dynamo_llm::block_manager::KvBlockManager;
 use dynamo_llm::block_manager::Storage;
-use dynamo_llm::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
 use dynamo_llm::block_manager::block::{
     BasicMetadata, BlockDataProvider, BlockDataProviderMut, MutableBlock, data::BlockDataExt,
     locality::LocalityProvider,
 };
 use dynamo_llm::block_manager::config::{
-    BlockParallelismStrategy, KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig,
-    KvManagerRuntimeConfig,
+    KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
     G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
-    G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker, G4TransferBlock, KvbmLeader,
-    KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
+    G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker, G4TransferBlock,
     route_g4_put_blocks_by_owner, route_g4_sequence_hashes_by_owner,
     route_g4_transfer_blocks_by_owner, select_g4_owner,
 };
-use dynamo_llm::block_manager::locality::Logical;
-use dynamo_llm::block_manager::storage::{
-    DeviceAllocator, PinnedStorage, StorageAllocator,
-    torch::{TorchDevice, TorchTensor},
-};
+use dynamo_llm::block_manager::locality::Local;
+use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, PinnedStorage};
 use futures::future::join_all;
 use reqwest::Client;
 use tokio_util::sync::CancellationToken;
-
-#[derive(Clone, Debug)]
-struct MockTensor {
-    ptr: u64,
-    size: usize,
-    shape: Vec<usize>,
-}
-
-impl MockTensor {
-    fn new(shape: Vec<usize>, device_id: usize, dtype_width_bytes: usize) -> Result<Self> {
-        let allocator = DeviceAllocator::new(device_id)?;
-        let size = shape.iter().product::<usize>() * dtype_width_bytes;
-        let device_storage = ManuallyDrop::new(allocator.allocate(size)?);
-
-        Ok(Self {
-            ptr: device_storage.addr(),
-            size,
-            shape,
-        })
-    }
-}
-
-impl TorchTensor for MockTensor {
-    fn device(&self) -> TorchDevice {
-        TorchDevice::Cuda(0)
-    }
-
-    fn data_ptr(&self) -> u64 {
-        self.ptr
-    }
-
-    fn size_bytes(&self) -> usize {
-        self.size
-    }
-
-    fn shape(&self) -> Vec<usize> {
-        self.shape.clone()
-    }
-
-    fn stride(&self) -> Vec<usize> {
-        let mut stride = vec![1];
-        for i in (0..self.shape.len() - 1).rev() {
-            stride.push(stride.last().unwrap() * self.shape[i]);
-        }
-        stride.reverse();
-        stride
-    }
-}
 
 #[derive(Clone, Debug)]
 struct Args {
@@ -97,7 +41,7 @@ struct Args {
     count: usize,
 }
 
-type LocalBlockManager = KvBlockManager<Logical<DistributedLeaderWorkerResources>, BasicMetadata>;
+type LocalBlockManager = KvBlockManager<Local, BasicMetadata>;
 
 #[derive(Clone, Debug)]
 struct DemoBlock {
@@ -358,51 +302,14 @@ async fn prepare_demo_blocks(
     Ok(demo_blocks)
 }
 
-async fn build_local_runtime(
-    args: &Args,
-) -> Result<(Arc<KvbmLeader>, KvbmWorker, LocalBlockManager)> {
-    let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
-    let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
-        shape,
-        args.device_id,
-        args.dtype_width_bytes,
-    )?)];
-
-    let worker_config = KvbmWorkerConfig::builder()
-        .cancel_token(CancellationToken::new())
-        .num_device_blocks(args.num_device_blocks)
-        .page_size(args.page_size)
-        .dtype_width_bytes(args.dtype_width_bytes)
-        .device_id(args.device_id)
-        .tensors(tensors)
-        .leader_pub_url(args.leader_pub_url.clone())
-        .leader_ack_url(args.leader_ack_url.clone())
-        .build()?;
-
-    let worker = KvbmWorker::new(worker_config, false).await?;
-
-    let leader_config = KvbmLeaderConfig::builder()
-        .world_size(1)
-        .leader_pub_url(args.leader_pub_url.clone())
-        .leader_ack_url(args.leader_ack_url.clone())
-        .host_blocks_config(KvbmLeaderNumBlocksConfig {
-            cache_size_in_gb: 0.0,
-            num_blocks_overriden: args.host_blocks,
-        })
-        .disk_blocks_config(KvbmLeaderNumBlocksConfig {
-            cache_size_in_gb: 0.0,
-            num_blocks_overriden: args.disk_blocks,
-        })
-        .build()?;
-
-    let leader = Arc::new(KvbmLeader::new(leader_config).await?);
-
+async fn build_local_runtime(args: &Args) -> Result<LocalBlockManager> {
     let cancel_token = CancellationToken::new();
-    let block_manager_config = KvBlockManagerConfig::builder()
+    let mut block_manager_config = KvBlockManagerConfig::builder()
         .runtime(
             KvManagerRuntimeConfig::builder()
                 .worker_id(args.worker_id)
                 .cancellation_token(cancel_token.clone())
+                .disable_nixl()
                 .build()?,
         )
         .model(
@@ -417,34 +324,27 @@ async fn build_local_runtime(
         .device_layout(
             KvManagerLayoutConfig::builder()
                 .num_blocks(args.num_device_blocks)
-                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                .allocator(DeviceAllocator::new(args.device_id)?)
                 .build()?,
-        )
-        .host_layout(
+        );
+
+    if args.host_blocks > 0 {
+        block_manager_config = block_manager_config.host_layout(
             KvManagerLayoutConfig::builder()
                 .num_blocks(args.host_blocks)
-                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                .allocator(PinnedAllocator::new(args.device_id)?)
                 .build()?,
-        )
-        .disk_layout(
-            KvManagerLayoutConfig::builder()
-                .num_blocks(args.disk_blocks)
-                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                .build()?,
-        )
-        .build()?;
+        );
+    }
 
-    let resources =
-        DistributedLeaderWorkerResources::new(Some(leader.clone()), cancel_token.child_token())?;
-    let block_manager = LocalBlockManager::new(block_manager_config, resources).await?;
-
-    Ok((leader, worker, block_manager))
+    let block_manager_config = block_manager_config.build()?;
+    LocalBlockManager::new(block_manager_config).await
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse()?;
-    let (_leader, _worker, block_manager) = build_local_runtime(&args).await?;
+    let block_manager = build_local_runtime(&args).await?;
     println!(
         "local worker ready: worker_id={} device_blocks={} host_blocks={}",
         block_manager.worker_id(),

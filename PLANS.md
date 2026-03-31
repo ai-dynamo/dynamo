@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:33:30 UTC
+Last updated: 2026-03-31 19:39:55 UTC
 
 Current in-progress run (2026-03-31 19:28:47 UTC):
 - Mandatory context re-read completed in this run:
@@ -13,9 +13,12 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
 - Current branch baseline observed in this run:
-  - detached `HEAD` at `2792612b5` (`Refresh G4 plan handoff`)
-  - inherited local modification in `PLANS.md` from the prior handoff refresh;
-    preserving and extending it in this run rather than resetting it
+  - started this run detached at `2792612b5` (`Refresh G4 plan handoff`)
+  - current detached `HEAD` after the first milestone commit is `0680163fd`
+    (`Add local G4 smoke onboard path`)
+  - worktree is currently dirty only in
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs` for the follow-up portability
+    cleanup described below
 - Current implementation slice for this run:
   - make `kvbm_g4_worker_smoke` build a real local `KvBlockManager` so fetched
     remote hits can be registered into host blocks and onboarded into device
@@ -36,15 +39,17 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     routing, but they block truthful local registration because KVBM registration
     keys come from token-derived sequence hashes
 - In-progress edits:
-  - `PLANS.md`
-    - refreshed the top-of-file handoff so this run tracks the actual current
-      detached `HEAD` and the new `query -> fetch -> onboard` smoke milestone
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
     - rewired the smoke binary around a real local `KvBlockManager`
     - switched demo block generation from fake monotonic hashes to
       token-derived `sequence_hash` values
     - added local host registration plus `onboard_blocks(...)` after remote
       fetch so the smoke path now validates actual local KVBM reuse entry
+    - follow-up cleanup in progress:
+      replaced the local distributed leader/worker-backed block manager with a
+      plain local `KvBlockManager<Local, ...>` using explicit device/host
+      allocators and `disable_nixl()` so live smoke validation does not depend
+      on the extra distributed transport path
 - Milestones completed in this run:
   - local smoke `query -> fetch -> onboard` milestone
     - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
@@ -56,6 +61,13 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     - fetched remote hits are now written into local host blocks, registered by
       `sequence_hash`, and onboarded into the local device pool before the
       smoke binary declares success
+  - portability cleanup after the first commit
+    - moved the smoke binary's local onboard validation off the distributed
+      leader/worker logical runtime and onto a plain local block manager with
+      explicit device/host allocators
+    - dropped the accidental local disk-layout dependency from the smoke
+      validation path; local disk is not required for `query -> fetch -> onboard`
+      validation in this binary
 - Validation completed so far in this run:
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
     -> pass
@@ -63,19 +75,40 @@ Current in-progress run (2026-03-31 19:28:47 UTC):
     -> pass
   - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
     -> pass (`18 passed`)
+  - `git diff --check`
+    -> pass before commit `0680163fd`
+  - live backend check:
+    `target/debug/kvbm_g4_backend --listen 127.0.0.1:58181 --leader-pub-url tcp://127.0.0.1:56191 --leader-ack-url tcp://127.0.0.1:56192 --disk-blocks 0`
+    -> partial pass:
+    `/health` responded with `{"worker_id":41,"listen":"127.0.0.1:58181"}`
+    but process emitted `registerMem: no available backends for mem type 'VRAM_SEG'`
+  - live smoke run against that backend:
+    `target/debug/kvbm_g4_worker_smoke --backend-url http://127.0.0.1:58181 --disk-blocks 0`
+    -> fail in this environment:
+    emitted `registerMem: no available backends for mem type 'VRAM_SEG'`
+    then aborted in `cufile_worker_thread.h:57`
 - Exact next file or command to touch:
   - file:
-    `PLANS.md`
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - next commands:
-    `git commit --signoff -am "Add local G4 smoke onboard path"`
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
   - then:
-    start one or more `kvbm_g4_backend` processes for manual smoke validation
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_worker_smoke`
   - then:
-    run `kvbm_g4_worker_smoke` against those backend URLs
+    `git commit --signoff -am "Make G4 smoke local onboard runtime self-contained"`
+  - then:
+    if the next machine supports the required GPU/NIXL/CUFile runtime, rerun:
+    `target/debug/kvbm_g4_backend --listen 127.0.0.1:58181 --leader-pub-url tcp://127.0.0.1:56191 --leader-ack-url tcp://127.0.0.1:56192 --disk-blocks 0`
+  - then:
+    `target/debug/kvbm_g4_worker_smoke --backend-url http://127.0.0.1:58181 --disk-blocks 0`
 - Remaining work after this run:
-  - make a small signed commit for the completed local onboard milestone
-  - run the updated smoke binary end-to-end against live local backend process
-    or processes so the new onboard path is validated outside compile/test only
+  - commit the portability cleanup now in the worktree
+  - live end-to-end smoke validation remains blocked by this environment's
+    GPU/NIXL/CUFile stack, not by the Rust compile/test surface
+  - once runtime support exists, verify whether the remaining `VRAM_SEG` /
+    `cufile_worker_thread` abort comes from the backend, the local device
+    allocator path, or a broader host capability gap before claiming runtime
+    completion
   - after that, re-read the plan again and choose the next smallest follow-up
     between stronger smoke validation, docs alignment, or runtime wiring
 
