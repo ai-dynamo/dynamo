@@ -16,8 +16,12 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.25
-ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
-ARG CRIU_COMMIT=777baaf27f6a76f743c9bf24b64886297dc0129b
+# Default to upstream CRIU development branch. Custom forks can override both
+# args at build time, for example:
+#   --build-arg CRIU_REPO=https://github.com/galletas1712/criu.git
+#   --build-arg CRIU_COMMIT=<fork-branch-or-sha>
+ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+ARG CRIU_COMMIT=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
