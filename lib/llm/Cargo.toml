@@ -207,3 +207,8 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
+
+[[bin]]
+name = "test_hpu_standalone_v2"
+path = "bin/test_hpu_standalone_v2.rs"
+required-features = ["block-manager-bench", "hpu"]

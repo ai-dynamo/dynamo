@@ -13,8 +13,25 @@ use crate::block_manager::v2::memory::{
 use crate::block_manager::v2::physical::layout::physical::PhysicalLayout;
 use crate::block_manager::v2::physical::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
+use crate::block_manager::v2::device::DeviceBackend;
 use std::any::Any;
 use std::sync::Arc;
+
+// Helper for tests: auto-detect backend or use CUDA as fallback
+fn get_test_backend() -> (DeviceBackend, u32) {
+    match DeviceBackend::auto_detect() {
+        Ok(backend) => (backend, 0),
+        Err(_) => {
+            // Fallback for tests without hardware
+            #[cfg(feature = "cuda")]
+            return (DeviceBackend::Cuda, 0);
+            #[cfg(all(not(feature = "cuda"), feature = "hpu"))]
+            return (DeviceBackend::Hpu, 0);
+            #[cfg(all(not(feature = "cuda"), not(feature = "hpu"), feature = "xpu"))]
+            return (DeviceBackend::Ze, 0);
+        }
+    }
+}
 
 // Simple mock implementation for testing
 #[derive(Debug)]
@@ -111,6 +128,7 @@ fn test_fully_contiguous_layout_serialization_roundtrip() {
     let agent = NixlAgent::require_backends("test-fc-serialize", &[])
         .expect("failed to create wrapped agent");
     let config = make_test_config();
+    let (backend, device_id) = get_test_backend();
 
     // Calculate required size
     let required_size = config.num_blocks
@@ -125,7 +143,7 @@ fn test_fully_contiguous_layout_serialization_roundtrip() {
     let regions = vec![memory as OwnedMemoryRegion];
 
     // Build physical layout
-    let original_layout = PhysicalLayout::builder(agent)
+    let original_layout = PhysicalLayout::builder(agent, backend, device_id)
         .with_config(config.clone())
         .fully_contiguous()
         .with_registered_regions(regions)
@@ -180,6 +198,7 @@ fn test_layer_separate_layout_serialization_roundtrip() {
     let agent = NixlAgent::require_backends("test-ls-serialize", &[])
         .expect("failed to create wrapped agent");
     let config = make_test_config();
+    let (backend, device_id) = get_test_backend();
 
     // Calculate per-layer size
     let per_layer_size = config.num_blocks
@@ -200,7 +219,7 @@ fn test_layer_separate_layout_serialization_roundtrip() {
         .collect();
 
     // Build physical layout
-    let original_layout = PhysicalLayout::builder(agent)
+    let original_layout = PhysicalLayout::builder(agent, backend, device_id)
         .with_config(config.clone())
         .layer_separate(BlockDimension::BlockIsFirstDim)
         .with_registered_regions(regions)
@@ -266,6 +285,7 @@ fn test_memory_region_calculation_after_deserialization() {
         .dtype_width_bytes(2)
         .build()
         .unwrap();
+    let (backend, device_id) = get_test_backend();
 
     let required_size = config.num_blocks
         * config.num_layers
@@ -277,7 +297,7 @@ fn test_memory_region_calculation_after_deserialization() {
     let memory = TestMemoryRegion::new(0x1000, required_size, StorageKind::System);
     let regions = vec![memory as OwnedMemoryRegion];
 
-    let original_layout = PhysicalLayout::builder(agent)
+    let original_layout = PhysicalLayout::builder(agent, backend, device_id)
         .with_config(config.clone())
         .fully_contiguous()
         .with_registered_regions(regions)
