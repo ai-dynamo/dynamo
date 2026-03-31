@@ -68,8 +68,17 @@ func BuildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	if len(podTemplate.Spec.Containers) > 0 {
-		mainContainer := &podTemplate.Spec.Containers[0]
+	var mainContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == consts.MainContainerName {
+			mainContainer = &podTemplate.Spec.Containers[i]
+			break
+		}
+	}
+	if mainContainer == nil && len(podTemplate.Spec.Containers) > 0 {
+		mainContainer = &podTemplate.Spec.Containers[0]
+	}
+	if mainContainer != nil {
 		mainContainer.Env = dynamo.MergeEnvs(
 			buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 			mainContainer.Env,
@@ -101,8 +110,8 @@ func BuildCheckpointJob(
 	}
 
 	wrapLaunchJob := false
-	if len(podTemplate.Spec.Containers) != 0 {
-		if gpus, ok := podTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
+	if mainContainer != nil {
+		if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
 			wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
 		}
 	}

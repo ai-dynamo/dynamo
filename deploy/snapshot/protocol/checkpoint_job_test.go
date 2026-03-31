@@ -86,3 +86,48 @@ func TestNewCheckpointJob(t *testing.T) {
 		t.Fatalf("unexpected ttlSecondsAfterFinished: %#v", job.Spec.TTLSecondsAfterFinished)
 	}
 }
+
+func TestNewCheckpointJobPrefersMainContainerForLaunchWrapper(t *testing.T) {
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "sidecar",
+					Image:   "sidecar:latest",
+					Command: []string{"sleep", "3600"},
+				},
+				{
+					Name:    "main",
+					Image:   "test:latest",
+					Command: []string{"python3", "-m", "dynamo.vllm"},
+					Args:    []string{"--model", "Qwen"},
+				},
+			},
+		},
+	}, CheckpointJobOptions{
+		Namespace:       "test-ns",
+		CheckpointID:    "hash",
+		ArtifactVersion: "2",
+		Name:            "test-job",
+		WrapLaunchJob:   true,
+	})
+	if err != nil {
+		t.Fatalf("expected checkpoint job, got error: %v", err)
+	}
+
+	if job.Spec.Template.Spec.Containers[0].Command[0] != "sleep" {
+		t.Fatalf("expected sidecar command to be preserved, got %#v", job.Spec.Template.Spec.Containers[0].Command)
+	}
+	if len(job.Spec.Template.Spec.Containers[1].Command) != 1 || job.Spec.Template.Spec.Containers[1].Command[0] != "cuda-checkpoint" {
+		t.Fatalf("expected main container to be wrapped, got %#v", job.Spec.Template.Spec.Containers[1].Command)
+	}
+	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
+	if len(job.Spec.Template.Spec.Containers[1].Args) != len(expectedArgs) {
+		t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, job.Spec.Template.Spec.Containers[1].Args)
+	}
+	for i := range expectedArgs {
+		if job.Spec.Template.Spec.Containers[1].Args[i] != expectedArgs[i] {
+			t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, job.Spec.Template.Spec.Containers[1].Args)
+		}
+	}
+}
