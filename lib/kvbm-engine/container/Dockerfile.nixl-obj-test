@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builds NIXL 0.10.0 (POSIX + OBJ backends) and compiles the full
+# kvbm-engine test suite. No GPU required — SystemStorage (malloc)
+# is used for DRAM, and the OBJ backend writes to S3-compatible storage.
+#
+# UCX is not built; the OBJ backend reads DRAM buffers directly for
+# single-agent local transfers (no RDMA needed). Tests that require
+# UCX/RDMA are expected to be skipped or fail.
+#
+# Build (from repo root):
+#   docker build -f lib/kvbm-engine/container/Dockerfile.nixl-obj-test \
+#     -t kvbm-nixl-obj-test .
+#
+# Run via docker compose:
+#   bash lib/kvbm-engine/scripts/test-nixl-obj.sh
+
+# ── Stage 1: build dependencies (AWS SDK C++, NIXL) ──────────────────────────
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS nixl-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git cmake ninja-build python3-pip python3-dev \
+    pkg-config autoconf automake libtool \
+    libssl-dev zlib1g-dev libcurl4-openssl-dev curl ca-certificates \
+    protobuf-compiler libclang-dev libasio-dev \
+    && pip3 install --no-cache-dir meson pybind11 \
+    && rm -rf /var/lib/apt/lists/*
+
+# AWS SDK C++ — S3 component only (required for NIXL OBJ backend).
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN git clone --recurse-submodules --depth 1 \
+        --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    cmake -S /tmp/aws-sdk-cpp -B /tmp/aws-sdk-cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3;s3-crt" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON \
+    && cmake --build /tmp/aws-sdk-cpp/build -j$(nproc) \
+    && cmake --install /tmp/aws-sdk-cpp/build \
+    && ldconfig \
+    && rm -rf /tmp/aws-sdk-cpp
+
+# NIXL 0.10.0 — OBJ plugin only; GDS (GPU Direct Storage) and UCX disabled.
+ARG NIXL_REF=0.10.0
+RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl && \
+    cd /tmp/nixl && git checkout ${NIXL_REF} && \
+    meson setup /tmp/nixl/build /tmp/nixl \
+        --prefix=/opt/nvidia/nvda_nixl \
+        --buildtype=release \
+        -Dcudapath_inc=/usr/local/cuda/include \
+        -Dcudapath_lib=/usr/local/cuda/lib64 \
+        -Ddisable_gds_backend=true \
+        -Denable_plugins=POSIX,OBJ \
+    && ninja -C /tmp/nixl/build \
+    && ninja -C /tmp/nixl/build install \
+    && rm -rf /tmp/nixl
+
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+# On Ubuntu multiarch, meson installs libs to lib/x86_64-linux-gnu/ not lib64/.
+# Register all NIXL .so directories with ldconfig and export NIXL_PLUGIN_DIR so
+# the NIXL plugin manager can find the OBJ plugin at runtime.
+RUN find /opt/nvidia/nvda_nixl -name '*.so*' -printf '%h\n' | sort -u \
+        > /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
+    NIXL_PLUGIN_DIR=$(find /opt/nvidia/nvda_nixl -name '*nixl_plugin*' -printf '%h\n' 2>/dev/null | sort -u | head -1) && \
+    echo "Detected NIXL_PLUGIN_DIR: ${NIXL_PLUGIN_DIR}" && \
+    echo "NIXL_PLUGIN_DIR=${NIXL_PLUGIN_DIR}" >> /etc/environment
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
+
+# ── Stage 2: Rust toolchain + test binary ────────────────────────────────────
+FROM nixl-build AS test-runner
+
+# Install Rust (stable, same channel used by the workspace).
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --no-modify-path
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy the full workspace source.
+WORKDIR /workspace
+COPY . .
+
+# Pre-compile both test suites — fail hard if NIXL headers are not found.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_NO_STUBS_FALLBACK=1
+RUN cargo test -p kvbm-engine --features testing --no-run 2>&1 | tail -3
+RUN cargo test -p kvbm-engine --features testing-nixl-obj --no-run 2>&1 | tail -3
+
+# Default command: run the full test suite with all NIXL features enabled.
+# testing-nixl-obj is a superset of testing-s3 and testing, so this covers
+# all unit tests plus the NIXL OBJ and S3 integration tests.
+CMD ["cargo", "test", "-p", "kvbm-engine", "--features", "testing-nixl-obj", \
+     "--", "--nocapture"]
