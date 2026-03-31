@@ -378,6 +378,132 @@ class TestHandleCancellationAbortToggle:
         generation_result.abort.assert_not_called()
 
 
+class TestFirstTokenEventGuard:
+    """Tests for the first_token_event guard in disaggregated decode cancellation.
+
+    NVBugs 5969206: In disaggregated serving, decode abort must be delayed until
+    the first token is received (indicating KV cache transfer is complete).
+    Aborting before KV transfer completes leaks blocks on the prefill side.
+    """
+
+    def _make_handler(self, disable_request_abort: bool = False) -> HandlerBase:
+        config = MagicMock()
+        config.disable_request_abort = disable_request_abort
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    @pytest.mark.asyncio
+    async def test_decode_abort_delayed_until_first_token(self):
+        """abort() should not fire until first_token_event is set."""
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-decode-delay"
+
+        first_token_event = asyncio.Event()
+
+        # Start _handle_cancellation — it should block on first_token_event.wait()
+        task = asyncio.create_task(
+            handler._handle_cancellation(
+                generation_result, context, first_token_event=first_token_event
+            )
+        )
+        await asyncio.sleep(0.05)
+        generation_result.abort.assert_not_called()
+
+        # Signal first token received — abort should now fire
+        first_token_event.set()
+        await task
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_decode_abort_immediate_if_first_token_already_set(self):
+        """If first_token_event is already set when cancel fires, abort immediately."""
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-decode-immediate"
+
+        first_token_event = asyncio.Event()
+        first_token_event.set()
+
+        await handler._handle_cancellation(
+            generation_result, context, first_token_event=first_token_event
+        )
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_event_guard_without_first_token_event(self):
+        """Without first_token_event (non-disagg mode), abort fires immediately."""
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-no-event"
+
+        await handler._handle_cancellation(
+            generation_result, context, first_token_event=None
+        )
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_bypasses_first_token_guard(self):
+        """Shutdown must abort immediately, even if first_token_event is not set."""
+        from dynamo.llm.exceptions import EngineShutdown
+
+        handler = self._make_handler(disable_request_abort=False)
+        handler.shutdown_event = asyncio.Event()
+
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-shutdown"
+
+        first_token_event = asyncio.Event()  # NOT set
+
+        task = asyncio.create_task(
+            handler._handle_cancellation(
+                generation_result, context, first_token_event=first_token_event
+            )
+        )
+        await asyncio.sleep(0.05)
+        generation_result.abort.assert_not_called()
+
+        # Trigger shutdown — should bypass event guard
+        handler.shutdown_event.set()
+
+        with pytest.raises(EngineShutdown):
+            await task
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_disable_request_abort_skips_event_guard(self):
+        """When disable_request_abort=True, the event guard is never reached."""
+        handler = self._make_handler(disable_request_abort=True)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-disabled"
+
+        first_token_event = asyncio.Event()  # NOT set — would block if reached
+
+        await handler._handle_cancellation(
+            generation_result, context, first_token_event=first_token_event
+        )
+        generation_result.abort.assert_not_called()
+
+
 class TestMultimodalGuard:
     """Tests for multimodal guard when --modality multimodal is not configured."""
 

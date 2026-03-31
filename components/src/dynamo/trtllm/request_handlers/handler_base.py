@@ -180,9 +180,9 @@ class HandlerBase(BaseGenerativeHandler):
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_top_logprobs.append(
                     {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
+                        "rank": (
+                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
+                        ),
                         "token_id": tok_id,
                         "token": (
                             logprob_info.decoded_token
@@ -197,11 +197,18 @@ class HandlerBase(BaseGenerativeHandler):
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: GenerationResult,
+        context: Context,
+        first_token_event: Optional[asyncio.Event] = None,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
+
+        In disaggregated decode mode, abort is delayed until first token is received
+        (first_token_event), ensuring KV cache transfer from prefill completes before
+        the decode worker stops. See NVBugs 5969206.
 
         Raise EngineShutdown if shutdown event is triggered.
         """
@@ -221,12 +228,34 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation unless disabled
+            # Shutdown always aborts immediately, bypassing disagg guards
+            if shutdown_task in done:
+                generation_result.abort()
+                # Clean up pending tasks before raising
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                raise EngineShutdown("Engine was shut down during generation.")
+
+            # Abort the generation unless disabled or delayed by disagg guard
             if self.disable_request_abort:
                 logging.debug(
                     f"Request ID {context.id()} cancelled but abort() skipped "
                     "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
                 )
+            elif first_token_event is not None and not first_token_event.is_set():
+                # Decode waiting for KV — delay abort until first token confirms
+                # KV cache transfer is complete. See NVBugs 5969206.
+                logging.debug(
+                    f"Request ID {context.id()} cancelled, waiting for first "
+                    "token before abort (disagg decode KV transfer guard)"
+                )
+                await first_token_event.wait()
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
             else:
                 generation_result.abort()
                 logging.debug(f"Aborted Request ID: {context.id()}")
@@ -239,21 +268,23 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise EngineShutdown if cancellation is due to shutdown event triggered
-            if shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during generation.")
-
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: GenerationResult,
+        context: Context,
+        first_token_event: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
+
+        In disaggregated decode mode, first_token_event delays abort until
+        first token is received, ensuring KV cache transfer completes.
 
         Raise EngineShutdown if shutdown event is triggered.
 
@@ -261,7 +292,11 @@ class HandlerBase(BaseGenerativeHandler):
             asyncio.Task: The cancellation monitoring task
         """
         monitor_task = asyncio.create_task(
-            self._handle_cancellation(generation_result, context)
+            self._handle_cancellation(
+                generation_result,
+                context,
+                first_token_event=first_token_event,
+            )
         )
 
         try:
@@ -824,9 +859,27 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
+            # In disagg decode mode, create first_token_event to delay abort until
+            # KV cache transfer completes. See NVBugs 5969206.
+            first_token_event = (
+                asyncio.Event()
+                if self.disaggregation_mode == DisaggregationMode.DECODE
+                else None
+            )
+
             # Monitor for cancellation triggers and cancel by calling generation_result.abort()
-            async with self._cancellation_monitor(generation_result, context):
+            async with self._cancellation_monitor(
+                generation_result,
+                context,
+                first_token_event=first_token_event,
+            ):
+                _first_result_signaled = False
                 async for res in generation_result:
+                    # Signal first_token_event on first result (decode KV received)
+                    if not _first_result_signaled and first_token_event is not None:
+                        first_token_event.set()
+                        _first_result_signaled = True
+
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:
