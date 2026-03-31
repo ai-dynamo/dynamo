@@ -127,15 +127,6 @@ pub struct OffloadManagerConfig {
     pub bypass_cpu_mem: bool,
 }
 
-pub trait DiskBlockRegistrationObserver<Locality: LocalityProvider, Metadata: BlockMetadata>:
-    Send + Sync
-{
-    fn observe_registered_blocks(
-        &self,
-        blocks: &[ImmutableBlock<DiskStorage, Locality, Metadata>],
-    ) -> Result<()>;
-}
-
 /// The offload manager handles all block transfers between different cache levels.
 pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     // Handles to the device, host, and disk pools.
@@ -173,7 +164,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         host: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
         device: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
         filters: OffloadFilters,
-        disk_block_observer: Option<Arc<dyn DiskBlockRegistrationObserver<Locality, Metadata>>>,
         config: OffloadManagerConfig,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
@@ -280,7 +270,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         );
 
         // Host -> Disk offload
-        let host_to_disk_task = OffloadManager::disk_offload_worker(
+        let host_to_disk_task = OffloadManager::offload_worker(
             this.host.clone(),
             this.disk.clone(),
             host_offload_rx,
@@ -300,7 +290,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 .kvbm_metrics
                 .as_ref()
                 .map(|m| m.offload_blocks_h2d.clone()),
-            disk_block_observer.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -369,7 +358,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 "G1->G3 direct offload enabled: Device will offload directly to Disk, bypassing Host memory (CPU cache disabled)"
             );
 
-            let device_to_disk_task = OffloadManager::disk_offload_worker(
+            let device_to_disk_task = OffloadManager::offload_worker(
                 this.device.clone(),
                 this.disk.clone(),
                 device_to_disk_offload_rx,
@@ -389,7 +378,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     .kvbm_metrics
                     .as_ref()
                     .map(|m| m.offload_blocks_d2d.clone()),
-                disk_block_observer.clone(),
                 config.cancellation_token.clone(),
             );
             CriticalTaskExecutionHandle::new_with_runtime(
@@ -505,137 +493,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 }
             } else {
                 // Await the next request.
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => return Ok(()),
-                    Some(request) = offload_rx.recv() => {
-                        queue.insert(request);
-                    }
-                }
-            }
-        }
-    }
-
-    async fn disk_offload_worker<Source: Storage>(
-        source_pool: Option<Arc<dyn BlockPool<Source, Locality, Metadata>>>,
-        target_pool: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
-        mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
-        transfer_manager: Arc<dyn TransferManager<Source, DiskStorage, Locality, Metadata>>,
-        offload_filter: Option<Arc<dyn OffloadFilter>>,
-        offload_metric: Option<prometheus::IntCounter>,
-        disk_block_observer: Option<Arc<dyn DiskBlockRegistrationObserver<Locality, Metadata>>>,
-        cancellation_token: CancellationToken,
-    ) -> Result<()> {
-        if source_pool.is_none() || target_pool.is_none() {
-            return Ok(());
-        }
-
-        let source_pool = source_pool.as_ref().unwrap();
-        let target_pool = target_pool.as_ref().unwrap();
-
-        let mut queue = BTreeSet::new();
-
-        loop {
-            if cancellation_token.is_cancelled() {
-                return Ok(());
-            }
-
-            loop {
-                match offload_rx.try_recv() {
-                    Ok(request) => {
-                        queue.insert(request);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return Ok(()),
-                }
-            }
-
-            if let Some(request) = queue.pop_first() {
-                let block = match request.block.upgrade() {
-                    Some(block) => Some(ImmutableBlock::new(block)),
-                    None => source_pool
-                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
-                        .await?
-                        .pop(),
-                };
-
-                if let Some(block) = block {
-                    if let Ok(blocks) = target_pool
-                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
-                        .await
-                        && !blocks.is_empty()
-                    {
-                        continue;
-                    }
-
-                    if let Some(offload_filter) = offload_filter.as_ref()
-                        && !offload_filter.should_offload(request.sequence_hash)
-                    {
-                        continue;
-                    }
-
-                    let target_block = 'target_block: {
-                        if let Ok(blocks) = target_pool.allocate_blocks(1).await
-                            && let Some(block) = blocks.into_iter().next()
-                        {
-                            break 'target_block Some(block);
-                        }
-
-                        tracing::warn!(
-                            "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
-                        );
-                        None
-                    };
-
-                    if let Some(target_block) = target_block {
-                        tracing::debug!(
-                            "Offloading block with sequence hash {} to target disk pool.",
-                            request.sequence_hash
-                        );
-
-                        if let Some(ref metric) = offload_metric {
-                            metric.inc();
-                        }
-
-                        let completion_indicator = disk_block_observer.as_ref().map(|_| {
-                            let (tx, rx) =
-                                oneshot::channel::<BlockResult<DiskStorage, Locality, Metadata>>();
-                            if let Some(observer) = disk_block_observer.clone() {
-                                tokio::spawn(async move {
-                                    match rx.await {
-                                        Ok(Ok(blocks)) => {
-                                            if let Err(err) = observer.observe_registered_blocks(&blocks) {
-                                                tracing::warn!(
-                                                    "Failed to observe disk block registration: {err:#}"
-                                                );
-                                            }
-                                        }
-                                        Ok(Err(err)) => {
-                                            tracing::warn!(
-                                                "Disk offload completed with registration error: {err:#}"
-                                            );
-                                        }
-                                        Err(err) => {
-                                            tracing::warn!(
-                                                "Disk offload completion channel dropped before registration: {err:#}"
-                                            );
-                                        }
-                                    }
-                                });
-                            }
-                            tx
-                        });
-
-                        transfer_manager
-                            .enqueue_transfer(PendingTransfer::new(
-                                vec![block],
-                                vec![target_block],
-                                completion_indicator,
-                                target_pool.clone(),
-                            ))
-                            .await?;
-                    }
-                }
-            } else {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => return Ok(()),
                     Some(request) = offload_rx.recv() => {
@@ -1025,34 +882,6 @@ mod tests {
         HostPool,
         DiskPool,
     )> {
-        build_pools_with_disk_observer(
-            device_blocks,
-            host_blocks,
-            disk_blocks,
-            inner_dim,
-            layout_type,
-            duplication_setting,
-            bypass_cpu_mem,
-            None,
-        )
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn build_pools_with_disk_observer(
-        device_blocks: usize,
-        host_blocks: Option<usize>,
-        disk_blocks: Option<usize>,
-        inner_dim: Option<usize>,
-        layout_type: LayoutType,
-        duplication_setting: BlockRegistrationDuplicationSetting,
-        bypass_cpu_mem: bool,
-        disk_block_observer: Option<Arc<dyn DiskBlockRegistrationObserver<Local, BasicMetadata>>>,
-    ) -> Result<(
-        Arc<OffloadManager<Local, BasicMetadata>>,
-        DevicePool,
-        HostPool,
-        DiskPool,
-    )> {
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
             num_layers: NUM_LAYERS,
@@ -1124,7 +953,6 @@ mod tests {
             host_pool.clone(),
             device_pool.clone(),
             OffloadFilters::builder().build()?,
-            disk_block_observer,
             config,
         )?;
 
