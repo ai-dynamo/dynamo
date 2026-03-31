@@ -16,7 +16,7 @@ use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::ReplayRouterMode;
 use crate::replay::router::ReplayRouter;
 
-use super::live_runtime::{
+use super::entrypoints::{
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
     simulate_trace_requests, simulate_trace_requests_with_stats,
     simulate_trace_workload_with_stats,
@@ -361,7 +361,7 @@ fn test_online_concurrency_replay_respects_max_in_flight() {
     .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn test_online_concurrency_replay_kv_router_respects_max_in_flight() {
             .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]

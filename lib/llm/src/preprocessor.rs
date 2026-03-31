@@ -1217,7 +1217,7 @@ impl OpenAIPreprocessor {
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
-                        for choice in data.choices.iter_mut() {
+                        for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
                             if let Some(
                                 dynamo_async_openai::types::ChatCompletionMessageContent::Text(

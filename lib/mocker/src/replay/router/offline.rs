@@ -110,6 +110,7 @@ struct PendingRequest {
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
+    track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
 }
 
@@ -130,6 +131,7 @@ impl PendingRequest {
             overlaps: self.overlaps.clone(),
             decode_blocks,
             prefill_tokens,
+            track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -246,19 +248,18 @@ impl OfflineReplayRouter {
 
     pub(crate) fn mark_prefill_completed(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
         self.slots
-            .mark_prefill_completed_sync(&uuid.to_string())
+            .mark_prefill_completed(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
 
     pub(crate) fn free(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
         self.slots
-            .free_sync(&uuid.to_string())
+            .free(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
 
-    #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -315,8 +316,6 @@ impl OfflineReplayRouter {
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {}
-
     fn enqueue_key(&self, now_ms: f64, request: &PendingRequest) -> ReplayQueueKey {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
         self.policy.enqueue_key(
@@ -371,6 +370,7 @@ impl OfflineReplayRouter {
             token_seq,
             isl_tokens: request.tokens.len(),
             overlaps,
+            track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
                 u32::try_from(request.max_output_tokens)
                     .context("max_output_tokens does not fit into u32")?,
@@ -379,11 +379,14 @@ impl OfflineReplayRouter {
     }
 
     fn admit_request(&mut self, request: PendingRequest) -> Result<usize> {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
-            request.token_seq.as_deref(),
-            request.isl_tokens,
-            request.overlaps.clone(),
-        );
+        let (decode_blocks, prefill_tokens) = self
+            .slots
+            .potential_blocks_and_tokens_with_prefill_tracking(
+                request.token_seq.as_deref(),
+                request.isl_tokens,
+                request.overlaps.clone(),
+                request.track_prefill_tokens,
+            );
         let scheduling_request = request.scheduling_request(decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -395,11 +398,12 @@ impl OfflineReplayRouter {
         let request_id = request.request_id();
 
         self.slots
-            .add_request_sync(SequenceRequest {
+            .add_request(SequenceRequest {
                 request_id,
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
+                track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: None,

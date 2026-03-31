@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use crate::common::protocols::OutputSignal;
+use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
 
 use super::config::{SglangConfig, floor_to_block};
@@ -179,6 +180,13 @@ pub(super) fn simulate_decode_step(
         output_signals.push(OutputSignal {
             uuid: req.uuid,
             completed: is_complete,
+            handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                config.worker_type,
+                is_complete,
+                req.prompt_len(),
+                config.kv_transfer_bandwidth,
+                config.kv_bytes_per_token,
+            ),
         });
 
         if is_complete {

@@ -23,7 +23,7 @@ use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal, RawKvEvent,
     RawKvEventSink,
 };
-use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
+use dynamo_mocker::common::utils::sleep_precise;
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_runtime::DistributedRuntime;
@@ -396,7 +396,7 @@ impl MockEngine {
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
         for dp_rank in 0..args.dp_size {
-            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
             let (kv_event_publishers, relay_publisher): (
                 KvEventPublishers,
@@ -499,12 +499,14 @@ impl MockEngine {
                 loop {
                     tokio::select! {
                         signal_result = output_rx.recv() => {
-                            let Some(signal) = signal_result else {
+                            let Some(output_batch) = signal_result else {
                                 break; // Channel closed
                             };
 
-                            if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
-                                let _ = request_tx.send(signal);
+                            for signal in output_batch {
+                                if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
+                                    let _ = request_tx.send(signal);
+                                }
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
@@ -645,14 +647,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let bootstrap_server = self.bootstrap_server.clone();
         let reasoning = self.engine_args.reasoning.clone();
 
-        // Compute KV transfer delay for prefill workers.
-        // Simulates the time to transfer KV cache from prefill to decode worker.
-        let kv_transfer_delay = if is_prefill {
-            compute_kv_transfer_delay(&self.engine_args, request.token_ids.len())
-        } else {
-            None
-        };
-
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             let mut token_count = 0;
@@ -693,17 +687,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         if signal.completed {
                             let _ = stream_tx.send(output);
 
-                            // Simulate KV transfer delay before prefill's first (and only) token.
-                            // This models the time to transfer KV cache to the decode worker.
-                            if token_count == 1
-                                && let Some(delay) = kv_transfer_delay
+                            // Prefill-to-decode handoff delay is emitted by the shared mocker core.
+                            if is_prefill
+                                && let Some(delay_ms) = signal.handoff_delay_ms
                             {
-                                sleep_precise(delay).await;
+                                sleep_precise(Duration::from_secs_f64(delay_ms / 1000.0)).await;
                             }
 
                             // Prefill: after first token, mark room complete (unblocks decode)
                             if is_prefill
-                                && token_count == 1
                                 && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
                             {
                                 server.complete_room(room_id);

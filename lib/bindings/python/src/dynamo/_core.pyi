@@ -841,11 +841,22 @@ class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
     Auto-discovers engine publishers via the discovery plane.
+
+    Two mutually exclusive usage modes:
+
+    1. **recv mode** (default): call ``recv()`` to pull individual messages.
+    2. **tracking mode**: call ``start_tracking()`` once, then poll
+       ``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
+       ``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+       workers are removed (via discovery watch).
     """
 
     def __init__(self, endpoint: Endpoint) -> None:
         """
         Create a subscriber that auto-discovers FPM publishers.
+
+        No background tasks are started until ``recv()`` or
+        ``start_tracking()`` is called.
 
         Args:
             endpoint: Dynamo component endpoint (provides runtime + discovery).
@@ -857,13 +868,48 @@ class FpmEventSubscriber:
         Blocking receive of the next message (raw msgspec bytes).
         Releases the GIL while waiting.
 
+        On the first call a background subscriber task is spawned (recv mode).
+        Cannot be used after ``start_tracking()``.
+
         Returns:
             Raw msgspec payload, or None if the stream is closed.
         """
         ...
 
+    def start_tracking(self) -> None:
+        """
+        Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        Spawns two background tasks:
+
+        1. Event consumption: subscribes to FPM events, extracts the composite
+           key (worker_id, dp_rank) from the msgpack payload, stores latest
+           raw bytes in an internal map.
+        2. MDC discovery watch: monitors ComponentModels for the target
+           component.  When a model is removed, all entries whose
+           worker_id matches the removed instance_id are purged.
+
+        After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def get_recent_stats(self) -> dict[tuple[str, int], bytes]:
+        """
+        Return the latest FPM bytes for every tracked (worker_id, dp_rank).
+
+        Cleanup of removed engines is handled by the MDC discovery watch
+        task spawned by ``start_tracking()``.
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``(worker_id, dp_rank)`` to raw msgspec bytes.
+            Decode each value with ``forward_pass_metrics.decode(data)``.
+        """
+        ...
+
     def shutdown(self) -> None:
-        """Shut down the subscriber."""
+        """Shut down the subscriber (all background tasks)."""
         ...
 
 
@@ -1133,7 +1179,6 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
-        min_initial_workers: int = 1,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1167,9 +1212,6 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues (default: 1). Ignored when
-                skip_initial_worker_wait is enabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
@@ -1217,6 +1259,7 @@ class MockEngineArgs:
         dp_size: int = 1,
         startup_time: Optional[float] = None,
         worker_type: str = "aggregated",
+        planner_profile_data: Optional[str | os.PathLike[str]] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
@@ -1238,6 +1281,8 @@ class MockEngineArgs:
     @staticmethod
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
+
+    def dump_json(self) -> str: ...
 
     @property
     def block_size(self) -> int: ...
@@ -1376,8 +1421,12 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
 def run_mocker_trace_replay(
     trace_file: str | os.PathLike[str],
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
@@ -1391,8 +1440,12 @@ def run_mocker_synthetic_trace_replay(
     output_tokens: int,
     request_count: int,
     extra_engine_args: Optional[MockEngineArgs] = None,
+    prefill_engine_args: Optional[MockEngineArgs] = None,
+    decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
     num_workers: int = 1,
+    num_prefill_workers: int = 1,
+    num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",

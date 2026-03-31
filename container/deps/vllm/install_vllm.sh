@@ -143,7 +143,6 @@ echo "✓ vLLM repository cloned"
 
 if [ "$DEVICE" = "xpu" ]; then
     echo "\n=== Installing vLLM ==="
-    git apply --ignore-whitespace /tmp/vllm-xpu.patch
     uv pip install -r requirements/xpu.txt --index-strategy unsafe-best-match
     uv pip install --verbose --no-build-isolation .
 fi

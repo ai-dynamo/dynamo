@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
 
@@ -13,8 +14,24 @@ use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 
-const fn default_min_initial_workers() -> usize {
-    1
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
+pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
+    match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
+        Ok(value) => value.parse::<usize>().map_err(|error| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_MIN_INITIAL_WORKERS} must be a non-negative integer, got {value:?}: {error}"
+            )
+        }),
+        Err(VarError::NotPresent) => Ok(0),
+        Err(VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_ROUTER_MIN_INITIAL_WORKERS} must be valid unicode")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +80,9 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
+
+    #[builder(default)]
+    pub track_prefill_tokens: Option<bool>,
 }
 
 /// KV Router configuration parameters
@@ -97,6 +117,12 @@ pub struct KvRouterConfig {
     /// When true, computes actual block hashes for sequence tracking.
     /// When false, generates random hashes (assuming no KV cache reuse).
     pub router_assume_kv_reuse: bool,
+
+    /// Whether to include prompt-side prefill tokens in active load accounting (default: true).
+    /// When false, prompt tokens are excluded from active prefill token tracking, queue pressure,
+    /// and potential prefill-token load calculations.
+    #[serde(default = "default_track_prefill_tokens")]
+    pub router_track_prefill_tokens: bool,
 
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     #[validate(range(min = 1))]
@@ -136,16 +162,7 @@ pub struct KvRouterConfig {
     /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_cache_control: bool,
 
-    /// Skip blocking for workers at init time (default: false).
-    /// When true, the router starts immediately without waiting for discovery-based
-    /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
-
-    /// Minimum number of workers that must be discovered before router startup continues.
-    /// Default: 1. Ignored when skip_initial_worker_wait=true.
-    #[serde(default = "default_min_initial_workers")]
-    #[validate(range(min = 1))]
-    pub min_initial_workers: usize,
 
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
@@ -171,6 +188,7 @@ impl Default for KvRouterConfig {
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
+            router_track_prefill_tokens: default_track_prefill_tokens(),
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
@@ -180,7 +198,6 @@ impl Default for KvRouterConfig {
             router_event_threads: 4,
             router_enable_cache_control: false,
             skip_initial_worker_wait: false,
-            min_initial_workers: default_min_initial_workers(),
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }
@@ -208,6 +225,18 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
 }
 
 impl KvRouterConfig {
+    pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse)
+    }
+
+    pub fn track_prefill_tokens(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.router_track_prefill_tokens)
+    }
+
     /// Compute sequence hashes for active block tracking based on configuration.
     ///
     /// Returns:
@@ -231,9 +260,7 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        let assume_kv_reuse = config_override
-            .and_then(|cfg| cfg.assume_kv_reuse)
-            .unwrap_or(self.router_assume_kv_reuse);
+        let assume_kv_reuse = self.assume_kv_reuse(config_override);
 
         if assume_kv_reuse {
             let block_hashes = match precomputed_block_hashes {
@@ -286,17 +313,8 @@ mod tests {
     }
 
     #[test]
-    fn kv_router_config_defaults_to_one_initial_worker() {
-        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
-    }
-
-    #[test]
-    fn kv_router_config_rejects_zero_initial_workers() {
-        let cfg = KvRouterConfig {
-            min_initial_workers: 0,
-            ..KvRouterConfig::default()
-        };
-        assert!(cfg.validate().is_err());
+    fn kv_router_config_defaults_to_tracking_prefill_tokens() {
+        assert!(KvRouterConfig::default().router_track_prefill_tokens);
     }
 
     #[test]
@@ -330,6 +348,17 @@ mod tests {
             .unwrap();
 
         assert_ne!(without_mm, with_mm);
+    }
+
+    #[test]
+    fn router_config_override_serde_round_trip_preserves_track_prefill_tokens() {
+        let serialized = serde_json::to_string(&RouterConfigOverride {
+            track_prefill_tokens: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        let deserialized: RouterConfigOverride = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.track_prefill_tokens, Some(false));
     }
 
     #[test]

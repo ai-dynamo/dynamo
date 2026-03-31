@@ -696,8 +696,8 @@ pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
 ) -> Result<NvResponse, anyhow::Error> {
-    let chat_resp = nv_resp;
-    let nvext = chat_resp.nvext.clone();
+    let nvext = nv_resp.nvext.clone();
+    let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
@@ -1163,32 +1163,34 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
-            id: "chatcmpl-xyz".into(),
-            choices: vec![dynamo_async_openai::types::ChatChoice {
-                index: 0,
-                message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                            "This is a reply".to_string(),
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_async_openai::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+                        content: Some(
+                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                                "This is a reply".to_string(),
+                            ),
                         ),
-                    ),
-                    refusal: None,
-                    tool_calls: None,
-                    role: dynamo_async_openai::types::Role::Assistant,
-                    function_call: None,
-                    audio: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: now,
-            model: "llama-3.1-8b-instruct".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".to_string(),
-            usage: None,
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_async_openai::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: now,
+                model: "llama-3.1-8b-instruct".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
             nvext: None,
         };
 
@@ -1218,35 +1220,37 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
-            id: "chatcmpl-xyz".into(),
-            choices: vec![dynamo_async_openai::types::ChatChoice {
-                index: 0,
-                message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: None,
-                    refusal: None,
-                    tool_calls: Some(vec![ChatCompletionMessageToolCall {
-                        id: "call_abc".into(),
-                        r#type: ChatCompletionToolType::Function,
-                        function: dynamo_async_openai::types::FunctionCall {
-                            name: "get_weather".into(),
-                            arguments: r#"{"location":"SF"}"#.into(),
-                        },
-                    }]),
-                    role: dynamo_async_openai::types::Role::Assistant,
-                    function_call: None,
-                    audio: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: now,
-            model: "test-model".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".to_string(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_async_openai::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+                        content: None,
+                        refusal: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                            id: "call_abc".into(),
+                            r#type: ChatCompletionToolType::Function,
+                            function: dynamo_async_openai::types::FunctionCall {
+                                name: "get_weather".into(),
+                                arguments: r#"{"location":"SF"}"#.into(),
+                            },
+                        }]),
+                        role: dynamo_async_openai::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: now,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
             nvext: None,
         };
 
@@ -1432,14 +1436,16 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            choices: vec![],
-            created: 0,
-            id: "test".into(),
-            model: "m".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                choices: vec![],
+                created: 0,
+                id: "test".into(),
+                model: "m".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
             nvext: None,
         };
 
@@ -1463,14 +1469,16 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            choices: vec![],
-            created: 0,
-            id: "test".into(),
-            model: "m".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                choices: vec![],
+                created: 0,
+                id: "test".into(),
+                model: "m".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
             nvext: None,
         };
 
@@ -1489,14 +1497,16 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            choices: vec![],
-            created: 0,
-            id: "test".into(),
-            model: "m".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                choices: vec![],
+                created: 0,
+                id: "test".into(),
+                model: "m".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
             nvext: None,
         };
 
@@ -1555,29 +1565,31 @@ thinking
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
-            choices: vec![ChatChoice {
-                index: 0,
-                #[allow(deprecated)]
-                message: ChatCompletionResponseMessage {
-                    content: Some(ChatCompletionMessageContent::Text(text.into())),
-                    role: dynamo_async_openai::types::Role::Assistant,
-                    tool_calls: None,
-                    refusal: None,
-                    reasoning_content: None,
-                    function_call: None,
-                    audio: None,
-                },
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            id: "test".into(),
-            model: "m".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                choices: vec![ChatChoice {
+                    index: 0,
+                    #[allow(deprecated)]
+                    message: ChatCompletionResponseMessage {
+                        content: Some(ChatCompletionMessageContent::Text(text.into())),
+                        role: dynamo_async_openai::types::Role::Assistant,
+                        tool_calls: None,
+                        refusal: None,
+                        reasoning_content: None,
+                        function_call: None,
+                        audio: None,
+                    },
+                    finish_reason: Some(FinishReason::Stop),
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                id: "test".into(),
+                model: "m".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
             nvext: None,
         }
     }

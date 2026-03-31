@@ -15,10 +15,11 @@ The public replay entrypoints live one level up in `lib/mocker/src/replay/entryp
 
 Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
-`offline/mod.rs` chooses between two implementations:
+`offline/mod.rs` chooses between three implementations:
 
 - `lib/mocker/src/replay/offline/single.rs` for the special case `num_workers == 1` with the vLLM engine
-- `lib/mocker/src/replay/offline/multi.rs` for everything else, including multi-worker replay and `kv_router` replay
+- `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
+- `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
 
 ## File Map
 
@@ -26,8 +27,10 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
   Chooses single-worker fast path vs multi-worker harness.
 - `lib/mocker/src/replay/offline/single.rs`
   Minimal replay loop for one vLLM worker.
-- `lib/mocker/src/replay/offline/multi.rs`
+- `lib/mocker/src/replay/offline/agg.rs`
   General offline cluster simulator for multi-worker replay and KV-router replay.
+- `lib/mocker/src/replay/offline/disagg.rs`
+  Offline two-stage replay harness with separate prefill and decode pools.
 - `lib/mocker/src/replay/offline/state.rs`
   Per-worker wrapper around `EngineCore`, including optional KV event capture.
 - `lib/mocker/src/replay/offline/events.rs`
@@ -72,7 +75,7 @@ Important details:
 
 ## Multi-Worker Harness
 
-The general harness lives in `lib/mocker/src/replay/offline/multi.rs`. It models a cluster with:
+The general aggregated harness lives in `lib/mocker/src/replay/offline/agg.rs`. It models a cluster with:
 
 - a logical clock `now_ms`
 - a pending request queue
@@ -82,7 +85,7 @@ The general harness lives in `lib/mocker/src/replay/offline/multi.rs`. It models
 
 ### Main Loop
 
-The harness is event-driven. It does not sleep. Instead, `OfflineRuntime` repeatedly:
+The aggregated harness is event-driven. It does not sleep. Instead, `AggRuntime` repeatedly:
 
 1. picks the next meaningful timestamp
 2. advances `now_ms`
@@ -114,7 +117,7 @@ So offline replay is not a toy simulator. It reuses the real per-pass mocker sch
 
 ## Completion Event Queue
 
-The multi-worker harness uses `SimulationEvent` from `lib/mocker/src/replay/offline/events.rs` as a min-time priority queue implemented with `BinaryHeap`.
+The multi-worker and disagg harnesses use `SimulationEvent` from `lib/mocker/src/replay/offline/events.rs` as a min-time priority queue implemented with `BinaryHeap`.
 
 Right now the only scheduled event type is:
 
@@ -122,6 +125,7 @@ Right now the only scheduled event type is:
 
 That event carries:
 
+- worker `stage` (`aggregated`, `prefill`, or `decode`)
 - `worker_idx`
 - `completed_requests`
 - `output_signals`
@@ -160,14 +164,14 @@ flowchart LR
     F -->|yes| G["dispatch to worker"]
     F -->|no| H["store in router_pending"]
 
-    I["worker pass emits RouterEvent + OutputSignal"] --> J["OfflineRuntime::process_completed_pass"]
+    I["worker pass emits RouterEvent + OutputSignal"] --> J["AggRuntime::process_completed_pass"]
     J --> K["apply router events to sync indexer"]
     J --> L["mark_prefill_completed / free"]
     L --> M["drain queued admissions"]
     M --> G
 ```
 
-### Why KV events are captured only here
+### Why KV events are captured only where needed
 
 When offline replay uses `kv_router`, workers are created with KV event capture enabled via:
 
@@ -177,6 +181,37 @@ When offline replay uses `kv_router`, workers are created with KV event capture 
 That causes each pass to return router-visible `kv_events`, which the harness applies synchronously to the offline router indexer after the pass completes.
 
 In round-robin mode, this capture is skipped because nothing consumes those events.
+In offline disagg replay, only the prefill workers capture and publish KV events; the decode workers
+run with capture disabled because the decode router is overlap-blind and does not consume router
+events.
+
+## Disaggregated Harness
+
+The disaggregated runtime in `lib/mocker/src/replay/offline/disagg.rs` models two distinct stages:
+
+- a prefill router and prefill worker pool
+- a decode router and decode worker pool
+
+It keeps one logical clock and one completion-event heap, but request ownership moves through a
+two-stage state machine instead of the aggregated single-pool lifecycle.
+
+The prefill router is derived from the main router config with `router_track_active_blocks = false`.
+The decode router is derived with:
+
+- overlap disabled
+- `assume_kv_reuse = false`
+- `track_prefill_tokens = false`
+
+The prefill stage runs a hidden synthetic one-token bootstrap request. When prefill completes, the
+harness:
+
+1. applies any prefill KV events
+2. marks prefill complete in the prefill router
+3. frees prefill router state
+4. enqueues the original request into decode at the same logical timestamp
+
+Decode then runs with normal collector visibility. The public replay report remains decode-only, so
+TTFT includes prefill queueing and prefill compute.
 
 ## Trace vs Concurrency Modes
 
