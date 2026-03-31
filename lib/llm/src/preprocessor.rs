@@ -627,7 +627,7 @@ impl OpenAIPreprocessor {
         } else {
             std::borrow::Cow::Borrowed(prompt)
         };
-        let encoding = self.tokenizer.encode(prompt)?;
+        let encoding = self.tokenizer.encode(prompt.as_ref())?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
