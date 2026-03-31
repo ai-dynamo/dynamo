@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:34:14 UTC
+Last updated: 2026-03-31 19:38:54 UTC
 
 Current in-progress run (2026-03-31 19:28:54 UTC):
 - Mandatory context re-read completed in this run:
@@ -48,24 +48,45 @@ Current in-progress run (2026-03-31 19:28:54 UTC):
     - removed the malformed plain-text line that had been inserted into the
       workspace root `Cargo.toml` and was preventing all cargo-based validation
       from parsing the workspace manifest
+  - smoke query/fetch fallback realism
+    - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+      now follows a real `query -> fetch` flow by carrying query misses forward
+      as explicit cache misses and fetching only confirmed remote hits
+    - added a duplicate re-offer pass after payload upload so the smoke binary
+      verifies already-present blocks are rejected instead of silently
+      re-admitted
+    - the smoke output now reports cache-miss fallback separately from fetched
+      blocks, which keeps the demo aligned with the design doc's
+      "cache miss => recompute" model
 - Validation completed so far in this run:
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
     -> pass
   - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
     -> pass (`18 passed`)
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    -> pass
+  - `git diff --check`
+    -> pass
 - Exact next file or command to touch:
   - file:
-    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-  - then:
     `PLANS.md`
   - then:
-    `lib/llm/src/block_manager/distributed/g4.rs`
+    `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - then:
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - next commands:
     `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
   - then:
     `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
   - then:
     `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+- Remaining work after this run:
+  - the smoke path is still HTTP-only and still does not perform real local
+    onboard into KVBM device/host pools after fetch; it only validates the
+    control/data exchange and cache-miss handling semantics
+  - runtime discovery, RPC ownership wiring, and true worker-side onboard
+    integration remain follow-up slices and are larger than the behavior fixes
+    completed in this run
 
 Current in-progress run (2026-03-31 19:07:10 UTC):
 - Mandatory context re-read completed in this run:

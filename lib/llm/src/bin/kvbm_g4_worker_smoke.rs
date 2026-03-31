@@ -393,6 +393,48 @@ async fn main() -> Result<()> {
         println!("uploaded accepted payloads to worker {worker_id}");
     }
 
+    let duplicate_offer_blocks: Vec<G4PutBlock> = accepted_blocks
+        .iter()
+        .map(|block| block.meta.clone())
+        .collect();
+    if !duplicate_offer_blocks.is_empty() {
+        let duplicate_offer_routes =
+            route_g4_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
+        for result in join_all(
+            duplicate_offer_routes
+                .into_iter()
+                .map(|(worker_id, blocks)| {
+                    let client = client.clone();
+                    let backend_url = backend_urls_by_worker
+                        .get(&worker_id)
+                        .cloned()
+                        .with_context(|| format!("missing backend url for worker {worker_id}"));
+                    async move {
+                        let backend_url = backend_url?;
+                        let offer: G4OfferResponse = client
+                            .post(format!("{backend_url}/offer"))
+                            .json(&G4OfferRequest { blocks })
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json()
+                            .await?;
+                        Ok::<_, anyhow::Error>((worker_id, offer.accepted))
+                    }
+                }),
+        )
+        .await
+        {
+            let (worker_id, accepted) = result?;
+            anyhow::ensure!(
+                accepted.is_empty(),
+                "duplicate offer unexpectedly accepted hashes on worker {worker_id}: {:?}",
+                accepted
+            );
+            println!("duplicate offer on worker {worker_id} correctly accepted nothing");
+        }
+    }
+
     let query_hashes: Vec<u64> = (0..=args.count)
         .map(|offset| args.sequence_start + offset as u64)
         .collect();
@@ -426,7 +468,28 @@ async fn main() -> Result<()> {
         hits.extend(result?);
     }
 
-    let fetch_hashes: Vec<u64> = blocks.iter().map(|block| block.sequence_hash).collect();
+    let hit_by_sequence_hash: HashMap<u64, G4QueryHit> = hits
+        .iter()
+        .cloned()
+        .map(|hit| (hit.sequence_hash, hit))
+        .collect();
+    let cache_miss_hashes: Vec<u64> = query_hashes
+        .iter()
+        .copied()
+        .filter(|sequence_hash| !hit_by_sequence_hash.contains_key(sequence_hash))
+        .collect();
+    let fetch_hashes: Vec<u64> = query_hashes
+        .iter()
+        .copied()
+        .filter(|sequence_hash| hit_by_sequence_hash.contains_key(sequence_hash))
+        .collect();
+
+    anyhow::ensure!(
+        cache_miss_hashes == vec![args.sequence_start + args.count as u64],
+        "unexpected cache-miss set: {:?}",
+        cache_miss_hashes
+    );
+
     let fetch_routes = route_g4_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
     let mut fetched_blocks = Vec::new();
     for result in join_all(
@@ -467,7 +530,10 @@ async fn main() -> Result<()> {
         blocks: fetched_blocks,
     };
 
-    for expected in &transfer_blocks {
+    for expected in transfer_blocks
+        .iter()
+        .filter(|block| fetch_hashes.contains(&block.meta.sequence_hash))
+    {
         let actual = fetched
             .blocks
             .iter()
@@ -483,6 +549,7 @@ async fn main() -> Result<()> {
     let transferred_bytes: usize = fetched.blocks.iter().map(|block| block.payload.len()).sum();
 
     println!("queried hashes: {:?}", query_hashes);
+    println!("cache misses carried as fallback: {:?}", cache_miss_hashes);
     println!("remote hits:");
     for hit in hits {
         println!(
