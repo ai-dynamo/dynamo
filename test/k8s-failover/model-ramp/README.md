@@ -11,7 +11,7 @@ capture memory accounting, then deploy with failover enabled to check for regres
 |------|-------|------|----|------|---------------------|--------|
 | 1 | Qwen/Qwen3-8B | Dense | 2 | 2 | ~16 GB | PASS (baseline + failover) |
 | 2 | Qwen/Qwen3-32B | Dense | 4 | 4 | ~64 GB | PASS (baseline + failover + multinode) |
-| 3 | Qwen/Qwen3-30B-A3B | MoE | 2 | 2 | ~60 GB | Not started |
+| 3 | Qwen/Qwen3-30B-A3B | MoE | 2 | 2 | ~60 GB | PASS (baseline + failover) |
 
 ## Directory structure
 
