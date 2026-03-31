@@ -39,15 +39,27 @@ impl FastTokenizer {
 
 impl Encoder for FastTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
+        self.encode_with_special_tokens(input, false)
+    }
+
+    fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+        inputs.par_iter().map(|input| self.encode(input)).collect()
+    }
+
+    fn encode_with_special_tokens(
+        &self,
+        input: &str,
+        add_special_tokens: bool,
+    ) -> Result<Encoding> {
+        if add_special_tokens {
+            return self.hf_decoder.encode_with_special_tokens(input, true);
+        }
+
         let ids = self
             .fast_encoder
             .encode(input)
             .map_err(|e| Error::msg(format!("Fastokens encode error: {e}")))?;
         Ok(Encoding::Sp(ids))
-    }
-
-    fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
-        inputs.par_iter().map(|input| self.encode(input)).collect()
     }
 }
 
@@ -57,7 +69,11 @@ impl Decoder for FastTokenizer {
     }
 }
 
-impl Tokenizer for FastTokenizer {}
+impl Tokenizer for FastTokenizer {
+    fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
+        self.hf_decoder.convert_ids_to_tokens(token_ids)
+    }
+}
 
 #[cfg(test)]
 mod tests {

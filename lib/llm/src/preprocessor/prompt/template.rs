@@ -4,6 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Ok, Result};
+use either::Either;
 use minijinja::Environment;
 
 use crate::model_card::{ModelDeploymentCard, PromptContextMixin, PromptFormatterArtifact};
@@ -19,11 +20,19 @@ use tokcfg::ChatTemplateValue;
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+        Self::from_mdc_with_chat_template(mdc, None)
+    }
+
+    pub fn from_mdc_with_chat_template(
+        mdc: &ModelDeploymentCard,
+        chat_template_override: Option<&str>,
+    ) -> Result<PromptFormatter> {
         // Special handling for DeepSeek-V3.2(-Speciale) which doesn't provide Jinja chat_template
         let name_lower = mdc.display_name.to_lowercase();
         if name_lower.contains("deepseek")
             && name_lower.contains("v3.2")
             && !name_lower.contains("exp")
+            && chat_template_override.is_none()
         {
             tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
             return Ok(Self::OAI(Arc::new(
@@ -54,13 +63,19 @@ impl PromptFormatter {
                         crate::log_json_err(&file.display().to_string(), &contents, err)
                     })?;
 
+                if let Some(chat_template) = chat_template_override {
+                    config.chat_template =
+                        Some(ChatTemplateValue(Either::Left(chat_template.to_string())));
+                }
+
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate {
-                    file: checked_file, ..
-                }) = mdc.chat_template_file.as_ref()
+                if chat_template_override.is_none()
+                    && let Some(PromptFormatterArtifact::HfChatTemplate {
+                        file: checked_file, ..
+                    }) = mdc.chat_template_file.as_ref()
                 {
                     let Some(chat_template_file) = checked_file.path() else {
                         anyhow::bail!(
