@@ -98,6 +98,8 @@ class ImageLoader:
                 image_data = BytesIO(response.content)
 
             with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
+                # PIL is sync, so offload to a thread to avoid blocking the event loop
+                # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
                 image = await asyncio.to_thread(
                     Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
                 )
@@ -169,7 +171,7 @@ class ImageLoader:
                         raise ValueError("Data URL must be base64 encoded")
 
                     try:
-                        image_bytes = base64.b64decode(data)
+                        image_bytes = base64.b64decode(data, validate=True)
                     except binascii.Error as e:
                         raise ValueError(f"Invalid base64 encoding: {e}")
                     image_data = BytesIO(image_bytes)
