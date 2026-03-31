@@ -4,20 +4,24 @@
 """Protocol types for disaggregated omni stage workers and connectors.
 """
 
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from typing import Any, AsyncGenerator, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class StageEngine(Protocol):
-    """Any engine that can generate outputs for a single pipeline stage."""
+    """Any engine that can generate outputs for a single pipeline stage.
 
-    async def generate(
+    Matches AsyncOmni.generate() signature — the only vllm_omni engine
+    with a consistent async generator interface for both LLM and diffusion.
+    """
+
+    def generate(
         self,
-        inputs: Any,
-        sampling_params: Any,
+        prompt: Any,
+        request_id: str = "",
         *,
-        request_id: str,
-    ) -> AsyncIterator[Any]:
+        sampling_params_list: Any = None,
+    ) -> AsyncGenerator[Any, None]:
         ...
 
 

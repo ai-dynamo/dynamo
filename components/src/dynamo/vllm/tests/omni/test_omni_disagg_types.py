@@ -19,8 +19,11 @@ pytestmark = [
 
 
 class _MockEngine:
-    async def generate(self, inputs, sampling_params, *, request_id):
-        yield {}
+    def generate(self, prompt, request_id="", *, sampling_params_list=None):
+        async def _gen():
+            yield {}
+
+        return _gen()
 
 
 class _MockConnector:
