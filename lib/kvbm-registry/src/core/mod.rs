@@ -7,6 +7,8 @@ pub mod codec;
 pub mod error;
 pub mod events;
 pub mod eviction;
+pub mod hub;
+pub mod hub_transport;
 pub mod key;
 pub mod lease;
 pub mod metadata;
@@ -38,6 +40,10 @@ pub use value::{RegistryValue, StorageBackend, StorageLocation};
 
 // Transport
 pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
+
+// Hub (Server)
+pub use hub::{HubStats, RegistryHub};
+pub use hub_transport::{ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport};
 
 // Event Bus
 pub use events::{
