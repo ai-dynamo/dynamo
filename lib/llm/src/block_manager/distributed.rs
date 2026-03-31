@@ -10,9 +10,9 @@ mod leader;
 mod worker;
 
 pub use g4::{
-    G4BlockIndex, G4Error, G4FetchRequest, G4FetchResponse, G4FetchedBlock, G4OfferRequest,
-    G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4StorageAgent, G4StorageClient,
-    G4StorageWorker, G4TransferBlock, select_g4_owner,
+    G4BlockIndex, G4Error, G4FetchRequest, G4FetchResponse, G4FetchedBlock, G4HealthResponse,
+    G4OfferRequest, G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4QueryRequest,
+    G4StorageAgent, G4StorageClient, G4StorageWorker, G4TransferBlock, select_g4_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;

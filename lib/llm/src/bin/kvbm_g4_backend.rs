@@ -15,15 +15,15 @@ use axum::{
 };
 use dynamo_llm::block_manager::Storage;
 use dynamo_llm::block_manager::distributed::{
-    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
-    G4PutPayloadRequest, G4QueryHit, G4StorageAgent, G4StorageWorker, G4TransferBlock, KvbmLeader,
-    KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
+    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest,
+    G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageAgent,
+    G4StorageWorker, G4TransferBlock, KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig,
+    KvbmWorker, KvbmWorkerConfig,
 };
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, StorageAllocator,
     torch::{TorchDevice, TorchTensor},
 };
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
@@ -187,17 +187,6 @@ impl Args {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    worker_id: u64,
-    listen: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct QueryRequest {
-    sequence_hashes: Vec<u64>,
-}
-
 #[derive(Clone)]
 struct AppState {
     agent: Arc<G4StorageAgent>,
@@ -207,8 +196,8 @@ struct AppState {
     _worker: Arc<tokio::sync::Mutex<KvbmWorker>>,
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
+async fn health(State(state): State<AppState>) -> Json<G4HealthResponse> {
+    Json(G4HealthResponse {
         worker_id: state.agent.worker_id(),
         listen: state.listen.to_string(),
     })
@@ -224,7 +213,7 @@ async fn put_blocks(
 
 async fn query_blocks(
     State(state): State<AppState>,
-    Json(request): Json<QueryRequest>,
+    Json(request): Json<G4QueryRequest>,
 ) -> Json<Vec<G4QueryHit>> {
     Json(state.agent.query_blocks(&request.sequence_hashes).await)
 }

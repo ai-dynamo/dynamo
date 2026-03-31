@@ -1,8 +1,11 @@
+
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 18:57:48 UTC
+IMPORTANT: Must rebase on the mf/kvbm .. v2 branch. Currenttly . unabel to commit or push.
 
-Current in-progress run (2026-03-31 18:53:48 UTC):
+Last updated: 2026-03-31 19:01:31 UTC
+
+Current in-progress run (2026-03-31 19:01:31 UTC):
 
 - Mandatory context re-read completed in this run:
   - `Agents.md`
@@ -13,86 +16,58 @@ Current in-progress run (2026-03-31 18:53:48 UTC):
   - `lib/llm/src/block_manager/distributed/worker.rs`
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-  - `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
 - Current branch baseline observed in this run:
-  - detached `HEAD` at `ded8ebd14`
-  - worktree started clean
+  - detached `HEAD` at `435adb3f3` (`Add shared G4 payload helpers`)
+  - worktree started clean after that commit
 - Current implementation slice for this run:
-  - replace the stale top-of-file “toolchain missing” handoff with the actual
-    current environment and real validation results
-  - add shared payload request/response types plus payload-size validation and
-    payload-side `offer(...)` / `offer_and_put(...)` helpers on the G4
-    agent/client layer
-  - make the smoke HTTP backend and worker smoke client reuse those shared
-    payload types/helpers instead of maintaining duplicate route/request shapes
-    and open-coded `/put_payload` filtering
+  - finish the smoke API deduplication now that payload request/response types
+    are shared by also lifting the remaining `health` and `query` HTTP shapes
+    into the shared G4 module
+  - make both smoke binaries consume only shared distributed-module G4 HTTP
+    types so the smoke API surface has a single source of truth
 - Why this slice:
-  - the design doc still prefers metadata admission before expensive payload
-    transfer, but the only in-tree payload path remained split across two
-    binaries with duplicate request structs and route-local filtering logic
-  - shared payload helpers are the smallest follow-up after the earlier shared
-    metadata admission work and keep the branch moving toward a less ad hoc
-    smoke/runtime boundary without claiming real remote discovery is complete
-  - this container can now be upgraded into a real validation host, so the
-    prior blocked-validation note should be retired instead of propagated
+  - after the payload-helper commit, the last duplicated smoke API structs were
+    `HealthResponse` and `QueryRequest`
+  - this is the smallest follow-up that meaningfully reduces smoke/backend drift
+    without expanding scope into a multi-owner runtime change
 - Environment facts confirmed in this run:
-  - installed Rust via `rustup` and the repo-pinned toolchain now resolves to
-    `1.93.1-x86_64-unknown-linux-gnu`
-  - added `rustfmt` for the pinned toolchain with
-    `rustup component add --toolchain 1.93.1-x86_64-unknown-linux-gnu rustfmt`
+  - repo-pinned Rust toolchain `1.93.1-x86_64-unknown-linux-gnu` remains
+    installed and usable
+  - `rustfmt` is installed for that pinned toolchain
 - In-progress edits:
   - `lib/llm/src/block_manager/distributed/g4.rs`
-    - added shared `G4TransferBlock`, `G4OfferRequest`,
-      `G4OfferResponse`, `G4PutPayloadRequest`, `G4FetchRequest`, and
-      `G4FetchResponse` types
-    - added payload-size validation on transfer blocks via the new
-      `G4Error::InvalidPayloadSize` variant
-    - added `G4StorageAgent::{offered_payload_blocks,offer_and_put_payload_blocks}`
-      and `G4StorageClient::{offer_payload_blocks,offer_and_put_payload_blocks}`
-    - added focused payload-helper tests for size validation, offer filtering,
-      and payload-side offer-and-register behavior
-    - fixed a compile regression after widening `G4Error` by handling the new
-      `InvalidPayloadSize` variant in the client fetch error matcher
+    - added shared `G4HealthResponse` and `G4QueryRequest`
   - `lib/llm/src/block_manager/distributed.rs`
-    - re-exported the shared payload request/response types
+    - re-exported `G4HealthResponse` and `G4QueryRequest`
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
-    - replaced duplicate payload HTTP types with the shared distributed-module
-      types
-    - changed `/put_payload` to reuse
-      `G4StorageAgent::offered_payload_blocks(...)` for validation and
-      admission before persisting payloads and publishing metadata
+    - removed local `HealthResponse` / `QueryRequest`
+    - switched `/health` and `/query` routes to the shared G4 types
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-    - replaced duplicate offer/fetch/payload HTTP types with the shared
-      distributed-module types
+    - removed local `HealthResponse` / `QueryRequest`
+    - switched the smoke client to the shared G4 types
 - Validation completed in this run:
-  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
-  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
-    -> pass (`Finished dev profile`, smoke backend + worker bins compile cleanly)
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
-    -> pass after installing `rustfmt` for the pinned toolchain
-  - rerun:
-    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
-    -> pass (`14 passed`, including the new payload-helper tests)
+    -> pass
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`14 passed`)
   - `git diff --check`
     -> pass
-- Validation notes from this run:
-  - the first post-edit `cargo test` rerun surfaced one real regression after
-    widening `G4Error`; the missing `InvalidPayloadSize` match arm in the
-    client fetch path was fixed in the same run before the final green rerun
-  - `cargo fmt` also reformatted `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
-    without changing behavior
 - Remaining work after this run:
-  - make a signed commit for the now-validated shared payload-helper slice
-  - re-read `PLANS.md` again after that commit and choose the next smallest G4
-    slice, most likely either client-side/shared payload-path cleanup beyond the
-    smoke route or a more realistic multi-owner smoke/runtime path
+  - make a signed commit for the validated smoke API deduplication slice
+  - re-read `PLANS.md` again and decide whether there is another small,
+    concrete G4 slice worth landing now; the next non-trivial option is likely
+    a more realistic multi-owner smoke/runtime path rather than further type
+    cleanup
 - Exact next file or command to touch:
   - command:
-    `git commit --signoff -am "Add shared G4 payload helpers"`
+    `git commit --signoff -am "Deduplicate smoke G4 API types"`
   - then:
-    `git log --oneline --max-count=5`
+    `git log --oneline --max-count=6`
   - then:
-    re-read `PLANS.md` and choose the next smallest post-validation G4 slice
+    re-read `PLANS.md` and either choose the next smallest G4 slice or record a
+    precise handoff if the next step is too large for the remaining run
 
 Current in-progress run (2026-03-31 18:33:59 UTC):
 

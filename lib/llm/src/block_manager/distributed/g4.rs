@@ -82,6 +82,17 @@ pub struct G4OfferRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct G4HealthResponse {
+    pub worker_id: WorkerID,
+    pub listen: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct G4QueryRequest {
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G4OfferResponse {
     pub accepted: Vec<SequenceHash>,
 }

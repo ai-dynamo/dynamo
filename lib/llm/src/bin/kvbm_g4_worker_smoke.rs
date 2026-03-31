@@ -7,16 +7,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use dynamo_llm::block_manager::Storage;
 use dynamo_llm::block_manager::distributed::{
-    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
-    G4PutPayloadRequest, G4QueryHit, G4StorageWorker, G4TransferBlock, KvbmLeader,
-    KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
+    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest,
+    G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker,
+    G4TransferBlock, KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker,
+    KvbmWorkerConfig,
 };
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, StorageAllocator,
     torch::{TorchDevice, TorchTensor},
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
@@ -195,17 +195,6 @@ impl Args {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct HealthResponse {
-    worker_id: u64,
-    listen: String,
-}
-
-#[derive(Debug, Serialize)]
-struct QueryRequest {
-    sequence_hashes: Vec<u64>,
-}
-
 async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)> {
     let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
     let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
@@ -261,7 +250,7 @@ async fn main() -> Result<()> {
     println!("local worker ready: worker_id={local_worker_id}");
 
     let client = Client::new();
-    let health: HealthResponse = client
+    let health: G4HealthResponse = client
         .get(format!("{}/health", args.backend_url))
         .send()
         .await?
@@ -326,7 +315,7 @@ async fn main() -> Result<()> {
         .collect();
     let hits: Vec<G4QueryHit> = client
         .post(format!("{}/query", args.backend_url))
-        .json(&QueryRequest {
+        .json(&G4QueryRequest {
             sequence_hashes: query_hashes.clone(),
         })
         .send()
