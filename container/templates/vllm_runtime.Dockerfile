@@ -206,6 +206,27 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 {% endif %}
 
+{% if device == "xpu" %}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    #ffmpeg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    # Install Intel GPU runtime packages
+    apt-get install -y --allow-downgrades libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
+    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 \
+    xpu-smi=1.3.6-1~24.04~ppa1 libxpum1=1.3.6-1~24.04~ppa1 \
+    libigsc0=0.9.5-1~24.04~ppa2 libmetee5=5.0.0-1~24.04~ppa2 libmetee-dev=5.0.0-1~24.04~ppa2 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 {% if device == "cuda" %}
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
