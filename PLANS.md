@@ -103,8 +103,8 @@ Current run outcome:
   - next validation command:
     `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
 
-- Switched to branch `mf/kvbm-g4`.
-- HUMAN VETO: SHOULD BE BASED ON MAIN, not on mf/kvbm-trtllm. 
+- Switched to branch `mf/kvbm-g4-v2`, recreated on top of `main`.
+- Do not base this work on `mf/kvbm-trtllm`.
 - Scope for this run stayed planning-only. Do not treat this section as a code
   change summary; treat it as instructions for the next subagent that will do
   the implementation.
@@ -116,7 +116,7 @@ Current run outcome:
 
 ## Subagent Start Here
 
-If you are the next subagent picking up `mf/kvbm-g4`, start with the smallest
+If you are the next subagent picking up `mf/kvbm-g4-v2`, start with the smallest
 useful vertical slice. Do not begin by designing a full distributed storage
 system.
 

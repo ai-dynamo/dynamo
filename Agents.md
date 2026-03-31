@@ -6,7 +6,7 @@ Before starting any work on this repo, always read these documents first:
 2. `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
 
 Those two files are the primary handoff and design context for the current
-`mf/kvbm-g4` work. Do not start coding before reading both.
+`mf/kvbm-g4-v2` work. Do not start coding before reading both.
 
 ## Read Order
 
