@@ -1,8 +1,8 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:41:11 UTC
+Last updated: 2026-03-31 19:33:30 UTC
 
-Current in-progress run (2026-03-31 19:28:54 UTC):
+Current in-progress run (2026-03-31 19:28:47 UTC):
 - Mandatory context re-read completed in this run:
   - `Agents.md`
   - `PLANS.md`
@@ -13,88 +13,71 @@ Current in-progress run (2026-03-31 19:28:54 UTC):
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
 - Current branch baseline observed in this run:
-  - started this run detached at `759958a29` (`Add multi-backend G4 smoke routing`)
-  - current detached `HEAD` after this run is
-    `96ab7bbb2` (`Make G4 smoke path honor cache misses`)
-  - worktree was clean before starting this run and is clean after the two
-    commits recorded below
+  - detached `HEAD` at `2792612b5` (`Refresh G4 plan handoff`)
+  - inherited local modification in `PLANS.md` from the prior handoff refresh;
+    preserving and extending it in this run rather than resetting it
 - Current implementation slice for this run:
-  - tighten shared G4 offer/payload admission so duplicate `sequence_hash`
-    values within one caller batch are treated as duplicates, not as multiple
-    accepted writes
-  - make the smoke worker exercise a more realistic `query -> fetch` path by
-    explicitly carrying misses forward as cache-miss fallback instead of trying
-    to pretend every requested block should fetch
-  - add an explicit duplicate-case smoke/demo check so the binary validates the
-    first-pass duplicate policy instead of only the happy path
+  - make `kvbm_g4_worker_smoke` build a real local `KvBlockManager` so fetched
+    remote hits can be registered into host blocks and onboarded into device
+    blocks instead of stopping at HTTP payload validation
+  - replace the fake monotonic demo `sequence_hash` values with token-derived
+    hashes from local completed blocks so the smoke path can honestly assert
+    local `query -> fetch -> onboard` behavior against KVBM pools
+  - keep remote storage-agent transport HTTP-only; the goal in this slice is
+    realistic local onboarding after fetch, not new discovery or runtime RPC
 - Why this slice:
-  - the prior run already completed multi-owner HTTP routing; the next honest
-    gap is behavior, not more endpoint plumbing
-  - the design doc treats `G4` as a cache where misses are acceptable, so the
-    smoke path should model query-discovered misses clearly
-  - duplicate single-batch offers are a real correctness bug in the current
-    shared helpers because the first accepted hash can currently admit later
-    same-hash entries from the same batch
+  - the remaining top-of-file gap called out by the previous run is still true:
+    the smoke path validates control/data exchange semantics but still does not
+    perform real worker-side onboard into KVBM tiers after fetch
+  - the design doc's read path explicitly ends with local onboard, so the next
+    smallest honest step is to make the smoke binary hit that endpoint locally
+    without claiming full runtime discovery or remote NIXL integration
+  - the current fake `sequence_hash` demo values are sufficient for HTTP
+    routing, but they block truthful local registration because KVBM registration
+    keys come from token-derived sequence hashes
 - In-progress edits:
   - `PLANS.md`
-    - replaced the stale top-of-file handoff with the actual current detached
-      `HEAD` and this run's narrower behavior/correctness slice
+    - refreshed the top-of-file handoff so this run tracks the actual current
+      detached `HEAD` and the new `query -> fetch -> onboard` smoke milestone
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+    - rewired the smoke binary around a real local `KvBlockManager`
+    - switched demo block generation from fake monotonic hashes to
+      token-derived `sequence_hash` values
+    - added local host registration plus `onboard_blocks(...)` after remote
+      fetch so the smoke path now validates actual local KVBM reuse entry
 - Milestones completed in this run:
-  - commits made in this run:
-    - `165b8f21b` `Tighten G4 duplicate offer admission`
-    - `96ab7bbb2` `Make G4 smoke path honor cache misses`
-  - shared G4 duplicate-admission correctness
-    - `lib/llm/src/block_manager/distributed/g4.rs`
-      now rejects duplicate `sequence_hash` values within one offer/payload
-      batch at the index, agent, and client layers while preserving the first
-      accepted entry in caller order
-    - added focused regression tests covering duplicate metadata batches and
-      duplicate payload batches for both agent and client flows
-  - repo-state unblock
-    - removed the malformed plain-text line that had been inserted into the
-      workspace root `Cargo.toml` and was preventing all cargo-based validation
-      from parsing the workspace manifest
-  - smoke query/fetch fallback realism
+  - local smoke `query -> fetch -> onboard` milestone
     - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-      now follows a real `query -> fetch` flow by carrying query misses forward
-      as explicit cache misses and fetching only confirmed remote hits
-    - added a duplicate re-offer pass after payload upload so the smoke binary
-      verifies already-present blocks are rejected instead of silently
-      re-admitted
-    - the smoke output now reports cache-miss fallback separately from fetched
-      blocks, which keeps the demo aligned with the design doc's
-      "cache miss => recompute" model
+      now builds a local logical `KvBlockManager` backed by the leader/worker
+      transport instead of stopping after HTTP byte validation
+    - the demo now derives all uploaded and missing `sequence_hash` values from
+      real local completed blocks, which makes later host registration honest
+      instead of relying on synthetic hash literals
+    - fetched remote hits are now written into local host blocks, registered by
+      `sequence_hash`, and onboarded into the local device pool before the
+      smoke binary declares success
 - Validation completed so far in this run:
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
     -> pass
-  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
-    -> pass (`18 passed`)
   - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
     -> pass
-  - `git diff --check`
-    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`18 passed`)
 - Exact next file or command to touch:
   - file:
     `PLANS.md`
-  - then:
-    `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
-  - then:
-    `lib/llm/src/block_manager/distributed/worker.rs`
-  - then:
-    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - next commands:
-    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    `git commit --signoff -am "Add local G4 smoke onboard path"`
   - then:
-    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    start one or more `kvbm_g4_backend` processes for manual smoke validation
   - then:
-    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    run `kvbm_g4_worker_smoke` against those backend URLs
 - Remaining work after this run:
-  - the smoke path is still HTTP-only and still does not perform real local
-    onboard into KVBM device/host pools after fetch; it only validates the
-    control/data exchange and cache-miss handling semantics
-  - runtime discovery, RPC ownership wiring, and true worker-side onboard
-    integration remain follow-up slices and are larger than the behavior fixes
-    completed in this run
+  - make a small signed commit for the completed local onboard milestone
+  - run the updated smoke binary end-to-end against live local backend process
+    or processes so the new onboard path is validated outside compile/test only
+  - after that, re-read the plan again and choose the next smallest follow-up
+    between stronger smoke validation, docs alignment, or runtime wiring
 
 Current in-progress run (2026-03-31 19:07:10 UTC):
 - Mandatory context re-read completed in this run:

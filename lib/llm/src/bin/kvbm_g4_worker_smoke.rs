@@ -6,16 +6,27 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use dynamo_llm::block_manager::KvBlockManager;
 use dynamo_llm::block_manager::Storage;
+use dynamo_llm::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+use dynamo_llm::block_manager::block::{
+    BasicMetadata, BlockDataProvider, BlockDataProviderMut, MutableBlock, data::BlockDataExt,
+    locality::LocalityProvider,
+};
+use dynamo_llm::block_manager::config::{
+    BlockParallelismStrategy, KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig,
+    KvManagerRuntimeConfig,
+};
 use dynamo_llm::block_manager::distributed::{
-    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest,
-    G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker,
-    G4TransferBlock, KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker,
-    KvbmWorkerConfig, route_g4_put_blocks_by_owner, route_g4_sequence_hashes_by_owner,
+    G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
+    G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker, G4TransferBlock, KvbmLeader,
+    KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
+    route_g4_put_blocks_by_owner, route_g4_sequence_hashes_by_owner,
     route_g4_transfer_blocks_by_owner, select_g4_owner,
 };
+use dynamo_llm::block_manager::locality::Logical;
 use dynamo_llm::block_manager::storage::{
-    DeviceAllocator, StorageAllocator,
+    DeviceAllocator, PinnedStorage, StorageAllocator,
     torch::{TorchDevice, TorchTensor},
 };
 use futures::future::join_all;
@@ -84,6 +95,16 @@ struct Args {
     disk_blocks: usize,
     sequence_start: u64,
     count: usize,
+}
+
+type LocalBlockManager = KvBlockManager<Logical<DistributedLeaderWorkerResources>, BasicMetadata>;
+
+#[derive(Clone, Debug)]
+struct DemoBlock {
+    tokens: Vec<u32>,
+    sequence_hash: u64,
+    payload: Vec<u8>,
+    size_bytes: usize,
 }
 
 impl Default for Args {
@@ -192,7 +213,7 @@ impl Args {
   --leader-ack-url <url>          local worker/leader ack url
   --host-blocks <n>               leader host blocks (default 8)
   --disk-blocks <n>               leader disk blocks (default 8)
-  --sequence-start <n>            first demo sequence hash (default 1000)
+  --sequence-start <n>            first demo token seed (default 1000)
   --count <n>                     number of demo blocks (default 4)"
                     );
                     std::process::exit(0);
@@ -214,7 +235,132 @@ impl Args {
     }
 }
 
-async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)> {
+fn demo_tokens(args: &Args, offset: usize) -> Vec<u32> {
+    let start = args.sequence_start as u32 + (offset as u32 * args.page_size as u32);
+    (0..args.page_size).map(|idx| start + idx as u32).collect()
+}
+
+fn block_size_bytes<S: Storage>(block: &impl BlockDataProvider<StorageType = S>) -> Result<usize> {
+    let block_data = block.block_data();
+    let mut size_bytes = 0usize;
+    for layer_idx in 0..block_data.num_layers() {
+        for outer_idx in 0..block_data.num_outer_dims() {
+            size_bytes += block_data.layer_view(layer_idx, outer_idx)?.size();
+        }
+    }
+    Ok(size_bytes)
+}
+
+fn write_block_payload<S: Storage>(
+    block: &mut impl BlockDataProviderMut<StorageType = S>,
+    payload: &[u8],
+) -> Result<()> {
+    let block_data = block.block_data_mut();
+    let mut copied = 0usize;
+
+    for layer_idx in 0..block_data.num_layers() {
+        for outer_idx in 0..block_data.num_outer_dims() {
+            let mut layer_view = block_data.layer_view_mut(layer_idx, outer_idx)?;
+            let layer_size = layer_view.size();
+            let end = copied + layer_size;
+            anyhow::ensure!(
+                end <= payload.len(),
+                "payload shorter than destination block: copied={copied} layer_size={layer_size} payload_len={}",
+                payload.len()
+            );
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    payload[copied..end].as_ptr(),
+                    layer_view.as_mut_ptr(),
+                    layer_size,
+                );
+            }
+            copied = end;
+        }
+    }
+
+    anyhow::ensure!(
+        copied == payload.len(),
+        "payload longer than destination block: copied={copied} payload_len={}",
+        payload.len()
+    );
+
+    Ok(())
+}
+
+fn read_block_payload(
+    block: &impl BlockDataProvider<StorageType = PinnedStorage>,
+) -> Result<Vec<u8>> {
+    let block_data = block.block_data();
+    let mut payload = Vec::with_capacity(block_size_bytes(block)?);
+
+    for layer_idx in 0..block_data.num_layers() {
+        for outer_idx in 0..block_data.num_outer_dims() {
+            let layer_view = block_data.layer_view(layer_idx, outer_idx)?;
+            unsafe {
+                payload.extend_from_slice(std::slice::from_raw_parts(
+                    layer_view.as_ptr(),
+                    layer_view.size(),
+                ));
+            }
+        }
+    }
+
+    Ok(payload)
+}
+
+fn complete_block<
+    S: Storage,
+    L: LocalityProvider,
+    M: dynamo_llm::block_manager::block::BlockMetadata,
+>(
+    block: &mut MutableBlock<S, L, M>,
+    tokens: &[u32],
+) -> Result<()> {
+    block.init_sequence(42)?;
+    for token in tokens {
+        block.add_token(*token)?;
+    }
+    block.commit()?;
+    Ok(())
+}
+
+async fn prepare_demo_blocks(
+    args: &Args,
+    block_manager: &LocalBlockManager,
+) -> Result<Vec<DemoBlock>> {
+    let device_pool = block_manager
+        .device()
+        .context("local block manager has no device pool")?;
+    let mut blocks = device_pool.allocate_blocks(args.count + 1).await?;
+    let mut demo_blocks = Vec::with_capacity(blocks.len());
+
+    for (offset, block) in blocks.iter_mut().enumerate() {
+        let tokens = demo_tokens(args, offset);
+        complete_block(block, &tokens)?;
+        let sequence_hash = block.sequence_hash()?;
+        let size_bytes = block_size_bytes(block)?;
+        let payload = (0..size_bytes)
+            .map(|idx| ((idx + offset) % 251) as u8)
+            .collect();
+
+        demo_blocks.push(DemoBlock {
+            tokens,
+            sequence_hash,
+            payload,
+            size_bytes,
+        });
+    }
+
+    drop(blocks);
+
+    Ok(demo_blocks)
+}
+
+async fn build_local_runtime(
+    args: &Args,
+) -> Result<(Arc<KvbmLeader>, KvbmWorker, LocalBlockManager)> {
     let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
     let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
         shape,
@@ -233,7 +379,7 @@ async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)
         .leader_ack_url(args.leader_ack_url.clone())
         .build()?;
 
-    let mut worker = KvbmWorker::new(worker_config, false).await?;
+    let worker = KvbmWorker::new(worker_config, false).await?;
 
     let leader_config = KvbmLeaderConfig::builder()
         .world_size(1)
@@ -249,24 +395,66 @@ async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)
         })
         .build()?;
 
-    let leader = KvbmLeader::new(leader_config).await?;
-    let block_index = Arc::new(G4BlockIndex::default());
-    let storage_worker = G4StorageWorker {
-        worker_id: args.worker_id,
-        endpoint: "local-smoke".to_string(),
-    };
+    let leader = Arc::new(KvbmLeader::new(leader_config).await?);
 
-    let agent = worker
-        .into_g4_storage_agent(storage_worker, block_index)
-        .await?;
-    Ok((leader, worker, agent.worker_id()))
+    let cancel_token = CancellationToken::new();
+    let block_manager_config = KvBlockManagerConfig::builder()
+        .runtime(
+            KvManagerRuntimeConfig::builder()
+                .worker_id(args.worker_id)
+                .cancellation_token(cancel_token.clone())
+                .build()?,
+        )
+        .model(
+            KvManagerModelConfig::builder()
+                .num_layers(1)
+                .outer_dim(1)
+                .page_size(args.page_size)
+                .inner_dim(128)
+                .dtype_width_bytes(args.dtype_width_bytes)
+                .build()?,
+        )
+        .device_layout(
+            KvManagerLayoutConfig::builder()
+                .num_blocks(args.num_device_blocks)
+                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                .build()?,
+        )
+        .host_layout(
+            KvManagerLayoutConfig::builder()
+                .num_blocks(args.host_blocks)
+                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                .build()?,
+        )
+        .disk_layout(
+            KvManagerLayoutConfig::builder()
+                .num_blocks(args.disk_blocks)
+                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                .build()?,
+        )
+        .build()?;
+
+    let resources =
+        DistributedLeaderWorkerResources::new(Some(leader.clone()), cancel_token.child_token())?;
+    let block_manager = LocalBlockManager::new(block_manager_config, resources).await?;
+
+    Ok((leader, worker, block_manager))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse()?;
-    let (_leader, _worker, local_worker_id) = build_local_worker(&args).await?;
-    println!("local worker ready: worker_id={local_worker_id}");
+    let (_leader, _worker, block_manager) = build_local_runtime(&args).await?;
+    println!(
+        "local worker ready: worker_id={} device_blocks={} host_blocks={}",
+        block_manager.worker_id(),
+        args.num_device_blocks,
+        args.host_blocks
+    );
+
+    let demo_blocks = prepare_demo_blocks(&args, &block_manager).await?;
+    let uploaded_demo_blocks = &demo_blocks[..args.count];
+    let missing_demo_block = &demo_blocks[args.count];
 
     let client = Client::new();
     let health_checks = join_all(args.backend_urls.iter().map(|backend_url| {
@@ -310,22 +498,22 @@ async fn main() -> Result<()> {
         );
     }
 
-    let blocks: Vec<G4PutBlock> = (0..args.count)
-        .map(|offset| G4PutBlock {
-            sequence_hash: args.sequence_start + offset as u64,
+    let blocks: Vec<G4PutBlock> = uploaded_demo_blocks
+        .iter()
+        .enumerate()
+        .map(|(offset, block)| G4PutBlock {
+            sequence_hash: block.sequence_hash,
             disk_block_idx: offset,
-            size_bytes: args.page_size * 128 * args.dtype_width_bytes,
+            size_bytes: block.size_bytes,
             checksum: None,
         })
         .collect();
-    let transfer_blocks: Vec<G4TransferBlock> = blocks
+    let transfer_blocks: Vec<G4TransferBlock> = uploaded_demo_blocks
         .iter()
-        .enumerate()
-        .map(|(offset, meta)| G4TransferBlock {
+        .zip(blocks.iter())
+        .map(|(demo, meta)| G4TransferBlock {
             meta: meta.clone(),
-            payload: (0..meta.size_bytes)
-                .map(|i| ((i + offset) % 251) as u8)
-                .collect(),
+            payload: demo.payload.clone(),
         })
         .collect();
 
@@ -435,8 +623,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    let query_hashes: Vec<u64> = (0..=args.count)
-        .map(|offset| args.sequence_start + offset as u64)
+    let query_hashes: Vec<u64> = demo_blocks
+        .iter()
+        .map(|block| block.sequence_hash)
         .collect();
     let query_routes = route_g4_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
     let mut hits = Vec::<G4QueryHit>::new();
@@ -485,7 +674,7 @@ async fn main() -> Result<()> {
         .collect();
 
     anyhow::ensure!(
-        cache_miss_hashes == vec![args.sequence_start + args.count as u64],
+        cache_miss_hashes == vec![missing_demo_block.sequence_hash],
         "unexpected cache-miss set: {:?}",
         cache_miss_hashes
     );
@@ -530,21 +719,86 @@ async fn main() -> Result<()> {
         blocks: fetched_blocks,
     };
 
-    for expected in transfer_blocks
+    for expected in uploaded_demo_blocks
         .iter()
-        .filter(|block| fetch_hashes.contains(&block.meta.sequence_hash))
+        .filter(|block| fetch_hashes.contains(&block.sequence_hash))
     {
         let actual = fetched
             .blocks
             .iter()
-            .find(|block| block.meta.sequence_hash == expected.meta.sequence_hash)
-            .with_context(|| format!("missing fetched block {}", expected.meta.sequence_hash))?;
+            .find(|block| block.meta.sequence_hash == expected.sequence_hash)
+            .with_context(|| format!("missing fetched block {}", expected.sequence_hash))?;
         anyhow::ensure!(
             actual.payload == expected.payload,
             "payload mismatch for sequence hash {}",
-            expected.meta.sequence_hash
+            expected.sequence_hash
         );
     }
+
+    let host_pool = block_manager
+        .host()
+        .context("local block manager has no host pool for fetched G4 blocks")?;
+    let device_pool = block_manager
+        .device()
+        .context("local block manager has no device pool for onboarded G4 blocks")?;
+    let fetched_demo_blocks: Vec<_> = uploaded_demo_blocks
+        .iter()
+        .filter(|block| fetch_hashes.contains(&block.sequence_hash))
+        .collect();
+    let mut mutable_host_blocks = host_pool.allocate_blocks(fetched_demo_blocks.len()).await?;
+    for (mutable_host_block, expected) in mutable_host_blocks.iter_mut().zip(&fetched_demo_blocks) {
+        complete_block(mutable_host_block, &expected.tokens)?;
+        write_block_payload(mutable_host_block, &expected.payload)?;
+    }
+
+    let immutable_host_blocks = host_pool.register_blocks(mutable_host_blocks).await?;
+    anyhow::ensure!(
+        immutable_host_blocks.len() == fetched_demo_blocks.len(),
+        "expected {} registered host blocks, got {}",
+        fetched_demo_blocks.len(),
+        immutable_host_blocks.len()
+    );
+
+    for expected in &fetched_demo_blocks {
+        let host_block = immutable_host_blocks
+            .iter()
+            .find(|block| block.sequence_hash() == expected.sequence_hash)
+            .with_context(|| {
+                format!(
+                    "missing registered host block for fetched sequence hash {}",
+                    expected.sequence_hash
+                )
+            })?;
+        anyhow::ensure!(
+            read_block_payload(host_block)? == expected.payload,
+            "host registration payload mismatch for sequence hash {}",
+            expected.sequence_hash
+        );
+    }
+
+    let onboarded_blocks = block_manager
+        .onboard_blocks(immutable_host_blocks.clone(), None)
+        .await??;
+    anyhow::ensure!(
+        onboarded_blocks.len() == fetched_demo_blocks.len(),
+        "expected {} onboarded device blocks, got {}",
+        fetched_demo_blocks.len(),
+        onboarded_blocks.len()
+    );
+
+    let onboarded_sequence_hashes: Vec<_> = onboarded_blocks
+        .iter()
+        .map(|block| block.sequence_hash())
+        .collect();
+    let matched_device_blocks = device_pool
+        .match_sequence_hashes(fetch_hashes.as_slice())
+        .await?;
+    anyhow::ensure!(
+        matched_device_blocks.len() == fetched_demo_blocks.len(),
+        "expected {} device-pool matches after onboard, got {}",
+        fetched_demo_blocks.len(),
+        matched_device_blocks.len()
+    );
 
     let transferred_bytes: usize = fetched.blocks.iter().map(|block| block.payload.len()).sum();
 
@@ -558,12 +812,17 @@ async fn main() -> Result<()> {
         );
     }
     println!(
+        "onboarded {} fetched blocks into local device pool with sequence hashes {:?}",
+        onboarded_blocks.len(),
+        onboarded_sequence_hashes
+    );
+    println!(
         "transferred {} blocks / {} bytes via the smoke HTTP transfer backend",
         fetched.blocks.len(),
         transferred_bytes
     );
     println!(
-        "note: this validates actual byte transfer in the smoke backend; real KVBM remote data-plane integration is still a separate step."
+        "note: this validates HTTP query/fetch plus local host registration and device onboard; real remote KVBM data-plane integration is still a separate step."
     );
 
     Ok(())
