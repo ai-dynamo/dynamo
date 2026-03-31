@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -183,7 +186,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 

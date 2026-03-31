@@ -20,7 +20,7 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from dynamo.planner.utils.exceptions import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()

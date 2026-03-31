@@ -9,7 +9,7 @@ import pytest
 
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.scale_protocol import ScaleRequest
+from dynamo.planner.connectors.protocol import ScaleRequest
 
 pytestmark = [
     pytest.mark.gpu_0,
