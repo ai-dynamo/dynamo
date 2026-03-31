@@ -61,7 +61,8 @@ class AicSession:
         )
         self._database = database
         self._model = model
-        self._model_name = getattr(model, "model_name", "")
+        # AIC models consistently expose model_path, but some do not surface model_name.
+        self._model_name = getattr(model, "model_name", None) or model_path
         self._config = config
         logger.info(
             "AIC session initialized: backend=%s, system=%s, model=%s, tp=%d",
@@ -80,11 +81,9 @@ class AicSession:
 
         total_latency = 0.0
         for op in self._model.context_ops:
-            x = (
-                batch_size * effective_isl
-                if "logits_gemm" not in op._name
-                else batch_size
-            )
+            # AIC operations identify kernels via Operation._name; there is no public name accessor.
+            op_name = getattr(op, "_name", None)
+            x = batch_size * effective_isl if op_name != "logits_gemm" else batch_size
             result = op.query(
                 self._database,
                 x=x,
@@ -103,6 +102,7 @@ class AicSession:
         if osl <= 1:
             return 0.0
 
+        # BaseModel stores speculative decode width on _nextn, which generation_ops scale by.
         effective_batch_size = batch_size * (self._model._nextn + 1)
         total_latency = 0.0
 
