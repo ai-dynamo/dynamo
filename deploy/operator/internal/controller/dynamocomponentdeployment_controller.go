@@ -80,6 +80,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch

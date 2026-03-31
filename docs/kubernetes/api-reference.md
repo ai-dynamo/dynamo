@@ -265,7 +265,6 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointPhase
@@ -284,7 +283,7 @@ _Appears in:_
 | --- | --- |
 | `Pending` | DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started<br /> |
 | `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
-| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC<br /> |
+| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint artifact is available<br /> |
 | `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
 
 
@@ -320,26 +319,10 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
-| `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  | Optional: \{\} <br /> |
-| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointStorageType
-
-_Underlying type:_ _string_
-
-DynamoCheckpointStorageType defines the supported storage backends for checkpoints
-
-_Validation:_
-- Enum: [pvc s3 oci]
-
-_Appears in:_
-- [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
 
 
 #### DynamoComponentDeployment
@@ -1716,77 +1699,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage holds storage backend configuration |  |  |
-
-
-#### CheckpointOCIConfig
-
-
-
-CheckpointOCIConfig holds OCI registry storage configuration.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the OCI URI (oci://registry/repository) |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the docker config secret |  |  |
-
-
-#### CheckpointPVCConfig
-
-
-
-CheckpointPVCConfig holds PVC storage configuration.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PVC | snapshot-pvc |  |
-| `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
-
-
-#### CheckpointS3Config
-
-
-
-CheckpointS3Config holds S3 storage configuration.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the S3 URI (s3://[endpoint/]bucket/prefix) |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the credentials secret |  |  |
-
-
-#### CheckpointStorageConfiguration
-
-
-
-CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
-
-
-
-_Appears in:_
-- [CheckpointConfiguration](#checkpointconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `type` _string_ | Type is the storage backend type: pvc, s3, or oci | pvc |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration (used when Type=pvc) |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration (used when Type=s3) |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration (used when Type=oci) |  |  |
 
 
 #### DiscoveryBackend

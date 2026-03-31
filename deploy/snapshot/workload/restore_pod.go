@@ -53,15 +53,15 @@ func PrepareRestorePodSpec(
 
 func ValidateRestorePodSpec(
 	podSpec *corev1.PodSpec,
-	container *corev1.Container,
 	storage protocol.Storage,
 	seccompProfile string,
 ) error {
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
+	container := restoreTargetContainer(podSpec)
 	if container == nil {
-		return fmt.Errorf("container is nil")
+		return fmt.Errorf("restore target container is missing")
 	}
 	if storage.PVCName != "" {
 		hasVolume := false
@@ -98,6 +98,19 @@ func ValidateRestorePodSpec(
 		return fmt.Errorf("expected localhost seccomp profile %q", seccompProfile)
 	}
 	return nil
+}
+
+func restoreTargetContainer(podSpec *corev1.PodSpec) *corev1.Container {
+	var fallback *corev1.Container
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == "main" {
+			return &podSpec.Containers[i]
+		}
+		if fallback == nil {
+			fallback = &podSpec.Containers[i]
+		}
+	}
+	return fallback
 }
 
 func injectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {

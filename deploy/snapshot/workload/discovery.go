@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	SnapshotAgentLabelKey      = "app.kubernetes.io/name"
-	SnapshotAgentLabelValue    = "snapshot"
+	SnapshotAgentLabelKey      = "app.kubernetes.io/component"
+	SnapshotAgentLabelValue    = "snapshot-agent"
 	SnapshotAgentContainerName = "agent"
 	SnapshotAgentLabelSelector = SnapshotAgentLabelKey + "=" + SnapshotAgentLabelValue
 )

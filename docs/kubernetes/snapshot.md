@@ -49,17 +49,12 @@ This flow is defined in [deploy/snapshot/Makefile](https://github.com/ai-dynamo/
 
 ### 2. Enable checkpointing in the platform and verify it
 
-Whether you are installing or upgrading `dynamo-platform`, the operator must have checkpointing enabled and must point at the same storage that the snapshot chart will use:
+Whether you are installing or upgrading `dynamo-platform`, the operator only needs checkpointing enabled:
 
 ```yaml
 dynamo-operator:
   checkpoint:
     enabled: true
-    storage:
-      type: pvc
-      pvc:
-        pvcName: snapshot-pvc
-        basePath: /checkpoints
 ```
 
 If the platform is already installed, verify that the operator config contains the checkpoint block:
@@ -73,7 +68,7 @@ kubectl get configmap "${OPERATOR_CONFIG}" -n "${PLATFORM_NAMESPACE}" \
   -o jsonpath='{.data.config\.yaml}' | sed -n '/^checkpoint:/,/^[^[:space:]]/p'
 ```
 
-Verify that the rendered config includes `enabled: true` and the same PVC name and base path you plan to use for the snapshot chart.
+Verify that the rendered config includes `enabled: true`. Snapshot storage is configured by the snapshot chart in the target namespace.
 
 For the full platform/operator configuration surface, see [deploy/helm/charts/platform/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md) and [deploy/helm/charts/platform/components/operator/values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/components/operator/values.yaml).
 
@@ -173,7 +168,7 @@ Auto mode resolves checkpoints by identity hash. It may create `checkpoint-<hash
 kubectl get dckpt -n ${NAMESPACE}
 
 CKPT_NAME=$(kubectl get dckpt -n ${NAMESPACE} \
-  -l nvidia.com/snapshot-checkpoint-hash=73e74442beb109ed \
+  -l nvidia.com/snapshot-checkpoint-id=73e74442beb109ed \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
@@ -246,7 +241,7 @@ kubectl get dynamocheckpoint qwen3-06b-bf16 -n ${NAMESPACE}
 kubectl apply -f my-dgd.yaml -n ${NAMESPACE}
 ```
 
-`mode: Auto` still resolves checkpoints by identity hash. The operator backfills `status.identityHash` and the `nvidia.com/snapshot-checkpoint-hash` label on each `DynamoCheckpoint` so auto lookup and uniqueness checks do not depend on the CR name.
+`mode: Auto` resolves checkpoints by identity hash. The operator writes `status.identityHash` and the `nvidia.com/snapshot-checkpoint-id` label on each `DynamoCheckpoint` so auto lookup and uniqueness checks do not depend on the CR name.
 
 ## Checkpoint Identity
 
@@ -315,7 +310,6 @@ spec:
 
   job:
     activeDeadlineSeconds: 3600
-    ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:
         restartPolicy: Never
@@ -371,12 +365,10 @@ Other useful status fields are:
 |-------|---------|
 | `status.identityHash` | Deterministic hash of `spec.identity` used for auto lookup and reuse |
 | `status.jobName` | Name of the checkpoint Job |
-| `status.location` | Checkpoint location in the configured storage backend |
-| `status.storageType` | Storage backend type (`pvc`, `s3`, or `oci`) |
 | `status.createdAt` | Timestamp recorded when the checkpoint becomes ready |
 | `status.message` | Failure or progress message when available |
 
-`status.conditions` is deprecated for `DynamoCheckpoint`. The legacy condition types `JobCreated` and `JobCompleted` are kept for compatibility only. Prefer `status.phase`, `status.jobName`, and `status.message` when checking checkpoint progress.
+Use `status.phase`, `status.jobName`, and `status.message` when checking checkpoint progress.
 
 **Detailed status:**
 
@@ -452,7 +444,7 @@ Or use `mode: Auto` with the same identity, and the operator will reuse the same
    kubectl describe pod <worker-pod> -n ${NAMESPACE}
    ```
 
-3. Confirm the referenced checkpoint is still `Ready`:
+3. Confirm the referenced checkpoint is `Ready`:
    ```bash
    kubectl get dckpt <checkpoint-name> -n ${NAMESPACE}
    ```

@@ -31,6 +31,7 @@ func validConfig() *configv1alpha1.OperatorConfiguration {
 	configv1alpha1.SetDefaultsOperatorConfiguration(cfg)
 	cfg.MPI.SSHSecretName = "mpi-ssh"
 	cfg.MPI.SSHSecretNamespace = "default"
+	// Cluster-wide validation requires chart-provided RBAC names.
 	cfg.RBAC.PlannerClusterRoleName = "planner-role"
 	cfg.RBAC.DGDRProfilingClusterRoleName = "dgdr-profiling-role"
 	cfg.RBAC.EPPClusterRoleName = "epp-role"

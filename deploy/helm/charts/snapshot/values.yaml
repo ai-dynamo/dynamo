@@ -19,7 +19,8 @@
 
 # Storage configuration for checkpoints
 storage:
-  # Storage type: pvc (default), s3, or oci
+  # Storage type stays snapshot-owned for future backend expansion.
+  # Only pvc is implemented today.
   type: pvc
 
   # PVC configuration (when type=pvc)
@@ -38,15 +39,12 @@ storage:
     # Restore targets derive checkpoint paths from this mount.
     basePath: /checkpoints
 
-  # S3 configuration (when type=s3)
+  # Reserved for future snapshot-owned backends. Unsupported today.
   s3:
-    # S3 URI (e.g., s3://my-bucket/checkpoints)
     uri: ""
-    # Credentials are expected via IRSA or mounted secrets
 
-  # OCI configuration (when type=oci)
+  # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
-    # OCI URI (e.g., oci://registry.io/repo/checkpoints)
     uri: ""
 
 # DaemonSet configuration for snapshot (checkpoint/restore) agent

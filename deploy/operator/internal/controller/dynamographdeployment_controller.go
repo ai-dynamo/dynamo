@@ -91,6 +91,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

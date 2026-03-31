@@ -112,12 +112,12 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		Volumes: []corev1.Volume{{
 			Name: protocol.CheckpointVolumeName,
 		}},
-	}
-	container := &corev1.Container{
-		Name: "main",
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      protocol.CheckpointVolumeName,
-			MountPath: "/checkpoints",
+		Containers: []corev1.Container{{
+			Name: "main",
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:      protocol.CheckpointVolumeName,
+				MountPath: "/checkpoints",
+			}},
 		}},
 	}
 	storage := protocol.Storage{
@@ -126,25 +126,60 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, container, storage, protocol.DefaultSeccompLocalhostProfile); err != nil {
+	if err := ValidateRestorePodSpec(podSpec, storage, protocol.DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected restore pod spec to be valid, got %v", err)
 	}
 
 	badSpec := podSpec.DeepCopy()
 	badSpec.Volumes = nil
-	if err := ValidateRestorePodSpec(badSpec, container.DeepCopy(), storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
+	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
 		t.Fatalf("expected missing volume error, got %v", err)
 	}
 
-	badContainer := container.DeepCopy()
-	badContainer.VolumeMounts = nil
-	if err := ValidateRestorePodSpec(podSpec.DeepCopy(), badContainer, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].VolumeMounts = nil
+	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
 		t.Fatalf("expected missing mount error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.SecurityContext = nil
-	if err := ValidateRestorePodSpec(badSpec, container.DeepCopy(), storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
+	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
 		t.Fatalf("expected missing seccomp error, got %v", err)
+	}
+}
+
+func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
+	profile := protocol.DefaultSeccompLocalhostProfile
+	podSpec := &corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{
+				Type:             corev1.SeccompProfileTypeLocalhost,
+				LocalhostProfile: &profile,
+			},
+		},
+		Volumes: []corev1.Volume{{
+			Name: protocol.CheckpointVolumeName,
+		}},
+		Containers: []corev1.Container{
+			{Name: "sidecar"},
+			{
+				Name: "main",
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      protocol.CheckpointVolumeName,
+					MountPath: "/checkpoints",
+				}},
+			},
+		},
+	}
+
+	storage := protocol.Storage{
+		Type:     protocol.StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+
+	if err := ValidateRestorePodSpec(podSpec, storage, protocol.DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("expected restore pod spec to validate against main container, got %v", err)
 	}
 }

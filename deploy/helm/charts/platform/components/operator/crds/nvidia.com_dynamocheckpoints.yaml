@@ -8172,12 +8172,6 @@ spec:
                       x-kubernetes-validations:
                         - message: sharedMemory.size must not be set when sharedMemory.disabled is true
                           rule: '!(has(self.disabled) && self.disabled && has(self.size))'
-                    ttlSecondsAfterFinished:
-                      default: 300
-                      description: TTLSecondsAfterFinished specifies how long to keep the Job after completion
-                      format: int32
-                      minimum: 0
-                      type: integer
                   required:
                     - podTemplateSpec
                   type: object

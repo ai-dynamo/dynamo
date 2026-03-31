@@ -110,7 +110,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if len(pod.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
 		}
-		if err := snapshotworkload.ValidateRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
+		if err := snapshotworkload.ValidateRestorePodSpec(&pod.Spec, resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}
 

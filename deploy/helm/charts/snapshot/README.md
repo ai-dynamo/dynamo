@@ -20,20 +20,15 @@ Snapshot storage is namespace-local. Install this chart in every namespace where
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 - Dynamo Platform already installed, with operator checkpointing enabled
 
-The platform/operator configuration must point at the same checkpoint storage that this chart installs:
+The platform/operator configuration only needs checkpointing enabled:
 
 ```yaml
 dynamo-operator:
   checkpoint:
     enabled: true
-    storage:
-      type: pvc
-      pvc:
-        pvcName: snapshot-pvc
-        basePath: /checkpoints
 ```
 
-The snapshot-agent no longer reads `basePath` from its ConfigMap, but the operator still uses its configured PVC base path when it annotates checkpoint and restore pods. That path must match `storage.pvc.basePath` here so the mounted checkpoint location is valid inside the agent pod.
+Snapshot storage is owned by this chart. Restore targets carry checkpoint identity metadata only, and snapshot-owned code discovers the mounted checkpoint PVC from the `snapshot-agent` DaemonSet in the target namespace.
 
 Cross-node restore requires a shared `ReadWriteMany` storage class. The chart defaults to `storage.pvc.accessMode=ReadWriteMany`.
 
@@ -79,7 +74,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | Parameter | Meaning | Default |
 |-----------|---------|---------|
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing PVC | `true` |
-| `storage.pvc.name` | PVC name used by the agent and by the operator config | `snapshot-pvc` |
+| `storage.pvc.name` | PVC name mounted by the snapshot-agent DaemonSet | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.accessMode` | Access mode for the checkpoint PVC | `ReadWriteMany` |
@@ -121,5 +116,5 @@ kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot --all-containers
 If checkpoint creation never becomes ready, verify all three pieces line up:
 
 - the operator has `dynamo-operator.checkpoint.enabled=true`
-- the operator PVC name and base path match the snapshot chart values
+- the `snapshot-agent` DaemonSet is running in the same namespace and has the expected PVC mounted
 - the workload uses a snapshot-capable worker image and command

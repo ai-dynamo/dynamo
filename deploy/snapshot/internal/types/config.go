@@ -34,7 +34,7 @@ func (c *AgentConfig) Validate() error {
 		storageType = "pvc"
 	}
 	if storageType != "pvc" {
-		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q", storageType)}
+		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q; only pvc is implemented today", storageType)}
 	}
 	if strings.TrimSpace(c.Storage.BasePath) == "" {
 		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath is required"}

@@ -33,7 +33,6 @@ spec:
   # Job configuration for checkpoint creation
   job:
     activeDeadlineSeconds: 3600
-    ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:
         containers:
