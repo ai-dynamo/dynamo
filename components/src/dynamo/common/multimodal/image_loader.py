@@ -75,6 +75,17 @@ class ImageLoader:
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
 
+    @staticmethod
+    async def _open_image(image_data: BytesIO) -> Image.Image:
+        """Open and validate an image from raw bytes, converting to RGB."""
+        with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
+            image = await asyncio.to_thread(
+                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+            )
+            if image.format not in ("JPEG", "PNG", "WEBP"):
+                raise ValueError(f"Unsupported image format: {image.format}")
+            return image.convert("RGB")
+
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
         if key not in self._image_cache:
@@ -97,15 +108,7 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(response.content)
 
-            with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-                # PIL is sync, so offload to a thread to avoid blocking the event loop
-                # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-                image = await asyncio.to_thread(
-                    Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-                )
-                if image.format not in ("JPEG", "PNG", "WEBP"):
-                    raise ValueError(f"Unsupported image format: {image.format}")
-                return image.convert("RGB")
+            return await self._open_image(image_data)
 
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP {e.response.status_code} loading image: '{image_url}'")
@@ -188,13 +191,7 @@ class ImageLoader:
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-                image = await asyncio.to_thread(
-                    Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-                )
-                if image.format not in ("JPEG", "PNG", "WEBP"):
-                    raise ValueError(f"Unsupported image format: {image.format}")
-                return image.convert("RGB")
+            return await self._open_image(image_data)
 
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")

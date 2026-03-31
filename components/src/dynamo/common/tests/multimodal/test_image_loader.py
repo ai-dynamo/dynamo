@@ -12,6 +12,8 @@ from PIL import Image
 
 from dynamo.common.multimodal.image_loader import ImageLoader
 
+pytestmark = [pytest.mark.asyncio, pytest.mark.gpu_0]
+
 
 def _make_png_bytes() -> bytes:
     """Create a minimal valid PNG in memory."""
@@ -70,7 +72,6 @@ def _init_loader(loader: ImageLoader) -> None:
 # --- Concurrent same-URL dedup ---
 
 
-@pytest.mark.asyncio
 async def test_concurrent_same_url_deduplicates(loader: ImageLoader) -> None:
     """Two concurrent load_image calls for the same URL should issue only one HTTP fetch."""
     mock_client = _mock_http_client(delay=0.05)
@@ -89,7 +90,6 @@ async def test_concurrent_same_url_deduplicates(loader: ImageLoader) -> None:
     assert mock_client.get.call_count == 1
 
 
-@pytest.mark.asyncio
 async def test_concurrent_different_urls_fetch_independently(
     loader: ImageLoader,
 ) -> None:
@@ -110,7 +110,6 @@ async def test_concurrent_different_urls_fetch_independently(
 # --- Waiter cancellation isolation ---
 
 
-@pytest.mark.asyncio
 async def test_waiter_cancellation_does_not_cancel_shared_task(
     loader: ImageLoader,
 ) -> None:
@@ -135,7 +134,6 @@ async def test_waiter_cancellation_does_not_cancel_shared_task(
 # --- Retry after failure ---
 
 
-@pytest.mark.asyncio
 async def test_retry_after_failure(loader: ImageLoader) -> None:
     """After a fetch failure, the next caller should start a fresh fetch."""
     fail_client = _mock_http_client(side_effect=httpx.TimeoutException("timeout"))
@@ -162,21 +160,18 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-@pytest.mark.asyncio
 async def test_file_not_found_normalized(loader: ImageLoader) -> None:
     """file:// path that doesn't exist should raise ValueError, not FileNotFoundError."""
     with pytest.raises(ValueError, match="Failed to load image"):
         await loader.load_image("file:///nonexistent/path/img.png")
 
 
-@pytest.mark.asyncio
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
     """Malformed base64 data URL should raise ValueError."""
     with pytest.raises(ValueError, match="Invalid base64"):
         await loader.load_image("data:image/png;base64,NOT_VALID!!!")
 
 
-@pytest.mark.asyncio
 async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
     """data: URL with non-image media type should raise ValueError."""
     with pytest.raises(ValueError, match="Data URL must be an image type"):
@@ -186,7 +181,6 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
 # --- HTTP error contract ---
 
 
-@pytest.mark.asyncio
 async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
     """HTTP timeout should be normalized to ValueError."""
     mock_client = _mock_http_client(side_effect=httpx.TimeoutException("timed out"))
@@ -198,7 +192,6 @@ async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
             await loader.load_image("https://example.com/img.png")
 
 
-@pytest.mark.asyncio
 async def test_http_status_error_propagated(loader: ImageLoader) -> None:
     """HTTP 4xx/5xx should propagate as HTTPStatusError."""
     mock_client = _mock_http_client(status_code=404)
@@ -213,7 +206,6 @@ async def test_http_status_error_propagated(loader: ImageLoader) -> None:
 # --- Cache behavior ---
 
 
-@pytest.mark.asyncio
 async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
     """A cached image should be returned without making an HTTP request."""
     img = Image.new("RGB", (2, 2))
