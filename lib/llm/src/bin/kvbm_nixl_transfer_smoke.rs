@@ -220,10 +220,8 @@ async fn main() -> Result<()> {
         )
         .build()?;
 
-    let resources = DistributedLeaderWorkerResources::new(
-        Some(Arc::new(leader)),
-        cancel_token.child_token(),
-    )?;
+    let resources =
+        DistributedLeaderWorkerResources::new(Some(Arc::new(leader)), cancel_token.child_token())?;
 
     let block_manager =
         KvBlockManager::<Logical<DistributedLeaderWorkerResources>, BasicMetadata>::new(
@@ -272,7 +270,8 @@ async fn main() -> Result<()> {
 
     println!(
         "nixl smoke transfer complete: device->host {} blocks, host->device {} blocks",
-        NUM_BLOCKS, new_device_blocks.len()
+        NUM_BLOCKS,
+        new_device_blocks.len()
     );
     println!("sequence_hashes={:?}", sequence_hashes);
     Ok(())

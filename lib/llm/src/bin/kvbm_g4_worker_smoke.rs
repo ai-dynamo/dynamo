@@ -5,15 +5,16 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use dynamo_llm::block_manager::Storage;
 use dynamo_llm::block_manager::distributed::{
-    G4BlockIndex, G4PutBlock, G4StorageWorker, KvbmLeader, KvbmLeaderConfig,
-    KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
+    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
+    G4PutPayloadRequest, G4QueryHit, G4StorageWorker, G4TransferBlock, KvbmLeader,
+    KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
 };
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, StorageAllocator,
     torch::{TorchDevice, TorchTensor},
 };
-use dynamo_llm::block_manager::Storage;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -108,16 +109,38 @@ impl Args {
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
-                "--backend-url" => args.backend_url = it.next().context("missing value for --backend-url")?,
-                "--worker-id" => args.worker_id = it.next().context("missing value for --worker-id")?.parse()?,
-                "--device-id" => args.device_id = it.next().context("missing value for --device-id")?.parse()?,
-                "--num-device-blocks" => {
-                    args.num_device_blocks = it.next().context("missing value for --num-device-blocks")?.parse()?
+                "--backend-url" => {
+                    args.backend_url = it.next().context("missing value for --backend-url")?
                 }
-                "--page-size" => args.page_size = it.next().context("missing value for --page-size")?.parse()?,
+                "--worker-id" => {
+                    args.worker_id = it
+                        .next()
+                        .context("missing value for --worker-id")?
+                        .parse()?
+                }
+                "--device-id" => {
+                    args.device_id = it
+                        .next()
+                        .context("missing value for --device-id")?
+                        .parse()?
+                }
+                "--num-device-blocks" => {
+                    args.num_device_blocks = it
+                        .next()
+                        .context("missing value for --num-device-blocks")?
+                        .parse()?
+                }
+                "--page-size" => {
+                    args.page_size = it
+                        .next()
+                        .context("missing value for --page-size")?
+                        .parse()?
+                }
                 "--dtype-width-bytes" => {
-                    args.dtype_width_bytes =
-                        it.next().context("missing value for --dtype-width-bytes")?.parse()?
+                    args.dtype_width_bytes = it
+                        .next()
+                        .context("missing value for --dtype-width-bytes")?
+                        .parse()?
                 }
                 "--leader-pub-url" => {
                     args.leader_pub_url = it.next().context("missing value for --leader-pub-url")?
@@ -125,12 +148,27 @@ impl Args {
                 "--leader-ack-url" => {
                     args.leader_ack_url = it.next().context("missing value for --leader-ack-url")?
                 }
-                "--host-blocks" => args.host_blocks = it.next().context("missing value for --host-blocks")?.parse()?,
-                "--disk-blocks" => args.disk_blocks = it.next().context("missing value for --disk-blocks")?.parse()?,
-                "--sequence-start" => {
-                    args.sequence_start = it.next().context("missing value for --sequence-start")?.parse()?
+                "--host-blocks" => {
+                    args.host_blocks = it
+                        .next()
+                        .context("missing value for --host-blocks")?
+                        .parse()?
                 }
-                "--count" => args.count = it.next().context("missing value for --count")?.parse()?,
+                "--disk-blocks" => {
+                    args.disk_blocks = it
+                        .next()
+                        .context("missing value for --disk-blocks")?
+                        .parse()?
+                }
+                "--sequence-start" => {
+                    args.sequence_start = it
+                        .next()
+                        .context("missing value for --sequence-start")?
+                        .parse()?
+                }
+                "--count" => {
+                    args.count = it.next().context("missing value for --count")?.parse()?
+                }
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g4_worker_smoke
@@ -166,46 +204,6 @@ struct HealthResponse {
 #[derive(Debug, Serialize)]
 struct QueryRequest {
     sequence_hashes: Vec<u64>,
-}
-
-#[derive(Debug, Serialize)]
-struct OfferRequest {
-    blocks: Vec<G4PutBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OfferResponse {
-    accepted: Vec<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct QueryHit {
-    worker_id: u64,
-    sequence_hash: u64,
-    disk_block_idx: usize,
-    size_bytes: usize,
-    _checksum: Option<[u8; 32]>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TransferBlock {
-    meta: G4PutBlock,
-    payload: Vec<u8>,
-}
-
-#[derive(Debug, Serialize)]
-struct PutPayloadRequest {
-    blocks: Vec<TransferBlock>,
-}
-
-#[derive(Debug, Serialize)]
-struct FetchRequest {
-    sequence_hashes: Vec<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FetchResponse {
-    blocks: Vec<TransferBlock>,
 }
 
 async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)> {
@@ -250,7 +248,9 @@ async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)
         endpoint: "local-smoke".to_string(),
     };
 
-    let agent = worker.into_g4_storage_agent(storage_worker, block_index).await?;
+    let agent = worker
+        .into_g4_storage_agent(storage_worker, block_index)
+        .await?;
     Ok((leader, worker, agent.worker_id()))
 }
 
@@ -282,10 +282,10 @@ async fn main() -> Result<()> {
             checksum: None,
         })
         .collect();
-    let transfer_blocks: Vec<TransferBlock> = blocks
+    let transfer_blocks: Vec<G4TransferBlock> = blocks
         .iter()
         .enumerate()
-        .map(|(offset, meta)| TransferBlock {
+        .map(|(offset, meta)| G4TransferBlock {
             meta: meta.clone(),
             payload: (0..meta.size_bytes)
                 .map(|i| ((i + offset) % 251) as u8)
@@ -293,9 +293,9 @@ async fn main() -> Result<()> {
         })
         .collect();
 
-    let offer: OfferResponse = client
+    let offer: G4OfferResponse = client
         .post(format!("{}/offer", args.backend_url))
-        .json(&OfferRequest {
+        .json(&G4OfferRequest {
             blocks: blocks.clone(),
         })
         .send()
@@ -306,7 +306,7 @@ async fn main() -> Result<()> {
 
     println!("offer accepted hashes: {:?}", offer.accepted);
 
-    let accepted_blocks: Vec<TransferBlock> = transfer_blocks
+    let accepted_blocks: Vec<G4TransferBlock> = transfer_blocks
         .iter()
         .filter(|block| offer.accepted.contains(&block.meta.sequence_hash))
         .cloned()
@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
 
     client
         .post(format!("{}/put_payload", args.backend_url))
-        .json(&PutPayloadRequest {
+        .json(&G4PutPayloadRequest {
             blocks: accepted_blocks.clone(),
         })
         .send()
@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
     let query_hashes: Vec<u64> = (0..=args.count)
         .map(|offset| args.sequence_start + offset as u64)
         .collect();
-    let hits: Vec<QueryHit> = client
+    let hits: Vec<G4QueryHit> = client
         .post(format!("{}/query", args.backend_url))
         .json(&QueryRequest {
             sequence_hashes: query_hashes.clone(),
@@ -335,9 +335,9 @@ async fn main() -> Result<()> {
         .json()
         .await?;
 
-    let fetched: FetchResponse = client
+    let fetched: G4FetchResponse = client
         .post(format!("{}/fetch", args.backend_url))
-        .json(&FetchRequest {
+        .json(&G4FetchRequest {
             sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
         })
         .send()
@@ -374,7 +374,9 @@ async fn main() -> Result<()> {
         fetched.blocks.len(),
         transferred_bytes
     );
-    println!("note: this validates actual byte transfer in the smoke backend; real KVBM remote data-plane integration is still a separate step.");
+    println!(
+        "note: this validates actual byte transfer in the smoke backend; real KVBM remote data-plane integration is still a separate step."
+    );
 
     Ok(())
 }

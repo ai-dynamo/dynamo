@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -13,15 +13,16 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use dynamo_llm::block_manager::Storage;
 use dynamo_llm::block_manager::distributed::{
-    G4BlockIndex, G4PutBlock, G4QueryHit, G4StorageAgent, G4StorageWorker, KvbmLeader,
+    G4BlockIndex, G4FetchRequest, G4FetchResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
+    G4PutPayloadRequest, G4QueryHit, G4StorageAgent, G4StorageWorker, G4TransferBlock, KvbmLeader,
     KvbmLeaderConfig, KvbmLeaderNumBlocksConfig, KvbmWorker, KvbmWorkerConfig,
 };
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, StorageAllocator,
     torch::{TorchDevice, TorchTensor},
 };
-use dynamo_llm::block_manager::Storage;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -111,16 +112,38 @@ impl Args {
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
-                "--listen" => args.listen = it.next().context("missing value for --listen")?.parse()?,
-                "--worker-id" => args.worker_id = it.next().context("missing value for --worker-id")?.parse()?,
-                "--device-id" => args.device_id = it.next().context("missing value for --device-id")?.parse()?,
-                "--num-device-blocks" => {
-                    args.num_device_blocks = it.next().context("missing value for --num-device-blocks")?.parse()?
+                "--listen" => {
+                    args.listen = it.next().context("missing value for --listen")?.parse()?
                 }
-                "--page-size" => args.page_size = it.next().context("missing value for --page-size")?.parse()?,
+                "--worker-id" => {
+                    args.worker_id = it
+                        .next()
+                        .context("missing value for --worker-id")?
+                        .parse()?
+                }
+                "--device-id" => {
+                    args.device_id = it
+                        .next()
+                        .context("missing value for --device-id")?
+                        .parse()?
+                }
+                "--num-device-blocks" => {
+                    args.num_device_blocks = it
+                        .next()
+                        .context("missing value for --num-device-blocks")?
+                        .parse()?
+                }
+                "--page-size" => {
+                    args.page_size = it
+                        .next()
+                        .context("missing value for --page-size")?
+                        .parse()?
+                }
                 "--dtype-width-bytes" => {
-                    args.dtype_width_bytes =
-                        it.next().context("missing value for --dtype-width-bytes")?.parse()?
+                    args.dtype_width_bytes = it
+                        .next()
+                        .context("missing value for --dtype-width-bytes")?
+                        .parse()?
                 }
                 "--leader-pub-url" => {
                     args.leader_pub_url = it.next().context("missing value for --leader-pub-url")?
@@ -128,8 +151,18 @@ impl Args {
                 "--leader-ack-url" => {
                     args.leader_ack_url = it.next().context("missing value for --leader-ack-url")?
                 }
-                "--host-blocks" => args.host_blocks = it.next().context("missing value for --host-blocks")?.parse()?,
-                "--disk-blocks" => args.disk_blocks = it.next().context("missing value for --disk-blocks")?.parse()?,
+                "--host-blocks" => {
+                    args.host_blocks = it
+                        .next()
+                        .context("missing value for --host-blocks")?
+                        .parse()?
+                }
+                "--disk-blocks" => {
+                    args.disk_blocks = it
+                        .next()
+                        .context("missing value for --disk-blocks")?
+                        .parse()?
+                }
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g4_backend
@@ -165,41 +198,10 @@ struct QueryRequest {
     sequence_hashes: Vec<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct OfferRequest {
-    blocks: Vec<G4PutBlock>,
-}
-
-#[derive(Debug, Serialize)]
-struct OfferResponse {
-    accepted: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TransferBlock {
-    meta: G4PutBlock,
-    payload: Vec<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PutPayloadRequest {
-    blocks: Vec<TransferBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FetchRequest {
-    sequence_hashes: Vec<u64>,
-}
-
-#[derive(Debug, Serialize)]
-struct FetchResponse {
-    blocks: Vec<TransferBlock>,
-}
-
 #[derive(Clone)]
 struct AppState {
     agent: Arc<G4StorageAgent>,
-    payloads: Arc<tokio::sync::RwLock<HashMap<u64, TransferBlock>>>,
+    payloads: Arc<tokio::sync::RwLock<HashMap<u64, G4TransferBlock>>>,
     listen: SocketAddr,
     _leader: Arc<KvbmLeader>,
     _worker: Arc<tokio::sync::Mutex<KvbmWorker>>,
@@ -229,49 +231,46 @@ async fn query_blocks(
 
 async fn offer_blocks(
     State(state): State<AppState>,
-    Json(request): Json<OfferRequest>,
-) -> Json<OfferResponse> {
+    Json(request): Json<G4OfferRequest>,
+) -> Json<G4OfferResponse> {
     let accepted = state.agent.offer_blocks(&request.blocks).await;
 
-    Json(OfferResponse { accepted })
+    Json(G4OfferResponse { accepted })
 }
 
 async fn put_payload_blocks(
     State(state): State<AppState>,
-    Json(request): Json<PutPayloadRequest>,
+    Json(request): Json<G4PutPayloadRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    for block in &request.blocks {
-        if block.payload.len() != block.meta.size_bytes {
+    let accepted = match state.agent.offered_payload_blocks(request.blocks).await {
+        Ok(accepted) => accepted,
+        Err(dynamo_llm::block_manager::distributed::G4Error::InvalidPayloadSize { .. }) => {
             return Err(StatusCode::BAD_REQUEST);
         }
-    }
-
-    let metadata: Vec<G4PutBlock> = request.blocks.iter().map(|block| block.meta.clone()).collect();
-    let accepted = state.agent.offered_blocks(metadata).await;
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
 
     if accepted.is_empty() {
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    let accepted_hashes: std::collections::HashSet<_> =
-        accepted.iter().map(|block| block.sequence_hash).collect();
-
     let mut payloads = state.payloads.write().await;
-    for block in request.blocks {
-        if accepted_hashes.contains(&block.meta.sequence_hash) {
-            payloads.insert(block.meta.sequence_hash, block);
-        }
+    for block in &accepted {
+        payloads.insert(block.meta.sequence_hash, block.clone());
     }
 
-    state.agent.put_blocks(accepted).await;
+    state
+        .agent
+        .put_blocks(accepted.into_iter().map(|block| block.meta).collect())
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn fetch_blocks(
     State(state): State<AppState>,
-    Json(request): Json<FetchRequest>,
-) -> Result<Json<FetchResponse>, StatusCode> {
+    Json(request): Json<G4FetchRequest>,
+) -> Result<Json<G4FetchResponse>, StatusCode> {
     let payloads = state.payloads.read().await;
     let mut blocks = Vec::with_capacity(request.sequence_hashes.len());
 
@@ -282,14 +281,16 @@ async fn fetch_blocks(
         blocks.push(block.clone());
     }
 
-    Ok(Json(FetchResponse { blocks }))
+    Ok(Json(G4FetchResponse { blocks }))
 }
 
-async fn build_backend(args: &Args) -> Result<(
+async fn build_backend(
+    args: &Args,
+) -> Result<(
     Arc<KvbmLeader>,
     Arc<tokio::sync::Mutex<KvbmWorker>>,
     Arc<G4StorageAgent>,
-    Arc<tokio::sync::RwLock<HashMap<u64, TransferBlock>>>,
+    Arc<tokio::sync::RwLock<HashMap<u64, G4TransferBlock>>>,
 )> {
     let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
     let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
@@ -331,7 +332,11 @@ async fn build_backend(args: &Args) -> Result<(
         worker_id: args.worker_id,
         endpoint: format!("http://{}", args.listen),
     };
-    let agent = Arc::new(worker.into_g4_storage_agent(storage_worker, block_index).await?);
+    let agent = Arc::new(
+        worker
+            .into_g4_storage_agent(storage_worker, block_index)
+            .await?,
+    );
     let payloads = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
     Ok((
