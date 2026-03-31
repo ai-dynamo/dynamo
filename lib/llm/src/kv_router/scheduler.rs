@@ -81,6 +81,7 @@ where
             block_size,
             selector,
             policy,
+            kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),
             worker_type,
             watch_worker_configs,
@@ -180,9 +181,10 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
         overlaps: OverlapScores,
+        track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         self.inner
-            .get_potential_loads(token_seq, isl_tokens, overlaps)
+            .get_potential_loads(token_seq, isl_tokens, overlaps, track_prefill_tokens)
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {

@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -34,7 +37,6 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -184,7 +186,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
@@ -635,6 +637,9 @@ async def register_vllm_model(
     if model_type != ModelType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)

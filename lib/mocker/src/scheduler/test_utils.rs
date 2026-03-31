@@ -215,7 +215,7 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
 /// common prefix to exercise prefix caching / radix tree reuse.
 pub(crate) async fn assert_scheduler_completes_all(
     scheduler: &dyn SchedulerHandle,
-    output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: &mut mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     num_requests: usize,
     input_len: usize,
     max_output_tokens: usize,
@@ -260,8 +260,8 @@ pub(crate) async fn assert_scheduler_completes_all(
     loop {
         tokio::select! {
             biased;
-            Some(_) = output_rx.recv() => {
-                received_tokens += 1;
+            Some(output_batch) = output_rx.recv() => {
+                received_tokens += output_batch.len();
                 if received_tokens >= expected_tokens {
                     break;
                 }
