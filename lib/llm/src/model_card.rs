@@ -1035,28 +1035,38 @@ impl TokenizerKind {
     /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
     /// layouts or filesystem failures that should be treated as hard errors.
     pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
+        // Helper: probe a single well-known file.  Returns Ok(None) when the
+        // file simply does not exist, Ok(Some(..)) on success, and Err for
+        // anything else (unreadable file, checksum failure, etc.).
+        fn probe(path: std::path::PathBuf) -> Result<Option<CheckedFile>> {
+            if !path.exists() {
+                return Ok(None);
+            }
+            Ok(Some(CheckedFile::from_disk(path)?))
+        }
+
         // 1. Try tokenizer.json (HuggingFace)
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
+        if let Some(f) = probe(directory.join("tokenizer.json"))? {
             return Ok(Some(Self::HfTokenizerJson(f)));
         }
 
         // 2. Try tiktoken.model
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
+        if let Some(f) = probe(directory.join("tiktoken.model"))? {
             return Ok(Some(Self::TikTokenModel(f)));
         }
 
         // 3. Search for any *.tiktoken file
         let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
+            .with_context(|| format!("Failed to read directory {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("Failed to iterate directory {}", directory.display()))?
             .into_iter()
-            .flatten()
-            .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
             .collect();
 
         if tiktoken_files.len() == 1 {
-            if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
-                return Ok(Some(Self::TikTokenModel(f)));
-            }
+            let f = CheckedFile::from_disk(tiktoken_files[0].path())?;
+            return Ok(Some(Self::TikTokenModel(f)));
         } else if tiktoken_files.len() > 1 {
             let names: Vec<_> = tiktoken_files
                 .iter()
