@@ -1,6 +1,86 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 03:02:10 UTC
+Last updated: 2026-03-31 18:33:59 UTC
+
+Current in-progress run (2026-03-31 18:33:59 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager.rs`
+  - `lib/llm/src/block_manager/state.rs`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
+- Current implementation slice for this run:
+  - compact the stale top-of-file handoff by recording that the worker helper
+    and distributed runtime/index integration test are already present in the
+    current branch
+  - add a shared metadata-admission `offer` API to the G4 agent/client layer so
+    callers can cheaply filter already-known blocks before payload transfer
+  - make the smoke HTTP backend reuse that shared admission API instead of
+    open-coding direct `G4BlockIndex` checks at the route layer
+- Why this slice:
+  - the design doc and prior plan entries both call out metadata-first
+    admission before expensive payload transfer as a preferred next refinement
+  - the current branch already has an ad hoc `/offer` path in the smoke backend,
+    which proves the need but leaves the real G4 runtime surface inconsistent
+  - this is still local/in-process and testable without claiming discovery or
+    real remote NIXL data-plane routing are complete
+- In-progress edits:
+  - `PLANS.md`
+    - recorded that the previous top entry was stale relative to the checked-in
+      branch state
+    - set this run's next milestone to shared G4 metadata admission
+- Milestone completed in this run:
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+    - added shared `offer_blocks(...)` admission helpers on `G4BlockIndex`,
+      `G4StorageAgent`, and `G4StorageClient`
+    - routed client-side offer admission by owner while preserving caller input
+      order for accepted blocks
+    - added focused tests for agent-level duplicate rejection and client-level
+      owner-routed admission
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+    - changed the smoke `/offer` route to reuse
+      `G4StorageAgent::offer_blocks(...)` instead of open-coding direct index
+      checks
+- Validation completed in this run:
+  - attempted:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> failed in this container before execution: `/bin/bash: cargo: command not found`
+  - attempted:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> failed in this container before execution: `/bin/bash: cargo: command not found`
+  - attempted environment check:
+    `rustc --version`
+    -> failed in this container before execution: `/bin/bash: rustc: command not found`
+- Validation notes from this run:
+  - this container currently has no Rust toolchain installed or discoverable on
+    `PATH`; `whereis cargo` returned no result and the usual binary locations
+    checked in this run were empty
+  - because `cargo`/`rustc` are absent, this run could not execute the required
+    post-milestone formatting or Rust tests even though the commands were
+    attempted exactly as planned
+- Remaining work after this run:
+  - rerun the blocked validation commands on the next host/container that has
+    `cargo` and `rustc` installed
+  - if those pass, update the smoke worker/client code to use the new shared
+    `G4StorageClient::offer_blocks(...)` path instead of HTTP-local request
+    filtering where that reuse makes sense
+  - after validation, re-read `PLANS.md` again and decide whether the next
+    smallest G4 slice should be shared payload `put_payload` helpers or a more
+    realistic multi-owner smoke/runtime path
+- Exact next file or command to touch:
+  - command:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
 
 Current in-progress run (2026-03-31 03:02:10 UTC):
 

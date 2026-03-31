@@ -231,18 +231,7 @@ async fn offer_blocks(
     State(state): State<AppState>,
     Json(request): Json<OfferRequest>,
 ) -> Json<OfferResponse> {
-    let accepted = request
-        .blocks
-        .into_iter()
-        .filter_map(|block| {
-            state
-                .agent
-                .block_index()
-                .block(block.sequence_hash)
-                .is_none()
-                .then_some(block.sequence_hash)
-        })
-        .collect();
+    let accepted = state.agent.offer_blocks(&request.blocks).await;
 
     Json(OfferResponse { accepted })
 }
