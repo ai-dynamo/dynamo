@@ -128,6 +128,10 @@ func buildCRIUConf(c *types.CRIUSettings) string {
 		return ""
 	}
 	var content string
+	policy, err := c.ResolvedSocketPolicy()
+	if err == nil && policy == types.SocketPolicyPreserveLoopbackOnly {
+		content += "tcp-loopback-only\n"
+	}
 	if c.LibDir != "" {
 		content += "libdir " + c.LibDir + "\n"
 	}

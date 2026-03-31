@@ -43,17 +43,29 @@ func shouldSetCgroupRoot(cgMode criurpc.CriuCgMode) bool {
 
 // applyCommonSettings sets CRIU options shared between dump and restore.
 func applyCommonSettings(opts *criurpc.CriuOpts, settings *types.CRIUSettings) error {
-	if settings.TcpClose && settings.TcpEstablished {
-		return fmt.Errorf("tcpClose and tcpEstablished cannot both be true")
+	policy, err := settings.ResolvedSocketPolicy()
+	if err != nil {
+		return err
 	}
 
 	opts.LogLevel = proto.Int32(settings.LogLevel)
 	opts.ShellJob = proto.Bool(settings.ShellJob)
-	opts.TcpClose = proto.Bool(settings.TcpClose)
-	opts.TcpEstablished = proto.Bool(settings.TcpEstablished)
 	opts.FileLocks = proto.Bool(settings.FileLocks)
 	opts.ExtUnixSk = proto.Bool(settings.ExtUnixSk)
 	opts.LinkRemap = proto.Bool(settings.LinkRemap)
+	switch policy {
+	case types.SocketPolicyCloseAllConnected:
+		opts.TcpClose = proto.Bool(true)
+		opts.TcpEstablished = proto.Bool(false)
+	case types.SocketPolicyPreserveAllConnected:
+		opts.TcpClose = proto.Bool(false)
+		opts.TcpEstablished = proto.Bool(true)
+	case types.SocketPolicyPreserveLoopbackOnly:
+		opts.TcpClose = proto.Bool(false)
+		opts.TcpEstablished = proto.Bool(false)
+	default:
+		return fmt.Errorf("unsupported socket policy %q", policy)
+	}
 
 	opts.ManageCgroups = proto.Bool(true)
 	cgMode, _, err := parseManageCgroupsMode(settings.ManageCgroupsMode)
