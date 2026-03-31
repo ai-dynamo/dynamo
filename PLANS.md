@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:38:54 UTC
+Last updated: 2026-03-31 19:41:11 UTC
 
 Current in-progress run (2026-03-31 19:28:54 UTC):
 - Mandatory context re-read completed in this run:
@@ -13,8 +13,11 @@ Current in-progress run (2026-03-31 19:28:54 UTC):
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
 - Current branch baseline observed in this run:
-  - detached `HEAD` at `759958a29` (`Add multi-backend G4 smoke routing`)
-  - worktree was clean before starting this run
+  - started this run detached at `759958a29` (`Add multi-backend G4 smoke routing`)
+  - current detached `HEAD` after this run is
+    `96ab7bbb2` (`Make G4 smoke path honor cache misses`)
+  - worktree was clean before starting this run and is clean after the two
+    commits recorded below
 - Current implementation slice for this run:
   - tighten shared G4 offer/payload admission so duplicate `sequence_hash`
     values within one caller batch are treated as duplicates, not as multiple
@@ -37,6 +40,9 @@ Current in-progress run (2026-03-31 19:28:54 UTC):
     - replaced the stale top-of-file handoff with the actual current detached
       `HEAD` and this run's narrower behavior/correctness slice
 - Milestones completed in this run:
+  - commits made in this run:
+    - `165b8f21b` `Tighten G4 duplicate offer admission`
+    - `96ab7bbb2` `Make G4 smoke path honor cache misses`
   - shared G4 duplicate-admission correctness
     - `lib/llm/src/block_manager/distributed/g4.rs`
       now rejects duplicate `sequence_hash` values within one offer/payload
@@ -72,6 +78,8 @@ Current in-progress run (2026-03-31 19:28:54 UTC):
     `PLANS.md`
   - then:
     `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - then:
+    `lib/llm/src/block_manager/distributed/worker.rs`
   - then:
     `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - next commands:
