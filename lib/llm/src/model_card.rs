@@ -676,18 +676,7 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                {
-                    let tk = TokenizerKind::from_disk(local_path)?;
-                    if tk.is_none() {
-                        tracing::warn!(
-                            "No supported tokenizer found in {} \
-                             (expected tokenizer.json or a tiktoken file). \
-                             Features that depend on the Rust tokenizer will not be available.",
-                            local_path.display()
-                        );
-                    }
-                    tk
-                },
+                TokenizerKind::from_disk(local_path)?,
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
@@ -1079,6 +1068,12 @@ impl TokenizerKind {
             );
         }
 
+        tracing::warn!(
+            "No supported tokenizer found in {} \
+             (expected tokenizer.json or a tiktoken file). \
+             Features that depend on the Rust tokenizer will not be available.",
+            directory.display()
+        );
         Ok(None)
     }
 }
