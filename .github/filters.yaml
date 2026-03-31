@@ -116,6 +116,7 @@ deploy:
   - 'tests/deploy/**'
 
 planner:
+  - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
   - 'tests/planner/**'

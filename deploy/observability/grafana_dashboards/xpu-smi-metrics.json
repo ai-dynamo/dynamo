@@ -642,7 +642,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(xpu_memory_read_bytes_total{device_id=~\"$device_id\"}[10s])",
+          "expr": "xpu_memory_read_bytes_per_second{device_id=~\"$device_id\"}",
           "legendFormat": "XPU {{device_id}} Read BW",
           "range": true,
           "refId": "A"
@@ -653,7 +653,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(xpu_memory_write_bytes_total{device_id=~\"$device_id\"}[10s])",
+          "expr": "xpu_memory_write_bytes_per_second{device_id=~\"$device_id\"}",
           "legendFormat": "XPU {{device_id}} Write BW",
           "range": true,
           "refId": "B"
@@ -749,7 +749,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(xpu_pcie_read_bytes_total{device_id=~\"$device_id\"}[10s])",
+          "expr": "xpu_pcie_read_bytes_per_second{device_id=~\"$device_id\"}",
           "legendFormat": "XPU {{device_id}} PCIe RX",
           "range": true,
           "refId": "A"
@@ -760,7 +760,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(xpu_pcie_write_bytes_total{device_id=~\"$device_id\"}[10s])",
+          "expr": "xpu_pcie_write_bytes_per_second{device_id=~\"$device_id\"}",
           "legendFormat": "XPU {{device_id}} PCIe TX",
           "range": true,
           "refId": "B"

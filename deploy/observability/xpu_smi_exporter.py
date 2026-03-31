@@ -17,13 +17,13 @@ Metrics exposed (matching the Grafana dashboard xpu-smi-metrics.json):
     xpu_memory_free_bytes        - GPU memory free in bytes
     xpu_memory_utilization_ratio - GPU memory utilization (0-1)
     xpu_temperature_celsius      - GPU temperature (from dump metric 3)
-    xpu_pcie_read_bytes_total    - PCIe read throughput (counter, bytes)
-    xpu_pcie_write_bytes_total   - PCIe write throughput (counter, bytes)
+    xpu_pcie_read_bytes_per_second  - PCIe read throughput (gauge, bytes/sec)
+    xpu_pcie_write_bytes_per_second - PCIe write throughput (gauge, bytes/sec)
     xpu_engine_group_compute_engine_util - Compute engine utilization %
     xpu_engine_group_render_engine_util  - Render engine utilization %
     xpu_engine_group_copy_engine_util    - Copy engine utilization %
-    xpu_memory_read_bytes_total  - Memory read throughput (counter, bytes)
-    xpu_memory_write_bytes_total - Memory write throughput (counter, bytes)
+    xpu_memory_read_bytes_per_second - Memory read throughput (gauge, bytes/sec)
+    xpu_memory_write_bytes_per_second - Memory write throughput (gauge, bytes/sec)
 """
 
 import argparse
@@ -95,14 +95,14 @@ DUMP_HEADER_MAP = {
         {},
     ),
     "GPU Memory Read (kB/s)": (
-        "xpu_memory_read_bytes_total",
+        "xpu_memory_read_bytes_per_second",
         "GPU memory read throughput in bytes per second",
         "gauge",
         1024,
         {},
     ),
     "GPU Memory Write (kB/s)": (
-        "xpu_memory_write_bytes_total",
+        "xpu_memory_write_bytes_per_second",
         "GPU memory write throughput in bytes per second",
         "gauge",
         1024,
@@ -116,14 +116,14 @@ DUMP_HEADER_MAP = {
         {},
     ),
     "PCIe Read (kB/s)": (
-        "xpu_pcie_read_bytes_total",
+        "xpu_pcie_read_bytes_per_second",
         "PCIe read throughput in bytes per second",
         "gauge",
         1024,
         {},
     ),
     "PCIe Write (kB/s)": (
-        "xpu_pcie_write_bytes_total",
+        "xpu_pcie_write_bytes_per_second",
         "PCIe write throughput in bytes per second",
         "gauge",
         1024,

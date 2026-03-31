@@ -161,6 +161,12 @@ impl HfTokenizerConfigJsonFormatter {
         // Detect at model load time whether this template requires content arrays
         let requires_content_arrays = detect_content_array_usage(&env);
 
+        // Detect if the template natively handles reasoning_content (e.g. Nemotron, Qwen3).
+        // If so, we must NOT inject <think> blocks — the template does it itself.
+        let template_handles_reasoning = env
+            .templates()
+            .any(|(_, tmpl)| tmpl.source().contains("reasoning_content"));
+
         Ok(HfTokenizerConfigJsonFormatter {
             env,
             config,
@@ -168,6 +174,7 @@ impl HfTokenizerConfigJsonFormatter {
             supports_add_generation_prompt: supports_add_generation_prompt.unwrap_or(false),
             requires_content_arrays,
             exclude_tools_when_tool_choice_none,
+            template_handles_reasoning,
         })
     }
 }

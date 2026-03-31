@@ -290,8 +290,8 @@ docker compose -f deploy/docker-observability.yml -f deploy/docker-observability
 | **XPU Temperature** | `xpu_temperature_celsius` | Raw value (°C) | GPU die and memory temperature. Labels: `location="gpu"` or `location="memory"`. Thresholds: yellow@70°C, red@85°C |
 | **XPU Power Usage** | `xpu_power_watts` | Raw value (W) | Instantaneous power draw per XPU device. Equivalent to `DCGM_FI_DEV_POWER_USAGE` |
 | **XPU Engine Utilization** | `xpu_engine_group_compute_engine_util`, `xpu_engine_group_copy_engine_util`, `xpu_engine_group_render_engine_util` | Raw values (0-100%) | Per-engine-group utilization breakdown |
-| **XPU Memory Bandwidth** | `xpu_memory_read_bytes_total`, `xpu_memory_write_bytes_total` | `rate(...[10s])` | HBM read/write bandwidth in bytes/sec |
-| **XPU PCIe Bandwidth** | `xpu_pcie_read_bytes_total`, `xpu_pcie_write_bytes_total` | `rate(...[10s])` | PCIe read/write bandwidth. Equivalent to `DCGM_FI_PROF_PCIE_RX/TX_BYTES` |
+| **XPU Memory Bandwidth** | `xpu_memory_read_bytes_per_second`, `xpu_memory_write_bytes_per_second` | Raw value (bytes/sec) | HBM read/write bandwidth in bytes/sec |
+| **XPU PCIe Bandwidth** | `xpu_pcie_read_bytes_per_second`, `xpu_pcie_write_bytes_per_second` | Raw value (bytes/sec) | PCIe read/write bandwidth. Equivalent to `DCGM_FI_PROF_PCIE_RX/TX_BYTES` |
 | **Avg XPU Utilization** | `xpu_engine_group_compute_engine_util` | `avg(...)` | Average utilization gauge across all XPU devices |
 | **Max XPU Temperature** | `xpu_temperature_celsius{location="gpu"}` | `max(...)` | Maximum temperature gauge across all XPU devices |
 
@@ -305,8 +305,8 @@ docker compose -f deploy/docker-observability.yml -f deploy/docker-observability
 | `DCGM_FI_DEV_GPU_TEMP` | `xpu_temperature_celsius{location="gpu"}` | GPU temperature |
 | `DCGM_FI_DEV_MEMORY_TEMP` | `xpu_temperature_celsius{location="memory"}` | Memory temperature |
 | `DCGM_FI_DEV_POWER_USAGE` | `xpu_power_watts` | Power draw (W) |
-| `DCGM_FI_PROF_PCIE_RX_BYTES` | `xpu_pcie_read_bytes_total` | PCIe RX bytes |
-| `DCGM_FI_PROF_PCIE_TX_BYTES` | `xpu_pcie_write_bytes_total` | PCIe TX bytes |
+| `DCGM_FI_PROF_PCIE_RX_BYTES` | `xpu_pcie_read_bytes_per_second` | PCIe RX bytes/sec |
+| `DCGM_FI_PROF_PCIE_TX_BYTES` | `xpu_pcie_write_bytes_per_second` | PCIe TX bytes/sec |
 
 ### Metric Architecture (XPU)
 
