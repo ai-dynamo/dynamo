@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:09:39 UTC
+Last updated: 2026-03-31 21:10:20 UTC
 
 ## Active state
 
@@ -35,9 +35,9 @@ Last updated: 2026-03-31 21:09:39 UTC
 
 - implementation commit recorded in this run:
   - `6b6326172` `Add foyer-backed G3PB peer storage`
-- final handoff commit recorded in this run:
-  - `f05a605b8` `Refresh G3PB foyer handoff`
-- worktree was clean immediately before and after the push
+- follow-up signed `PLANS.md` handoff refresh commits were recorded after the
+  implementation commit
+- worktree was clean immediately before each push in this run
 - added a concrete `FoyerG3pbPeerStorage` behind the existing
   `G3pbPeerStorage` trait in
   `lib/llm/src/block_manager/distributed/g3pb.rs`
@@ -102,7 +102,8 @@ Last updated: 2026-03-31 21:09:39 UTC
 ### Branch update completed in this run
 
 - pushed detached `HEAD` to `origin/mf/kvbm-g4-v2`
-- push fast-forwarded remote `91704994b..f05a605b8`
+- remote branch now contains the `foyer` storage milestone plus the condensed
+  handoff updates from this run
 
 ### Exact next step for the next run
 
