@@ -361,8 +361,10 @@ impl G3pbPeerStorage for FoyerG3pbPeerStorage {
         worker_id: WorkerID,
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit> {
+        // Foyer currently requires loading the stored block to query metadata.
+        // If the cache exposes a metadata-only presence check, switch to that
+        // so query can avoid disk payload reads while still updating eviction.
         let mut hits = Vec::new();
-
         for sequence_hash in sequence_hashes {
             let Some(entry) = self.get_stored_block(*sequence_hash).await else {
                 continue;

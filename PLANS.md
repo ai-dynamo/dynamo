@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:10:20 UTC
+Last updated: 2026-03-31 21:17:50 UTC
 
 ## Active state
 
@@ -19,7 +19,7 @@ Last updated: 2026-03-31 21:10:20 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 
-## Current run (2026-03-31 20:53:29 UTC)
+## Current run (2026-03-31 21:14:41 UTC)
 
 ### Context re-read
 
@@ -29,69 +29,51 @@ Last updated: 2026-03-31 21:10:20 UTC
 - `lib/llm/src/block_manager/distributed.rs`
 - `lib/llm/src/block_manager/distributed/g3pb.rs`
 - `lib/llm/src/bin/kvbm_g3pb_backend.rs`
+- `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
+- `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
+- `lib/llm/src/block_manager/distributed/transfer.rs`
+- `lib/llm/src/block_manager/distributed/worker.rs`
 - `lib/llm/Cargo.toml`
 
-### Milestone completed in working tree
+### Current findings before edits
 
-- implementation commit recorded in this run:
-  - `6b6326172` `Add foyer-backed G3PB peer storage`
-- follow-up signed `PLANS.md` handoff refresh commits were recorded after the
-  implementation commit
-- worktree was clean immediately before each push in this run
-- added a concrete `FoyerG3pbPeerStorage` behind the existing
-  `G3pbPeerStorage` trait in
-  `lib/llm/src/block_manager/distributed/g3pb.rs`
-- added `G3pbFoyerStorageConfig` with bounded default memory/disk capacities so
-  the peer cache backend can stay internal to `G3PB`
-- kept `InMemoryG3pbPeerStorage` as the contract-reference backend and default
-  agent constructor path
-- re-exported the new `foyer` storage types from
-  `lib/llm/src/block_manager/distributed.rs`
-- wired `lib/llm/src/bin/kvbm_g3pb_backend.rs` to support:
-  - `--foyer-dir`
-  - `--foyer-memory-bytes`
-  - `--foyer-disk-bytes`
-- added targeted library coverage for the new backend through the same
-  storage-agent semantics already used by the in-memory path
-- added the `foyer` crate dependency with its `serde` feature in
-  `lib/llm/Cargo.toml`
+- worktree was not clean at pickup:
+  - modified `lib/llm/src/block_manager/distributed/g3pb.rs`
+- the only uncommitted change at pickup replaced
+  `let mut hits = Vec::new();` in `FoyerG3pbPeerStorage::query_blocks` with
+  freeform prose about using a metadata-only `contains_key` path
+- because of that local edit, the first required baseline validation no longer
+  matched the handoff state and failed to compile before any new changes
 
-### Validation completed in this run
+### Validation completed in this run so far
 
-- `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
-  - pass
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`13 passed`)
-  - includes the new `foyer_storage_supports_agent_query_and_fetch` test
-- `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend`
-  - pass
+  - fail at pickup
+  - compiler error at
+    `lib/llm/src/block_manager/distributed/g3pb.rs:364`
+  - cause: stray prose in `FoyerG3pbPeerStorage::query_blocks`
+  - pass after baseline repair (`13 passed`)
 - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
-  - pass
-- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend`
+  - pass after baseline repair
+- `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
   - pass
 - `git diff --check`
   - pass
-- live host-only backend validation with `foyer`:
-  - command:
-    `target/debug/kvbm_g3pb_backend --listen 127.0.0.1:58182 --worker-id 52 --foyer-dir /tmp/tmp.l1l75f5kuN`
-  - `/health`
-    - pass, returned `{"worker_id":52,"listen":"127.0.0.1:58182"}`
-  - direct HTTP `offer -> put_payload -> query -> fetch`
-    for `sequence_hash=123`
-    - pass
 
-### Decisions confirmed in this run
+### Decisions confirmed in this run so far
 
-- the `foyer` backend is now a drop-in peer-local implementation, not a new
-  user-visible KVBM tier
-- the in-memory backend remains the default constructor path until the fuller
-  worker/peer runtime has more operational evidence with `foyer`
-- `foyer` persistence/recovery semantics were intentionally not promoted as a
-  contract in this run; the landed validation target is the peer-cache API
-  contract (`offer/query/fetch/put`) behind the existing trait seam
+- first priority in this run is to restore the committed `G3PB` baseline to a
+  compiling, testable state before attempting the NIXL/UCX follow-up
+- the local `foyer` note should be preserved as an actual code comment rather
+  than dropped, because the underlying concern is valid:
+  metadata-only query would be better than loading payloads from disk
+- the baseline repair itself is intentionally minimal:
+  preserve existing behavior, restore compilation, and keep the optimization
+  note as a code comment instead of changing `foyer` query semantics blindly
 
-### Remaining work after this run
+### Remaining work in this run
 
+- make a small signed commit for the baseline repair
 - reconnect the remote data path to real NIXL/UCX `device <-> CPU` transfers
   instead of HTTP payload exchange
 - revalidate the next slice in layers:
@@ -99,22 +81,16 @@ Last updated: 2026-03-31 21:10:20 UTC
   - `kvbm_nixl_transfer_smoke`
   - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
 
-### Branch update completed in this run
-
-- pushed detached `HEAD` to `origin/mf/kvbm-g4-v2`
-- remote branch now contains the `foyer` storage milestone plus the condensed
-  handoff updates from this run
-
-### Exact next step for the next run
+### Exact next step
 
 - next file:
-  `lib/llm/src/block_manager/distributed/g3pb.rs`
+  `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - next commands:
-  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
-  - then start the NIXL/UCX transfer follow-up from
-    `lib/llm/src/block_manager/distributed/g3pb.rs`
-    and `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
+  - `git commit --signoff -am "Repair G3PB foyer query baseline"`
+  - inspect `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs` against
+    `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
+  - identify the smallest real NIXL/UCX transport splice that can replace the
+    HTTP `put_payload`/`fetch` path without reintroducing an external disk tier
 
 ## Archived milestones (condensed)
 
