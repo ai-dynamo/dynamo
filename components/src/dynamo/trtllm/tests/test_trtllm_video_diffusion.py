@@ -522,15 +522,23 @@ class TestDiffusionEngineGenerate:
         #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
         # so we inject a fake module into sys.modules.
         fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
-        with patch.dict("sys.modules", {
-            "tensorrt_llm._torch.visual_gen.executor": fake_executor,
-        }):
-            engine.generate(prompt="a golden retriever", height=64, width=64,
-                            num_frames=4, num_inference_steps=1)
+        with patch.dict(
+            "sys.modules",
+            {
+                "tensorrt_llm._torch.visual_gen.executor": fake_executor,
+            },
+        ):
+            engine.generate(
+                prompt="a golden retriever",
+                height=64,
+                width=64,
+                num_frames=4,
+                num_inference_steps=1,
+            )
 
-        assert isinstance(captured["prompt"], list), (
-            f"Expected list, got {type(captured['prompt'])}"
-        )
+        assert isinstance(
+            captured["prompt"], list
+        ), f"Expected list, got {type(captured['prompt'])}"
         assert captured["prompt"] == ["a golden retriever"]
 
 
