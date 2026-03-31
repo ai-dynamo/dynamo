@@ -34,7 +34,6 @@ pub use block::{
 };
 pub use config::*;
 
-pub use distributed::G4BlockIndex;
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
 pub use offload::{filter::OffloadFilter, request::BlockResult};
 pub use pool::{BlockPool, ManagedBlockPool};
@@ -141,10 +140,6 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     /// Get the worker ID
     pub fn worker_id(&self) -> WorkerID {
         self.state.worker_id()
-    }
-
-    pub fn g4_block_index(&self) -> Option<Arc<G4BlockIndex>> {
-        self.state.g4_block_index()
     }
 
     /// Onboard a set of blocks to the device pool

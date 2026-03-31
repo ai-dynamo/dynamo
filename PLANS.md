@@ -1,6 +1,83 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:39:55 UTC
+
+New steering direction update at bottom of plan. Step: G4 rename to G3PB. Aslo need to push to git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2 branch once commited.
+Condense the plan once finished with this stage.
+
+Last updated: 2026-03-31 20:30:32 UTC
+
+Current in-progress run (2026-03-31 20:30:32 UTC):
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager.rs`
+  - `lib/llm/src/block_manager/state.rs`
+  - `lib/llm/src/block_manager/offload.rs`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+- Current branch baseline observed in this run:
+  - started on branch `mf/kvbm-g4-v2` at `87d9607cc` (`add plan`)
+  - worktree already had a user-authored `PLANS.md` edit when this run began;
+    no prior code edits from this run were present
+- Current implementation slice for this run:
+  - execute the first `G3PB` migration milestone from the steering section:
+    remove `G4BlockIndex` / disk-observer coupling from core block-manager
+    paths before renaming the unlanded remote-cache surface
+  - make the standalone backend own its remote cache state directly instead of
+    depending on the leader/worker runtime just to materialize a `G4StorageAgent`
+- Milestones completed in this run so far:
+  - removed `G4BlockIndex` plumbing from:
+    - `lib/llm/src/block_manager.rs`
+    - `lib/llm/src/block_manager/state.rs`
+    - `lib/llm/src/block_manager/distributed.rs`
+    - `lib/llm/src/block_manager/distributed/worker.rs`
+    - `lib/llm/src/block_manager/offload.rs`
+  - deleted the offload tests that asserted host/disk registration side effects
+    into a remote `G4BlockIndex`
+  - rewired `lib/llm/src/bin/kvbm_g4_backend.rs` to construct its own
+    standalone `G4StorageAgent` with a noop transfer executor, which removes
+    the backend's previous dependency on local worker/leader startup and the
+    associated VRAM registration path for simple HTTP control-plane checks
+- Validation completed so far in this run:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`18 passed`)
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+    -> pass
+  - `git diff --check`
+    -> pass
+- Decisions confirmed in this run:
+  - the remote peer-cache index should no longer be derived from local disk
+    offload registration in core KVBM state
+  - the backend binary should be able to answer `/health`, `offer`, `query`,
+    `put_payload`, and `fetch` without booting the full worker runtime
+- Exact next file or command to touch:
+  - file:
+    `lib/llm/src/block_manager/distributed/g4.rs`
+  - then:
+    `lib/llm/src/bin/kvbm_g4_backend.rs`
+  - then:
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - next commands:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    or, if the module rename is still mid-edit,
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+- Remaining work after this run:
+  - rename the unlanded `g4` module, wire types, helpers, and binaries to
+    `G3PB`
+  - remove `disk_block_idx` from the remote API identity and reshape the
+    remote metadata around peer-cache entries keyed only by `sequence_hash`
+  - replace the G4 NVMe RAID design doc with the new `G3PB` peer-cache design
+    doc and condense this execution log once the rename stage lands
 
 Current in-progress run (2026-03-31 19:28:47 UTC):
 - Mandatory context re-read completed in this run:

@@ -915,7 +915,6 @@ mod tests {
         block::{
             BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock, locality::Local,
         },
-        distributed::G4BlockIndex,
         layout::{FullyContiguous, LayerSeparate, LayoutType, nixl::NixlLayout},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
         storage::{
@@ -1130,28 +1129,6 @@ mod tests {
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
-    }
-
-    async fn wait_for_disk_registration(
-        disk_pool: &Arc<dyn BlockPool<DiskStorage, Local, BasicMetadata>>,
-        observer: &G4BlockIndex,
-        sequence_hash: u64,
-    ) -> Result<(
-        ImmutableBlock<DiskStorage, Local, BasicMetadata>,
-        super::super::distributed::G4PutBlock,
-    )> {
-        for _ in 0..50 {
-            let disk_blocks = disk_pool.match_sequence_hashes(&[sequence_hash]).await?;
-            if let Some(disk_block) = disk_blocks.into_iter().next()
-                && let Some(indexed) = observer.block(sequence_hash)
-            {
-                return Ok((disk_block, indexed));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        anyhow::bail!("timed out waiting for disk registration");
     }
 
     /// Create a block in the 'RESET' state.
@@ -1727,83 +1704,6 @@ mod tests {
         );
 
         check_block_contents(&immutable_host_block, &disk_blocks[0], 42)?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_host_to_disk_offload_updates_g4_disk_index() -> Result<()> {
-        let observer = Arc::new(G4BlockIndex::default());
-        let (offload_manager, _, host_pool, disk_pool) = build_pools_with_disk_observer(
-            1,
-            Some(1),
-            Some(1),
-            None,
-            LayoutType::FullyContiguous,
-            BlockRegistrationDuplicationSetting::Disabled,
-            false,
-            Some(observer.clone()),
-        )?;
-
-        let host_pool = host_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
-
-        let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
-        let immutable_host_block = host_pool.register_blocks(vec![host_block]).await?.remove(0);
-        let sequence_hash = immutable_host_block.sequence_hash();
-
-        offload_manager.offload(&immutable_host_block, 0).await?;
-
-        let (disk_block, indexed) =
-            wait_for_disk_registration(disk_pool, observer.as_ref(), sequence_hash).await?;
-
-        assert_eq!(indexed.sequence_hash, sequence_hash);
-        assert_eq!(indexed.disk_block_idx, disk_block.block_id());
-        assert_eq!(
-            indexed.size_bytes,
-            disk_block.block_data().block_view()?.size()
-        );
-        assert_eq!(indexed.checksum, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_device_to_disk_bypass_updates_g4_disk_index() -> Result<()> {
-        let observer = Arc::new(G4BlockIndex::default());
-        let (offload_manager, device_pool, _, disk_pool) = build_pools_with_disk_observer(
-            1,
-            None,
-            Some(1),
-            None,
-            LayoutType::FullyContiguous,
-            BlockRegistrationDuplicationSetting::Disabled,
-            true,
-            Some(observer.clone()),
-        )?;
-
-        let device_pool = device_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
-
-        let device_block = completed_block(device_pool, [0, 1, 2, 3]).await?;
-        let immutable_device_block = device_pool
-            .register_blocks(vec![device_block])
-            .await?
-            .remove(0);
-        let sequence_hash = immutable_device_block.sequence_hash();
-
-        offload_manager.offload(&immutable_device_block, 0).await?;
-
-        let (disk_block, indexed) =
-            wait_for_disk_registration(disk_pool, observer.as_ref(), sequence_hash).await?;
-
-        assert_eq!(indexed.sequence_hash, sequence_hash);
-        assert_eq!(indexed.disk_block_idx, disk_block.block_id());
-        assert_eq!(
-            indexed.size_bytes,
-            disk_block.block_data().block_view()?.size()
-        );
-        assert_eq!(indexed.checksum, None);
 
         Ok(())
     }
