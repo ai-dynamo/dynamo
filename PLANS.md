@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 18:43:23 UTC
+Last updated: 2026-03-31 18:44:02 UTC
 
 Current in-progress run (2026-03-31 18:40:38 UTC):
 
@@ -79,9 +79,8 @@ Current in-progress run (2026-03-31 18:40:38 UTC):
     missing Rust toolchain in this container rather than by an observed source
     error from these files
 - Commits made in this run:
-  - pending; create a signed-off commit after this plan update
+  - `00da166829` `Add G4 offer-and-put helpers`
 - Remaining work after this run:
-  - create the signed-off commit for this `offer_and_put(...)` helper slice
   - rerun the blocked validation commands on the next host/container that has
     `cargo` and `rustc` installed
   - if those pass, decide whether the next smallest G4 slice should be
@@ -89,11 +88,14 @@ Current in-progress run (2026-03-31 18:40:38 UTC):
     smoke/runtime path
 - Exact next file or command to touch:
   - command:
-    `git commit --signoff -am "Add G4 offer-and-put helpers"`
-  - then:
     `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
   - then:
     `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
+  - if those pass:
+    re-read `PLANS.md` and choose between shared payload helpers and a more
+    realistic multi-owner smoke/runtime path for the next smallest slice
 
 Current in-progress run (2026-03-31 18:33:59 UTC):
 
