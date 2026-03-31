@@ -23,7 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -76,14 +76,14 @@ func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
 			Name:      "snapshot-agent",
 			Namespace: testNamespace,
 			Labels: map[string]string{
-				snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
 			},
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name: snapshotworkload.SnapshotAgentContainerName,
+						Name: snapshotprotocol.SnapshotAgentContainerName,
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "checkpoints",
 							MountPath: "/checkpoints",

@@ -58,7 +58,7 @@ func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string 
 	if ckpt == nil {
 		return snapshotprotocol.DefaultCheckpointArtifactVersion
 	}
-	return snapshotprotocol.ArtifactVersionFromAnnotations(ckpt.Annotations)
+	return snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 func ResolveCheckpointForService(

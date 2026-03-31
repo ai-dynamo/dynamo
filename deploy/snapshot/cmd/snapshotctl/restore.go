@@ -15,7 +15,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
 type restoreOptions struct {
@@ -80,7 +79,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 
 	if createPodFromManifest {
-		restorePod := snapshotworkload.NewRestorePod(&corev1.Pod{
+		restorePod := snapshotprotocol.NewRestorePod(&corev1.Pod{
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        pod.Name,
@@ -88,7 +87,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 				Annotations: pod.Annotations,
 			},
 			Spec: *pod.Spec.DeepCopy(),
-		}, snapshotworkload.PodOptions{
+		}, snapshotprotocol.PodOptions{
 			Namespace:       namespace,
 			CheckpointID:    checkpointID,
 			ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
@@ -110,7 +109,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if len(pod.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
 		}
-		if err := snapshotworkload.ValidateRestorePodSpec(&pod.Spec, resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
+		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}
 

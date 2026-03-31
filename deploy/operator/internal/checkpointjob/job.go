@@ -15,12 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func ArtifactVersion(annotations map[string]string) string {
-	return snapshotprotocol.ArtifactVersionFromAnnotations(annotations)
-}
-
 func DesiredCheckpointJobName(identityHash string, annotations map[string]string) string {
-	return snapshotprotocol.CheckpointJobName(identityHash, ArtifactVersion(annotations))
+	return snapshotprotocol.CheckpointJobName(identityHash, annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 func buildCheckpointWorkerDefaultEnv(
@@ -115,7 +111,7 @@ func BuildCheckpointJob(
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
-		ArtifactVersion:       ArtifactVersion(ckpt.Annotations),
+		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
 		SeccompProfile:        consts.SeccompProfilePath,
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,

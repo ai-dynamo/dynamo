@@ -1,9 +1,8 @@
-package workload
+package protocol
 
 import (
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -28,24 +27,24 @@ func TestNewRestorePod(t *testing.T) {
 		Namespace:       "test-ns",
 		CheckpointID:    "hash",
 		ArtifactVersion: "2",
-		Storage: protocol.Storage{
-			Type:     protocol.StorageTypePVC,
+		Storage: Storage{
+			Type:     StorageTypePVC,
 			PVCName:  "snapshot-pvc",
 			BasePath: "/checkpoints",
 		},
-		SeccompProfile: protocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
 
 	if restorePod.Name != "worker" || restorePod.Namespace != "test-ns" {
 		t.Fatalf("unexpected restore pod identity: %#v", restorePod.ObjectMeta)
 	}
-	if restorePod.Labels[protocol.RestoreTargetLabel] != "true" {
+	if restorePod.Labels[RestoreTargetLabel] != "true" {
 		t.Fatalf("expected restore target label: %#v", restorePod.Labels)
 	}
-	if restorePod.Labels[protocol.CheckpointIDLabel] != "hash" {
+	if restorePod.Labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint id label: %#v", restorePod.Labels)
 	}
-	if restorePod.Annotations[protocol.CheckpointArtifactVersionAnnotation] != "2" {
+	if restorePod.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation: %#v", restorePod.Annotations)
 	}
 	if restorePod.Spec.RestartPolicy != corev1.RestartPolicyNever {
@@ -75,13 +74,13 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		Args:    []string{"--model", "Qwen"},
 	}
 
-	storage := protocol.Storage{
-		Type:     protocol.StorageTypePVC,
+	storage := Storage{
+		Type:     StorageTypePVC,
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
 	}
-	PrepareRestorePodSpec(&podSpec, &container, storage, protocol.DefaultSeccompLocalhostProfile, true)
-	PrepareRestorePodSpec(&podSpec, &container, storage, protocol.DefaultSeccompLocalhostProfile, true)
+	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
+	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
 
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
@@ -101,7 +100,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 }
 
 func TestValidateRestorePodSpec(t *testing.T) {
-	profile := protocol.DefaultSeccompLocalhostProfile
+	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
 			SeccompProfile: &corev1.SeccompProfile{
@@ -110,47 +109,47 @@ func TestValidateRestorePodSpec(t *testing.T) {
 			},
 		},
 		Volumes: []corev1.Volume{{
-			Name: protocol.CheckpointVolumeName,
+			Name: CheckpointVolumeName,
 		}},
 		Containers: []corev1.Container{{
 			Name: "main",
 			VolumeMounts: []corev1.VolumeMount{{
-				Name:      protocol.CheckpointVolumeName,
+				Name:      CheckpointVolumeName,
 				MountPath: "/checkpoints",
 			}},
 		}},
 	}
-	storage := protocol.Storage{
-		Type:     protocol.StorageTypePVC,
+	storage := Storage{
+		Type:     StorageTypePVC,
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, protocol.DefaultSeccompLocalhostProfile); err != nil {
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected restore pod spec to be valid, got %v", err)
 	}
 
 	badSpec := podSpec.DeepCopy()
 	badSpec.Volumes = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
+	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume" {
 		t.Fatalf("expected missing volume error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Containers[0].VolumeMounts = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
+	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
 		t.Fatalf("expected missing mount error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.SecurityContext = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, protocol.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
+	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
 		t.Fatalf("expected missing seccomp error, got %v", err)
 	}
 }
 
 func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
-	profile := protocol.DefaultSeccompLocalhostProfile
+	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
 			SeccompProfile: &corev1.SeccompProfile{
@@ -159,27 +158,27 @@ func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
 			},
 		},
 		Volumes: []corev1.Volume{{
-			Name: protocol.CheckpointVolumeName,
+			Name: CheckpointVolumeName,
 		}},
 		Containers: []corev1.Container{
 			{Name: "sidecar"},
 			{
 				Name: "main",
 				VolumeMounts: []corev1.VolumeMount{{
-					Name:      protocol.CheckpointVolumeName,
+					Name:      CheckpointVolumeName,
 					MountPath: "/checkpoints",
 				}},
 			},
 		},
 	}
 
-	storage := protocol.Storage{
-		Type:     protocol.StorageTypePVC,
+	storage := Storage{
+		Type:     StorageTypePVC,
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, protocol.DefaultSeccompLocalhostProfile); err != nil {
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected restore pod spec to validate against main container, got %v", err)
 	}
 }

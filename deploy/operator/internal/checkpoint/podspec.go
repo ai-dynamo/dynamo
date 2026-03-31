@@ -23,7 +23,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -79,7 +78,7 @@ func InjectCheckpointIntoPodSpec(
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
-	if err := snapshotworkload.PrepareRestorePodSpecForCheckpoint(
+	if err := snapshotprotocol.PrepareRestorePodSpecForCheckpoint(
 		ctx,
 		reader,
 		namespace,

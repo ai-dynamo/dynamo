@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
 func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, string, snapshotprotocol.Storage, error) {
@@ -74,13 +73,13 @@ func loadClientset(kubeContext string) (kubernetes.Interface, string, error) {
 
 func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotprotocol.Storage, error) {
 	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: snapshotworkload.SnapshotAgentLabelSelector,
+		LabelSelector: snapshotprotocol.SnapshotAgentLabelSelector,
 	})
 	if err != nil {
 		return snapshotprotocol.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
 	}
 
-	return snapshotworkload.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
+	return snapshotprotocol.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
 }
 
 func loadPod(manifestPath string) (*corev1.Pod, error) {

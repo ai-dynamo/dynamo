@@ -29,7 +29,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -1265,14 +1265,14 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			Name:      "snapshot-agent",
 			Namespace: "default",
 			Labels: map[string]string{
-				snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
 			},
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name: snapshotworkload.SnapshotAgentContainerName,
+						Name: snapshotprotocol.SnapshotAgentContainerName,
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "checkpoints",
 							MountPath: "/checkpoints",
@@ -1515,14 +1515,14 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 				Name:      "snapshot-agent",
 				Namespace: "default",
 				Labels: map[string]string{
-					snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+					snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
 				},
 			},
 			Spec: appsv1.DaemonSetSpec{
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
-							Name: snapshotworkload.SnapshotAgentContainerName,
+							Name: snapshotprotocol.SnapshotAgentContainerName,
 							VolumeMounts: []corev1.VolumeMount{{
 								Name:      "checkpoints",
 								MountPath: "/checkpoints",
