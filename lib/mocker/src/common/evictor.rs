@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::{Eq, Ordering};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::hash::Hash;
+
+use rustc_hash::FxHashMap;
 
 /// A wrapper for (T, counter) that implements Ord based only on counter
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -28,7 +30,7 @@ impl<T: Eq> PartialOrd for PriorityItem<T> {
 /// priority counter. Lower counter values are evicted first.
 #[derive(Debug)]
 pub struct LRUEvictor<T: Clone + Eq + Hash> {
-    free_table: HashMap<T, i64>,
+    free_table: FxHashMap<T, i64>,
     priority_queue: BTreeSet<PriorityItem<T>>,
     positive_counter: i64,
     negative_counter: i64,
@@ -37,7 +39,7 @@ pub struct LRUEvictor<T: Clone + Eq + Hash> {
 impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
     fn default() -> Self {
         Self {
-            free_table: HashMap::new(),
+            free_table: FxHashMap::default(),
             priority_queue: BTreeSet::new(),
             positive_counter: 0,
             negative_counter: 0,

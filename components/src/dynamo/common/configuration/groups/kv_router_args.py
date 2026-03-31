@@ -26,6 +26,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
+    "router_track_prefill_tokens",
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
@@ -34,7 +35,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_threshold",
     "router_event_threads",
     "router_enable_cache_control",
-    "min_initial_workers",
     "router_queue_policy",
     "remote_indexer_component",
 )
@@ -51,6 +51,7 @@ class KvRouterConfigBase(ConfigBase):
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
+    router_track_prefill_tokens: bool
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
@@ -59,7 +60,6 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_threshold: Optional[float]
     router_event_threads: int
     router_enable_cache_control: bool
-    min_initial_workers: int
     router_queue_policy: str
     remote_indexer_component: Optional[str]
 
@@ -173,6 +173,18 @@ class KvRouterArgGroup(ArgGroup):
             ),
             obsolete_flag="--assume-kv-reuse",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-track-prefill-tokens",
+            env_var="DYN_ROUTER_TRACK_PREFILL_TOKENS",
+            default=True,
+            dest="router_track_prefill_tokens",
+            help=(
+                "KV Router: Include prompt-side prefill tokens in active load accounting. "
+                "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
+                "prefill-token load, queue pressure, and active_prefill_tokens metrics."
+            ),
+        )
         add_argument(
             g,
             flag_name="--router-snapshot-threshold",
@@ -259,18 +271,6 @@ class KvRouterArgGroup(ArgGroup):
                 "a cache_control service mesh client and fires pin_prefix after generation for "
                 "requests with nvext.cache_control."
             ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-min-initial-workers",
-            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
-            default=1,
-            help=(
-                "KV Router: Minimum number of workers that must be discovered before "
-                "router startup continues. Ignored when skip_initial_worker_wait is enabled."
-            ),
-            arg_type=int,
-            dest="min_initial_workers",
         )
         add_argument(
             g,

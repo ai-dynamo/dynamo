@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use anyhow::{Result, anyhow, bail};
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use super::types::{ReadyTurn, Trace, TurnTrace};
+use super::types::{ReadyTurn, ReplayRequestHashes, Trace};
+use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriverMode {
@@ -18,10 +20,18 @@ enum DriverMode {
 #[derive(Debug)]
 struct SessionRuntime {
     session_id: String,
-    turns: Vec<TurnTrace>,
+    turns: Vec<TurnRuntime>,
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
     in_flight: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TurnRuntime {
+    tokens: Vec<u32>,
+    max_output_tokens: usize,
+    delay_after_previous_ms: f64,
+    replay_hashes: ReplayRequestHashes,
 }
 
 #[derive(Debug)]
@@ -66,9 +76,8 @@ impl PartialOrd for ReadySession {
 #[derive(Debug)]
 pub struct WorkloadDriver {
     mode: DriverMode,
-    block_size: usize,
     sessions: Vec<SessionRuntime>,
-    in_flight: HashMap<Uuid, InFlightTurn>,
+    in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
 }
 
@@ -82,20 +91,36 @@ impl WorkloadDriver {
     }
 
     fn new(trace: Trace, mode: DriverMode) -> Result<Self> {
+        let block_size = trace.block_size;
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
-            .map(|session| SessionRuntime {
-                session_id: session.session_id,
-                turns: session.turns,
-                next_turn_index: 0,
-                next_ready_at_ms: Some(match mode {
+            .map(|session| -> Result<SessionRuntime> {
+                let next_ready_at_ms = Some(match mode {
                     DriverMode::Trace => session.first_arrival_timestamp_ms.unwrap_or(0.0),
                     DriverMode::Concurrency => 0.0,
-                }),
-                in_flight: None,
+                });
+                let turns = session
+                    .turns
+                    .into_iter()
+                    .map(|turn| -> Result<TurnRuntime> {
+                        Ok(TurnRuntime {
+                            tokens: turn.synthesize_tokens(block_size)?,
+                            max_output_tokens: turn.max_output_tokens,
+                            delay_after_previous_ms: turn.delay_after_previous_ms,
+                            replay_hashes: turn.to_replay_hashes(block_size)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(SessionRuntime {
+                    session_id: session.session_id,
+                    turns,
+                    next_turn_index: 0,
+                    next_ready_at_ms,
+                    in_flight: None,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let ready_sessions = sessions
             .iter()
@@ -111,9 +136,8 @@ impl WorkloadDriver {
 
         Ok(Self {
             mode,
-            block_size: trace.block_size,
             sessions,
-            in_flight: HashMap::new(),
+            in_flight: FxHashMap::default(),
             ready_sessions,
         })
     }
@@ -146,16 +170,18 @@ impl WorkloadDriver {
                 .next_ready_at_ms
                 .expect("ready session must have a timestamp");
             let request_uuid = Uuid::new_v4();
-            let replay_hashes = session.turns[turn_index]
-                .to_replay_hashes(self.block_size)
-                .expect("validated trace should always synthesize replay hashes");
+            let turn = &session.turns[turn_index];
             let arrival_timestamp_ms = match self.mode {
                 DriverMode::Trace => Some(scheduled_ready_at_ms),
                 DriverMode::Concurrency => None,
             };
-            let request = session.turns[turn_index]
-                .to_direct_request(self.block_size, request_uuid, arrival_timestamp_ms)
-                .expect("validated trace should always synthesize into a direct request");
+            let request = DirectRequest {
+                tokens: turn.tokens.clone(),
+                max_output_tokens: turn.max_output_tokens,
+                uuid: Some(request_uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms,
+            };
             session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;
             self.in_flight.insert(
@@ -170,7 +196,7 @@ impl WorkloadDriver {
                 session_id: session.session_id.clone(),
                 turn_index,
                 scheduled_ready_at_ms,
-                replay_hashes: Some(replay_hashes),
+                replay_hashes: Some(turn.replay_hashes.clone()),
                 request,
             });
         }

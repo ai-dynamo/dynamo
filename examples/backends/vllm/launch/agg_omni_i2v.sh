@@ -13,6 +13,8 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 
@@ -35,13 +37,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=========================================="
-echo "Starting vLLM-Omni I2V Worker"
-echo "Model: $MODEL"
-echo "=========================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --no-curl "Launching vLLM-Omni Image-to-Video (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_curl_footer <<CURL
+curl -s http://localhost:${HTTP_PORT}/v1/videos \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "model": "${MODEL}",
+    "prompt": "A bear sleeping",
+    "input_reference": "/tmp/input.png",
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "num_inference_steps": 40,
+      "num_frames": 33,
+      "guidance_scale": 1.0,
+      "boundary_ratio": 0.875
+    }
+  }' | jq
+CURL
 
-
-echo "Starting frontend on port ${DYN_HTTP_PORT:-8000}..."
 python -m dynamo.frontend &
 FRONTEND_PID=$!
 
@@ -53,4 +68,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --model "$MODEL" \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

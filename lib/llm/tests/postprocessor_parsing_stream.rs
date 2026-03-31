@@ -192,7 +192,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
             continue;
         };
 
-        for choice in &output_data.choices {
+        for choice in &output_data.inner.choices {
             if let Some(reasoning_content) = &choice.delta.reasoning_content {
                 reasoning.push_str(reasoning_content);
             }
