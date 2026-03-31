@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import asyncio
+import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
