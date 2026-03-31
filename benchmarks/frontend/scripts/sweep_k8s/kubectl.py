@@ -113,8 +113,14 @@ def wait_pod(
 ) -> None:
     """Wait for pod(s) matching a label selector to reach a condition."""
     run_kubectl(
-        ["wait", "pod", "-l", label_selector,
-         f"--for=condition={condition}", f"--timeout={timeout}s"],
+        [
+            "wait",
+            "pod",
+            "-l",
+            label_selector,
+            f"--for=condition={condition}",
+            f"--timeout={timeout}s",
+        ],
         namespace=namespace,
         timeout=timeout + 10,
     )
@@ -139,8 +145,14 @@ def get_pod_name(
 ) -> Optional[str]:
     """Get the name of the first pod matching a label selector."""
     result = run_kubectl(
-        ["get", "pod", "-l", label_selector,
-         "-o", "jsonpath={.items[0].metadata.name}"],
+        [
+            "get",
+            "pod",
+            "-l",
+            label_selector,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
         namespace=namespace,
         check=False,
     )

@@ -20,7 +20,6 @@ from sweep_k8s.kubectl import (
     get_pod_name,
     patch_json,
     patch_merge,
-    pod_exists,
     run_kubectl,
     wait_for_pod_deletion,
     wait_pod,
@@ -60,6 +59,7 @@ def wait_model_ready(
         # Try direct HTTP (works if endpoint is port-forwarded or localhost)
         try:
             import urllib.request
+
             req = urllib.request.Request(
                 f"http://{endpoint}/v1/models",
                 headers={"Accept": "application/json"},
@@ -95,11 +95,24 @@ def _check_model_via_kubectl(
     """Check model readiness by running curl from inside the cluster."""
     try:
         result = subprocess.run(
-            ["kubectl", "run", "model-check", "--rm", "-i", "--restart=Never",
-             "-n", namespace, "--quiet",
-             "--image=curlimages/curl:latest",
-             "--", "-sf", f"http://{endpoint}/v1/models"],
-            capture_output=True, text=True, timeout=20,
+            [
+                "kubectl",
+                "run",
+                "model-check",
+                "--rm",
+                "-i",
+                "--restart=Never",
+                "-n",
+                namespace,
+                "--quiet",
+                "--image=curlimages/curl:latest",
+                "--",
+                "-sf",
+                f"http://{endpoint}/v1/models",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         if result.returncode == 0 and result.stdout.strip():
             data = json.loads(result.stdout)
@@ -144,7 +157,9 @@ def dgd_switch_backend(
     recreates the frontend pod automatically.
     """
     mapped_backend = TOKENIZER_BACKEND_MAP.get(backend, backend)
-    print(f"\n--- Switching DGD tokenizer backend -> {mapped_backend} (dgd={dgd_name}) ---")
+    print(
+        f"\n--- Switching DGD tokenizer backend -> {mapped_backend} (dgd={dgd_name}) ---"
+    )
 
     # Find the index of DYN_TOKENIZER_BACKEND in the Frontend env array
     try:
@@ -170,18 +185,26 @@ def dgd_switch_backend(
             "dgd",
             dgd_name,
             namespace,
-            [{"op": "replace",
-              "path": f"/spec/services/Frontend/extraPodSpec/mainContainer/env/{idx}/value",
-              "value": mapped_backend}],
+            [
+                {
+                    "op": "replace",
+                    "path": f"/spec/services/Frontend/extraPodSpec/mainContainer/env/{idx}/value",
+                    "value": mapped_backend,
+                }
+            ],
         )
     else:
         patch_json(
             "dgd",
             dgd_name,
             namespace,
-            [{"op": "add",
-              "path": "/spec/services/Frontend/extraPodSpec/mainContainer/env/-",
-              "value": {"name": "DYN_TOKENIZER_BACKEND", "value": mapped_backend}}],
+            [
+                {
+                    "op": "add",
+                    "path": "/spec/services/Frontend/extraPodSpec/mainContainer/env/-",
+                    "value": {"name": "DYN_TOKENIZER_BACKEND", "value": mapped_backend},
+                }
+            ],
         )
 
     print("  DGD patched -- waiting for frontend pod replacement...")
@@ -287,7 +310,9 @@ def dgd_restart_graph(
                     print(f"  DGD restart completed (waited {waited}s)")
                     break
                 elif phase in ("Failed", "Superseded"):
-                    raise RuntimeError(f"DGD restart {restart_id} ended with phase={phase}")
+                    raise RuntimeError(
+                        f"DGD restart {restart_id} ended with phase={phase}"
+                    )
         except (KeyError, TypeError):
             pass
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:

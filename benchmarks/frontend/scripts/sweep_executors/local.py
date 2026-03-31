@@ -96,7 +96,9 @@ class LocalExecutor:
 
         # TODO: when run_perf.sh gains --backend vllm support, pass it here
         if deploy.backend == "vllm":
-            print("    WARNING: vllm backend not yet supported by run_perf.sh; using mocker")
+            print(
+                "    WARNING: vllm backend not yet supported by run_perf.sh; using mocker"
+            )
 
         # Passthrough args (e.g., --skip-bpf --skip-nsys)
         cmd.extend(config.passthrough_args)
@@ -180,7 +182,9 @@ def _parse_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
     aiperf_json = run_dir / "aiperf" / "profile_export_aiperf.json"
     if not aiperf_json.exists():
         # Multi-model: results are in aiperf/<model-name>/
-        for candidate in sorted((run_dir / "aiperf").glob("*/profile_export_aiperf.json")):
+        for candidate in sorted(
+            (run_dir / "aiperf").glob("*/profile_export_aiperf.json")
+        ):
             aiperf_json = candidate
             break
     metrics = _parse_aiperf_json(aiperf_json)
@@ -205,9 +209,13 @@ def _port_free(port: int) -> bool:
 
 def _kill_port(port: int) -> None:
     """Kill any process holding a port."""
-    subprocess.run(f"fuser -k -TERM {port}/tcp", shell=True, capture_output=True, timeout=5)
+    subprocess.run(
+        f"fuser -k -TERM {port}/tcp", shell=True, capture_output=True, timeout=5
+    )
     time.sleep(2)
-    subprocess.run(f"fuser -k -KILL {port}/tcp", shell=True, capture_output=True, timeout=5)
+    subprocess.run(
+        f"fuser -k -KILL {port}/tcp", shell=True, capture_output=True, timeout=5
+    )
 
 
 def _wait_port_free(port: int, timeout: int = 30) -> None:

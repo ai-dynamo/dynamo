@@ -54,7 +54,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     # Common options
     parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model path")
-    parser.add_argument("--model-name", default="", help="Served model name (default: same as --model)")
+    parser.add_argument(
+        "--model-name", default="", help="Served model name (default: same as --model)"
+    )
     parser.add_argument(
         "--mode",
         choices=["local", "k8s"],
@@ -146,15 +148,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     # K8s-specific options
     k8s_group = parser.add_argument_group("K8s mode options")
-    k8s_group.add_argument(
-        "--namespace", default="dynamo-bench", help="K8s namespace"
-    )
+    k8s_group.add_argument("--namespace", default="dynamo-bench", help="K8s namespace")
     k8s_group.add_argument(
         "--endpoint", default=None, help="K8s frontend endpoint (host:port)"
     )
-    k8s_group.add_argument(
-        "--dgd-name", default="", help="DynamoGraphDeployment name"
-    )
+    k8s_group.add_argument("--dgd-name", default="", help="DynamoGraphDeployment name")
     k8s_group.add_argument(
         "--image", default="", help="Container image for k8s deployment"
     )
@@ -187,9 +185,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     k8s_group.add_argument(
         "--router-mode", default="round-robin", help="Frontend router mode"
     )
-    k8s_group.add_argument(
-        "--hf-token", default="", help="HuggingFace token for k8s"
-    )
+    k8s_group.add_argument("--hf-token", default="", help="HuggingFace token for k8s")
     k8s_group.add_argument(
         "--image-pull-secret", default="", help="Image pull secret name"
     )
@@ -253,7 +249,9 @@ def config_from_args(args: argparse.Namespace) -> SweepConfig:
     if args.endpoint:
         k8s_config.endpoint = args.endpoint
     elif k8s_config.dgd_name:
-        k8s_config.endpoint = f"{k8s_config.dgd_name}-frontend:{k8s_config.frontend_port}"
+        k8s_config.endpoint = (
+            f"{k8s_config.dgd_name}-frontend:{k8s_config.frontend_port}"
+        )
     else:
         k8s_config.endpoint = f"frontend:{k8s_config.frontend_port}"
 

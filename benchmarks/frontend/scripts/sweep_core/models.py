@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 IsolationPolicy = Literal["fresh_per_run", "reuse_by_deploy_key"]
 
@@ -43,7 +43,9 @@ class DeployKey:
             tokenizer=d["tokenizer"],
             workers=d["workers"],
             num_models=d["num_models"],
-            env_overrides=frozenset(env.items()) if isinstance(env, dict) else frozenset(env),
+            env_overrides=frozenset(env.items())
+            if isinstance(env, dict)
+            else frozenset(env),
         )
 
 

@@ -52,9 +52,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from sweep_core.config import build_argument_parser, config_from_args
-from sweep_core.orchestrator import run as run_sweep
-from sweep_core.planner import build_plan, print_plan
+from sweep_core.config import build_argument_parser, config_from_args  # noqa: E402
+from sweep_core.orchestrator import run as run_sweep  # noqa: E402
+from sweep_core.planner import build_plan, print_plan  # noqa: E402
 
 
 def main():
@@ -97,7 +97,10 @@ def main():
 
         executor = K8sDgdExecutor()
     else:
-        print(f"ERROR: Unknown mode '{config.mode}'. Use 'local' or 'k8s'.", file=sys.stderr)
+        print(
+            f"ERROR: Unknown mode '{config.mode}'. Use 'local' or 'k8s'.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Run the sweep

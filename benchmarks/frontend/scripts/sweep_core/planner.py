@@ -48,7 +48,9 @@ def build_plan(config: SweepConfig) -> SweepPlan:
                                 isl=isl,
                                 osl=config.osl,
                                 num_requests=nr,
-                                benchmark_duration=config.benchmark_duration if nr is None else None,
+                                benchmark_duration=config.benchmark_duration
+                                if nr is None
+                                else None,
                                 request_rate=rps,
                             )
 

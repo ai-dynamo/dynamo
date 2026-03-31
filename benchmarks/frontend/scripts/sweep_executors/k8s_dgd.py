@@ -75,9 +75,7 @@ class K8sDgdExecutor:
 
         if self._template_path:
             # Template-based deployment: render + apply
-            k8s_template.apply_rendered_template(
-                self._template_path, deploy, config
-            )
+            k8s_template.apply_rendered_template(self._template_path, deploy, config)
             print("  Waiting for deployment to be ready...")
             k8s_dgd.wait_model_ready(k8s.endpoint, config.model_name, max_wait=300)
             return
@@ -113,16 +111,20 @@ class K8sDgdExecutor:
         if strategy == "graph":
             if k8s.dgd_name:
                 k8s_dgd.dgd_restart_graph(
-                    k8s.dgd_name, k8s.namespace,
-                    k8s.endpoint, self._config.model_name,
+                    k8s.dgd_name,
+                    k8s.namespace,
+                    k8s.endpoint,
+                    self._config.model_name,
                 )
             else:
                 print("  WARNING: graph reset requires --dgd-name")
         elif strategy == "frontend":
             if k8s.dgd_name:
                 k8s_dgd.dgd_restart_frontend(
-                    k8s.dgd_name, k8s.namespace,
-                    k8s.endpoint, self._config.model_name,
+                    k8s.dgd_name,
+                    k8s.namespace,
+                    k8s.endpoint,
+                    self._config.model_name,
                 )
             else:
                 print("  WARNING: frontend reset requires --dgd-name")
@@ -130,12 +132,16 @@ class K8sDgdExecutor:
             # Just wait for readiness
             if k8s.dgd_name:
                 k8s_dgd.dgd_wait_all_ready(
-                    k8s.dgd_name, k8s.namespace,
-                    k8s.endpoint, self._config.model_name,
+                    k8s.dgd_name,
+                    k8s.namespace,
+                    k8s.endpoint,
+                    self._config.model_name,
                     max_wait=60,
                 )
             else:
-                k8s_dgd.wait_model_ready(k8s.endpoint, self._config.model_name, max_wait=60)
+                k8s_dgd.wait_model_ready(
+                    k8s.endpoint, self._config.model_name, max_wait=60
+                )
 
     def execute_run(self, run_spec: RunSpec, run_dir: Path) -> RunResult:
         """Execute a single k8s run: metrics capture + aiperf + post-metrics."""
@@ -149,9 +155,13 @@ class K8sDgdExecutor:
 
         # Capture pre-run metrics (use in-cluster endpoint + kubectl exec fallback)
         frontend_label = (
-            f"nvidia.com/dynamo-graph-deployment-name={k8s.dgd_name},"
-            f"nvidia.com/dynamo-component-type=frontend"
-        ) if k8s.dgd_name else None
+            (
+                f"nvidia.com/dynamo-graph-deployment-name={k8s.dgd_name},"
+                f"nvidia.com/dynamo-component-type=frontend"
+            )
+            if k8s.dgd_name
+            else None
+        )
         capture_metrics(
             self._incluster_endpoint,
             run_dir / "frontend_metrics_pre.txt",

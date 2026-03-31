@@ -241,8 +241,14 @@ def _print_job_logs(job_name: str, namespace: str, tail: int = 20) -> None:
 def _get_job_pod_name(job_name: str, namespace: str) -> Optional[str]:
     """Get the pod name for a Job."""
     result = run_kubectl(
-        ["get", "pods", "-l", f"job-name={job_name}",
-         "-o", "jsonpath={.items[0].metadata.name}"],
+        [
+            "get",
+            "pods",
+            "-l",
+            f"job-name={job_name}",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
         namespace=namespace,
         check=False,
     )
@@ -292,7 +298,8 @@ spec:
         for _ in range(30):
             result = run_kubectl(
                 ["get", "pod", helper_name, "-o", "jsonpath={.status.phase}"],
-                namespace=namespace, check=False,
+                namespace=namespace,
+                check=False,
             )
             if result.stdout.strip() == "Running":
                 break
@@ -301,7 +308,8 @@ spec:
         # List what's on the PVC
         result = run_kubectl(
             ["exec", helper_name, "--", "ls", "-la", pvc_path],
-            namespace=namespace, check=False,
+            namespace=namespace,
+            check=False,
         )
         if result.stdout:
             print(f"  PVC artifacts ({pvc_path}):")
@@ -310,10 +318,16 @@ spec:
 
         # Copy artifacts locally
         subprocess.run(
-            ["kubectl", "cp",
-             f"{namespace}/{helper_name}:{pvc_path}/",
-             str(local_dir) + "/"],
-            capture_output=True, text=True, check=True, timeout=120,
+            [
+                "kubectl",
+                "cp",
+                f"{namespace}/{helper_name}:{pvc_path}/",
+                str(local_dir) + "/",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
         )
         files = list(local_dir.glob("*"))
         print(f"  Copied {len(files)} artifact files to local")
@@ -326,7 +340,8 @@ spec:
         # Cleanup helper pod
         run_kubectl(
             ["delete", "pod", helper_name, "--ignore-not-found", "--grace-period=0"],
-            namespace=namespace, check=False,
+            namespace=namespace,
+            check=False,
         )
 
 

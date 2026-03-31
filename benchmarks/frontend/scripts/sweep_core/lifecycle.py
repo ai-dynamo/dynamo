@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sweep_core.models import DeployKey, IsolationPolicy, RunSpec
+from sweep_core.models import IsolationPolicy, RunSpec
 
 
 def needs_deploy_or_reset(

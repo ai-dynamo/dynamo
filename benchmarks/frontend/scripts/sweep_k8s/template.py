@@ -17,7 +17,6 @@ from typing import Dict
 from sweep_core.models import DeployDimension, SweepConfig
 from sweep_k8s.kubectl import apply_yaml
 
-
 # Tokenizer backend mapping for template substitution
 TOKENIZER_TEMPLATE_MAP = {
     "hf": "default",

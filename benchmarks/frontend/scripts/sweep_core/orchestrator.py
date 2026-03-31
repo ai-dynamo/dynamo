@@ -13,7 +13,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
-from sweep_core.artifacts import print_results_table, write_csv, write_summary, write_sweep_config
+from sweep_core.artifacts import (
+    print_results_table,
+    write_csv,
+    write_summary,
+    write_sweep_config,
+)
 from sweep_core.failures import FailureTracker
 from sweep_core.lifecycle import needs_deploy_or_reset
 from sweep_core.models import RunResult, RunSpec, SweepPlan
@@ -57,7 +62,9 @@ def run(plan: SweepPlan, executor: "SweepExecutor") -> List[RunResult]:
             run_dir = output_root / run_spec.run_id
 
             # Check skip policy
-            if failure_tracker.should_skip(deploy.backend, aiperf.concurrency, deploy.workers):
+            if failure_tracker.should_skip(
+                deploy.backend, aiperf.concurrency, deploy.workers
+            ):
                 result = RunResult(
                     run_spec=run_spec,
                     status="skipped",
@@ -86,7 +93,9 @@ def run(plan: SweepPlan, executor: "SweepExecutor") -> List[RunResult]:
 
             # Update failure tracking
             if result.status == "ok":
-                failure_tracker.record_success(deploy.backend, aiperf.concurrency, deploy.workers)
+                failure_tracker.record_success(
+                    deploy.backend, aiperf.concurrency, deploy.workers
+                )
                 rps = f"{result.req_per_sec:.1f}" if result.req_per_sec else "N/A"
                 tp50 = f"{result.ttft_p50_ms:.1f}ms" if result.ttft_p50_ms else "N/A"
                 print(f"    OK: {rps} req/s, TTFT p50={tp50}")

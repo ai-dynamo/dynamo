@@ -55,7 +55,9 @@ def write_csv(results: List[RunResult], csv_path: Path) -> None:
                 "speedup_ratio": 0,  # filled by config
                 "status": r.status,
                 "req_per_sec": f"{r.req_per_sec:.2f}" if r.req_per_sec else "",
-                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}" if r.output_tok_per_sec else "",
+                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}"
+                if r.output_tok_per_sec
+                else "",
                 "ttft_p50_ms": f"{r.ttft_p50_ms:.1f}" if r.ttft_p50_ms else "",
                 "ttft_p99_ms": f"{r.ttft_p99_ms:.1f}" if r.ttft_p99_ms else "",
                 "itl_p50_ms": f"{r.itl_p50_ms:.1f}" if r.itl_p50_ms else "",
@@ -92,7 +94,9 @@ def write_summary(results: List[RunResult], summary_path: Path) -> None:
     ok = sum(1 for r in results if r.status == "ok")
     fail = sum(1 for r in results if r.status == "fail")
     skip = sum(1 for r in results if r.status == "skipped")
-    lines.append(f"**Totals:** {ok} passed, {fail} failed, {skip} skipped out of {len(results)}")
+    lines.append(
+        f"**Totals:** {ok} passed, {fail} failed, {skip} skipped out of {len(results)}"
+    )
 
     summary_path.write_text("\n".join(lines) + "\n")
 
@@ -111,7 +115,9 @@ def write_sweep_config(config: SweepConfig, output_dir: Path) -> None:
         "benchmark_duration": config.benchmark_duration or "N/A",
         "osl": config.osl,
         "output_dir": config.output_dir,
-        "total_runs": len(config.tokenizers) * len(config.concurrencies) * len(config.isls),
+        "total_runs": len(config.tokenizers)
+        * len(config.concurrencies)
+        * len(config.isls),
         "isolation_policy": config.isolation_policy,
     }
     config_path.write_text(json.dumps(config_data, indent=2) + "\n")

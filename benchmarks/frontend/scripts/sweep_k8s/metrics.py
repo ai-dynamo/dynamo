@@ -76,9 +76,20 @@ def _try_kubectl_exec(
     try:
         # Get a pod name from the label selector
         result = subprocess.run(
-            ["kubectl", "-n", namespace, "get", "pod", "-l", pod_label,
-             "-o", "jsonpath={.items[0].metadata.name}"],
-            capture_output=True, text=True, timeout=10,
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "pod",
+                "-l",
+                pod_label,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         pod_name = result.stdout.strip()
         if not pod_name:
@@ -86,12 +97,22 @@ def _try_kubectl_exec(
 
         # Exec curl inside the pod (curl may not be available; try wget too)
         result = subprocess.run(
-            ["kubectl", "-n", namespace, "exec", pod_name, "--",
-             "sh", "-c",
-             f"curl -sf http://{endpoint}/metrics 2>/dev/null || "
-             f"wget -qO- http://{endpoint}/metrics 2>/dev/null || "
-             f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://{endpoint}/metrics').read().decode())\" 2>/dev/null"],
-            capture_output=True, text=True, timeout=15,
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "exec",
+                pod_name,
+                "--",
+                "sh",
+                "-c",
+                f"curl -sf http://{endpoint}/metrics 2>/dev/null || "
+                f"wget -qO- http://{endpoint}/metrics 2>/dev/null || "
+                f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://{endpoint}/metrics').read().decode())\" 2>/dev/null",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
@@ -104,11 +125,23 @@ def _try_kubectl_run(endpoint: str, namespace: str) -> Optional[str]:
     """Fetch metrics via a one-shot kubectl run --rm pod."""
     try:
         result = subprocess.run(
-            ["kubectl", "run", "metrics-fetch", "--rm", "-i", "--restart=Never",
-             "-n", namespace,
-             "--image=curlimages/curl:latest",
-             "--", "-sf", f"http://{endpoint}/metrics"],
-            capture_output=True, text=True, timeout=30,
+            [
+                "kubectl",
+                "run",
+                "metrics-fetch",
+                "--rm",
+                "-i",
+                "--restart=Never",
+                "-n",
+                namespace,
+                "--image=curlimages/curl:latest",
+                "--",
+                "-sf",
+                f"http://{endpoint}/metrics",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
