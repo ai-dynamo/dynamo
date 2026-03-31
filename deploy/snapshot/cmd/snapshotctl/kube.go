@@ -13,18 +13,19 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
-func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, string, snapshotworkload.Storage, error) {
+func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, string, snapshotprotocol.Storage, error) {
 	pod, err := loadPod(manifestPath)
 	if err != nil {
-		return nil, nil, "", snapshotworkload.Storage{}, err
+		return nil, nil, "", snapshotprotocol.Storage{}, err
 	}
 
 	clientset, currentNamespace, err := loadClientset(kubeContext)
 	if err != nil {
-		return nil, nil, "", snapshotworkload.Storage{}, err
+		return nil, nil, "", snapshotprotocol.Storage{}, err
 	}
 
 	namespace := currentNamespace
@@ -40,7 +41,7 @@ func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride 
 
 	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
 	if err != nil {
-		return nil, nil, "", snapshotworkload.Storage{}, err
+		return nil, nil, "", snapshotprotocol.Storage{}, err
 	}
 	return pod, clientset, namespace, storage, nil
 }
@@ -71,12 +72,12 @@ func loadClientset(kubeContext string) (kubernetes.Interface, string, error) {
 	return clientset, namespace, nil
 }
 
-func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotworkload.Storage, error) {
+func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotprotocol.Storage, error) {
 	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: snapshotworkload.SnapshotAgentLabelSelector,
 	})
 	if err != nil {
-		return snapshotworkload.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
+		return snapshotprotocol.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
 	}
 
 	return snapshotworkload.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)

@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -121,7 +122,7 @@ func CreateOrGetAutoCheckpoint(
 				consts.KubeLabelCheckpointID: hash,
 			},
 			Annotations: map[string]string{
-				consts.KubeAnnotationCheckpointArtifactVersion: consts.DefaultCheckpointArtifactVersion,
+				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{

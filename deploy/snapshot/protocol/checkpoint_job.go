@@ -1,4 +1,7 @@
-package workload
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protocol
 
 import (
 	"fmt"
@@ -10,7 +13,10 @@ import (
 )
 
 type CheckpointJobOptions struct {
-	PodOptions
+	Namespace             string
+	CheckpointID          string
+	ArtifactVersion       string
+	SeccompProfile        string
 	Name                  string
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
@@ -28,7 +34,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.ArtifactVersion)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
-		injectLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
+		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if opts.WrapLaunchJob {
 		if len(podTemplate.Spec.Containers) == 0 {
@@ -61,7 +67,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	}, nil
 }
 
-func injectLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
+func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	if podSpec.SecurityContext == nil {
 		podSpec.SecurityContext = &corev1.PodSecurityContext{}
 	}

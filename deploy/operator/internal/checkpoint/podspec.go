@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,7 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		hash = checkpointInfo.Hash
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
-	snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -92,82 +93,7 @@ func InjectCheckpointIntoPodSpec(
 		return err
 	}
 
-	hasPodInfoVolume := false
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == commonconsts.PodInfoVolumeName {
-			hasPodInfoVolume = true
-			break
-		}
-	}
-	if !hasPodInfoVolume {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: commonconsts.PodInfoVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items: []corev1.DownwardAPIVolumeFile{
-						{
-							Path: "pod_name",
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: commonconsts.PodInfoFieldPodName,
-							},
-						},
-						{
-							Path: "pod_uid",
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: commonconsts.PodInfoFieldPodUID,
-							},
-						},
-						{
-							Path: "pod_namespace",
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: commonconsts.PodInfoFieldPodNamespace,
-							},
-						},
-						{
-							Path: commonconsts.PodInfoFileDynNamespace,
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoNamespace + "']",
-							},
-						},
-						{
-							Path: commonconsts.PodInfoFileDynNamespaceWorkerSuffix,
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoWorkerHash + "']",
-							},
-						},
-						{
-							Path: commonconsts.PodInfoFileDynComponent,
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoComponentType + "']",
-							},
-						},
-						{
-							Path: commonconsts.PodInfoFileDynParentDGDName,
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoGraphDeploymentName + "']",
-							},
-						},
-						{
-							Path: commonconsts.PodInfoFileDynParentDGDNamespace,
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: commonconsts.PodInfoFieldPodNamespace,
-							},
-						},
-					},
-				},
-			},
-		})
-	}
-
-	for _, mount := range mainContainer.VolumeMounts {
-		if mount.Name == commonconsts.PodInfoVolumeName {
-			return nil
-		}
-	}
-	mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
-		Name:      commonconsts.PodInfoVolumeName,
-		MountPath: commonconsts.PodInfoMountPath,
-		ReadOnly:  true,
-	})
+	EnsurePodInfoVolume(podSpec)
+	EnsurePodInfoMount(mainContainer)
 	return nil
 }

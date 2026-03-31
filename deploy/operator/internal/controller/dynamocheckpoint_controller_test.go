@@ -25,7 +25,9 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -58,7 +60,7 @@ var testHash = func() string {
 	return hash
 }()
 
-var defaultCheckpointJobName = "checkpoint-job-" + testHash + "-" + consts.DefaultCheckpointArtifactVersion
+var defaultCheckpointJobName = snapshotprotocol.CheckpointJobName(testHash, snapshotprotocol.DefaultCheckpointArtifactVersion)
 
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -136,7 +138,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job, err := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	podSpec := job.Spec.Template.Spec
 	main := podSpec.Containers[0]
@@ -233,7 +235,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	backoff := int32(5)
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff //nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
-	job, err = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err = checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
@@ -244,7 +246,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 		},
 	}
-	job, err = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err = checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
@@ -269,7 +271,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job, err := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	foundCustomShmVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -429,7 +431,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -521,7 +523,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -547,7 +549,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-running-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{Active: 1},
 		}
@@ -585,7 +587,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,

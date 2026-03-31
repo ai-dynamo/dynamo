@@ -20,10 +20,9 @@ package checkpoint
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -56,13 +55,10 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 }
 
 func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
-	if ckpt != nil && ckpt.Annotations != nil {
-		version := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
-		if version != "" {
-			return version
-		}
+	if ckpt == nil {
+		return snapshotprotocol.DefaultCheckpointArtifactVersion
 	}
-	return consts.DefaultCheckpointArtifactVersion
+	return snapshotprotocol.ArtifactVersionFromAnnotations(ckpt.Annotations)
 }
 
 func ResolveCheckpointForService(

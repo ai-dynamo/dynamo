@@ -18,7 +18,7 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 const testNodeName = "test-node"
@@ -33,7 +33,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 			Storage: types.StorageSpec{
-				Type:     snapshotworkload.StorageTypePVC,
+				Type:     snapshotprotocol.StorageTypePVC,
 				BasePath: t.TempDir(),
 			},
 		},
@@ -192,11 +192,11 @@ func TestReconcileCheckpointPod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			labels := map[string]string{
-				snapshotworkload.CheckpointSourceLabel: "true",
+				snapshotprotocol.CheckpointSourceLabel: "true",
 				"batch.kubernetes.io/job-name":         "checkpoint-job",
 			}
 			if tc.hash != "" {
-				labels[snapshotworkload.CheckpointIDLabel] = tc.hash
+				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
 			}
 
 			job := &batchv1.Job{
@@ -207,7 +207,7 @@ func TestReconcileCheckpointPod(t *testing.T) {
 			}
 			if tc.annotation != "" {
 				job.Annotations = map[string]string{
-					snapshotworkload.CheckpointStatusAnnotation: tc.annotation,
+					snapshotprotocol.CheckpointStatusAnnotation: tc.annotation,
 				}
 			}
 
@@ -380,18 +380,18 @@ func TestReconcileRestorePod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			labels := map[string]string{
-				snapshotworkload.RestoreTargetLabel: "true",
+				snapshotprotocol.RestoreTargetLabel: "true",
 			}
 			if tc.hash != "" {
-				labels[snapshotworkload.CheckpointIDLabel] = tc.hash
+				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
 			}
 
 			w := makeTestController(t)
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					snapshotworkload.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotworkload.RestoreContainerIDAnnotation: tc.annotationContainerID,
+					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
+					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
 				}
 			}
 
@@ -403,7 +403,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			}}
 
 			if tc.createDir && tc.hash != "" {
-				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotworkload.DefaultCheckpointArtifactVersion)
+				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatalf("failed to create checkpoint dir: %v", err)
 				}
@@ -463,7 +463,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 			Storage: types.StorageSpec{
-				Type:     snapshotworkload.StorageTypePVC,
+				Type:     snapshotprotocol.StorageTypePVC,
 				BasePath: t.TempDir(),
 			},
 		},

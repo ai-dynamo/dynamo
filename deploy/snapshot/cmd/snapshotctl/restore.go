@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
@@ -69,8 +70,8 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(checkpointID, snapshotworkload.DefaultCheckpointArtifactVersion, "", snapshotworkload.Storage{
-		Type:     snapshotworkload.StorageTypePVC,
+	resolvedStorage, err := snapshotprotocol.ResolveRestoreStorage(checkpointID, snapshotprotocol.DefaultCheckpointArtifactVersion, "", snapshotprotocol.Storage{
+		Type:     snapshotprotocol.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
 	})
@@ -90,9 +91,9 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		}, snapshotworkload.PodOptions{
 			Namespace:       namespace,
 			CheckpointID:    checkpointID,
-			ArtifactVersion: snapshotworkload.DefaultCheckpointArtifactVersion,
+			ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
 			Storage:         resolvedStorage,
-			SeccompProfile:  snapshotworkload.DefaultSeccompLocalhostProfile,
+			SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 		})
 		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
@@ -109,7 +110,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if len(pod.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
 		}
-		if err := snapshotworkload.ValidateRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], resolvedStorage, snapshotworkload.DefaultSeccompLocalhostProfile); err != nil {
+		if err := snapshotworkload.ValidateRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}
 
@@ -121,7 +122,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		for key, value := range pod.Annotations {
 			annotations[key] = value
 		}
-		snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotworkload.DefaultCheckpointArtifactVersion)
+		snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotprotocol.DefaultCheckpointArtifactVersion)
 		patch, err := json.Marshal(map[string]any{
 			"metadata": map[string]any{
 				"labels":      labels,
@@ -161,11 +162,11 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespa
 			return false, fmt.Errorf("get restore pod %s/%s: %w", namespace, podName, err)
 		}
 
-		status = strings.TrimSpace(pod.Annotations[snapshotworkload.RestoreStatusAnnotation])
-		if status == "completed" {
+		status = strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreStatusAnnotation])
+		if status == snapshotprotocol.RestoreStatusCompleted {
 			return true, nil
 		}
-		if status == "failed" {
+		if status == snapshotprotocol.RestoreStatusFailed {
 			return false, fmt.Errorf("restore pod %s/%s failed", namespace, podName)
 		}
 		if pod.Status.Phase == corev1.PodFailed {

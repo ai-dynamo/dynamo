@@ -1,4 +1,7 @@
-package workload
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protocol
 
 import (
 	"testing"
@@ -24,12 +27,10 @@ func TestNewCheckpointJob(t *testing.T) {
 			}},
 		},
 	}, CheckpointJobOptions{
-		PodOptions: PodOptions{
-			Namespace:       "test-ns",
-			CheckpointID:    "hash",
-			ArtifactVersion: "2",
-			SeccompProfile:  DefaultSeccompLocalhostProfile,
-		},
+		Namespace:             "test-ns",
+		CheckpointID:          "hash",
+		ArtifactVersion:       "2",
+		SeccompProfile:        DefaultSeccompLocalhostProfile,
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),

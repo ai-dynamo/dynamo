@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
-	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
@@ -54,8 +54,8 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	if checkpointID == "" {
 		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
 	}
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(checkpointID, "", snapshotworkload.Storage{
-		Type:     snapshotworkload.StorageTypePVC,
+	resolvedStorage, err := snapshotprotocol.ResolveCheckpointStorage(checkpointID, "", snapshotprotocol.Storage{
+		Type:     snapshotprotocol.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
 	})
@@ -64,22 +64,19 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	}
 
 	checkpointJobName := pod.Name + "-checkpoint"
-	job, err := snapshotworkload.NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
-	}, snapshotworkload.CheckpointJobOptions{
-		PodOptions: snapshotworkload.PodOptions{
-			Namespace:       namespace,
-			CheckpointID:    checkpointID,
-			ArtifactVersion: snapshotworkload.DefaultCheckpointArtifactVersion,
-			Storage:         resolvedStorage,
-			SeccompProfile:  snapshotworkload.DefaultSeccompLocalhostProfile,
-		},
-		Name:          checkpointJobName,
-		WrapLaunchJob: !opts.DisableCudaCheckpointJobFile,
+	}, snapshotprotocol.CheckpointJobOptions{
+		Namespace:       namespace,
+		CheckpointID:    checkpointID,
+		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
+		Name:            checkpointJobName,
+		WrapLaunchJob:   !opts.DisableCudaCheckpointJobFile,
 	})
 	if err != nil {
 		return nil, err
@@ -120,11 +117,11 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 			return false, fmt.Errorf("get checkpoint job %s/%s: %w", namespace, jobName, err)
 		}
 
-		status = strings.TrimSpace(job.Annotations[snapshotworkload.CheckpointStatusAnnotation])
-		if status == "completed" {
+		status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointStatusAnnotation])
+		if status == snapshotprotocol.CheckpointStatusCompleted {
 			return true, nil
 		}
-		if status == "failed" {
+		if status == snapshotprotocol.CheckpointStatusFailed {
 			return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
 		}
 		if job.Status.Failed > 0 {

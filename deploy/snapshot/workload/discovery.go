@@ -5,21 +5,22 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	SnapshotAgentLabelKey        = "app.kubernetes.io/name"
-	SnapshotAgentLabelValue      = "snapshot"
-	SnapshotAgentContainerName   = "agent"
-	SnapshotAgentLabelSelector   = SnapshotAgentLabelKey + "=" + SnapshotAgentLabelValue
+	SnapshotAgentLabelKey      = "app.kubernetes.io/name"
+	SnapshotAgentLabelValue    = "snapshot"
+	SnapshotAgentContainerName = "agent"
+	SnapshotAgentLabelSelector = SnapshotAgentLabelKey + "=" + SnapshotAgentLabelValue
 )
 
-func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonSet) (Storage, error) {
+func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonSet) (protocol.Storage, error) {
 	if len(daemonSets) == 0 {
-		return Storage{}, fmt.Errorf("no snapshot-agent daemonset found in namespace %s", namespace)
+		return protocol.Storage{}, fmt.Errorf("no snapshot-agent daemonset found in namespace %s", namespace)
 	}
 
 	names := make([]string, 0, len(daemonSets))
@@ -54,15 +55,15 @@ func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonS
 				continue
 			}
 
-			return Storage{
-				Type:     StorageTypePVC,
+			return protocol.Storage{
+				Type:     protocol.StorageTypePVC,
 				PVCName:  pvcName,
 				BasePath: basePath,
 			}, nil
 		}
 	}
 
-	return Storage{}, fmt.Errorf(
+	return protocol.Storage{}, fmt.Errorf(
 		"snapshot-agent daemonset in %s does not mount a PVC-backed checkpoint volume (%s)",
 		namespace,
 		strings.Join(names, ", "),
@@ -99,7 +100,7 @@ func PrepareRestorePodSpecForCheckpoint(
 		return err
 	}
 
-	resolvedStorage, err := ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
+	resolvedStorage, err := protocol.ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
 	if err != nil {
 		return err
 	}

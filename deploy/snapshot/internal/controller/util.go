@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/go-logr/logr"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -94,20 +95,6 @@ func getCheckpointJob(ctx context.Context, clientset kubernetes.Interface, pod *
 	return job, nil
 }
 
-func isLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
-	if lease == nil || lease.Spec.LeaseDurationSeconds == nil {
-		return true
-	}
-	last := lease.Spec.RenewTime
-	if last == nil {
-		last = lease.Spec.AcquireTime
-	}
-	if last == nil {
-		return true
-	}
-	return now.After(last.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
-}
-
 func acquireCheckpointLease(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, job *batchv1.Job, holderIdentity string) (bool, error) {
 	leaseName := job.Name
 	now := metav1.NewMicroTime(time.Now())
@@ -142,7 +129,7 @@ func acquireCheckpointLease(ctx context.Context, clientset kubernetes.Interface,
 		return true, nil
 	}
 
-	if !isLeaseExpired(existingLease, now.Time) &&
+	if !snapshotprotocol.LeaseExpired(existingLease, now.Time) &&
 		existingLease.Spec.HolderIdentity != nil &&
 		*existingLease.Spec.HolderIdentity != holderIdentity {
 		return false, nil
@@ -150,7 +137,7 @@ func acquireCheckpointLease(ctx context.Context, clientset kubernetes.Interface,
 
 	existingLease.Spec.HolderIdentity = &holderIdentity
 	existingLease.Spec.LeaseDurationSeconds = &leaseDurationSeconds
-	if existingLease.Spec.AcquireTime == nil || isLeaseExpired(existingLease, now.Time) {
+	if existingLease.Spec.AcquireTime == nil || snapshotprotocol.LeaseExpired(existingLease, now.Time) {
 		existingLease.Spec.AcquireTime = &now
 	}
 	existingLease.Spec.RenewTime = &now

@@ -1,31 +1,9 @@
-package workload
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protocol
 
 import "testing"
-
-func TestApplyCheckpointSourceMetadata(t *testing.T) {
-	labels := map[string]string{
-		RestoreTargetLabel: "true",
-		CheckpointIDLabel:  "old",
-	}
-	annotations := map[string]string{
-		CheckpointArtifactVersionAnnotation: "old",
-	}
-
-	applyCheckpointSourceMetadata(labels, annotations, "hash", "2")
-
-	if labels[CheckpointSourceLabel] != "true" {
-		t.Fatalf("expected checkpoint source label, got %#v", labels)
-	}
-	if labels[CheckpointIDLabel] != "hash" {
-		t.Fatalf("expected checkpoint hash label, got %#v", labels)
-	}
-	if _, ok := labels[RestoreTargetLabel]; ok {
-		t.Fatalf("restore target label was not cleared: %#v", labels)
-	}
-	if annotations[CheckpointArtifactVersionAnnotation] != "2" {
-		t.Fatalf("expected checkpoint artifact version annotation, got %#v", annotations)
-	}
-}
 
 func TestApplyRestoreTargetMetadata(t *testing.T) {
 	labels := map[string]string{

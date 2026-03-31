@@ -1,11 +1,12 @@
-package workload
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protocol
 
 import (
 	"fmt"
 	"strings"
 )
-
-const DefaultCheckpointArtifactVersion = "1"
 
 type Storage struct {
 	Type     string
@@ -19,11 +20,7 @@ func ResolveCheckpointStorage(checkpointID string, version string, storage Stora
 	if err != nil {
 		return Storage{}, err
 	}
-	version = strings.TrimSpace(version)
-	if version == "" {
-		version = DefaultCheckpointArtifactVersion
-	}
-	resolved.Location = strings.TrimRight(resolved.BasePath, "/") + "/" + checkpointID + "/versions/" + version
+	resolved.Location = strings.TrimRight(resolved.BasePath, "/") + "/" + checkpointID + "/versions/" + NormalizeArtifactVersion(version)
 	return resolved, nil
 }
 
@@ -34,11 +31,7 @@ func ResolveRestoreStorage(checkpointID string, version string, location string,
 	}
 	location = strings.TrimSpace(location)
 	if location == "" {
-		resolved, err = ResolveCheckpointStorage(checkpointID, version, storage)
-		if err != nil {
-			return Storage{}, err
-		}
-		return resolved, nil
+		return ResolveCheckpointStorage(checkpointID, version, storage)
 	}
 	resolved.Location = location
 	return resolved, nil

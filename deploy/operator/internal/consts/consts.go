@@ -140,7 +140,7 @@ const (
 	ResourceStateUnknown  = "unknown"
 
 	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in deploy/snapshot/workload/workload.go.
+	// CROSS-REFERENCE: Some constants below are duplicated in deploy/snapshot/protocol.
 	// If you change a value here, update there too.
 
 	// Kubernetes labels
