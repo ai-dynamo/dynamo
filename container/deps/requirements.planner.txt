@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Dependencies required by the planner and global_planner services.
+# Dependencies required by the planner, profiler, and global_planner services.
 
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@5d419f99d60fdae0d3911cba06a9b571f3b2965c
+aiofiles<=25.1.0
 filterpy==1.4.5
 kubernetes==32.0.1
+kubernetes_asyncio==32.0.0
 matplotlib==3.10.7
 pmdarima==2.1.1
 prometheus-api-client==0.6.0
