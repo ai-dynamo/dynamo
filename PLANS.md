@@ -1,6 +1,80 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:41:55 UTC
+Last updated: 2026-03-31 02:05:22 UTC
+
+Current in-progress run (2026-03-31 01:57:22 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/block_manager/distributed/transfer.rs`
+  - `lib/llm/src/block_manager/offload.rs`
+  - `lib/llm/src/block_manager/offload/pending.rs`
+  - `lib/llm/src/block_manager/state.rs`
+- Current implementation slice for this run:
+  - keep the existing single-owner exact-block G4 client/agent API
+  - split the in-memory G4 metadata map into a reusable shared disk index
+  - attach that index to the real disk offload completion path through a small
+    observer hook instead of introducing a second disk registration path
+- Why this slice:
+  - the previous run left `put_blocks(...)` as a manual/in-process metadata
+    step disconnected from actual disk-backed offload completion
+  - the smallest meaningful follow-up is to populate G4 metadata when disk
+    blocks are registered by the existing offload lifecycle
+  - runtime discovery / RPC wiring still remains a larger follow-up and is not
+    required to validate this lifecycle hook
+- Milestone completed in this run:
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+    - added shared `G4BlockIndex`
+    - made `G4StorageAgent` use the shared index
+    - added disk-block registration logic for registered `DiskStorage` blocks
+  - `lib/llm/src/block_manager/offload.rs`
+    - added optional disk registration observer support to `OffloadManager`
+    - routed host->disk and direct device->disk workers through a disk-specific
+      completion path that can observe registered disk blocks
+    - added targeted tests for host->disk and bypass device->disk observer
+      updates
+  - `lib/llm/src/block_manager/distributed.rs`
+    - re-exported `G4BlockIndex`
+  - `lib/llm/src/block_manager/state.rs`
+    - passed `None` for the new optional disk observer in existing state wiring
+- Validation completed in this run:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`6 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml test_host_to_disk_offload_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+    -> pass (`1 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml test_device_to_disk_bypass_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+    -> pass (`1 passed`)
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - post-format validation:
+    - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+      -> pass (`6 passed`)
+    - `cargo test --manifest-path lib/llm/Cargo.toml test_host_to_disk_offload_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+      -> pass (`1 passed`)
+    - `cargo test --manifest-path lib/llm/Cargo.toml test_device_to_disk_bypass_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+      -> pass (`1 passed`)
+- Validation notes from this run:
+  - the feature-gated offload tests emit `get_mempolicy: Operation not permitted`
+    in this container but still pass
+  - the feature-gated offload tests also emit a UCX warning about
+    `IB_PCI_RELAXED_ORDERING=try`; it was non-fatal in this environment
+- Remaining work after this run:
+  - wire an actual runtime owner to pass a `G4BlockIndex` observer into
+    `OffloadManager::new(...)` so the lifecycle hook is enabled outside tests
+  - connect that shared index to whichever worker/discovery runtime will own
+    the eventual G4 RPC or direct worker-to-worker path
+  - add broader integration coverage once discovery / RPC wiring exists so the
+    system exercises real `query -> fetch -> onboard` across distinct owners
+- Exact next file or command to touch:
+  - file: `lib/llm/src/block_manager/state.rs`
+  - then: the runtime construction site that will own `G4StorageAgent` /
+    `G4BlockIndex`
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml test_host_to_disk_offload_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
 
 Current run outcome:
 

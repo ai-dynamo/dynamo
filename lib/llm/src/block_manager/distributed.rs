@@ -10,7 +10,7 @@ mod leader;
 mod worker;
 
 pub use g4::{
-    G4Error, G4FetchedBlock, G4PutBlock, G4QueryHit, G4StorageAgent, G4StorageClient,
+    G4BlockIndex, G4Error, G4FetchedBlock, G4PutBlock, G4QueryHit, G4StorageAgent, G4StorageClient,
     G4StorageWorker, select_g4_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};

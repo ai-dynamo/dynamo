@@ -3,15 +3,23 @@
 
 use super::{BlockTransferHandler, BlockTransferPool, BlockTransferRequest};
 
-use crate::block_manager::WorkerID;
+use crate::block_manager::{
+    WorkerID,
+    block::{
+        BlockDataProvider, BlockMetadata, ImmutableBlock, data::BlockDataExt,
+        locality::LocalityProvider,
+    },
+    offload::DiskBlockRegistrationObserver,
+    storage::DiskStorage,
+};
 use crate::tokens::{SequenceHash, compute_hash_v2};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G4StorageWorker {
@@ -99,40 +107,38 @@ fn rendezvous_score(sequence_hash: SequenceHash, worker_id: WorkerID) -> u64 {
     compute_hash_v2(&bytes, 0)
 }
 
-#[derive(Clone)]
-pub struct G4StorageAgent {
-    worker_id: WorkerID,
-    transfer: Arc<dyn G4TransferExecutor>,
-    blocks: Arc<RwLock<HashMap<SequenceHash, G4PutBlock>>>,
+#[derive(Default)]
+pub struct G4BlockIndex {
+    blocks: RwLock<HashMap<SequenceHash, G4PutBlock>>,
 }
 
-impl G4StorageAgent {
-    pub fn new(worker_id: WorkerID, transfer: Arc<dyn G4TransferExecutor>) -> Self {
-        Self {
-            worker_id,
-            transfer,
-            blocks: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub fn worker_id(&self) -> WorkerID {
-        self.worker_id
-    }
-
+impl G4BlockIndex {
     pub async fn put_blocks(&self, blocks: Vec<G4PutBlock>) {
-        let mut guard = self.blocks.write().await;
+        let mut guard = self.blocks.write().expect("g4 block index poisoned");
         for block in blocks {
             guard.insert(block.sequence_hash, block);
         }
     }
 
-    pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G4QueryHit> {
-        let guard = self.blocks.read().await;
+    pub fn block(&self, sequence_hash: SequenceHash) -> Option<G4PutBlock> {
+        self.blocks
+            .read()
+            .expect("g4 block index poisoned")
+            .get(&sequence_hash)
+            .cloned()
+    }
+
+    async fn query_blocks(
+        &self,
+        worker_id: WorkerID,
+        sequence_hashes: &[SequenceHash],
+    ) -> Vec<G4QueryHit> {
+        let guard = self.blocks.read().expect("g4 block index poisoned");
         sequence_hashes
             .iter()
             .filter_map(|sequence_hash| {
                 guard.get(sequence_hash).map(|block| G4QueryHit {
-                    worker_id: self.worker_id,
+                    worker_id,
                     sequence_hash: *sequence_hash,
                     disk_block_idx: block.disk_block_idx,
                     size_bytes: block.size_bytes,
@@ -144,43 +150,132 @@ impl G4StorageAgent {
 
     async fn fetch_entries(
         &self,
+        worker_id: WorkerID,
+        entries: &[(SequenceHash, usize)],
+    ) -> Result<(Vec<(usize, usize)>, Vec<G4FetchedBlock>), G4Error> {
+        let guard = self.blocks.read().expect("g4 block index poisoned");
+        let mut missing = Vec::new();
+        let mut request_blocks = Vec::with_capacity(entries.len());
+        let mut fetched_blocks = Vec::with_capacity(entries.len());
+
+        for (sequence_hash, target_block_idx) in entries {
+            match guard.get(sequence_hash) {
+                Some(block) => {
+                    request_blocks.push((block.disk_block_idx, *target_block_idx));
+                    fetched_blocks.push(G4FetchedBlock {
+                        worker_id,
+                        sequence_hash: *sequence_hash,
+                        target_block_idx: *target_block_idx,
+                        size_bytes: block.size_bytes,
+                        checksum: block.checksum,
+                    });
+                }
+                None => missing.push(*sequence_hash),
+            }
+        }
+
+        if !missing.is_empty() {
+            return Err(G4Error::NotFound {
+                worker_id,
+                sequence_hashes: missing,
+            });
+        }
+
+        Ok((request_blocks, fetched_blocks))
+    }
+
+    pub fn register_disk_blocks<Locality, Metadata>(
+        &self,
+        blocks: &[ImmutableBlock<DiskStorage, Locality, Metadata>],
+    ) -> Result<()>
+    where
+        Locality: LocalityProvider,
+        Metadata: BlockMetadata,
+    {
+        let mut registered = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let size_bytes = block.block_data().block_view()?.size();
+            registered.push(G4PutBlock {
+                sequence_hash: block.sequence_hash(),
+                disk_block_idx: block.block_id(),
+                size_bytes,
+                checksum: None,
+            });
+        }
+
+        let mut guard = self.blocks.write().expect("g4 block index poisoned");
+        for block in registered {
+            guard.insert(block.sequence_hash, block);
+        }
+        Ok(())
+    }
+}
+
+impl<Locality, Metadata> DiskBlockRegistrationObserver<Locality, Metadata> for G4BlockIndex
+where
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+{
+    fn observe_registered_blocks(
+        &self,
+        blocks: &[ImmutableBlock<DiskStorage, Locality, Metadata>],
+    ) -> Result<()> {
+        self.register_disk_blocks(blocks)
+    }
+}
+
+#[derive(Clone)]
+pub struct G4StorageAgent {
+    worker_id: WorkerID,
+    transfer: Arc<dyn G4TransferExecutor>,
+    block_index: Arc<G4BlockIndex>,
+}
+
+impl G4StorageAgent {
+    pub fn new(worker_id: WorkerID, transfer: Arc<dyn G4TransferExecutor>) -> Self {
+        Self::new_with_index(worker_id, transfer, Arc::new(G4BlockIndex::default()))
+    }
+
+    pub fn new_with_index(
+        worker_id: WorkerID,
+        transfer: Arc<dyn G4TransferExecutor>,
+        block_index: Arc<G4BlockIndex>,
+    ) -> Self {
+        Self {
+            worker_id,
+            transfer,
+            block_index,
+        }
+    }
+
+    pub fn worker_id(&self) -> WorkerID {
+        self.worker_id
+    }
+
+    pub fn block_index(&self) -> Arc<G4BlockIndex> {
+        self.block_index.clone()
+    }
+
+    pub async fn put_blocks(&self, blocks: Vec<G4PutBlock>) {
+        self.block_index.put_blocks(blocks).await;
+    }
+
+    pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G4QueryHit> {
+        self.block_index
+            .query_blocks(self.worker_id, sequence_hashes)
+            .await
+    }
+
+    async fn fetch_entries(
+        &self,
         target_pool: BlockTransferPool,
         entries: &[(SequenceHash, usize)],
         timeout: Duration,
     ) -> Result<Vec<G4FetchedBlock>, G4Error> {
-        let request_blocks = {
-            let guard = self.blocks.read().await;
-            let mut missing = Vec::new();
-            let mut request_blocks = Vec::with_capacity(entries.len());
-            let mut fetched_blocks = Vec::with_capacity(entries.len());
-
-            for (sequence_hash, target_block_idx) in entries {
-                match guard.get(sequence_hash) {
-                    Some(block) => {
-                        request_blocks.push((block.disk_block_idx, *target_block_idx));
-                        fetched_blocks.push(G4FetchedBlock {
-                            worker_id: self.worker_id,
-                            sequence_hash: *sequence_hash,
-                            target_block_idx: *target_block_idx,
-                            size_bytes: block.size_bytes,
-                            checksum: block.checksum,
-                        });
-                    }
-                    None => missing.push(*sequence_hash),
-                }
-            }
-
-            if !missing.is_empty() {
-                return Err(G4Error::NotFound {
-                    worker_id: self.worker_id,
-                    sequence_hashes: missing,
-                });
-            }
-
-            (request_blocks, fetched_blocks)
-        };
-
-        let (request_blocks, fetched_blocks) = request_blocks;
+        let (request_blocks, fetched_blocks) = self
+            .block_index
+            .fetch_entries(self.worker_id, entries)
+            .await?;
         let request =
             BlockTransferRequest::new(BlockTransferPool::Disk, target_pool, request_blocks);
 
