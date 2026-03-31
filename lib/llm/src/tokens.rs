@@ -380,7 +380,11 @@ impl TokenBlockChunk {
     /// Creates a new chunk from a slice of `&[Token]` with an optional extra hash for multimodal
     /// content. Uses a two-stage hash: stage 1 hashes tokens, stage 2 combines with extra_hash.
     /// When extra_hash is None, behaves identically to [`from_tokens`].
-    fn from_tokens_with_extra(tokens: &[Token], salt_hash: SaltHash, extra_hash: Option<u64>) -> Self {
+    fn from_tokens_with_extra(
+        tokens: &[Token],
+        salt_hash: SaltHash,
+        extra_hash: Option<u64>,
+    ) -> Self {
         let token_hash = compute_hash_v2(cast_slice(tokens), salt_hash);
         let block_hash = match extra_hash {
             Some(extra) => compute_hash_v2(cast_slice(&[token_hash, extra]), salt_hash),
