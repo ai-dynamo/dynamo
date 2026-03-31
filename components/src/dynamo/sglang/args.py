@@ -378,6 +378,8 @@ async def parse_args(args: list[str]) -> Config:
     # SGLang sends disjoint segments which Dynamo passes through directly.
     # Force stream_output=True for optimal streaming performance.
     server_args.stream_output = True
+    if hasattr(server_args, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
