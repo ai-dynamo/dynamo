@@ -287,13 +287,13 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:      false,
 		},
 		{
-			name:      "already ready",
+			name:      "ready placeholder still restores",
 			nodeName:  testNodeName,
 			phase:     corev1.PodRunning,
 			ready:     true,
 			hash:      "abc123",
 			createDir: true,
-			want:      false,
+			want:      true,
 		},
 		{
 			name:     "missing hash",

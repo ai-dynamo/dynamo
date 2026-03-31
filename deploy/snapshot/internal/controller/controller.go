@@ -248,10 +248,6 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	if isPodReady(pod) {
-		return
-	}
-
 	checkpointID, ok := pod.Labels[snapshotprotocol.CheckpointIDLabel]
 	if !ok || checkpointID == "" {
 		w.log.Info("Restore pod has no checkpoint-id label", "pod", podKey)
