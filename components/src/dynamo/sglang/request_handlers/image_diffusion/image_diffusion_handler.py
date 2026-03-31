@@ -85,7 +85,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         logger.info(f"Image diffusion request: {request}")
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = build_trace_headers(context)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 

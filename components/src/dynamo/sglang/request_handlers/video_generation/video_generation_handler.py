@@ -90,7 +90,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = build_trace_headers(context)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         if trace_header:
             logger.debug(f"Video generation request with trace: {trace_header}")
 
