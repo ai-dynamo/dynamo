@@ -14,10 +14,10 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G4FetchRequest, G4FetchResponse, G4HealthResponse, G4OfferRequest, G4OfferResponse, G4PutBlock,
-    G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageWorker, G4TransferBlock,
-    route_g4_put_blocks_by_owner, route_g4_sequence_hashes_by_owner,
-    route_g4_transfer_blocks_by_owner, select_g4_owner,
+    G3pbFetchRequest, G3pbFetchResponse, G3pbHealthResponse, G3pbOfferRequest, G3pbOfferResponse,
+    G3pbPeer, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
+    G3pbTransferBlock, route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner,
+    route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
 use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, PinnedStorage};
@@ -33,10 +33,7 @@ struct Args {
     num_device_blocks: usize,
     page_size: usize,
     dtype_width_bytes: usize,
-    leader_pub_url: String,
-    leader_ack_url: String,
     host_blocks: usize,
-    disk_blocks: usize,
     sequence_start: u64,
     count: usize,
 }
@@ -60,10 +57,7 @@ impl Default for Args {
             num_device_blocks: 8,
             page_size: 32,
             dtype_width_bytes: 2,
-            leader_pub_url: "tcp://127.0.0.1:56021".to_string(),
-            leader_ack_url: "tcp://127.0.0.1:56022".to_string(),
             host_blocks: 8,
-            disk_blocks: 8,
             sequence_start: 1000,
             count: 4,
         }
@@ -116,22 +110,10 @@ impl Args {
                         .context("missing value for --dtype-width-bytes")?
                         .parse()?
                 }
-                "--leader-pub-url" => {
-                    args.leader_pub_url = it.next().context("missing value for --leader-pub-url")?
-                }
-                "--leader-ack-url" => {
-                    args.leader_ack_url = it.next().context("missing value for --leader-ack-url")?
-                }
                 "--host-blocks" => {
                     args.host_blocks = it
                         .next()
                         .context("missing value for --host-blocks")?
-                        .parse()?
-                }
-                "--disk-blocks" => {
-                    args.disk_blocks = it
-                        .next()
-                        .context("missing value for --disk-blocks")?
                         .parse()?
                 }
                 "--sequence-start" => {
@@ -145,7 +127,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "kvbm_g4_worker_smoke
+                        "kvbm_g3pb_worker_smoke
   --backend-url <url>             remote backend base url; repeat to add owners
                                   (default http://127.0.0.1:58080)
   --worker-id <id>                local worker id (default 11)
@@ -153,10 +135,7 @@ impl Args {
   --num-device-blocks <n>         local worker device blocks (default 8)
   --page-size <n>                 KVBM page size (default 32)
   --dtype-width-bytes <n>         dtype width bytes (default 2)
-  --leader-pub-url <url>          local worker/leader pub url
-  --leader-ack-url <url>          local worker/leader ack url
   --host-blocks <n>               leader host blocks (default 8)
-  --disk-blocks <n>               leader disk blocks (default 8)
   --sequence-start <n>            first demo token seed (default 1000)
   --count <n>                     number of demo blocks (default 4)"
                     );
@@ -361,7 +340,7 @@ async fn main() -> Result<()> {
         let client = client.clone();
         let backend_url = backend_url.clone();
         async move {
-            let health: G4HealthResponse = client
+            let health: G3pbHealthResponse = client
                 .get(format!("{backend_url}/health"))
                 .send()
                 .await?
@@ -388,7 +367,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        remote_workers.push(G4StorageWorker {
+        remote_workers.push(G3pbPeer {
             worker_id: health.worker_id,
             endpoint: backend_url.clone(),
         });
@@ -398,26 +377,24 @@ async fn main() -> Result<()> {
         );
     }
 
-    let blocks: Vec<G4PutBlock> = uploaded_demo_blocks
+    let blocks: Vec<G3pbPutBlock> = uploaded_demo_blocks
         .iter()
-        .enumerate()
-        .map(|(offset, block)| G4PutBlock {
+        .map(|block| G3pbPutBlock {
             sequence_hash: block.sequence_hash,
-            disk_block_idx: offset,
             size_bytes: block.size_bytes,
             checksum: None,
         })
         .collect();
-    let transfer_blocks: Vec<G4TransferBlock> = uploaded_demo_blocks
+    let transfer_blocks: Vec<G3pbTransferBlock> = uploaded_demo_blocks
         .iter()
         .zip(blocks.iter())
-        .map(|(demo, meta)| G4TransferBlock {
+        .map(|(demo, meta)| G3pbTransferBlock {
             meta: meta.clone(),
             payload: demo.payload.clone(),
         })
         .collect();
 
-    let offered_by_owner = route_g4_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
+    let offered_by_owner = route_g3pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
     let offers = join_all(offered_by_owner.into_iter().map(|(worker_id, blocks)| {
         let client = client.clone();
         let backend_url = backend_urls_by_worker
@@ -426,9 +403,9 @@ async fn main() -> Result<()> {
             .with_context(|| format!("missing backend url for worker {worker_id}"));
         async move {
             let backend_url = backend_url?;
-            let offer: G4OfferResponse = client
+            let offer: G3pbOfferResponse = client
                 .post(format!("{backend_url}/offer"))
-                .json(&G4OfferRequest { blocks })
+                .json(&G3pbOfferRequest { blocks })
                 .send()
                 .await?
                 .error_for_status()?
@@ -446,10 +423,10 @@ async fn main() -> Result<()> {
         accepted_by_worker.insert(worker_id, accepted.into_iter().collect());
     }
 
-    let accepted_blocks: Vec<G4TransferBlock> = transfer_blocks
+    let accepted_blocks: Vec<G3pbTransferBlock> = transfer_blocks
         .iter()
         .filter(|block| {
-            select_g4_owner(block.meta.sequence_hash, &remote_workers)
+            select_g3pb_owner(block.meta.sequence_hash, &remote_workers)
                 .and_then(|owner| accepted_by_worker.get(&owner.worker_id))
                 .is_some_and(|accepted| accepted.contains(&block.meta.sequence_hash))
         })
@@ -457,7 +434,7 @@ async fn main() -> Result<()> {
         .collect();
 
     let payloads_by_owner =
-        route_g4_transfer_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
+        route_g3pb_transfer_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
     for result in join_all(payloads_by_owner.into_iter().map(|(worker_id, blocks)| {
         let client = client.clone();
         let backend_url = backend_urls_by_worker
@@ -468,7 +445,7 @@ async fn main() -> Result<()> {
             let backend_url = backend_url?;
             client
                 .post(format!("{backend_url}/put_payload"))
-                .json(&G4PutPayloadRequest { blocks })
+                .json(&G3pbPutPayloadRequest { blocks })
                 .send()
                 .await?
                 .error_for_status()?;
@@ -481,13 +458,13 @@ async fn main() -> Result<()> {
         println!("uploaded accepted payloads to worker {worker_id}");
     }
 
-    let duplicate_offer_blocks: Vec<G4PutBlock> = accepted_blocks
+    let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks
         .iter()
         .map(|block| block.meta.clone())
         .collect();
     if !duplicate_offer_blocks.is_empty() {
         let duplicate_offer_routes =
-            route_g4_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
+            route_g3pb_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
         for result in join_all(
             duplicate_offer_routes
                 .into_iter()
@@ -499,9 +476,9 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("missing backend url for worker {worker_id}"));
                     async move {
                         let backend_url = backend_url?;
-                        let offer: G4OfferResponse = client
+                        let offer: G3pbOfferResponse = client
                             .post(format!("{backend_url}/offer"))
-                            .json(&G4OfferRequest { blocks })
+                            .json(&G3pbOfferRequest { blocks })
                             .send()
                             .await?
                             .error_for_status()?
@@ -527,8 +504,8 @@ async fn main() -> Result<()> {
         .iter()
         .map(|block| block.sequence_hash)
         .collect();
-    let query_routes = route_g4_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
-    let mut hits = Vec::<G4QueryHit>::new();
+    let query_routes = route_g3pb_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
+    let mut hits = Vec::<G3pbQueryHit>::new();
     for result in join_all(
         query_routes
             .into_iter()
@@ -540,9 +517,9 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("missing backend url for worker {worker_id}"));
                 async move {
                     let backend_url = backend_url?;
-                    let hits: Vec<G4QueryHit> = client
+                    let hits: Vec<G3pbQueryHit> = client
                         .post(format!("{backend_url}/query"))
-                        .json(&G4QueryRequest { sequence_hashes })
+                        .json(&G3pbQueryRequest { sequence_hashes })
                         .send()
                         .await?
                         .error_for_status()?
@@ -557,7 +534,7 @@ async fn main() -> Result<()> {
         hits.extend(result?);
     }
 
-    let hit_by_sequence_hash: HashMap<u64, G4QueryHit> = hits
+    let hit_by_sequence_hash: HashMap<u64, G3pbQueryHit> = hits
         .iter()
         .cloned()
         .map(|hit| (hit.sequence_hash, hit))
@@ -579,7 +556,7 @@ async fn main() -> Result<()> {
         cache_miss_hashes
     );
 
-    let fetch_routes = route_g4_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
+    let fetch_routes = route_g3pb_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
     let mut fetched_blocks = Vec::new();
     for result in join_all(
         fetch_routes
@@ -592,9 +569,9 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("missing backend url for worker {worker_id}"));
                 async move {
                     let backend_url = backend_url?;
-                    let fetched: G4FetchResponse = client
+                    let fetched: G3pbFetchResponse = client
                         .post(format!("{backend_url}/fetch"))
-                        .json(&G4FetchRequest { sequence_hashes })
+                        .json(&G3pbFetchRequest { sequence_hashes })
                         .send()
                         .await?
                         .error_for_status()?
@@ -615,7 +592,7 @@ async fn main() -> Result<()> {
             .position(|sequence_hash| *sequence_hash == block.meta.sequence_hash)
             .unwrap_or(usize::MAX)
     });
-    let fetched = G4FetchResponse {
+    let fetched = G3pbFetchResponse {
         blocks: fetched_blocks,
     };
 
@@ -637,10 +614,10 @@ async fn main() -> Result<()> {
 
     let host_pool = block_manager
         .host()
-        .context("local block manager has no host pool for fetched G4 blocks")?;
+        .context("local block manager has no host pool for fetched G3pb blocks")?;
     let device_pool = block_manager
         .device()
-        .context("local block manager has no device pool for onboarded G4 blocks")?;
+        .context("local block manager has no device pool for onboarded G3pb blocks")?;
     let fetched_demo_blocks: Vec<_> = uploaded_demo_blocks
         .iter()
         .filter(|block| fetch_hashes.contains(&block.sequence_hash))
@@ -707,8 +684,8 @@ async fn main() -> Result<()> {
     println!("remote hits:");
     for hit in hits {
         println!(
-            "  worker_id={} sequence_hash={} disk_block_idx={} size_bytes={}",
-            hit.worker_id, hit.sequence_hash, hit.disk_block_idx, hit.size_bytes
+            "  worker_id={} sequence_hash={} size_bytes={}",
+            hit.worker_id, hit.sequence_hash, hit.size_bytes
         );
     }
     println!(

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod g4;
+mod g3pb;
 mod transfer;
 mod utils;
 mod zmq;
@@ -9,12 +9,12 @@ mod zmq;
 mod leader;
 mod worker;
 
-pub use g4::{
-    G4Error, G4FetchRequest, G4FetchResponse, G4FetchedBlock, G4HealthResponse, G4OfferRequest,
-    G4OfferResponse, G4PutBlock, G4PutPayloadRequest, G4QueryHit, G4QueryRequest, G4StorageAgent,
-    G4StorageClient, G4StorageWorker, G4TransferBlock, G4TransferExecutor,
-    route_g4_put_blocks_by_owner, route_g4_sequence_hashes_by_owner,
-    route_g4_transfer_blocks_by_owner, select_g4_owner,
+pub use g3pb::{
+    G3pbError, G3pbFetchRequest, G3pbFetchResponse, G3pbHealthResponse, G3pbOfferRequest,
+    G3pbOfferResponse, G3pbPeer, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit,
+    G3pbQueryRequest, G3pbStorageAgent, G3pbStorageClient, G3pbTransferBlock,
+    route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner,
+    route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
