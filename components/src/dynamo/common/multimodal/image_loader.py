@@ -18,6 +18,7 @@ import base64
 import binascii
 import logging
 import os
+from collections import OrderedDict
 from io import BytesIO
 from typing import Any, Dict, Final, List
 from urllib.parse import urlparse
@@ -62,8 +63,8 @@ class ImageLoader:
                 network transport. Defaults to False.
         """
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, Image.Image] = {}
-        self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._cache_size = cache_size
+        self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
         self._enable_frontend_decoding = enable_frontend_decoding
         # Lazy-init NIXL connector only when frontend decoding is enabled
@@ -77,11 +78,9 @@ class ImageLoader:
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
         if key not in self._image_cache:
-            if self._cache_queue.full():
-                oldest = self._cache_queue.get_nowait()
-                del self._image_cache[oldest]
+            if len(self._image_cache) >= self._cache_size:
+                self._image_cache.popitem(last=False)
             self._image_cache[key] = image
-            self._cache_queue.put_nowait(key)
 
     async def _fetch_and_process(self, image_url: str, parsed_url: Any) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.

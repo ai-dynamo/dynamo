@@ -1,6 +1,7 @@
 """Tests for ImageLoader in-flight dedup, cancellation, and error contract."""
 
 import asyncio
+from collections import OrderedDict
 from io import BytesIO
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -59,8 +60,8 @@ def loader() -> ImageLoader:
 @pytest.fixture(autouse=True)
 def _init_loader(loader: ImageLoader) -> None:
     loader._http_timeout = 30.0
-    loader._image_cache = {}
-    loader._cache_queue = asyncio.Queue(maxsize=4)
+    loader._cache_size = 4
+    loader._image_cache = OrderedDict()
     loader._inflight = {}
     loader._enable_frontend_decoding = False
     loader._nixl_connector = None
