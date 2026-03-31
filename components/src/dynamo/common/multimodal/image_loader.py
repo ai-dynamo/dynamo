@@ -30,9 +30,23 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http_client import get_http_client
+from .http_client import MAX_CONNECTIONS, get_http_client
 
 logger = logging.getLogger(__name__)
+
+# Process-global semaphore, lazily initialized on first use.
+# Caps concurrent HTTP fetches to the connection pool size.
+_fetch_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_fetch_semaphore() -> asyncio.Semaphore:
+    """Return a process-global semaphore to throttle concurrent HTTP fetches."""
+    global _fetch_semaphore
+    if _fetch_semaphore is None:
+        _fetch_semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
+        logger.info(f"Image fetch semaphore initialized: concurrency={MAX_CONNECTIONS}")
+    return _fetch_semaphore
+
 
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
@@ -107,7 +121,8 @@ class ImageLoader:
                 with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                     http_client = get_http_client(self._http_timeout)
 
-                    response = await http_client.get(image_url)
+                    async with _get_fetch_semaphore():
+                        response = await http_client.get(image_url)
                     response.raise_for_status()
 
                     if not response.content:
