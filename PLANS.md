@@ -1,9 +1,8 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 19:12:49 UTC
+Last updated: 2026-03-31 19:13:49 UTC
 
 Current in-progress run (2026-03-31 19:07:10 UTC):
-- NEXT STEP: NEED TO make this a change on GIT! We need to add the commit to branch of mf/kvbm-g4-v2 (or similar name!)
 - Mandatory context re-read completed in this run:
   - `Agents.md`
   - `PLANS.md`
@@ -16,6 +15,15 @@ Current in-progress run (2026-03-31 19:07:10 UTC):
 - Current branch baseline observed in this run:
   - detached `HEAD` at `786f3bcd1` (`Deduplicate smoke G4 API types`)
   - worktree was clean before starting this run
+- Milestones completed in this run:
+  - `759958a29` `Add multi-backend G4 smoke routing`
+    - added shared owner-routing helpers for sequence hashes, put metadata, and
+      payload-bearing transfer blocks in `distributed::g4`
+    - refactored `G4StorageClient` to reuse those shared routing helpers so the
+      in-process client and smoke path follow the same owner-grouping rules
+    - replaced the single fixed smoke backend target with repeated
+      `--backend-url` discovery and per-owner HTTP `offer`, `put_payload`,
+      `query`, and `fetch` fanout in `kvbm_g4_worker_smoke`
 - Current implementation slice for this run:
   - replace the single fixed smoke backend target with a discovered backend set
     so the smoke worker can talk to more than one storage agent
@@ -31,21 +39,6 @@ Current in-progress run (2026-03-31 19:07:10 UTC):
     and the current smoke worker still assumes one fixed backend URL
   - the smallest honest next step is to reuse shared owner routing while
     keeping transport simple enough to validate quickly
-- In-progress edits:
-  - `PLANS.md`
-    - recorded this run's multi-backend smoke-routing scope before code edits
-  - `lib/llm/src/block_manager/distributed/g4.rs`
-    - added shared owner-routing helpers for sequence hashes, put metadata, and
-      payload-bearing transfer blocks
-    - refactored `G4StorageClient` to reuse those helpers so the in-process
-      client and the smoke path follow the same owner-grouping rules
-  - `lib/llm/src/block_manager/distributed.rs`
-    - re-exported the new shared G4 owner-routing helpers for binary consumers
-  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-    - replaced the single fixed backend target with repeated `--backend-url`
-      discovery and per-owner HTTP routing driven by the shared G4 helpers
-    - now fans out `offer`, `put_payload`, `query`, and `fetch` across the
-      discovered owner set while preserving caller-visible verification order
 - Validation completed in this run:
   - environment check:
     `cargo --version`
@@ -62,17 +55,23 @@ Current in-progress run (2026-03-31 19:07:10 UTC):
   - `git diff --check`
     -> pass
 - Remaining work after this run:
-  - commit this validated multi-backend smoke-routing milestone with
-    `--signoff`
-  - re-read `PLANS.md` after that commit and decide whether the next smallest
-    slice should stay in smoke-land
+  - after re-reading `PLANS.md`, the next smallest follow-up still looks like a
+    smoke-level behavior slice rather than runtime discovery:
     (`query -> fetch -> onboard` realism, fallback behavior, explicit duplicate
-    cases) or move toward actual runtime discovery ownership
+    cases)
+  - runtime discovery / RPC ownership wiring remains a larger follow-up and is
+    still not the smallest honest next step from the current branch
 - Exact next file or command to touch:
-  - command:
-    `git add PLANS.md lib/llm/src/block_manager/distributed/g4.rs lib/llm/src/block_manager/distributed.rs lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
+  - file:
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - then:
-    `git commit --signoff -m "Add multi-backend G4 smoke routing"`
+    `lib/llm/src/block_manager/distributed/g4.rs`
+  - next commands:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
 
 Current in-progress run (2026-03-31 19:02:45 UTC):
 
