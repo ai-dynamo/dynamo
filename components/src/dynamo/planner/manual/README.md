@@ -70,8 +70,3 @@ The manifests in this directory assume the current image split:
 - `dynamo-frontend` for the frontend service
 - `dynamo-planner` for the planner service
 - `vllm-runtime` for the backend workers
-
-## Not Restored
-
-The old `tests/planner/unit/controller.py` helper was not brought back here because it
-depended on `LocalConnector`, which is no longer part of the planner package.
