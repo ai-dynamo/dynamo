@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:36:45 UTC
+Last updated: 2026-03-31 02:41:55 UTC
 
 Current run outcome:
 
@@ -65,20 +65,43 @@ Current run outcome:
   - `--locked` is not currently usable with the repo-local `Cargo.lock` state;
     cargo immediately errors that the lock would need an update, so validation
     in this run stayed unlocked and the unrelated lockfile churn was reverted
-- Remaining work in this run:
-  - post-commit follow-up found and fixed one correctness bug in
-    `G4StorageClient::fetch_blocks(...)`: grouped fetches now preserve exact
-    caller target block indices even when ownership is interleaved across
-    workers
-  - added regression coverage for the non-contiguous target-index case
-  - reran targeted validation:
-    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+- Commits made in this run:
+  - `f8c87bf08` `Add first-pass G4 storage agent routing`
+  - `5a357300d` `Fix G4 fetch target index routing`
+- Final outcome of this run:
+  - first-pass single-owner G4 routing/storage-agent support now exists under
+    `lib/llm/src/block_manager/distributed/g4.rs`
+  - `BlockTransferHandler` now supports `Disk -> Host`, which is the missing
+    pinned-host staging leg for the G4 fetch path
+  - `KvbmWorker::into_g4_storage_agent(...)` now exposes an initialized worker
+    transfer handler as a G4 agent wrapper
+  - client fetch routing now preserves exact caller target indices even when
+    requested blocks map to different owners
+- End-of-run validation status:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
     -> pass (`6 passed`)
-  - pending: make a second small signed commit for the target-index fix, then
-    convert this top section into a precise handoff and stop unless a new
-    concrete scope item appears
-- Exact next file to touch:
-  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `cargo test --manifest-path lib/llm/Cargo.toml block_manager::distributed:: --lib`
+    -> pass (`5 passed`)
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+- Remaining work after this run:
+  - wire the new `G4StorageAgent` / `G4StorageClient` seam into a real
+    worker-to-worker or worker-to-agent request path; today the first-pass G4
+    layer is local/in-process and unit-tested, not yet attached to discovery or
+    network RPC
+  - connect `put_blocks(...)` registration to the actual disk-backed offload
+    lifecycle so G4 metadata is populated automatically when blocks land on the
+    owning worker’s disk tier
+  - add checksum/content-validation mismatch handling if the transfer path
+    starts carrying stronger validation metadata than the current optional field
+  - once the runtime seam is wired, add a broader distributed integration test
+    that exercises `query -> fetch -> onboard` across distinct owners instead of
+    only unit coverage
+- Exact next command or file to touch:
+  - file: `lib/llm/src/block_manager/distributed/g4.rs`
+  - then: `lib/llm/src/block_manager/distributed/worker.rs`
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
 
 - Switched to branch `mf/kvbm-g4`.
 - HUMAN VETO: SHOULD BE BASED ON MAIN, not on mf/kvbm-trtllm. 
