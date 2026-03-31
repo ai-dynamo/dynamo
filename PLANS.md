@@ -4,9 +4,9 @@
 New steering direction update at bottom of plan. Step: G4 rename to G3PB. Aslo need to push to git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2 branch once commited.
 Condense the plan once finished with this stage.
 
-Last updated: 2026-03-31 20:46:55 UTC
+Last updated: 2026-03-31 20:47:33 UTC
 
-Current in-progress run (2026-03-31 20:46:55 UTC):
+Current in-progress run (2026-03-31 20:47:33 UTC):
 - Mandatory context re-read completed in this run:
   - `Agents.md`
   - `PLANS.md`
@@ -24,7 +24,9 @@ Current in-progress run (2026-03-31 20:46:55 UTC):
   - commits made in this run so far:
     - `9c2754d33` `Decouple G4 peer cache from disk offload`
     - `14fd0973c` `Rename G4 peer cache flow to G3PB`
-  - worktree is clean after commit `14fd0973c`
+    - `dc91e06b3` `Refresh G3PB plan handoff`
+  - branch update completed:
+    - pushed `dc91e06b3` to `origin/mf/kvbm-g4-v2`
 - Implementation milestones completed in this run:
   - core decoupling
     - removed `G4BlockIndex` / disk-observer wiring from:
@@ -91,10 +93,13 @@ Current in-progress run (2026-03-31 20:46:55 UTC):
   - backend control-plane validation is now host-viable in this environment
 - Exact next file or command to touch:
   - file:
-    `PLANS.md`
+    `lib/llm/src/block_manager/distributed/g3pb.rs`
   - next commands:
-    push the current detached `HEAD` to the requested branch name:
-    `git push -u origin HEAD:refs/heads/mf/kvbm-g4-v2`
+    start the next follow-up slice from a clean tree:
+    `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - then:
+    prototype the `foyer`-backed `G3pbPeerStorage` implementation behind the
+    current in-memory trait seam
 - Remaining work after this run:
   - swap the in-memory `G3pbPeerStorage` backend for a `foyer`-backed hybrid
     cache behind the same trait
