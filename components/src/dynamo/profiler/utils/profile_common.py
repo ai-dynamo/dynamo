@@ -57,9 +57,11 @@ def _replace_image_name(image_ref: str, new_name: str) -> str:
     slash_idx = image_ref.rfind("/")
     prefix = image_ref[: slash_idx + 1] if slash_idx >= 0 else ""
     suffix = image_ref[slash_idx + 1 :]
-    colon_idx = suffix.find(":")
-    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
-    return f"{prefix}{new_name}{tag}"
+    name_and_tag, has_digest, digest = suffix.partition("@")
+    colon_idx = name_and_tag.rfind(":")
+    tag = name_and_tag[colon_idx:] if colon_idx >= 0 else ""
+    digest_suffix = f"@{digest}" if has_digest else ""
+    return f"{prefix}{new_name}{tag}{digest_suffix}"
 
 
 def derive_planner_image(profiler_image: str) -> str:

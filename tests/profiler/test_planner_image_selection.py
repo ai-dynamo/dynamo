@@ -21,7 +21,10 @@ try:
         SLASpec,
         WorkloadSpec,
     )
-    from dynamo.profiler.utils.profile_common import derive_planner_image
+    from dynamo.profiler.utils.profile_common import (
+        derive_backend_image,
+        derive_planner_image,
+    )
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
@@ -56,12 +59,53 @@ def _base_dgd_config(image: str) -> dict:
     }
 
 
-def test_derive_planner_image_preserves_registry_and_tag():
-    image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3"
+@pytest.mark.parametrize(
+    ("image", "expected"),
+    [
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+        ),
+    ],
+)
+def test_derive_planner_image_preserves_registry_tag_and_digest(
+    image: str, expected: str
+):
+    assert derive_planner_image(image) == expected
 
-    assert (
-        derive_planner_image(image) == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
-    )
+
+@pytest.mark.parametrize(
+    ("image", "backend", "expected"),
+    [
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3",
+            "vllm",
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
+            "sglang",
+            "nvcr.io/nvidia/ai-dynamo/sglang-runtime@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "trtllm",
+            "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3@sha256:deadbeef",
+        ),
+    ],
+)
+def test_derive_backend_image_preserves_registry_tag_and_digest(
+    image: str, backend: str, expected: str
+):
+    assert derive_backend_image(image, backend) == expected
 
 
 def test_add_planner_to_config_uses_dynamo_planner_image():
