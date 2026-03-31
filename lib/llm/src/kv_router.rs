@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    config::{KvRouterConfig, RouterConfigOverride},
+    config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -126,7 +126,7 @@ where
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        mut workers_with_configs: RuntimeConfigWatch,
+        workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
@@ -138,17 +138,19 @@ where
         kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
+        let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
 
-        if !kv_router_config.skip_initial_worker_wait {
-            let _ = workers_with_configs
-                .wait_for(|m| m.len() >= kv_router_config.min_initial_workers)
+        if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
+            let mut startup_watch = workers_with_configs.clone();
+            let _ = startup_watch
+                .wait_for(|m| m.len() >= min_initial_workers)
                 .await
                 .map_err(|_| {
                     anyhow::anyhow!(
                         "runtime config watch closed before {} workers appeared",
-                        kv_router_config.min_initial_workers
+                        min_initial_workers
                     )
                 })?;
         }

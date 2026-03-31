@@ -108,7 +108,7 @@ impl EngineScheduler {
     pub(crate) fn new_with_admission(
         args: crate::common::protocols::MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,

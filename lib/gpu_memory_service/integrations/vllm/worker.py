@@ -106,21 +106,31 @@ class GMSWorker(Worker):
         if not is_shadow_mode():
             return super().determine_available_memory()
 
-        # TODO: Need a more robust way for shadow engines to profile memory while they are sharing GPUs with other engines.
-        # For now this gets the job done.
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
         torch.cuda.synchronize()
-        non_kv_cache_memory = torch.cuda.max_memory_allocated()
+        torch_peak = torch.cuda.max_memory_allocated()
+
+        # If weights are strictly loaded (RO), torch's memory accounting will miss them since we didn't go through the mempool
+        # We therefore add in the memory of the weights into our accounting here
+        # This is not an issue on engines that write the weights and then downgrade to RO
+        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
+        if torch_peak < weights_memory:
+            non_kv_cache_memory = torch_peak + weights_memory
+        else:
+            non_kv_cache_memory = torch_peak
 
         projected_available = self.requested_memory - non_kv_cache_memory
 
         logger.info(
             "[GMS] Shadow mode: projected available memory "
-            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB)",
+            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
+            "torch_peak=%.2f GiB, weights=%.2f GiB)",
             projected_available / (1 << 30),
             self.requested_memory / (1 << 30),
             non_kv_cache_memory / (1 << 30),
+            torch_peak / (1 << 30),
+            weights_memory / (1 << 30),
         )
 
         return int(projected_available)
