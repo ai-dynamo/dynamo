@@ -256,6 +256,7 @@ def _build_load_config(**overrides) -> PlannerConfig:
         profile_results_dir=os.path.join(
             os.path.dirname(__file__),
             "..",
+            "data",
             "profiling_results",
             "H200_TP1P_TP1D",
         ),

@@ -16,9 +16,8 @@ from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.unit,
+    pytest.mark.integration,
     pytest.mark.planner,
-    pytest.mark.sglang,
 ]
 logger = logging.getLogger(__name__)
 

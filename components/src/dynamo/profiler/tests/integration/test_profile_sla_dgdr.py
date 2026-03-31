@@ -12,7 +12,6 @@ All tests are no-GPU (gpu_0) and pre_merge.
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,8 +19,12 @@ import numpy as np
 import pytest
 import yaml
 
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.integration,
+    pytest.mark.planner,
+]
 
 try:
     from dynamo.profiler.profile_sla import run_profile
@@ -56,7 +59,7 @@ def _make_ops(tmp_path, **overrides) -> ProfilerOperationalConfig:
     return ProfilerOperationalConfig(**defaults)
 
 
-CONFIGS_DIR = Path(__file__).parent / "configs"
+CONFIGS_DIR = Path(__file__).parent.parent / "data" / "configs"
 
 
 class TestRapidSupported:

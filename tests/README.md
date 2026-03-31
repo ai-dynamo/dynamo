@@ -59,9 +59,6 @@ dynamo/
 │   ├── deploy/                     # Deployment tests
 │   ├── frontend/                   # Frontend HTTP/gRPC tests
 │   ├── router/                     # Router E2E tests
-│   ├── planner/                    # Planner tests (unit + E2E)
-│   ├── profiler/                   # Profiler tests
-│   ├── global_planner/             # Global planner unit tests
 │   ├── mm_router/                  # Multimodal router tests
 │   ├── lmcache/                    # LM cache tests
 │   ├── basic/                      # Basic backend tests
@@ -93,9 +90,10 @@ dynamo/
 | End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
 | KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
 | Router            | Router E2E with backends                 | `tests/router/`                              |
-| Planner           | Planner unit + scaling tests             | `tests/planner/`                             |
+| Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
 | Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
-| Profiler          | Profiler tests                           | `tests/profiler/`                            |
+| Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |
+| Global Planner    | Global planner unit tests                | `components/src/dynamo/global_planner/tests/`|
 | Fault Tolerance   | Chaos, migration, cancellation           | `tests/fault_tolerance/`                     |
 | Deployment        | Deployment validation                    | `tests/deploy/`                              |
 | Benchmark         | Performance/load                         | `benchmarks/`                                |

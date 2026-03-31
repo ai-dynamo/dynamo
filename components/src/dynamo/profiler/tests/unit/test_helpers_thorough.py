@@ -8,15 +8,17 @@ require live K8s deployments and are covered by the mocked end-to-end tests
 in test_profile_sla_dgdr.py.
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 try:
     from dynamo.profiler.thorough import _pick_thorough_best_config

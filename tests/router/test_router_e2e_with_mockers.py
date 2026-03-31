@@ -61,7 +61,8 @@ BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 PLANNER_PROFILE_DATA_DIR = (
-    Path(__file__).resolve().parents[1] / "planner/profiling_results/H200_TP1P_TP1D"
+    Path(__file__).resolve().parents[2]
+    / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
 
 

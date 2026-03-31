@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from pathlib import Path
-
 import pytest
 
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root / "components" / "src"))
-
-pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 try:
     from dynamo.profiler.utils.config import update_image

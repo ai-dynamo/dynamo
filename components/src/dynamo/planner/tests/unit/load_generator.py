@@ -353,7 +353,7 @@ async def main():
     parser.add_argument(
         "--save-results",
         action="store_true",
-        help="Save results to tests/planner/e2e_scaling_results instead of /tmp",
+        help="Save results to components/src/dynamo/planner/tests/data instead of /tmp",
     )
 
     args = parser.parse_args()

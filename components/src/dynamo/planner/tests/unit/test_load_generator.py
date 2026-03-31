@@ -14,7 +14,7 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from utils.load_generator import LoadGenerator
+from load_generator import LoadGenerator
 
 pytestmark = [
     pytest.mark.gpu_0,

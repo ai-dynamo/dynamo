@@ -22,6 +22,13 @@ from kubernetes import client
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 
 @pytest.fixture
 def mock_config():
@@ -322,28 +329,26 @@ async def test_wait_for_graph_deployment_ready_on_second_attempt(
         )
 
 
-@pytest.mark.asyncio
-async def test_get_graph_deployment(k8s_api, mock_custom_api):
+def test_get_graph_deployment(k8s_api, mock_custom_api):
     """Test get_graph_deployment"""
     mock_deployment = {"metadata": {"name": "parent-dgd"}}
 
     with patch.object(
         k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
     ) as mock_get:
-        result = await k8s_api.get_graph_deployment("parent-dgd")
+        result = k8s_api.get_graph_deployment("parent-dgd")
 
         assert result == mock_deployment
         mock_get.assert_called_once_with("parent-dgd")
 
 
-@pytest.mark.asyncio
-async def test_get_graph_deployment_not_found(k8s_api, mock_custom_api):
+def test_get_graph_deployment_not_found(k8s_api, mock_custom_api):
     """Test get_graph_deployment when deployment is not found"""
     k8s_api.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
         status=404
     )
     with pytest.raises(DynamoGraphDeploymentNotFoundError) as exc_info:
-        await k8s_api.get_graph_deployment("parent-dgd")
+        k8s_api.get_graph_deployment("parent-dgd")
 
     exception = exc_info.value
     assert exception.deployment_name == "parent-dgd"

@@ -23,7 +23,12 @@ from dynamo.planner.core.state import PlannerSharedState
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 
 class PlannerHarness:
@@ -160,7 +165,10 @@ def planner():
         load_predictor="constant",
         profile_results_dir=os.path.join(
             os.path.dirname(__file__),
-            "profiling_results/H200_TP1P_TP1D",
+            "..",
+            "data",
+            "profiling_results",
+            "H200_TP1P_TP1D",
         ),
         environment="kubernetes",
         namespace="test-namespace",

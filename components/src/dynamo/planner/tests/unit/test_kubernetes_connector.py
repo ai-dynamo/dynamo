@@ -34,6 +34,13 @@ from dynamo.planner.monitoring.dgd_services import (
     get_service_from_sub_component_type_or_name,
 )
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 
 @pytest.fixture
 def mock_kube_api():
@@ -64,8 +71,9 @@ def kubernetes_connector(mock_kube_api_class, monkeypatch):
 
 
 def test_kubernetes_connector_no_env_var():
-    with pytest.raises(DeploymentValidationError) as exc_info:
-        KubernetesConnector("test-dynamo-namespace")
+    with patch("dynamo.planner.kubernetes_connector.KubernetesAPI"):
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            KubernetesConnector("test-dynamo-namespace")
 
     exception = exc_info.value
     assert set(exception.errors) == {

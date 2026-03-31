@@ -9,15 +9,17 @@ the end-to-end test suite.
 """
 
 import copy
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 try:
     from dynamo.profiler.rapid import _run_default_sim, _run_naive_fallback

@@ -9,15 +9,18 @@ where needed.
 """
 
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 try:
     from dynamo.planner.config.planner_config import (

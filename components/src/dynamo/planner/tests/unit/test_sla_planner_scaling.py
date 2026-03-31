@@ -22,7 +22,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
-    pytest.mark.vllm,
 ]
 
 
@@ -53,6 +52,7 @@ def _build_config():
         profile_results_dir=os.path.join(
             os.path.dirname(__file__),
             "..",
+            "data",
             "profiling_results",
             "H200_TP1P_TP1D",
         ),
@@ -406,6 +406,7 @@ class TestDryrunGpuDefaults:
             profile_results_dir=os.path.join(
                 os.path.dirname(__file__),
                 "..",
+                "data",
                 "profiling_results",
                 "H200_TP1P_TP1D",
             ),
