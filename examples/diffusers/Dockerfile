@@ -54,7 +54,6 @@ RUN echo "Building FastVideo for TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" \
  && git clone --recurse-submodules https://github.com/hao-ai-lab/FastVideo.git /tmp/FastVideo \
  && uv pip install --no-build-isolation /tmp/FastVideo
 
- # TODO: We should make these configurable as args in backend once we have new FastVideo release (currently they are not consumed in FastVideo upstream)
 ENV FASTVIDEO_VIDEO_CODEC=libx264
 ENV FASTVIDEO_X264_PRESET=ultrafast
 
