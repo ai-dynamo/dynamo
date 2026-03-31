@@ -551,8 +551,9 @@ impl ModelWatcher {
                 } else {
                     let tk = tokenizer.clone().ok_or_else(|| {
                         anyhow::anyhow!(
-                            "Model has no Rust tokenizer and no chat_engine_factory. \
-                             Use --dyn-chat-processor vllm/sglang or provide a tokenizer.json."
+                            "Model has no supported Rust tokenizer and no chat_engine_factory. \
+                             Use --dyn-chat-processor vllm/sglang or provide a supported \
+                             tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
                         )
                     })?;
                     entrypoint::build_routed_pipeline::<
