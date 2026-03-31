@@ -105,6 +105,7 @@ pub async fn completion_response_stream(
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, "grpc_completions");
+            return Status::resource_exhausted(e.to_string());
         }
         Status::internal(format!("Failed to generate completions: {}", e))
     })?;

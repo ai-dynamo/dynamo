@@ -104,6 +104,7 @@ pub async fn tensor_response_stream(
     let stream = engine.generate(request).await.map_err(|e| {
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
             state.metrics_clone().inc_rejection(&model_name, "tensor");
+            return Status::resource_exhausted(e.to_string());
         }
         Status::internal(format!("Failed to generate tensor response stream: {}", e))
     })?;
