@@ -269,11 +269,10 @@ impl VeloClientTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_velo_hub_query_response() {
-        let mut hub = VeloHubTransport::bind_local(0)
+        let _hub = VeloHubTransport::bind_local(0)
             .await
             .expect("bind failed");
 
