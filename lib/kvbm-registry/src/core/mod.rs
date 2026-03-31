@@ -3,6 +3,7 @@
 
 //! Core traits and types for the pluggable registry architecture.
 
+pub mod codec;
 pub mod error;
 pub mod events;
 pub mod eviction;
@@ -13,6 +14,11 @@ pub mod metrics;
 pub mod storage;
 pub mod transport;
 pub mod value;
+
+// Codec
+pub use codec::{
+    BinaryCodec, OffloadStatus, PROTOCOL_VERSION, QueryType, RegistryCodec, ResponseType,
+};
 
 // Error types
 pub use error::{RegistryError, RegistryResult};
