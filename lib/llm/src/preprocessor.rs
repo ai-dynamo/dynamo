@@ -621,6 +621,12 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
+        let prompt = if prompt.contains('\0') {
+            tracing::warn!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
+            std::borrow::Cow::Owned(prompt.replace('\0', ""))
+        } else {
+            std::borrow::Cow::Borrowed(prompt)
+        };
         let encoding = self.tokenizer.encode(prompt)?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
