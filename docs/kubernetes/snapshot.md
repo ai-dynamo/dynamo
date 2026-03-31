@@ -60,13 +60,13 @@ defaults are used.
 ```bash
 make docker-build-agent \
   IMG=registry.example.com/dynamo/snapshot-agent:1.0.0 \
-  CRIU_REPO=https://github.com/<owner>/criu.git \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
   CRIU_REF=<branch-or-sha>
 
 make docker-build-placeholder \
   PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
   PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}" \
-  CRIU_REPO=https://github.com/<owner>/criu.git \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
   CRIU_REF=<branch-or-sha>
 ```
 

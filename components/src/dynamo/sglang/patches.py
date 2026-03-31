@@ -53,16 +53,18 @@ def apply_snapshot_patches() -> None:
 
     _configure_snapshot_dist_init()
 
-    from sglang.srt.distributed.device_communicators import pynccl as pynccl_module
     from sglang.srt.distributed import parallel_state as parallel_state_module
+    from sglang.srt.distributed.device_communicators import pynccl as pynccl_module
     from sglang.srt.entrypoints import engine as engine_module
 
     original_init = pynccl_module.PyNcclCommunicator.__init__
     original_init_group = parallel_state_module.init_model_parallel_group
     current_scheduler_entrypoint = engine_module.Engine.run_scheduler_process_func
-    if getattr(original_init, "_dynamo_snapshot_patch", False) and getattr(
-        original_init_group, "_dynamo_snapshot_patch", False
-    ) and getattr(current_scheduler_entrypoint, "_dynamo_snapshot_patch", False):
+    if (
+        getattr(original_init, "_dynamo_snapshot_patch", False)
+        and getattr(original_init_group, "_dynamo_snapshot_patch", False)
+        and getattr(current_scheduler_entrypoint, "_dynamo_snapshot_patch", False)
+    ):
         _snapshot_patches_applied = True
         return
 

@@ -12,16 +12,16 @@ from pathlib import Path
 
 import pytest
 import sglang.srt.distributed as distributed_module
-import yaml
 import sglang.srt.distributed.device_communicators as device_communicators
+import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+from dynamo.sglang import patches as sglang_patches
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang import patches as sglang_patches
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -69,7 +69,9 @@ def test_snapshot_patches_force_file_dist_init_and_pynccl(monkeypatch):
     class FakeEngine:
         run_scheduler_process_func = staticmethod(fake_run_scheduler_process)
 
-    fake_pynccl_module = types.SimpleNamespace(PyNcclCommunicator=FakePyNcclCommunicator)
+    fake_pynccl_module = types.SimpleNamespace(
+        PyNcclCommunicator=FakePyNcclCommunicator
+    )
     fake_parallel_state_module = types.SimpleNamespace(
         init_model_parallel_group=fake_init_model_parallel_group
     )
@@ -79,8 +81,12 @@ def test_snapshot_patches_force_file_dist_init_and_pynccl(monkeypatch):
     stale_store_path.write_text("stale", encoding="utf-8")
 
     monkeypatch.setenv("POD_UID", "test-pod")
-    monkeypatch.setenv("SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE", "tcp://127.0.0.1:1234")
-    monkeypatch.setattr(device_communicators, "pynccl", fake_pynccl_module, raising=False)
+    monkeypatch.setenv(
+        "SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE", "tcp://127.0.0.1:1234"
+    )
+    monkeypatch.setattr(
+        device_communicators, "pynccl", fake_pynccl_module, raising=False
+    )
     monkeypatch.setattr(
         distributed_module,
         "parallel_state",
@@ -97,7 +103,9 @@ def test_snapshot_patches_force_file_dist_init_and_pynccl(monkeypatch):
         "sglang.srt.distributed.parallel_state",
         fake_parallel_state_module,
     )
-    monkeypatch.setitem(sys.modules, "sglang.srt.entrypoints.engine", fake_engine_module)
+    monkeypatch.setitem(
+        sys.modules, "sglang.srt.entrypoints.engine", fake_engine_module
+    )
 
     patches = importlib.reload(sglang_patches)
     patches.apply_snapshot_patches()
