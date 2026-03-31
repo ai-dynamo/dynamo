@@ -19,9 +19,9 @@ ARG GO_VERSION=1.25
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=https://github.com/galletas1712/criu.git
-#   --build-arg CRIU_COMMIT=<fork-branch-or-sha>
+#   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
-ARG CRIU_COMMIT=criu-dev
+ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -80,7 +80,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
-ARG CRIU_COMMIT
+ARG CRIU_REF
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -106,7 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_COMMIT} \
+    && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
