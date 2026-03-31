@@ -291,13 +291,6 @@ To run at higher concurrency, change `--concurrency` and scale `--request-count`
 
 Update the `--artifact-dir` to reflect the concurrency level (e.g., `concurrency_50`).
 
-### Baseline Results (C=10, ISL=1000, OSL=250, SGLang 0.9.1 FP8)
-
-| Mode | GPUs | TTFT (ms) | ITL (ms) | TPS/user | TPS total | TPS/GPU |
-|---|---|---|---|---|---|---|
-| Aggregated | 8 | 306 | 12.0 | 67.9 | 765 | 96 |
-| Disagg 1P1D | 16 | 452 | 10.8 | -- | 788 | 49 |
-
 ---
 
 ## Key NCCL / RoCE Environment Variables
