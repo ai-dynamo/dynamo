@@ -1,11 +1,8 @@
-
 # KVBM TensorRT-LLM Integration Execution Plan
 
-IMPORTANT: Must rebase on the mf/kvbm .. v2 branch. Currenttly . unabel to commit or push.
+Last updated: 2026-03-31 19:02:45 UTC
 
-Last updated: 2026-03-31 19:01:31 UTC
-
-Current in-progress run (2026-03-31 19:01:31 UTC):
+Current in-progress run (2026-03-31 19:02:45 UTC):
 
 - Mandatory context re-read completed in this run:
   - `Agents.md`
@@ -17,8 +14,8 @@ Current in-progress run (2026-03-31 19:01:31 UTC):
   - `lib/llm/src/bin/kvbm_g4_backend.rs`
   - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
 - Current branch baseline observed in this run:
-  - detached `HEAD` at `435adb3f3` (`Add shared G4 payload helpers`)
-  - worktree started clean after that commit
+  - detached `HEAD` at `786f3bcd1` (`Deduplicate smoke G4 API types`)
+  - worktree is clean after the two validated commits from this run
 - Current implementation slice for this run:
   - finish the smoke API deduplication now that payload request/response types
     are shared by also lifting the remaining `health` and `query` HTTP shapes
@@ -34,17 +31,24 @@ Current in-progress run (2026-03-31 19:01:31 UTC):
   - repo-pinned Rust toolchain `1.93.1-x86_64-unknown-linux-gnu` remains
     installed and usable
   - `rustfmt` is installed for that pinned toolchain
-- In-progress edits:
-  - `lib/llm/src/block_manager/distributed/g4.rs`
-    - added shared `G4HealthResponse` and `G4QueryRequest`
-  - `lib/llm/src/block_manager/distributed.rs`
-    - re-exported `G4HealthResponse` and `G4QueryRequest`
-  - `lib/llm/src/bin/kvbm_g4_backend.rs`
-    - removed local `HealthResponse` / `QueryRequest`
-    - switched `/health` and `/query` routes to the shared G4 types
-  - `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
-    - removed local `HealthResponse` / `QueryRequest`
-    - switched the smoke client to the shared G4 types
+- Milestones completed in this run:
+  - `435adb3f3` `Add shared G4 payload helpers`
+    - added shared payload request/response types plus payload-size validation
+      and payload-side `offer(...)` / `offer_and_put(...)` helpers on the G4
+      agent/client layer
+    - rewired the smoke backend and worker smoke client to use those shared
+      payload shapes
+  - `786f3bcd1` `Deduplicate smoke G4 API types`
+    - lifted the remaining `health` and `query` smoke HTTP structs into the
+      shared G4 module
+    - removed the last duplicate G4 HTTP shapes from the smoke backend and
+      worker smoke client
+  - environment/bootstrap work in this run:
+    - installed Rust via `rustup` for the repo-pinned toolchain
+    - installed `rustfmt` for `1.93.1-x86_64-unknown-linux-gnu`
+  - plan maintenance in this run:
+    - replaced the stale “missing toolchain” handoff with real validated state
+      and the detached-HEAD commit sequence now present on this machine
 - Validation completed in this run:
   - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
     -> pass
@@ -55,19 +59,26 @@ Current in-progress run (2026-03-31 19:01:31 UTC):
   - `git diff --check`
     -> pass
 - Remaining work after this run:
-  - make a signed commit for the validated smoke API deduplication slice
-  - re-read `PLANS.md` again and decide whether there is another small,
-    concrete G4 slice worth landing now; the next non-trivial option is likely
-    a more realistic multi-owner smoke/runtime path rather than further type
-    cleanup
+  - the remaining work is no longer type cleanup; the next meaningful slice is
+    behavioral and should make the smoke/runtime path less single-owner and less
+    ad hoc
+  - the best next slice is to prototype a more realistic multi-owner smoke path
+    where one smoke worker can talk to more than one backend/agent and route
+    ownership through shared G4 logic instead of assuming a single fixed HTTP
+    backend target
 - Exact next file or command to touch:
-  - command:
-    `git commit --signoff -am "Deduplicate smoke G4 API types"`
+  - file:
+    `lib/llm/src/bin/kvbm_g4_worker_smoke.rs`
   - then:
-    `git log --oneline --max-count=6`
+    `lib/llm/src/bin/kvbm_g4_backend.rs`
   - then:
-    re-read `PLANS.md` and either choose the next smallest G4 slice or record a
-    precise handoff if the next step is too large for the remaining run
+    `lib/llm/src/block_manager/distributed/g4.rs`
+  - next commands:
+    `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - then:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+  - then:
+    `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g4_backend --bin kvbm_g4_worker_smoke`
 
 Current in-progress run (2026-03-31 18:33:59 UTC):
 
