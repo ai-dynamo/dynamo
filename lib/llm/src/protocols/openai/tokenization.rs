@@ -86,6 +86,7 @@ impl TokenizeChatRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum TokenizeRequest {
     Completion(TokenizeCompletionRequest),
     Chat(TokenizeChatRequest),
