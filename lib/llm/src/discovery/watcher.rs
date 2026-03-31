@@ -583,26 +583,25 @@ impl ModelWatcher {
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor::new_with_parts")?;
-                    let completions_engine =
-                        entrypoint::build_routed_pipeline_with_preprocessor::<
-                            NvCreateCompletionRequest,
-                            NvCreateCompletionResponse,
-                        >(
-                            card,
-                            &client,
-                            self.manager.clone(),
-                            self.router_config.router_mode,
-                            worker_monitor,
-                            kv_chooser,
-                            preprocessor,
-                            tk,
-                            prefill_chooser,
-                            self.router_config.enforce_disagg,
-                            self.migration_limit,
-                            self.metrics.clone(),
-                        )
-                        .await
-                        .context("build_routed_pipeline_with_preprocessor")?;
+                    let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
+                        NvCreateCompletionRequest,
+                        NvCreateCompletionResponse,
+                    >(
+                        card,
+                        &client,
+                        self.manager.clone(),
+                        self.router_config.router_mode,
+                        worker_monitor,
+                        kv_chooser,
+                        preprocessor,
+                        tk,
+                        prefill_chooser,
+                        self.router_config.enforce_disagg,
+                        self.migration_limit,
+                        self.metrics.clone(),
+                    )
+                    .await
+                    .context("build_routed_pipeline_with_preprocessor")?;
                     worker_set.completions_engine = Some(completions_engine);
                     tracing::info!("Completions is ready");
                 } else {

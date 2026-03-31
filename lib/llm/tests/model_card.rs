@@ -66,10 +66,7 @@ async fn test_model_loads_without_tokenizer_json() {
         mdc.tokenizer.is_none(),
         "Expected tokenizer to be None for model without tokenizer.json"
     );
-    assert!(
-        !mdc.has_tokenizer(),
-        "has_tokenizer() should be false"
-    );
+    assert!(!mdc.has_tokenizer(), "has_tokenizer() should be false");
     // Model info should still be loaded
     assert!(mdc.model_info.is_some());
 }
