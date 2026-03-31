@@ -28,6 +28,8 @@ use kvbm_physical::transfer::PhysicalLayout;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+pub mod nixl;
+
 // ============================================================================
 // Key Formatting
 // ============================================================================
@@ -320,6 +322,9 @@ pub trait ObjectLockManager: Send + Sync {
 /// # Arguments
 /// * `config` - Object storage configuration
 /// * `rank` - Optional worker rank for key prefixing (None for leader)
+/// * `nixl_agent` - NIXL agent (required when `config.client` is `Nixl`; the
+///   OBJ backend must already be registered on the agent via
+///   [`nixl::add_obj_backend`]).
 ///
 /// # Errors
 /// Returns an error if the object client cannot be initialized or if the
@@ -328,6 +333,7 @@ pub trait ObjectLockManager: Send + Sync {
 pub async fn create_object_client(
     config: &kvbm_config::ObjectConfig,
     rank: Option<usize>,
+    nixl_agent: Option<dynamo_memory::nixl::NixlAgent>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
     use kvbm_config::ObjectClientConfig;
     use s3::{S3Config, S3ObjectBlockClient};
@@ -340,8 +346,16 @@ pub async fn create_object_client(
             let client = S3ObjectBlockClient::with_key_formatter(config, key_formatter).await?;
             Ok(Arc::new(client))
         }
-        ObjectClientConfig::Nixl(_nixl_config) => {
-            anyhow::bail!("Nixl object storage backend not yet implemented")
+        ObjectClientConfig::Nixl(nixl_config) => {
+            let agent = nixl_agent.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Nixl object storage requires a NixlAgent with the OBJ backend initialised. \
+                     Pass the agent from KvbmRuntime::nixl_agent()."
+                )
+            })?;
+            let client =
+                nixl::NixlObjectBlockClient::from_config(agent, nixl_config, rank).await?;
+            Ok(Arc::new(client))
         }
     }
 }
@@ -351,6 +365,7 @@ pub async fn create_object_client(
 pub async fn create_object_client(
     _config: &kvbm_config::ObjectConfig,
     _rank: Option<usize>,
+    _nixl_agent: Option<dynamo_memory::nixl::NixlAgent>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
     anyhow::bail!("Object storage requires the 's3' feature to be enabled")
 }
@@ -382,8 +397,19 @@ pub async fn create_lock_manager(
             let manager = S3LockManager::new(client, instance_id);
             Ok(Arc::new(manager))
         }
-        ObjectClientConfig::Nixl(_nixl_config) => {
-            anyhow::bail!("Nixl object storage backend not yet implemented")
+        ObjectClientConfig::Nixl(nixl_config) => {
+            // Distributed locking relies on conditional PUT semantics (If-None-Match).
+            // NIXL's OBJ backend does not expose conditional writes, so we fall back
+            // to an SDK-backed lock manager derived from the embedded S3 config.
+            use kvbm_config::NixlObjectConfig;
+            match nixl_config {
+                NixlObjectConfig::S3(nixl_s3) => {
+                    let s3_config = nixl::nixl_s3_to_sdk_config(nixl_s3);
+                    let client = Arc::new(s3::S3ObjectBlockClient::new(s3_config).await?);
+                    let manager = s3::S3LockManager::new(client, instance_id);
+                    Ok(Arc::new(manager))
+                }
+            }
         }
     }
 }

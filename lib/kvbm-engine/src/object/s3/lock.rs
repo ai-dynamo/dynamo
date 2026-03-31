@@ -274,7 +274,7 @@ mod s3_integration {
     #[tokio::test]
     async fn test_lock_expired_takeover_is_atomic() {
         let client = Arc::new(create_test_client("test-lock-atomic").await);
-        let hash = SequenceHash::from(0xDEAD_BEEF_u64);
+        let hash = dynamo_tokens::PositionalLineageHash::new(0xDEAD_BEEF_u64, None, 0);
 
         // Create a lock manager with an already-expired timeout (1ms)
         let manager_a = S3LockManager::new(client.clone(), "instance-a".into())
