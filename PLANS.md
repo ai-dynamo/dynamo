@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:28:50 UTC
+Last updated: 2026-03-31 02:36:45 UTC
 
 Current run outcome:
 
@@ -66,13 +66,19 @@ Current run outcome:
     cargo immediately errors that the lock would need an update, so validation
     in this run stayed unlocked and the unrelated lockfile churn was reverted
 - Remaining work in this run:
-  - inspect whether any immediate cleanup is required around docs or API
-    comments before the checkpoint commit
-  - make a signed checkpoint commit for the first-pass G4 slice
-  - re-read this file after the commit and decide whether a second slice is
-    still feasible in the current run
+  - post-commit follow-up found and fixed one correctness bug in
+    `G4StorageClient::fetch_blocks(...)`: grouped fetches now preserve exact
+    caller target block indices even when ownership is interleaved across
+    workers
+  - added regression coverage for the non-contiguous target-index case
+  - reran targeted validation:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`6 passed`)
+  - pending: make a second small signed commit for the target-index fix, then
+    convert this top section into a precise handoff and stop unless a new
+    concrete scope item appears
 - Exact next file to touch:
-  - `PLANS.md`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
 
 - Switched to branch `mf/kvbm-g4`.
 - HUMAN VETO: SHOULD BE BASED ON MAIN, not on mf/kvbm-trtllm. 

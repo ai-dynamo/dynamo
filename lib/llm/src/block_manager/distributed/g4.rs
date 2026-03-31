@@ -142,28 +142,26 @@ impl G4StorageAgent {
             .collect()
     }
 
-    pub async fn fetch_blocks(
+    async fn fetch_entries(
         &self,
-        sequence_hashes: &[SequenceHash],
         target_pool: BlockTransferPool,
-        target_block_start_idx: usize,
+        entries: &[(SequenceHash, usize)],
         timeout: Duration,
     ) -> Result<Vec<G4FetchedBlock>, G4Error> {
         let request_blocks = {
             let guard = self.blocks.read().await;
             let mut missing = Vec::new();
-            let mut request_blocks = Vec::with_capacity(sequence_hashes.len());
-            let mut fetched_blocks = Vec::with_capacity(sequence_hashes.len());
+            let mut request_blocks = Vec::with_capacity(entries.len());
+            let mut fetched_blocks = Vec::with_capacity(entries.len());
 
-            for (offset, sequence_hash) in sequence_hashes.iter().enumerate() {
+            for (sequence_hash, target_block_idx) in entries {
                 match guard.get(sequence_hash) {
                     Some(block) => {
-                        let target_block_idx = target_block_start_idx + offset;
-                        request_blocks.push((block.disk_block_idx, target_block_idx));
+                        request_blocks.push((block.disk_block_idx, *target_block_idx));
                         fetched_blocks.push(G4FetchedBlock {
                             worker_id: self.worker_id,
                             sequence_hash: *sequence_hash,
-                            target_block_idx,
+                            target_block_idx: *target_block_idx,
                             size_bytes: block.size_bytes,
                             checksum: block.checksum,
                         });
@@ -197,6 +195,21 @@ impl G4StorageAgent {
                 timeout,
             }),
         }
+    }
+
+    pub async fn fetch_blocks(
+        &self,
+        sequence_hashes: &[SequenceHash],
+        target_pool: BlockTransferPool,
+        target_block_start_idx: usize,
+        timeout: Duration,
+    ) -> Result<Vec<G4FetchedBlock>, G4Error> {
+        let entries: Vec<_> = sequence_hashes
+            .iter()
+            .enumerate()
+            .map(|(offset, sequence_hash)| (*sequence_hash, target_block_start_idx + offset))
+            .collect();
+        self.fetch_entries(target_pool, &entries, timeout).await
     }
 }
 
@@ -292,16 +305,13 @@ impl G4StorageClient {
                 continue;
             };
 
-            let ordered_hashes: Vec<_> = entries.iter().map(|(_, hash)| *hash).collect();
-            let target_start = target_block_start_idx + entries[0].0;
+            let routed_entries: Vec<_> = entries
+                .iter()
+                .map(|(offset, hash)| (*hash, target_block_start_idx + *offset))
+                .collect();
 
             match agent
-                .fetch_blocks(
-                    &ordered_hashes,
-                    target_pool,
-                    target_start,
-                    self.request_timeout,
-                )
+                .fetch_entries(target_pool, &routed_entries, self.request_timeout)
                 .await
             {
                 Ok(mut blocks) => fetched.append(&mut blocks),
@@ -535,5 +545,56 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[&1234].worker_id, owner.worker_id);
         assert_eq!(hits[&1234].disk_block_idx, 55);
+    }
+
+    #[tokio::test]
+    async fn client_fetch_preserves_non_contiguous_target_indices() {
+        let worker_list = workers();
+        let sequence_hashes = vec![1_u64, 2_u64, 3_u64];
+
+        let mut agents = HashMap::new();
+        let mut request_log = Vec::new();
+
+        for sequence_hash in &sequence_hashes {
+            let owner = select_g4_owner(*sequence_hash, &worker_list).unwrap();
+            let transfer = Arc::new(MockTransferExecutor::default());
+            let agent = agents
+                .entry(owner.worker_id)
+                .or_insert_with(|| Arc::new(G4StorageAgent::new(owner.worker_id, transfer.clone())))
+                .clone();
+
+            agent
+                .put_blocks(vec![G4PutBlock {
+                    sequence_hash: *sequence_hash,
+                    disk_block_idx: (*sequence_hash as usize) * 10,
+                    size_bytes: 1024,
+                    checksum: None,
+                }])
+                .await;
+
+            request_log.push((owner.worker_id, transfer));
+        }
+
+        let client = G4StorageClient::new(worker_list, agents, Duration::from_millis(50));
+        let fetched = client
+            .fetch_blocks(&sequence_hashes, BlockTransferPool::Host, 100)
+            .await;
+
+        assert_eq!(fetched.len(), 3);
+        assert_eq!(fetched[0].target_block_idx, 100);
+        assert_eq!(fetched[1].target_block_idx, 101);
+        assert_eq!(fetched[2].target_block_idx, 102);
+
+        for (worker_id, transfer) in request_log {
+            let requests = transfer.requests.lock().await;
+            for request in requests.iter() {
+                for (_, target_idx) in &request.blocks {
+                    assert!(
+                        (100..=102).contains(target_idx),
+                        "worker {worker_id} produced unexpected target idx {target_idx}"
+                    );
+                }
+            }
+        }
     }
 }
