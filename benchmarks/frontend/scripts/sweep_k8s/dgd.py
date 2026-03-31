@@ -292,6 +292,20 @@ def dgd_restart_graph(
     restart_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{random.randint(0, 9999)}"
     print(f"  Restarting full DGD deployment (id={restart_id})...")
 
+    # Discover service names from the DGD spec so the restart order is correct
+    # for any backend (mocker, vllm, trtllm, etc.)
+    try:
+        dgd_spec = get_json("dgd", dgd_name, namespace, timeout=60)
+        services = list(dgd_spec.get("spec", {}).get("services", {}).keys())
+        # Put workers before frontend: restart workers first, then frontend
+        frontend_names = [s for s in services if s.lower() == "frontend"]
+        worker_names = [s for s in services if s.lower() != "frontend"]
+        restart_order = worker_names + frontend_names
+    except Exception:
+        restart_order = ["Frontend"]
+
+    print(f"  Restart order: {restart_order}")
+
     patch_merge(
         "dgd",
         dgd_name,
@@ -302,7 +316,7 @@ def dgd_restart_graph(
                     "id": restart_id,
                     "strategy": {
                         "type": "Sequential",
-                        "order": ["MockerWorker", "Frontend"],
+                        "order": restart_order,
                     },
                 }
             }
