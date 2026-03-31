@@ -278,6 +278,38 @@ The simple text-generation capture is a useful example because it shows both pre
 
 comes back with the Responses-shaped structure intact: a reasoning item, a message item, the original `max_output_tokens`, and the usual top-level fields. At the same time, it shows the current edge of the implementation. `output_tokens_details.reasoning_tokens` is still `0` even though reasoning content is clearly present in the response. That is exactly the kind of detail a Codex-style client notices.
 
+## OpenClaw: Long-Lived Sessions and Background Loops
+
+Claude Code stress-tests the system prompt and single-session tool loop. OpenClaw stress-tests what happens when sessions stay alive across channels, turns accumulate over hours, and the client is a background loop rather than an interactive terminal.
+
+OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. A user might ask a question over Telegram, follow up on WhatsApp an hour later, and the same conversation history grows across both. The system prompt is shorter than Claude Code's 54K-token payload, but it never changes. That makes prefix caching straightforward in theory and exposes a different failure mode in practice: whether the backend can sustain cache reuse over many turns without the prefix drifting.
+
+We ran three experiments against the same Dynamo + TRT-LLM deployment used for the Claude Code measurements: Nemotron-3-Super-120B-A12B-NVFP4 on B200, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, and the `nemotron_deci` reasoning parser.
+
+### Cache Stability Across Turns
+
+The first experiment measured TTFT across 8-turn multi-turn conversations under three conditions: a stable system prompt, a varying prompt (random preamble injected each turn), and a billing-header-style prefix that Dynamo strips before tokenization. Three rounds of each condition, all hitting the same endpoint.
+
+On TRT-LLM with B200, all three conditions converged to the same TTFT band. Stable-prefix turns averaged `118ms`, varying-prefix turns averaged `112ms`, and stripped-prefix turns averaged `116ms`. The differences are within noise. After the first turn or two of each session (which ran slightly higher at `120-136ms` as the cache warmed), subsequent turns settled into a `101-116ms` band regardless of condition.
+
+The story here is simpler than the Claude Code result but still useful. OpenClaw's shorter, static system prompt does not benefit as dramatically from preamble stripping because there is less prefix to invalidate. The billing header that costs `744ms` on a 52K-token Claude Code prompt has a proportionally smaller impact on a 2K-token OpenClaw prompt. But the invariant holds: stable prefixes stay in the fast path, and Dynamo's stripping keeps the stripped condition indistinguishable from stable.
+
+### Reasoning Fidelity in Multi-Turn Chat
+
+The second experiment tested whether Dynamo correctly preserves reasoning blocks (`thinking` content) across OpenClaw's multi-turn pattern. Three scenarios, each with two turns: the first turn triggers step-by-step reasoning, and the second turn asks a follow-up that references the prior reasoning.
+
+Reasoning fidelity was perfect: `30/30` turns produced reasoning blocks when expected, and block ordering was correct `30/30` times (thinking before content). On reasoning-heavy turns, the mean TTFT was `104ms`, with reasoning blocks averaging `1,100` characters of chain-of-thought.
+
+This result matters for OpenClaw specifically because its long-lived sessions accumulate many reasoning-containing turns. If even one prior turn's reasoning were dropped or reordered in the replay path, the prefix would diverge and cache reuse would break silently. The Nemotron-3-Super model with the `nemotron_deci` parser maintained correct `<think>` block separation across all tested multi-turn sequences.
+
+One expected limitation: the model did not produce structured tool calls in the Anthropic `tool_use` format, even when tools were provided and the prompt explicitly requested calculator use. This is a model behavior characteristic of Nemotron-3-Super in NVFP4 mode rather than a Dynamo issue. The model reasons about the computation inline rather than emitting a `<TOOLCALL>` block. For the dispatch experiment, this meant we could not measure tool-call dispatch timing. The reasoning and content fidelity results stand on their own.
+
+### What OpenClaw Adds to the Story
+
+The Claude Code experiments established that prefix stability, replay fidelity, and stream semantics matter for agentic serving. The OpenClaw experiments show the same invariants holding under a different access pattern: shorter prompts, longer sessions, multi-channel delivery, and background operation without an interactive user watching each response.
+
+The practical takeaway is that the harness-facing fixes in Dynamo (preamble stripping, reasoning segment preservation, correct block ordering) are not Claude-Code-specific. They compose correctly with a different client that makes different assumptions about session lifetime and prompt structure.
+
 ## Closing the Loop
 
 The architecture from the first post only pays off if the harness-facing layer preserves enough structure for the router and the cache to exploit it. That is the connective tissue between these two posts.
