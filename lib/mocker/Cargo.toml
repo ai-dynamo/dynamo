@@ -36,6 +36,7 @@ ndarray = "0.16"
 slotmap = "1"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+rustc-hash = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"
