@@ -199,7 +199,6 @@ jobs:
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
       copy_to_acr: false
-      show_summary: false
     secrets: inherit
 
   # ============================================================================
