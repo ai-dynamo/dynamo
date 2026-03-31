@@ -39,34 +39,12 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
 - Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
-- Installs released Dynamo dependencies and then overlays the local Dynamo source tree so the image runs the built-in `dynamo.fastvideo` backend from this repo
-- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
-
-The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
+- Builds and installs the local `ai-dynamo-runtime` bindings plus the local Dynamo source tree so the image runs the built-in `dynamo.fastvideo` backend from this repo
 
 ```bash
-# Blackwell (default)
-docker build -f examples/diffusers/Dockerfile . --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
-
-# Hopper
-docker build -f examples/diffusers/Dockerfile . --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
+docker build -f examples/diffusers/Dockerfile .
 ```
 
-`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
-
-```bash
-docker build -f examples/diffusers/Dockerfile . --build-arg MAX_JOBS=2
-```
-
-When using Docker Compose, set these as environment variables before running `docker compose up --build`:
-
-```bash
-# Hopper on a memory-constrained builder
-TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
-```
-
-> [!WARNING]
-> The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
 ## Warmup Time
 
@@ -299,8 +277,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
-| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
+| OOM during Docker build | Building local runtime bindings or CUDA-dependent packages uses too much RAM | Rebuild on a machine with more RAM |
 | 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
 | Lower throughput than expected on B200/B300 | `torch.compile`, FP4, and flash-attention are configured separately | Try `--torch-compile --fp4-quantization` and, if desired, `--attention-backend FLASH_ATTN` |
