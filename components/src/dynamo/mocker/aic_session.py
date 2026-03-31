@@ -82,8 +82,8 @@ class AicSession:
         total_latency = 0.0
         for op in self._model.context_ops:
             # AIC operations identify kernels via Operation._name; there is no public name accessor.
-            op_name = getattr(op, "_name", None)
-            x = batch_size * effective_isl if op_name != "logits_gemm" else batch_size
+            op_name = getattr(op, "_name", "")
+            x = batch_size if "logits_gemm" in op_name else batch_size * effective_isl
             result = op.query(
                 self._database,
                 x=x,
