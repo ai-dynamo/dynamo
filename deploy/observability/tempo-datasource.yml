@@ -20,7 +20,7 @@ datasources:
         filterByTraceID: false
         filterBySpanID: false
         customQuery: true
-        query: '{service_name=~".+"} | trace_id = "$${__span.traceId}"'
+        query: '{service_name=~".+"} | json | trace_id = "$${__span.traceId}"'
       search:
         hide: false
       nodeGraph:

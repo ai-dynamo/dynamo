@@ -32,5 +32,5 @@ compactor:
   compaction:
     compaction_window: 1h
     max_compaction_objects: 1000000
-    block_retention: 1h
+    block_retention: 72h
     compacted_block_retention: 10m
