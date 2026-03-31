@@ -21,6 +21,19 @@ from typing import Any, Optional
 
 def _hash_features_to_u64(features: Any) -> int:
     """Return a stable u64 hash of arbitrary feature data."""
+    # vLLM MultiModalFeatureSpec: prefer identifier (per-item cache key) and
+    # tensor data; avoid str(feature) which is not a stable unique key for VLMs.
+    if features is not None and hasattr(features, "identifier"):
+        ident = getattr(features, "identifier", None)
+        data = getattr(features, "data", None)
+        if ident is not None or data is not None:
+            h = hashlib.sha256()
+            if ident is not None:
+                h.update(str(ident).encode())
+            if data is not None:
+                _update_hash(h, data)
+            return struct.unpack("<Q", h.digest()[:8])[0]
+
     h = hashlib.sha256()
     _update_hash(h, features)
     return struct.unpack("<Q", h.digest()[:8])[0]
@@ -67,11 +80,15 @@ def compute_mm_block_hashes(
     Parameters
     ----------
     mm_positions:
-        ``request.mm_positions`` – a sequence of objects with ``.offset`` and
-        ``.length`` attributes (vLLM ``PlaceholderRange``).
+        Optional list of ``PlaceholderRange`` (``offset`` / ``length``). Older vLLM
+        exposes this on ``request.mm_positions``; vLLM 0.18+ embeds the same
+        range on each ``MultiModalFeatureSpec`` as ``mm_position`` — this
+        function derives positions from ``mm_features`` when the top-level list
+        is missing.
     mm_features:
         ``request.mm_features`` – a sequence of feature objects (one per
-        multimodal item) whose content uniquely identifies the image.
+        multimodal item). Prefer ``MultiModalFeatureSpec.identifier`` (and
+        ``data`` when present) for hashing.
     num_tokens:
         Total number of tokens in the request (``len(request.all_token_ids)``).
     block_size:
@@ -79,6 +96,12 @@ def compute_mm_block_hashes(
     """
     num_blocks = math.ceil(num_tokens / block_size) if num_tokens > 0 else 0
     result: list[Optional[int]] = [None] * num_blocks
+
+    # vLLM 0.18+: Request no longer has top-level mm_positions; each
+    # MultiModalFeatureSpec carries PlaceholderRange as mm_position.
+    if not mm_positions and mm_features:
+        derived = [getattr(f, "mm_position", None) for f in mm_features]
+        mm_positions = [p for p in derived if p is not None]
 
     if not mm_positions:
         return result
