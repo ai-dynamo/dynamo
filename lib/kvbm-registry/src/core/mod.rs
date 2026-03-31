@@ -3,6 +3,7 @@
 
 //! Core traits and types for the pluggable registry architecture.
 
+pub mod builder;
 pub mod codec;
 pub mod error;
 pub mod events;
@@ -13,9 +14,13 @@ pub mod key;
 pub mod lease;
 pub mod metadata;
 pub mod metrics;
+pub mod registry;
 pub mod storage;
 pub mod transport;
 pub mod value;
+
+#[cfg(test)]
+mod tests;
 
 // Codec
 pub use codec::{
@@ -38,12 +43,16 @@ pub use key::{CompositeKey, Key128, PositionalKey, RegistryKey};
 pub use metadata::{NoMetadata, PositionMetadata, RegistryMetadata, TimestampMetadata};
 pub use value::{RegistryValue, StorageBackend, StorageLocation};
 
-// Transport
+// Client
+pub use registry::{OffloadResult, Registry, RegistryClient};
 pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
 
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
 pub use hub_transport::{ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport};
+
+// Builder
+pub use builder::{ClientBuilder, HubBuilder, client, hub};
 
 // Event Bus
 pub use events::{
