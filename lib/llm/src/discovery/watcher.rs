@@ -478,7 +478,11 @@ impl ModelWatcher {
             // once and only when a local pipeline actually needs it.  Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
             // they rely on a Python chat_engine_factory for tokenization.
-            let tokenizer = card.tokenizer().ok();
+            let tokenizer = if card.has_tokenizer() {
+                Some(card.tokenizer().context("tokenizer")?)
+            } else {
+                None
+            };
 
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
