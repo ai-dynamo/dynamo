@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use dynamo_kv_router::config::KvRouterConfig;
 use tokio::sync::{Notify, Semaphore, mpsc};
@@ -13,9 +12,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::WorkloadDriver;
 use crate::replay::router::ReplayRouter;
-use crate::replay::{ReplayRouterMode, TraceSimulationReport, normalize_trace_requests};
+use crate::replay::{ReplayRouterMode, TraceSimulationReport};
 use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
 
 use super::demux::run_demux;
@@ -25,11 +24,11 @@ use super::state::{
 };
 use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
 
-struct LiveRuntime {
-    pending: VecDeque<DirectRequest>,
+pub(super) struct LiveRuntime {
+    pending: std::collections::VecDeque<DirectRequest>,
     senders: Arc<[mpsc::UnboundedSender<DirectRequest>]>,
     schedulers: Vec<EngineScheduler>,
-    output_rx: mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     admission_rx: mpsc::UnboundedReceiver<AdmissionEvent>,
     cancel_token: CancellationToken,
     start: Instant,
@@ -38,16 +37,17 @@ struct LiveRuntime {
 }
 
 impl LiveRuntime {
-    fn new(
+    /// Build the shared router, worker schedulers, and demux inputs for one live replay run.
+    pub(super) fn new(
         args: MockEngineArgs,
         router_config: Option<KvRouterConfig>,
-        pending: VecDeque<DirectRequest>,
+        pending: std::collections::VecDeque<DirectRequest>,
         num_workers: usize,
         mode: LiveReplayMode,
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         let cancel_token = CancellationToken::new();
-        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
         let router = Arc::new(ReplayRouter::new(
             router_mode,
@@ -70,10 +70,6 @@ impl LiveRuntime {
             senders.push(scheduler.request_sender());
             schedulers.push(scheduler);
         }
-
-        drop(output_tx);
-        drop(admission_tx);
-
         Ok(Self {
             pending,
             senders: Arc::from(senders),
@@ -87,7 +83,8 @@ impl LiveRuntime {
         })
     }
 
-    async fn run(mut self) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    /// Replay a finite queue of requests and return the final trace report plus debug stats.
+    pub(super) async fn run(mut self) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
         let requests = Arc::new(DashMap::with_capacity(self.pending.len()));
         let stats = Arc::new(SharedLiveRuntimeStats::default());
         let (arrival_tx, arrival_rx) = mpsc::unbounded_channel();
@@ -160,7 +157,8 @@ impl LiveRuntime {
         Ok((report, stats.snapshot()))
     }
 
-    async fn run_workload(
+    /// Drive a multi-turn workload driver until it is drained and all spawned request tasks finish.
+    pub(super) async fn run_workload(
         mut self,
         driver: WorkloadDriver,
         total_turns: usize,
@@ -282,238 +280,4 @@ impl LiveRuntime {
         router.shutdown().await?;
         Ok((report, stats.snapshot()))
     }
-}
-
-fn run_live_runtime(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    pending: VecDeque<DirectRequest>,
-    num_workers: usize,
-    mode: LiveReplayMode,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow!("failed to create online replay runtime: {e}"))?;
-
-    runtime.block_on(async move {
-        LiveRuntime::new(args, router_config, pending, num_workers, mode, router_mode)?
-            .run()
-            .await
-    })
-}
-
-fn run_live_workload_runtime(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    driver: WorkloadDriver,
-    total_turns: usize,
-    num_workers: usize,
-    mode: LiveReplayMode,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow!("failed to create online replay runtime: {e}"))?;
-
-    runtime.block_on(async move {
-        LiveRuntime::new(
-            args,
-            router_config,
-            VecDeque::new(),
-            num_workers,
-            mode,
-            router_mode,
-        )?
-        .run_workload(driver, total_turns)
-        .await
-    })
-}
-
-pub(crate) fn simulate_trace_requests(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    requests: Vec<DirectRequest>,
-    num_workers: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let (report, _) = run_live_runtime(
-        args,
-        router_config,
-        pending,
-        num_workers,
-        LiveReplayMode::Trace,
-        router_mode,
-    )?;
-    Ok(report)
-}
-
-pub(crate) fn simulate_concurrency_requests(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    if requests.is_empty() {
-        bail!("online concurrency replay requires at least one request");
-    }
-
-    let pending = VecDeque::from(requests);
-    let (report, _) = run_live_runtime(
-        args,
-        router_config,
-        pending,
-        num_workers,
-        LiveReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?;
-    Ok(report)
-}
-
-pub(crate) fn simulate_trace_workload(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    trace: Trace,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let total_turns = trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum();
-    let (report, _) = run_live_workload_runtime(
-        args,
-        router_config,
-        trace.into_trace_driver()?,
-        total_turns,
-        num_workers,
-        LiveReplayMode::Trace,
-        router_mode,
-    )?;
-    Ok(report)
-}
-
-pub(crate) fn simulate_concurrency_workload(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    trace: Trace,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let total_turns = trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum();
-    let (report, _) = run_live_workload_runtime(
-        args,
-        router_config,
-        trace.into_concurrency_driver()?,
-        total_turns,
-        num_workers,
-        LiveReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?;
-    Ok(report)
-}
-
-#[cfg(test)]
-pub(super) fn simulate_trace_requests_with_stats(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    num_workers: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let args = args.normalized()?;
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    run_live_runtime(
-        args,
-        None,
-        pending,
-        num_workers,
-        LiveReplayMode::Trace,
-        router_mode,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn simulate_concurrency_requests_with_stats(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let args = args.normalized()?;
-    let pending = VecDeque::from(requests);
-    run_live_runtime(
-        args,
-        None,
-        pending,
-        num_workers,
-        LiveReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn simulate_trace_workload_with_stats(
-    args: MockEngineArgs,
-    trace: Trace,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let args = args.normalized()?;
-    let total_turns = trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum();
-    run_live_workload_runtime(
-        args,
-        None,
-        trace.into_trace_driver()?,
-        total_turns,
-        num_workers,
-        LiveReplayMode::Trace,
-        router_mode,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn simulate_concurrency_workload_with_stats(
-    args: MockEngineArgs,
-    trace: Trace,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
-    let args = args.normalized()?;
-    let total_turns = trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum();
-    run_live_workload_runtime(
-        args,
-        None,
-        trace.into_concurrency_driver()?,
-        total_turns,
-        num_workers,
-        LiveReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )
 }
