@@ -46,6 +46,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -495,6 +496,80 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to sleep engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale the elastic expert-parallelism data-parallel size live.
+
+        Args:
+            body: Dict with required 'new_data_parallel_size' key (int).
+                Example::
+
+                    {"new_data_parallel_size": 4}
+
+        The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
+        already reserved by the pod, then hot-swap the expert routing table.
+        No pod restart is needed.
+        """
+        body = body or {}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+
+        logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
+        try:
+            # TODO(upstream-vllm): remove this patch once vLLM fixes
+            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+            # instead of ray.util.state.list_nodes().
+            #
+            # Patch ray.util.state.list_nodes to use the GCS API instead of the
+            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+            # installs ray core only (not ray[default]), so the dashboard HTTP server
+            # starts in --minimal mode with the HTTP server disabled. vLLM's
+            # add_dp_placement_groups calls list_nodes() which requires that HTTP
+            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+            # API server".
+            #
+            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+            # needed) and returns the same information. Imported lazily so ray is not
+            # required at module load time (absent in non-elastic-EP deployments).
+            #
+            # Format mapping:
+            #   list_nodes() → objects with .node_ip and .node_id
+            #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            _ray_util_state.list_nodes = lambda **kw: [
+                _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+            ]
+
+            await self.engine_client.scale_elastic_ep(new_dp_size)
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
@@ -536,7 +611,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -568,13 +643,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -582,7 +659,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -596,7 +673,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):

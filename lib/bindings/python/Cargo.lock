@@ -1723,12 +1723,12 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
- "dynamo-runtime",
  "dynamo-tokens",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.2",
+ "rustc-hash 2.1.1",
  "serde",
  "serde_json",
  "slotmap",
@@ -1764,6 +1764,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "dashmap 6.1.0",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
@@ -1775,6 +1776,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
+ "rmp",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1783,6 +1785,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::selector::WorkerSelector;
+use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -53,6 +53,7 @@ pub struct SchedulerQueue<
     P: SequencePublisher,
     C: WorkerConfigLike,
     S: SchedulingPolicy = FcfsPolicy,
+    Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
     /// Number of requests currently parked in the pending queue.
@@ -65,19 +66,23 @@ pub struct SchedulerQueue<
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
-    selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+    selector: Sel,
     policy: S,
 }
 
-impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
-    SchedulerQueue<P, C, S>
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+> SchedulerQueue<P, C, S, Sel>
 {
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
         block_size: u32,
-        selector: Box<dyn WorkerSelector<C> + Send + Sync>,
+        selector: Sel,
         policy: S,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -186,11 +191,14 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
-            request.token_seq.as_deref(),
-            request.isl_tokens,
-            request.overlaps.clone(),
-        );
+        let (decode_blocks, prefill_tokens) = self
+            .slots
+            .potential_blocks_and_tokens_with_prefill_tracking(
+                request.token_seq.as_deref(),
+                request.isl_tokens,
+                request.overlaps.clone(),
+                request.track_prefill_tokens,
+            );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -223,19 +231,16 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
             return;
         };
 
-        if let Err(e) = self
-            .slots
-            .add_request(SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
-                expected_output_tokens: request.expected_output_tokens,
-                worker: selection.worker,
-                lora_name: request.lora_name.clone(),
-            })
-            .await
-        {
+        if let Err(e) = self.slots.add_request(SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: request.token_seq,
+            isl: request.isl_tokens,
+            overlap: selection.overlap_blocks,
+            track_prefill_tokens: request.track_prefill_tokens,
+            expected_output_tokens: request.expected_output_tokens,
+            worker: selection.worker,
+            lora_name: request.lora_name.clone(),
+        }) {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
     }
@@ -341,7 +346,7 @@ mod tests {
         }
         let (cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
+        let selector = DefaultWorkerSelector::new(None, "test");
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
@@ -371,6 +376,7 @@ mod tests {
             overlaps: OverlapScores::default(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -403,8 +409,8 @@ mod tests {
                 let resp = resp.expect("scheduling failed");
                 assert!(resp.best_worker.worker_id < num_workers as u64);
 
-                slots.mark_prefill_completed(&req_id).await.unwrap();
-                slots.free(&req_id).await.unwrap();
+                slots.mark_prefill_completed(&req_id).unwrap();
+                slots.free(&req_id).unwrap();
                 queue.update().await;
             }));
         }
@@ -447,8 +453,8 @@ mod tests {
         for _ in 0..num_requests {
             queue.update().await;
             for rid in &req_ids {
-                let _ = slots.mark_prefill_completed(rid).await;
-                let _ = slots.free(rid).await;
+                let _ = slots.mark_prefill_completed(rid);
+                let _ = slots.free(rid);
             }
         }
         queue.update().await;
@@ -489,11 +495,8 @@ mod tests {
         assert_eq!(queue.pending_count(), 2);
 
         // Free the first request and update — should drain one from pending
-        slots
-            .mark_prefill_completed(&"req-1".to_string())
-            .await
-            .unwrap();
-        slots.free(&"req-1".to_string()).await.unwrap();
+        slots.mark_prefill_completed(&"req-1".to_string()).unwrap();
+        slots.free(&"req-1".to_string()).unwrap();
         queue.update().await;
 
         // After update, one pending request should have been scheduled
@@ -504,11 +507,11 @@ mod tests {
         );
 
         // Free req-2 and update to drain remaining
-        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
-        let _ = slots.free(&"req-2".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-2".to_string());
+        let _ = slots.free(&"req-2".to_string());
         queue.update().await;
-        let _ = slots.mark_prefill_completed(&"req-3".to_string()).await;
-        let _ = slots.free(&"req-3".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-3".to_string());
+        let _ = slots.free(&"req-3".to_string());
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
@@ -588,9 +591,8 @@ mod tests {
         // Clean up
         slots
             .mark_prefill_completed(&"after-register".to_string())
-            .await
             .unwrap();
-        slots.free(&"after-register".to_string()).await.unwrap();
+        slots.free(&"after-register".to_string()).unwrap();
     }
 
     /// Register_workers is additive: calling with a new set does NOT remove old workers.
@@ -641,8 +643,8 @@ mod tests {
                 .expect("oneshot dropped")
                 .expect("scheduling failed");
             seen.insert(resp.best_worker.worker_id);
-            slots.mark_prefill_completed(&req_id).await.unwrap();
-            slots.free(&req_id).await.unwrap();
+            slots.mark_prefill_completed(&req_id).unwrap();
+            slots.free(&req_id).unwrap();
         }
 
         assert!(
@@ -690,6 +692,7 @@ mod tests {
             overlaps: OverlapScores::default(),
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
@@ -710,8 +713,34 @@ mod tests {
         );
         slots
             .mark_prefill_completed(&"filter-0".to_string())
-            .await
             .unwrap();
-        slots.free(&"filter-0".to_string()).await.unwrap();
+        slots.free(&"filter-0".to_string()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_queue_busy_check_ignores_untracked_prefill_tokens() {
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.0));
+
+        let (mut req1, rx1) = make_request("req-1", 256);
+        req1.track_prefill_tokens = false;
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+        assert_eq!(
+            slots
+                .active_tokens()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(0)
+        );
+
+        let (req2, rx2) = make_request("req-2", 256);
+        queue.enqueue(req2).await;
+        let _resp2 = rx2.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        let _ = slots.mark_prefill_completed(&"req-1".to_string());
+        let _ = slots.free(&"req-1".to_string());
+        let _ = slots.mark_prefill_completed(&"req-2".to_string());
+        let _ = slots.free(&"req-2".to_string());
     }
 }

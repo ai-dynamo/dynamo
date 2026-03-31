@@ -280,9 +280,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler[dict, dict]):
                 logger.debug(
                     f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
                 )
-                yield self._format_engine_output(response, num_output_tokens_so_far)
+                chunk = self._format_engine_output(response, num_output_tokens_so_far)
+
+                # Capture token count BEFORE yield — vLLM may mutate
+                # response.outputs[0].token_ids in-place while we're suspended.
                 if response.outputs:
                     num_output_tokens_so_far = len(response.outputs[0].token_ids)
+                yield chunk
         finally:
             if first_token:
                 if rng_ttft is not None:

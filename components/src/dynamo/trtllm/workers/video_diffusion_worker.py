@@ -85,12 +85,11 @@ async def init_video_diffusion_worker(
         default_guidance_scale=config.default_guidance_scale,
         # Pipeline optimization
         disable_torch_compile=config.disable_torch_compile,
-        torch_compile_mode=config.torch_compile_mode,
         enable_fullgraph=config.enable_fullgraph,
         fuse_qkv=config.fuse_qkv,
         enable_cuda_graph=config.enable_cuda_graph,
         enable_layerwise_nvtx_marker=config.enable_layerwise_nvtx_marker,
-        warmup_steps=config.warmup_steps,
+        skip_warmup=config.skip_warmup,
         # Attention
         attn_backend=config.attn_backend,
         # Quantization
