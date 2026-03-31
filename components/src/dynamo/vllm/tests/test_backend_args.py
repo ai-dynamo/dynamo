@@ -37,7 +37,9 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_agg_worker(self, mode):
-        config = DynamoVllmConfig(disaggregation_mode=mode, multimodal_worker=True)
+        config = DynamoVllmConfig()
+        config.disaggregation_mode = mode
+        config.multimodal_worker = True
         if mode is None or mode == DisaggregationMode.AGGREGATED:
             with pytest.warns(DeprecationWarning):
                 config.resolve_disaggregation_mode_from_legacy_multimodal_flags()
@@ -48,9 +50,9 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
 
     # special case of 'test_agg_worker' above, test the prefill worker case
     def test_prefill_worker(self):
-        config = DynamoVllmConfig(
-            disaggregation_mode=DisaggregationMode.PREFILL, multimodal_worker=True
-        )
+        config = DynamoVllmConfig()
+        config.disaggregation_mode = DisaggregationMode.PREFILL
+        config.multimodal_worker = True
         with pytest.warns(DeprecationWarning):
             config.resolve_disaggregation_mode_from_legacy_multimodal_flags()
             assert config.disaggregation_mode == DisaggregationMode.PREFILL
@@ -66,9 +68,9 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_encode_worker(self, mode):
-        config = DynamoVllmConfig(
-            disaggregation_mode=mode, multimodal_encode_worker=True
-        )
+        config = DynamoVllmConfig()
+        config.disaggregation_mode = mode
+        config.multimodal_encode_worker = True
         if mode is None or mode == DisaggregationMode.ENCODE:
             with pytest.warns(DeprecationWarning):
                 config.resolve_disaggregation_mode_from_legacy_multimodal_flags()
@@ -88,9 +90,9 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_decode_worker(self, mode):
-        config = DynamoVllmConfig(
-            disaggregation_mode=mode, multimodal_decode_worker=True
-        )
+        config = DynamoVllmConfig()
+        config.disaggregation_mode = mode
+        config.multimodal_decode_worker = True
         if mode is None or mode == DisaggregationMode.DECODE:
             with pytest.warns(DeprecationWarning):
                 config.resolve_disaggregation_mode_from_legacy_multimodal_flags()
