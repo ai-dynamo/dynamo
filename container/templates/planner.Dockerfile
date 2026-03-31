@@ -18,7 +18,8 @@ ARG NATS_VERSION
 ARG ETCD_VERSION
 
 # Minimal runtime packages:
-# - git + git-lfs for git-based Python requirements with LFS artifacts
+# - git for VCS-based Python requirements
+# - git-lfs because the pinned aiconfigurator Git dependency tracks files with LFS
 # - libgomp1 for scikit-learn / scipy OpenMP runtime support
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
@@ -71,15 +72,11 @@ COPY --chmod=664 --chown=dynamo:0 tests/conftest.py /workspace/tests/conftest.py
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
-COPY --chmod=664 --chown=dynamo:0 deploy/__init__.py /workspace/deploy/__init__.py
-COPY --chmod=775 --chown=dynamo:0 deploy/utils /workspace/deploy/utils
-COPY --chmod=775 --chown=dynamo:0 examples/backends/mocker/deploy /workspace/examples/backends/mocker/deploy
-COPY --chmod=775 --chown=dynamo:0 examples/backends/sglang/deploy /workspace/examples/backends/sglang/deploy
-COPY --chmod=775 --chown=dynamo:0 examples/backends/trtllm/deploy /workspace/examples/backends/trtllm/deploy
-COPY --chmod=775 --chown=dynamo:0 examples/backends/vllm/deploy /workspace/examples/backends/vllm/deploy
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 
-# Prefer the repository test tree over any third-party "tests" package that
-# may be present in site-packages when pytest imports tests.utils.
+# Pytest loads /workspace/tests/conftest.py, which imports tests.utils.
+# Make tests a real package so that import resolves reliably in the test image.
 RUN touch /workspace/tests/__init__.py /workspace/tests/utils/__init__.py && \
     chown dynamo:0 /workspace/tests/__init__.py /workspace/tests/utils/__init__.py && \
     chmod 664 /workspace/tests/__init__.py /workspace/tests/utils/__init__.py
@@ -92,19 +89,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 
 # Install local wheels and planner/profiler runtime dependencies in one pass
 # so the resolver sees the full constraint set together.
-RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.profiler.txt,target=/tmp/requirements.profiler.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.profiler.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
-
-RUN git lfs install
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
