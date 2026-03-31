@@ -22,24 +22,16 @@ title: Snapshot
 ## Prerequisites
 
 - x86_64 (`amd64`) GPU nodes
-- NVIDIA driver 580.xx or newer on the target GPU nodes
-- security clearance to run a privileged DaemonSet
+- NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
 - vLLM or SGLang backend today
-- `ReadWriteMany` storage if you need cross-node restore
-- for operator-managed flows: Dynamo Platform/Operator installed with checkpointing enabled
-- for lower-level `snapshotctl` testing: the snapshot chart installed in the target namespace; the operator is not required
+- `ReadWriteMany` storage for cross-node restore
 
-Install the snapshot chart in every namespace where you want checkpoint and restore. Snapshot storage is owned by that chart, not by the operator.
+## Quick Start via `DynamoCheckpoint` CR
 
-## Quick Start: Explicit `DynamoCheckpoint` + `checkpointRef`
-
-This is the clearest operator-managed flow:
-
-1. build a placeholder image
-2. install the snapshot chart
-3. create a `DynamoCheckpoint`
-4. wait for it to become `Ready`
-5. deploy a `DynamoGraphDeployment` that restores from `checkpointRef`
+1. Build a placeholder image
+2. Install the snapshot chart
+3. Create a `DynamoCheckpoint` and wait for it to become ready
+5. Deploy a `DynamoGraphDeployment` that restores from the corresponding `checkpointRef`
 
 ### 1. Build and push a placeholder image
 
@@ -97,8 +89,6 @@ Cross-node restore requires shared `ReadWriteMany` storage. The chart defaults t
 
 If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
 
-Only `storage.type=pvc` is implemented today. The chart keeps `storage.type` for future snapshot-owned backends, but `s3` and `oci` are not supported yet.
-
 Verify that the PVC and DaemonSet are ready:
 
 ```bash
@@ -109,7 +99,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -
 
 ### 4. Create a `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity and the placeholder image; the rest of the pod template should mirror your normal worker config.
+The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, a worker container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -206,9 +196,7 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 
 ## DGD Auto Flow
 
-`checkpointRef` is the most explicit path. `mode: Auto` is the higher-level path: the operator computes the checkpoint identity hash, looks for an equivalent `DynamoCheckpoint`, and creates one only when no matching checkpoint exists.
-
-If you already created an explicit `DynamoCheckpoint` with the same identity, Auto mode reuses it. If no matching checkpoint exists yet, the first worker cold-starts and the operator creates the checkpoint in the background.
+`checkpointRef` is the most explicit path. `mode: Auto` is the higher-level path: the operator computes the checkpoint identity hash, looks for an equivalent `DynamoCheckpoint`, and creates one only when no matching checkpoint exists. If a `DynamoCheckpoint` already exists with the same identity, Auto mode reuses it. If no matching checkpoint exists yet, the first worker cold-starts and the operator creates the checkpoint in the background.
 
 ```yaml
 checkpoint:
@@ -275,23 +263,7 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 ## Lower-Level Testing With `snapshotctl`
 
-Use `snapshotctl` when you want to validate snapshot infrastructure without the operator. This is the fastest way to answer questions like:
-
-- can this cluster run `snapshot-agent` correctly?
-- can this worker image be checkpointed?
-- can a restore pod come back ready from a known checkpoint?
-
-This path still requires the snapshot chart in the target namespace, but it does **not** require Dynamo Platform/Operator.
-
-### `snapshotctl` requirements
-
-- the manifest must be a `Pod`
-- `metadata.name` must be set
-- the manifest must contain exactly one worker container
-- that worker image should be a placeholder image if you want to restore it
-- the target namespace must already have a ready `snapshot-agent` DaemonSet and mounted checkpoint PVC
-
-The `snapshotctl` commands discover checkpoint storage by inspecting the `snapshot-agent` DaemonSet in the target namespace.
+It is possible to checkpoint and restore pods without the Dynamo operator via the lower level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet running in the namesapce with the checkpoint PVC mounted.
 
 ### Checkpoint from a worker pod manifest
 
@@ -301,6 +273,7 @@ snapshotctl checkpoint \
   --namespace ${NAMESPACE}
 ```
 
+The checkpoint manifest must be for a pod, and contain one worker container named `main`, which must use a placeholder image.
 If you do not pass `--checkpoint-id`, `snapshotctl` generates one and prints it:
 
 ```text
@@ -401,63 +374,50 @@ status:
 
 ## Troubleshooting
 
-### Checkpoint never becomes `Ready`
+### Checkpoint Job finishes but the checkpoint never becomes `Ready`
 
-1. Check the checkpoint resource and Job:
+Snapshot only becomes `Ready` after `snapshot-agent` confirms the checkpoint contents. A completed Job is not enough by itself.
 
-   ```bash
-   kubectl get dckpt -n ${NAMESPACE}
-   kubectl describe dckpt <checkpoint-name> -n ${NAMESPACE}
-   JOB_NAME=$(kubectl get dckpt <checkpoint-name> -n ${NAMESPACE} -o jsonpath='{.status.jobName}')
-   if [ -n "${JOB_NAME}" ]; then
-     kubectl logs job/"${JOB_NAME}" -n ${NAMESPACE}
-   fi
-   ```
+```bash
+kubectl get dckpt <checkpoint-name> -n ${NAMESPACE} \
+  -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,MESSAGE:.status.message,JOB:.status.jobName
 
-2. Check the snapshot agent:
+JOB_NAME=$(kubectl get dckpt <checkpoint-name> -n ${NAMESPACE} -o jsonpath='{.status.jobName}')
+if [ -n "${JOB_NAME}" ]; then
+  kubectl logs job/"${JOB_NAME}" -n ${NAMESPACE}
+fi
 
-   ```bash
-   kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
-   kubectl logs daemonset/snapshot-agent -n ${NAMESPACE} --all-containers
-   ```
+kubectl logs daemonset/snapshot-agent -n ${NAMESPACE} --all-containers
+```
 
-3. Verify the same namespace has a ready snapshot chart install:
+If the worker template is wrong, the most common causes are using the raw runtime image instead of the placeholder image, or leaving out normal mounts and secrets that the worker needs to start.
 
-   ```bash
-   kubectl get pvc -n ${NAMESPACE}
-   kubectl get daemonset -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -o wide
-   ```
+### Restore cannot find or mount checkpoint storage
 
-4. Verify the workload pod template matches the worker you intend to checkpoint:
+Restore discovers checkpoint storage from the `snapshot-agent` DaemonSet in the same namespace. That DaemonSet must be ready and must mount the checkpoint PVC.
 
-   - placeholder image, not the raw runtime image
-   - same command and args you expect to reuse later
-   - required model/cache secrets and PVC mounts
-   - loopback socket envs for the tested vLLM/SGLang flows
+```bash
+kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
+kubectl get daemonset -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -o wide
+kubectl get pvc -n ${NAMESPACE}
+```
 
-### Restore fails
+This is also the path that `snapshotctl` uses when it resolves checkpoint storage.
 
-1. Check the worker pod:
+### `snapshotctl` manifest is rejected or the restore target is wrong
 
-   ```bash
-   kubectl logs <worker-pod> -n ${NAMESPACE}
-   kubectl describe pod <worker-pod> -n ${NAMESPACE}
-   ```
+`snapshotctl` only accepts a single-container `Pod` manifest. For consistency with the operator-managed flow, use `main` as the worker container name.
 
-2. Confirm the referenced checkpoint is ready:
-
-   ```bash
-   kubectl get dckpt <checkpoint-name> -n ${NAMESPACE}
-   ```
-
-3. If you are using `snapshotctl`, verify that the manifest is a single-container `Pod` and that the target namespace has a ready `snapshot-agent` DaemonSet.
+```bash
+snapshotctl checkpoint --manifest ./worker-pod.yaml --namespace ${NAMESPACE}
+snapshotctl restore --manifest ./worker-pod.yaml --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
+```
 
 ## Planned Features
 
-- TensorRT-LLM backend support
-- snapshot-owned S3/MinIO storage backend
-- snapshot-owned OCI registry storage backend
-- broader multi-GPU support
+- Stabilize multi-GPU support
+- TensorRT-LLM support
+- Alternative storage backends
 
 ## Related Documentation
 
