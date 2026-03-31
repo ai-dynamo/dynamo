@@ -20,13 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git python3-pip
 WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
-COPY operator/go.mod operator/go.sum ./
-COPY snapshot/go.mod snapshot/go.sum /snapshot/
+COPY go.mod go.sum ./
+# The shared snapshot module comes from a named build context.
+COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
 # Copy source code
-COPY operator/. .
-COPY snapshot/. /snapshot/
+COPY . .
+COPY --from=snapshot . /snapshot/
 
 # Lint stage
 FROM base AS linter

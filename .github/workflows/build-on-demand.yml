@@ -148,7 +148,8 @@ jobs:
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} -f Dockerfile ..
+              --build-context snapshot=../snapshot \
+              ${TAGGING_FLAGS} .
 
           echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
