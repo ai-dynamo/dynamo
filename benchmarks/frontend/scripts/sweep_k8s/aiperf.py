@@ -59,9 +59,8 @@ def _build_aiperf_script(
 
     return f"""set -e
 apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
-pip install --quiet git+https://github.com/ai-dynamo/aiperf.git@main
+pip install --quiet git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
 echo "aiperf installed"
-sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
 
 # Wait for model
 echo "Waiting for model '{model_name}' at http://{endpoint}/v1/models..."
@@ -146,12 +145,16 @@ spec:
       restartPolicy: Never
       imagePullSecrets:
         - name: nvcrimagepullsecret
+      securityContext:
+        sysctls:
+          - name: net.ipv4.ip_local_port_range
+            value: "1024 65000"
       containers:
         - name: aiperf
           image: python:3.12-slim
           imagePullPolicy: IfNotPresent
           securityContext:
-            privileged: true
+            allowPrivilegeEscalation: false
           command:
             - /bin/bash
             - -c
@@ -212,8 +215,8 @@ def _wait_for_job(
                     print(f"  aiperf Job FAILED (waited {waited}s)")
                     _print_job_logs(job_name, namespace)
                     return False
-        except Exception:
-            pass
+        except (json.JSONDecodeError, subprocess.SubprocessError, OSError) as e:
+            print(f"  Transient error polling job {job_name} in {namespace}: {e}")
 
         time.sleep(5)
         waited += 5
@@ -260,13 +263,17 @@ def _copy_artifacts_from_pvc(
     job_name: str,
     namespace: str,
     local_dir: Path,
-) -> None:
+) -> bool:
     """Copy aiperf artifacts from the model-cache PVC to the local filesystem.
 
     Spins up a temporary busybox pod that mounts the PVC, uses kubectl cp
     to extract the artifacts, then deletes the pod.
+
+    Returns True if artifacts were successfully copied and the expected
+    profile_export_aiperf.json exists, False otherwise.
     """
     local_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_ok = False
     helper_name = f"copy-{job_name[-20:]}"
     pvc_path = f"/model-cache/perf/{job_name}"
 
@@ -334,6 +341,12 @@ spec:
         for f in sorted(files)[:5]:
             print(f"    {f.name} ({f.stat().st_size} bytes)")
 
+        expected = local_dir / "profile_export_aiperf.json"
+        if expected.exists() and expected.stat().st_size > 0:
+            artifacts_ok = True
+        else:
+            print(f"  WARNING: expected artifact missing or empty: {expected.name}")
+
     except Exception as e:
         print(f"  WARNING: artifact copy failed: {e}")
     finally:
@@ -343,6 +356,8 @@ spec:
             namespace=namespace,
             check=False,
         )
+
+    return artifacts_ok
 
 
 def run_aiperf(
@@ -432,7 +447,10 @@ def run_aiperf(
     success = _wait_for_job(job_name, namespace, timeout=timeout)
 
     # Copy artifacts from PVC regardless of success (partial results may exist)
-    _copy_artifacts_from_pvc(job_name, namespace, artifact_dir)
+    artifacts_ok = _copy_artifacts_from_pvc(job_name, namespace, artifact_dir)
+    if success and not artifacts_ok:
+        print("  Job succeeded but artifacts missing -- marking as failure")
+        success = False
 
     # Print logs on failure
     if not success:

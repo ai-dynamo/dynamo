@@ -10,6 +10,7 @@ Supports both direct HTTP (when endpoint is reachable) and kubectl-exec
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 import urllib.request
@@ -96,6 +97,7 @@ def _try_kubectl_exec(
             return None
 
         # Exec curl inside the pod (curl may not be available; try wget too)
+        safe_endpoint = shlex.quote(endpoint)
         result = subprocess.run(
             [
                 "kubectl",
@@ -106,9 +108,9 @@ def _try_kubectl_exec(
                 "--",
                 "sh",
                 "-c",
-                f"curl -sf http://{endpoint}/metrics 2>/dev/null || "
-                f"wget -qO- http://{endpoint}/metrics 2>/dev/null || "
-                f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://{endpoint}/metrics').read().decode())\" 2>/dev/null",
+                f"curl -sf http://{safe_endpoint}/metrics 2>/dev/null || "
+                f"wget -qO- http://{safe_endpoint}/metrics 2>/dev/null || "
+                f'python3 -c "import urllib.request,sys; print(urllib.request.urlopen(sys.argv[1]).read().decode())" http://{safe_endpoint}/metrics 2>/dev/null',
             ],
             capture_output=True,
             text=True,

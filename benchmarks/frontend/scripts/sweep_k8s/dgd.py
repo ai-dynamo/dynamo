@@ -13,6 +13,8 @@ import json
 import random
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 from sweep_k8s.kubectl import (
     delete_pod,
@@ -58,8 +60,6 @@ def wait_model_ready(
     while True:
         # Try direct HTTP (works if endpoint is port-forwarded or localhost)
         try:
-            import urllib.request
-
             req = urllib.request.Request(
                 f"http://{endpoint}/v1/models",
                 headers={"Accept": "application/json"},
@@ -70,7 +70,7 @@ def wait_model_ready(
                 if any(m.get("id") == model_name for m in models):
                     print(f"  Model ready (waited {waited}s)")
                     return
-        except Exception:
+        except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
             pass
 
         # Fallback: kubectl-based check for in-cluster endpoints
@@ -93,12 +93,13 @@ def _check_model_via_kubectl(
     namespace: str,
 ) -> bool:
     """Check model readiness by running curl from inside the cluster."""
+    pod_name = f"model-check-{int(time.time())}-{random.randint(0, 9999)}"
     try:
         result = subprocess.run(
             [
                 "kubectl",
                 "run",
-                "model-check",
+                pod_name,
                 "--rm",
                 "-i",
                 "--restart=Never",
@@ -118,7 +119,7 @@ def _check_model_via_kubectl(
             data = json.loads(result.stdout)
             models = data.get("data", [])
             return any(m.get("id") == model_name for m in models)
-    except Exception:
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
         pass
     return False
 
@@ -132,14 +133,25 @@ def dgd_wait_all_ready(
 ) -> None:
     """Wait for all DGD worker pods to be Ready, then wait for model endpoint."""
     print("  Waiting for all worker pods to be Ready...")
-    try:
-        wait_pod(
-            dgd_label_selector(dgd_name, "worker"),
-            namespace,
-            timeout=max_wait,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        print("  WARNING: Timed out waiting for worker pods")
+    retries = 3
+    for attempt in range(retries):
+        try:
+            wait_pod(
+                dgd_label_selector(dgd_name, "worker"),
+                namespace,
+                timeout=max_wait,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            raise
+        except subprocess.CalledProcessError as e:
+            if attempt < retries - 1:
+                print(f"  kubectl error (attempt {attempt + 1}/{retries}), retrying...")
+                time.sleep(5)
+            else:
+                raise RuntimeError(
+                    f"Worker pods not ready after {retries} retries: {e}"
+                ) from e
 
     wait_model_ready(endpoint, model_name, max_wait, namespace=namespace)
 
@@ -180,6 +192,13 @@ def dgd_switch_backend(
     except Exception:
         idx = None
 
+    # Capture the current frontend pod name BEFORE patching so we track
+    # the right pod for deletion (avoids racing with the operator).
+    old_pod = get_pod_name(
+        dgd_label_selector(dgd_name, "frontend"),
+        namespace,
+    )
+
     if idx is not None:
         patch_json(
             "dgd",
@@ -208,12 +227,6 @@ def dgd_switch_backend(
         )
 
     print("  DGD patched -- waiting for frontend pod replacement...")
-
-    # Wait for old pod to terminate
-    old_pod = get_pod_name(
-        dgd_label_selector(dgd_name, "frontend"),
-        namespace,
-    )
     if old_pod:
         print(f"  Waiting for old pod {old_pod} to terminate...")
         wait_for_pod_deletion(old_pod, namespace, timeout=120)

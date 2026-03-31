@@ -54,15 +54,23 @@ def write_csv(results: List[RunResult], csv_path: Path) -> None:
                 "workers": spec.deploy.workers,
                 "speedup_ratio": 0,  # filled by config
                 "status": r.status,
-                "req_per_sec": f"{r.req_per_sec:.2f}" if r.req_per_sec else "",
-                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}"
-                if r.output_tok_per_sec
+                "req_per_sec": f"{r.req_per_sec:.2f}"
+                if r.req_per_sec is not None
                 else "",
-                "ttft_p50_ms": f"{r.ttft_p50_ms:.1f}" if r.ttft_p50_ms else "",
-                "ttft_p99_ms": f"{r.ttft_p99_ms:.1f}" if r.ttft_p99_ms else "",
-                "itl_p50_ms": f"{r.itl_p50_ms:.1f}" if r.itl_p50_ms else "",
-                "itl_p99_ms": f"{r.itl_p99_ms:.1f}" if r.itl_p99_ms else "",
-                "duration_sec": f"{r.duration_sec:.1f}" if r.duration_sec else "",
+                "output_tok_per_sec": f"{r.output_tok_per_sec:.1f}"
+                if r.output_tok_per_sec is not None
+                else "",
+                "ttft_p50_ms": f"{r.ttft_p50_ms:.1f}"
+                if r.ttft_p50_ms is not None
+                else "",
+                "ttft_p99_ms": f"{r.ttft_p99_ms:.1f}"
+                if r.ttft_p99_ms is not None
+                else "",
+                "itl_p50_ms": f"{r.itl_p50_ms:.1f}" if r.itl_p50_ms is not None else "",
+                "itl_p99_ms": f"{r.itl_p99_ms:.1f}" if r.itl_p99_ms is not None else "",
+                "duration_sec": f"{r.duration_sec:.1f}"
+                if r.duration_sec is not None
+                else "",
                 "run_dir": r.run_dir,
             }
             writer.writerow(row)
@@ -80,12 +88,12 @@ def write_summary(results: List[RunResult], summary_path: Path) -> None:
     )
 
     for r in results:
-        rps = f"{r.req_per_sec:.1f}" if r.req_per_sec else "-"
-        tps = f"{r.output_tok_per_sec:.0f}" if r.output_tok_per_sec else "-"
-        tp50 = f"{r.ttft_p50_ms:.1f}ms" if r.ttft_p50_ms else "-"
-        tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms else "-"
-        ip50 = f"{r.itl_p50_ms:.1f}ms" if r.itl_p50_ms else "-"
-        dur = f"{r.duration_sec:.0f}s" if r.duration_sec else "-"
+        rps = f"{r.req_per_sec:.1f}" if r.req_per_sec is not None else "-"
+        tps = f"{r.output_tok_per_sec:.0f}" if r.output_tok_per_sec is not None else "-"
+        tp50 = f"{r.ttft_p50_ms:.1f}ms" if r.ttft_p50_ms is not None else "-"
+        tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms is not None else "-"
+        ip50 = f"{r.itl_p50_ms:.1f}ms" if r.itl_p50_ms is not None else "-"
+        dur = f"{r.duration_sec:.0f}s" if r.duration_sec is not None else "-"
         lines.append(
             f"| {r.run_spec.run_id} | {rps} | {tps} | {tp50} | {tp99} | {ip50} | {dur} | {r.status} |"
         )
@@ -101,7 +109,9 @@ def write_summary(results: List[RunResult], summary_path: Path) -> None:
     summary_path.write_text("\n".join(lines) + "\n")
 
 
-def write_sweep_config(config: SweepConfig, output_dir: Path) -> None:
+def write_sweep_config(
+    config: SweepConfig, output_dir: Path, total_runs: int = 0
+) -> None:
     """Write sweep_config.json for downstream consumers."""
     config_path = output_dir / "sweep_config.json"
     config_data = {
@@ -115,9 +125,7 @@ def write_sweep_config(config: SweepConfig, output_dir: Path) -> None:
         "benchmark_duration": config.benchmark_duration or "N/A",
         "osl": config.osl,
         "output_dir": config.output_dir,
-        "total_runs": len(config.tokenizers)
-        * len(config.concurrencies)
-        * len(config.isls),
+        "total_runs": total_runs,
         "isolation_policy": config.isolation_policy,
     }
     config_path.write_text(json.dumps(config_data, indent=2) + "\n")
@@ -131,10 +139,12 @@ def print_results_table(results: List[RunResult]) -> None:
     )
     print(f"  {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 10} {'-' * 10} {'-' * 8}")
     for r in results:
-        rps = f"{r.req_per_sec:.1f}" if r.req_per_sec else "N/A"
-        tps = f"{r.output_tok_per_sec:.0f}" if r.output_tok_per_sec else "N/A"
-        tp50 = f"{r.ttft_p50_ms:.1f}ms" if r.ttft_p50_ms else "N/A"
-        tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms else "N/A"
+        rps = f"{r.req_per_sec:.1f}" if r.req_per_sec is not None else "N/A"
+        tps = (
+            f"{r.output_tok_per_sec:.0f}" if r.output_tok_per_sec is not None else "N/A"
+        )
+        tp50 = f"{r.ttft_p50_ms:.1f}ms" if r.ttft_p50_ms is not None else "N/A"
+        tp99 = f"{r.ttft_p99_ms:.1f}ms" if r.ttft_p99_ms is not None else "N/A"
         print(
             f"  {r.run_spec.run_id:<30} {rps:>8} {tps:>8} {tp50:>10} {tp99:>10} {r.status:>8}"
         )

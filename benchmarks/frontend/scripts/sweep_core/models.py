@@ -216,6 +216,8 @@ class K8sConfig:
             "event_plane": self.event_plane,
             "router_mode": self.router_mode,
             "deploy": self.deploy,
+            "hf_token": "***" if self.hf_token else "",
+            "image_pull_secret": self.image_pull_secret,
             "export_level": self.export_level,
         }
 
@@ -276,7 +278,10 @@ class SweepConfig:
             "output_dir": self.output_dir,
             "max_consecutive_fails": self.max_consecutive_fails,
             "cooldown": self.cooldown,
+            "dry_run": self.dry_run,
+            "no_report": self.no_report,
             "isolation_policy": self.isolation_policy,
+            "passthrough_args": self.passthrough_args,
             "k8s": self.k8s.to_dict(),
         }
 

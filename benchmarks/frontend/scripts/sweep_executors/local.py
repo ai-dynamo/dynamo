@@ -22,14 +22,6 @@ from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
-# Tokenizer name mapping: human-readable CLI names -> DYN_TOKENIZER values
-TOKENIZER_MAP = {
-    "fast": "fastokens",
-    "fastokens": "fastokens",
-    "hf": "default",
-    "default": "default",
-}
-
 
 class LocalExecutor:
     """Executor that delegates runs to run_perf.sh."""
@@ -56,7 +48,8 @@ class LocalExecutor:
 
     def execute_run(self, run_spec: RunSpec, run_dir: Path) -> RunResult:
         """Execute a single run via run_perf.sh."""
-        assert self._config is not None
+        if self._config is None:
+            raise RuntimeError("prepare() must be called before execute_run()")
         config = self._config
         deploy = run_spec.deploy
         aiperf = run_spec.aiperf
@@ -200,11 +193,8 @@ def _parse_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
 
 def _port_free(port: int) -> bool:
     """Check if a port is free."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(("127.0.0.1", port)) != 0
-    finally:
-        s.close()
 
 
 def _kill_port(port: int) -> None:

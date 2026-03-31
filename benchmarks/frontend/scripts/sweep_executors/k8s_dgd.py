@@ -54,14 +54,15 @@ class K8sDgdExecutor:
         print(f"  In-cluster endpoint for aiperf: {self._incluster_endpoint}")
 
         # Wait for model to be ready before starting sweep.
-        # Uses kubectl fallback for in-cluster endpoints not reachable from localhost.
-        print("--- Pre-flight: waiting for frontend ---")
-        k8s_dgd.wait_model_ready(
-            self._incluster_endpoint,
-            config.model_name,
-            max_wait=300,
-            namespace=k8s.namespace,
-        )
+        # Skip when using deploy templates -- the deployment hasn't been applied yet.
+        if not self._template_path:
+            print("--- Pre-flight: waiting for frontend ---")
+            k8s_dgd.wait_model_ready(
+                self._incluster_endpoint,
+                config.model_name,
+                max_wait=300,
+                namespace=k8s.namespace,
+            )
 
     def apply_deploy(
         self,
@@ -69,7 +70,8 @@ class K8sDgdExecutor:
         prev: Optional[DeployDimension],
     ) -> None:
         """Apply a deployment change -- template-based or DGD patching."""
-        assert self._config is not None
+        if self._config is None:
+            raise RuntimeError("prepare() must be called before apply_deploy()")
         config = self._config
         k8s = config.k8s
 
@@ -77,7 +79,12 @@ class K8sDgdExecutor:
             # Template-based deployment: render + apply
             k8s_template.apply_rendered_template(self._template_path, deploy, config)
             print("  Waiting for deployment to be ready...")
-            k8s_dgd.wait_model_ready(k8s.endpoint, config.model_name, max_wait=300)
+            k8s_dgd.wait_model_ready(
+                self._incluster_endpoint,
+                config.model_name,
+                namespace=k8s.namespace,
+                max_wait=300,
+            )
             return
 
         # Legacy DGD patching
@@ -104,7 +111,10 @@ class K8sDgdExecutor:
 
     def _apply_reset_strategy(self) -> None:
         """Apply the configured reset strategy."""
-        assert self._config is not None
+        if self._config is None:
+            raise RuntimeError(
+                "prepare() must be called before _apply_reset_strategy()"
+            )
         k8s = self._config.k8s
         strategy = k8s.reset_strategy
 
@@ -145,7 +155,8 @@ class K8sDgdExecutor:
 
     def execute_run(self, run_spec: RunSpec, run_dir: Path) -> RunResult:
         """Execute a single k8s run: metrics capture + aiperf + post-metrics."""
-        assert self._config is not None
+        if self._config is None:
+            raise RuntimeError("prepare() must be called before execute_run()")
         config = self._config
         k8s = config.k8s
         aiperf = run_spec.aiperf

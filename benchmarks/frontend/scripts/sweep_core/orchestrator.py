@@ -46,16 +46,16 @@ def run(plan: SweepPlan, executor: "SweepExecutor") -> List[RunResult]:
     summary_path = output_root / "summary.md"
 
     # Write sweep config
-    write_sweep_config(config, output_root)
-
-    # Prepare executor
-    executor.prepare(config)
+    write_sweep_config(config, output_root, total_runs=plan.total_runs)
 
     failure_tracker = FailureTracker(config.max_consecutive_fails)
     results: List[RunResult] = []
     previous_run: Optional[RunSpec] = None
 
     try:
+        # Prepare executor inside try so cleanup() runs on prepare failure
+        executor.prepare(config)
+
         for i, run_spec in enumerate(plan.runs, 1):
             deploy = run_spec.deploy
             aiperf = run_spec.aiperf

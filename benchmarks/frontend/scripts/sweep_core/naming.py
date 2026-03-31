@@ -17,6 +17,6 @@ def build_run_id(deploy: DeployDimension, aiperf: AiperfDimension) -> str:
     base = f"{deploy.tokenizer}_c{aiperf.concurrency}_isl{aiperf.isl}_w{deploy.workers}"
     if deploy.num_models > 1:
         base += f"_m{deploy.num_models}"
-    if aiperf.request_rate:
+    if aiperf.request_rate is not None:
         base += f"_rps{aiperf.request_rate}"
     return base
