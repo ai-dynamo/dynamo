@@ -253,6 +253,7 @@ vllm_omni_configs = {
             AudioSpeechPayload(
                 body={
                     "input": "Hello, this is a test of Dynamo audio generation.",
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
                     "voice": "vivian",
                     "language": "English",
                 },

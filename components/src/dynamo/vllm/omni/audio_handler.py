@@ -124,17 +124,42 @@ class AudioGenerationHandler:
     def _is_tts_model(self) -> bool:
         """Check if the loaded model is a Qwen3-TTS-style model.
 
-        Mirrors vLLM-Omni's _find_tts_stage(): iterates over the AsyncOmni
-        stage_list and returns True if any stage's ``model_stage`` is in
-        ``_TTS_MODEL_STAGES``.
+        Searches for a TTS model_stage in the engine's stage list or
+        stage configs. Supports multiple vLLM-Omni API versions.
         """
+        # Try stage_list (v0.14-v0.16 API)
         stage_list = getattr(self.engine_client, "stage_list", None)
-        if stage_list is None:
-            return False
-        return any(
-            getattr(stage, "model_stage", None) in _TTS_MODEL_STAGES
-            for stage in stage_list
-        )
+        if stage_list:
+            for stage in stage_list:
+                if getattr(stage, "model_stage", None) in _TTS_MODEL_STAGES:
+                    return True
+
+        # Try stage_configs (v0.18+ API — stages may not expose model_stage directly)
+        stage_configs = getattr(self.engine_client, "stage_configs", None)
+        if stage_configs:
+            for cfg in stage_configs:
+                engine_args = (
+                    cfg.get("engine_args", {})
+                    if isinstance(cfg, dict)
+                    else getattr(cfg, "engine_args", {})
+                )
+                ms = (
+                    engine_args.get("model_stage")
+                    if isinstance(engine_args, dict)
+                    else getattr(engine_args, "model_stage", None)
+                )
+                if ms in _TTS_MODEL_STAGES:
+                    return True
+
+        # Try model_config.hf_config.model_type (universal fallback)
+        try:
+            model_type = self.engine_client.model_config.hf_config.model_type
+            if model_type in _TTS_MODEL_STAGES:
+                return True
+        except (AttributeError, TypeError):
+            pass
+
+        return False
 
     # -- Audio engine input construction --------------------------------------
 
