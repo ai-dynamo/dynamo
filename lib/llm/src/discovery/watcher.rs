@@ -611,6 +611,19 @@ impl ModelWatcher {
                     );
                 }
             }
+
+            // Verify we built at least one serving engine. A Tokens model that
+            // ends up with no chat AND no completions engine (e.g. completions-only
+            // model with no tokenizer) should fail fast rather than register an
+            // empty WorkerSet that can't serve any requests.
+            if !worker_set.has_decode_engine() {
+                anyhow::bail!(
+                    "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
+                     but no serving engine could be built. Provide a working tokenizer config or \
+                     perform tokenization in the backend (ModelInput::Text).",
+                    card.name()
+                );
+            }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
             // Case: Text + Embeddings
             let push_router = PushRouter::<
