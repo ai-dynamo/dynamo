@@ -68,45 +68,11 @@ impl PromptFormatter {
                             mdc.display_name
                         );
                     };
-                    let raw_content =
+                    let chat_template =
                         std::fs::read_to_string(chat_template_file).with_context(|| {
                             format!("fs:read_to_string '{}'", chat_template_file.display())
                         })?;
-
-                    // If the file is JSON (e.g. chat_template.json from Qwen3-Omni),
-                    // extract the "chat_template" field. The value may be a plain
-                    // string or a structured array of {name, template} objects —
-                    // deserialize it as ChatTemplateValue to handle both.
-                    let chat_template_value = if chat_template_file
-                        .extension()
-                        .is_some_and(|ext| ext == "json")
-                    {
-                        let wrapper: serde_json::Value = serde_json::from_str(&raw_content)
-                            .with_context(|| {
-                                format!(
-                                    "Failed to parse '{}' as JSON",
-                                    chat_template_file.display()
-                                )
-                            })?;
-                        let field = wrapper.get("chat_template").ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "'{}' does not contain a 'chat_template' field",
-                                chat_template_file.display()
-                            )
-                        })?;
-                        serde_json::from_value::<ChatTemplateValue>(field.clone()).with_context(
-                            || {
-                                format!(
-                                    "Failed to deserialize 'chat_template' in '{}'",
-                                    chat_template_file.display()
-                                )
-                            },
-                        )?
-                    } else {
-                        ChatTemplateValue(either::Left(raw_content))
-                    };
-
-                    config.chat_template = Some(chat_template_value);
+                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }
                 Self::from_parts(
                     config,

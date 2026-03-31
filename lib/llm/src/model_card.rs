@@ -1001,22 +1001,13 @@ impl PromptFormatterArtifact {
     }
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
-        // Try each candidate in priority order.  Only skip when the file is
-        // genuinely absent; propagate errors for files that exist but are
-        // unreadable or corrupt.
-        for filename in ["chat_template.jinja", "chat_template.json"] {
-            let path = directory.join(filename);
-            if path.exists() {
-                let f = CheckedFile::from_disk(&path)
-                    .with_context(|| format!("Failed to load {}", path.display()))?;
-                return Ok(Some(Self::HfChatTemplate {
-                    file: f,
-                    is_custom: false,
-                }));
-            }
+        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
+            Ok(f) => Ok(Some(Self::HfChatTemplate {
+                file: f,
+                is_custom: false,
+            })),
+            Err(_) => Ok(None),
         }
-
-        Ok(None)
     }
 }
 
