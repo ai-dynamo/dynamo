@@ -258,6 +258,26 @@ def _planner_profile_data_npz_path() -> Path:
     )
 
 
+def _aic_replay_args():
+    return MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "block_size": 512,
+                "enable_prefix_caching": True,
+                "enable_chunked_prefill": False,
+                "max_num_seqs": 16,
+                "max_num_batched_tokens": 65536,
+                "num_gpu_blocks": 100000,
+                "speedup_ratio": 1.0,
+                "aic_backend": "vllm",
+                "aic_system": "h200_sxm",
+                "aic_tp_size": 1,
+                "aic_model_path": "Qwen/Qwen3-32B",
+            }
+        )
+    )
+
+
 def _planner_profile_data_dir_path() -> Path:
     return (
         Path(__file__).resolve().parents[4]
@@ -559,6 +579,57 @@ def test_run_synthetic_concurrency_replay_counts_match(
         num_requests=3,
         input_tokens=64,
         output_tokens=2,
+    )
+
+
+def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix():
+    aiconfigurator = pytest.importorskip("aiconfigurator")
+
+    report = run_synthetic_trace_replay(
+        4096,
+        128,
+        8,
+        extra_engine_args=_aic_replay_args(),
+        num_workers=1,
+        replay_mode="offline",
+        replay_concurrency=8,
+        arrival_interval_ms=0.0,
+    )
+
+    database = aiconfigurator.sdk.perf_database.get_database(
+        system="h200_sxm",
+        backend="vllm",
+        version=aiconfigurator.sdk.perf_database.get_latest_database_version(
+            "h200_sxm",
+            "vllm",
+        ),
+    )
+    backend = aiconfigurator.sdk.backends.factory.get_backend("vllm")
+    model = aiconfigurator.sdk.models.get_model(
+        model_path="Qwen/Qwen3-32B",
+        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        backend_name="vllm",
+    )
+    session = aiconfigurator.sdk.inference_session.InferenceSession(
+        model, database, backend
+    )
+    summary = session.run_static(
+        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+            batch_size=8,
+            beam_width=1,
+            isl=4096,
+            osl=128,
+            prefix=0,
+        ),
+        mode="static",
+        stride=32,
+    )
+    aic = summary.get_summary_df().to_dict(orient="records")[0]
+
+    assert report["mean_ttft_ms"] == pytest.approx(aic["context_latency"], rel=0.05)
+    assert report["mean_tpot_ms"] == pytest.approx(aic["tpot"], rel=0.05)
+    assert report["output_throughput_tok_s"] == pytest.approx(
+        aic["tokens/s/gpu"], rel=0.05
     )
 
 
