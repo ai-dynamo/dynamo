@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -24,8 +25,38 @@ from tests.utils.payload_builder import (
     metric_payload_default,
     multimodal_payload_default,
 )
+from tests.utils.payloads import BasePayload
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (TRT-LLM video diffusion)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
+
+    def validate(self, response: Any, content: str) -> None:
+        assert content, "Video response content is empty"
 
 
 @dataclass
@@ -264,6 +295,56 @@ trtllm_configs = {
         env={
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
+    ),
+    # TensorRT-LLM video diffusion test using Wan2.1-T2V-1.3B model.
+    # Validates the end-to-end video generation pipeline (frontend → worker → /v1/videos).
+    # Uses --skip-warmup (warmup at default resolution OOMs on 22 GB L4 GPU),
+    # --disable-torch-compile, and small default resolution (480x272, 17 frames)
+    # to fit within CI GPU memory constraints.
+    "video_diffusion": TRTLLMConfig(
+        name="video_diffusion",
+        directory=trtllm_dir,
+        script_name="agg_video_diffusion.sh",
+        script_args=[
+            "--skip-warmup",
+            "--disable-torch-compile",
+            "--default-height",
+            "272",
+            "--default-width",
+            "480",
+            "--default-num-frames",
+            "17",
+        ],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(
+                600
+            ),  # Video generation is slow even at small resolution
+        ],
+        model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=300,
+        delayed_start=60,  # Model loading takes time
+        request_payloads=[
+            VideoGenerationPayload(
+                body={
+                    "prompt": "A golden retriever running on a beach",
+                    "size": "480x272",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 10,
+                        "num_frames": 17,
+                        "guidance_scale": 5.0,
+                        "seed": 42,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",

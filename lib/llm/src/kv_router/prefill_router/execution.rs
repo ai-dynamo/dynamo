@@ -309,6 +309,11 @@ impl PrefillRouter {
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
     }
+
+    /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
+    pub fn enforce_disagg(&self) -> bool {
+        self.enforce_disagg
+    }
 }
 
 pub(super) fn link_child_context<T: Send + Sync + 'static>(
