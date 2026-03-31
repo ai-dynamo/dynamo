@@ -15,6 +15,9 @@ pub mod ze;
 #[cfg(feature = "hpu")]
 pub mod hpu;
 
+#[cfg(all(test, feature = "hpu"))]
+mod test_hpu_minimal;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

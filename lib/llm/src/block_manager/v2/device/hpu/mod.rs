@@ -6,7 +6,110 @@ use crate::block_manager::v2::device::traits::*;
 use anyhow::{Result, Context as _};
 use synapse::{Device, Stream, Event, DeviceBufferView, HostBufferView};
 use synapse::synapse_sys;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+
+/// Initialize Synapse runtime (called once per process)
+/// CRITICAL: The Context must remain alive for the lifetime of the program,
+/// as dropping it may invalidate the Synapse runtime state.
+fn ensure_synapse_initialized() -> Result<()> {
+    static INIT_RESULT: OnceLock<Mutex<Result<(), String>>> = OnceLock::new();
+    static SYNAPSE_CONTEXT: OnceLock<synapse::Context> = OnceLock::new();
+
+    let init_mutex = INIT_RESULT.get_or_init(|| Mutex::new(Ok(())));
+    let init_result = init_mutex.lock().unwrap();
+
+    // Check if already attempted
+    if let Err(ref err) = *init_result {
+        return Err(anyhow::anyhow!("Synapse initialization failed previously: {}", err));
+    }
+
+    // Check if already successful
+    if SYNAPSE_CONTEXT.get().is_some() {
+        return Ok(());
+    }
+
+    // Try to initialize - Context will be kept alive for program lifetime
+    drop(init_result);  // Drop lock before potentially long-running init
+
+    match synapse::Context::new() {
+        Ok(ctx) => {
+            eprintln!("[HPU] ✓ Synapse runtime initialized successfully");
+            SYNAPSE_CONTEXT.get_or_init(|| ctx);
+            *init_mutex.lock().unwrap() = Ok(());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[HPU] ✗ Synapse runtime initialization FAILED: {}", e);
+            let err_msg = e.to_string();
+            *init_mutex.lock().unwrap() = Err(err_msg.clone());
+            Err(anyhow::anyhow!("Failed to initialize Synapse runtime: {}", err_msg))
+        }
+    }
+}
+
+/// Global cache of acquired HPU devices (one per device_id)
+/// The cached Device has owned=true, keeping the device acquired for the program lifetime.
+/// We return unowned references to allow multiple HpuContext instances to share it.
+fn get_or_acquire_device(device_id: u32) -> Result<Device> {
+    // Ensure Synapse runtime is initialized before attempting device operations
+    ensure_synapse_initialized()?;
+
+    static DEVICE_CACHE: OnceLock<Mutex<HashMap<u32, Device>>> = OnceLock::new();
+
+    let mut cache = DEVICE_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+
+    // Check if device is already acquired and cached
+    if cache.contains_key(&device_id) {
+        eprintln!("[HPU] Device {} already in cache, returning unowned ref", device_id);
+        // Return unowned reference - the cache holds the owned device
+        return Ok(Device::from_id_unowned(device_id));
+    }
+
+    eprintln!("[HPU] Device {} NOT in cache, acquiring...", device_id);
+
+    // Try acquiring the device for standalone applications
+    // Strategy: Try acquire_first() which works, then verify it matches requested device_id
+    let device = if device_id == 0 {
+        // For device 0, use acquire_first() which is most reliable
+        match Device::acquire_first() {
+            Ok(dev) => {
+                eprintln!("[HPU] Device acquired via acquire_first(), ID={}", dev.id());
+                // Cache the owned device
+                cache.insert(device_id, dev);
+                eprintln!("[HPU] Device {} cached successfully", device_id);
+                // Return unowned reference
+                Device::from_id_unowned(device_id)
+            }
+            Err(e) => {
+                eprintln!("[HPU] WARNING: acquire_first failed: {}, using unowned (may fail allocations!)", e);
+                // Device likely owned by PyTorch - use unowned reference
+                Device::from_id_unowned(device_id)
+            }
+        }
+    } else {
+        // For non-zero device IDs, try acquire_by_module_id
+        match Device::acquire_by_module_id(device_id) {
+            Ok(dev) => {
+                tracing::info!("HPU device {} acquired by module_id", device_id);
+                cache.insert(device_id, dev);
+                Device::from_id_unowned(device_id)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "HPU device {} acquire_by_module_id failed: {}, using unowned",
+                    device_id, e
+                );
+                Device::from_id_unowned(device_id)
+            }
+        }
+    };
+
+    Ok(device)
+}
 
 /// HPU device context wrapping Synapse Device
 #[derive(Debug)]
@@ -17,10 +120,7 @@ pub struct HpuContext {
 
 impl HpuContext {
     pub fn new(device_id: u32) -> Result<Self> {
-        // Use from_id_unowned to avoid conflicts when PyTorch or other
-        // frameworks already own the device. This allows KVBM to share
-        // the device without re-acquiring it.
-        let device = Device::from_id_unowned(device_id);
+        let device = get_or_acquire_device(device_id)?;
 
         Ok(Self {
             device,

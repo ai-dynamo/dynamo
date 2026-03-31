@@ -103,8 +103,10 @@ fn build_layout(
     agent: NixlAgent,
     config: LayoutConfig,
     storage_kind: StorageKind,
+    device_backend: DeviceBackend,
+    device_id: u32,
 ) -> PhysicalLayout {
-    let builder = PhysicalLayout::builder(agent)
+    let builder = PhysicalLayout::builder(agent, device_backend, device_id)
         .with_config(config)
         .fully_contiguous();
 
@@ -159,11 +161,19 @@ async fn benchmark(args: &Args) -> Result<()> {
         .dtype_width_bytes(2)
         .build()?;
 
-    let disk_layout = build_layout(agent.clone(), src_dst_config.clone(), StorageKind::Disk(0));
+    let disk_layout = build_layout(
+        agent.clone(),
+        src_dst_config.clone(),
+        StorageKind::Disk(0),
+        device_backend,
+        args.device_id,
+    );
     let device_layout = build_layout(
         agent.clone(),
         src_dst_config.clone(),
-        StorageKind::Device(0),
+        StorageKind::Device(args.device_id),
+        device_backend,
+        args.device_id,
     );
 
     let bounce_config = LayoutConfig::builder()
@@ -175,7 +185,13 @@ async fn benchmark(args: &Args) -> Result<()> {
         .dtype_width_bytes(2)
         .build()?;
 
-    let bounce_layout = build_layout(agent.clone(), bounce_config.clone(), StorageKind::Pinned);
+    let bounce_layout = build_layout(
+        agent.clone(),
+        bounce_config.clone(),
+        StorageKind::Pinned,
+        device_backend,
+        args.device_id,
+    );
 
     let ctx = TransportManager::builder()
         .worker_id(0)

@@ -531,12 +531,28 @@ mod tests {
     use super::*;
     use crate::block_manager::v2::physical::layout::LayoutConfig;
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
+    use crate::block_manager::v2::device::DeviceBackend;
 
     fn make_test_agent(name: &str) -> NixlAgent {
         NixlAgent::require_backends(name, &[]).expect("failed to create wrapped agent")
     }
 
+    fn get_test_backend() -> (DeviceBackend, u32) {
+        match DeviceBackend::auto_detect() {
+            Ok(backend) => (backend, 0),
+            Err(_) => {
+                #[cfg(feature = "cuda")]
+                return (DeviceBackend::Cuda, 0);
+                #[cfg(all(not(feature = "cuda"), feature = "hpu"))]
+                return (DeviceBackend::Hpu, 0);
+                #[cfg(all(not(feature = "cuda"), not(feature = "hpu"), feature = "xpu"))]
+                return (DeviceBackend::Ze, 0);
+            }
+        }
+    }
+
     fn make_test_layout(agent: &NixlAgent) -> PhysicalLayout {
+        let (backend, device_id) = get_test_backend();
         let config = LayoutConfig::builder()
             .num_blocks(2)
             .num_layers(2)
@@ -547,7 +563,7 @@ mod tests {
             .build()
             .unwrap();
 
-        PhysicalLayout::builder(agent.clone())
+        PhysicalLayout::builder(agent.clone(), backend, device_id)
             .with_config(config)
             .fully_contiguous()
             .allocate_system()
