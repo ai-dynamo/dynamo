@@ -22,7 +22,7 @@ python -m dynamo.<backend> --help
 ```
 
 > [!NOTE]
-> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags.
+> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags.
 
 > [!TIP]
 > If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
@@ -40,7 +40,7 @@ The tool call parser names currently supported in the codebase are:
 | `deepseek_v3` | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-R1-0528` |
 | `deepseek_v3_1` | `deepseek-ai/DeepSeek-V3.1` |
 | `deepseek_v3_2` | DeepSeek V3.2 DSML tool calling (`<｜DSML｜function_calls>...`) |
-| `default` | Dynamo's fallback parser for `<TOOLCALL>` and `<|python_tag|>` tool tags when no explicit parser is configured |
+| `default` | Dynamo's fallback parser for &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags when no explicit parser is configured |
 | `glm47` | `zai-org/GLM-4.7` |
 | `harmony` | `openai/gpt-oss-*` |
 | `hermes` | `Qwen/Qwen2.5-*`, `Qwen/QwQ-32B`, `NousResearch/Hermes-2-Pro-*`, `NousResearch/Hermes-2-Theta-*`, `NousResearch/Hermes-3-*` |
