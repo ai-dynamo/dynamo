@@ -17,18 +17,19 @@ use crate::tokens::{SequenceHash, compute_hash_v2};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G4StorageWorker {
     pub worker_id: WorkerID,
     pub endpoint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G4PutBlock {
     pub sequence_hash: SequenceHash,
     pub disk_block_idx: usize,
@@ -36,7 +37,7 @@ pub struct G4PutBlock {
     pub checksum: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G4QueryHit {
     pub worker_id: WorkerID,
     pub sequence_hash: SequenceHash,
@@ -45,7 +46,7 @@ pub struct G4QueryHit {
     pub checksum: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G4FetchedBlock {
     pub worker_id: WorkerID,
     pub sequence_hash: SequenceHash,

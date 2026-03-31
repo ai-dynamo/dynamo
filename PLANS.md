@@ -1,6 +1,50 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:31:37 UTC
+Last updated: 2026-03-31 03:02:10 UTC
+
+Current in-progress run (2026-03-31 03:02:10 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager.rs`
+  - `lib/llm/src/block_manager/state.rs`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/bindings/kvbm/src/block_manager.rs`
+  - `lib/bindings/kvbm/src/block_manager/distributed/worker.rs`
+  - `lib/bindings/kvbm/src/block_manager/vllm/connector/worker.rs`
+  - `lib/bindings/kvbm/src/block_manager/vllm/connector/trtllm_worker.rs`
+- Current implementation slice for this run:
+  - add a runtime-owned helper that builds `G4StorageAgent` from a live
+    `KvbmWorker` plus `KvBlockManager::g4_block_index()`, instead of requiring
+    callers to plumb the index manually
+  - cover that seam with a distributed integration-style test that uses a real
+    logical `KvBlockManager`, waits for disk offload registration, then queries
+    the resulting metadata through a worker-derived `G4StorageAgent`
+- Why this slice:
+  - the worker API and shared index are already aligned, but the only real
+    runtime pairing point is still left to ad hoc callers
+  - the existing distributed test harness is the smallest in-tree runtime owner
+    that already constructs both a `KvBlockManager` and `KvbmWorker`
+  - this moves the plan from unit-only helper coverage toward a real runtime
+    seam without claiming discovery / remote RPC are finished
+- In-progress edits:
+  - none yet
+- Validation completed in this run:
+  - none yet
+- Remaining work after this run:
+  - implement the helper + distributed test above
+  - rerun targeted G4/distributed tests
+  - if that passes, re-read `PLANS.md` again and decide whether a second small
+    follow-up slice is still possible in this run
+- Exact next file or command to touch:
+  - file: `lib/llm/src/block_manager/distributed/worker.rs`
+  - then: `lib/llm/src/block_manager/distributed.rs`
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml block_manager::distributed:: --lib --features testing-cuda,testing-etcd`
 
 Current in-progress run (2026-03-31 02:31:37 UTC):
 
@@ -175,6 +219,13 @@ Current in-progress run (2026-03-31 02:20:50 UTC):
     with a real `G4StorageAgent` / `G4StorageClient` request path
   - wire the shared runtime index into whichever worker/discovery layer will own
     live G4 membership and remote fetch/query routing
+  - make the missing limitation explicit in code and runtime notes: the current
+    seam still has no real remote transfer of KV payload bytes; today the
+    control-plane/query path exists, but live remote data-plane transfer is not
+    wired through a network backend yet
+  - when that data-plane work starts, treat a NIXL-backed transport as a strong
+    candidate for the first real backend, while leaving room for other remote
+    transfer backends if they fit the runtime and deployment constraints better
   - add broader integration coverage once that runtime seam exists so the system
     exercises real `query -> fetch -> onboard` across distinct owners
 - Exact next file or command to touch:

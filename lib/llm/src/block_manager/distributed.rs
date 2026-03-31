@@ -61,10 +61,7 @@ mod tests {
     use anyhow::Result;
     use rstest::*;
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     use dynamo_runtime::logging::init as init_logging;
@@ -122,12 +119,14 @@ mod tests {
 
     async fn build_leader_and_workers(num_workers: usize) -> Result<(KvbmLeader, Vec<KvbmWorker>)> {
         let mut workers = Vec::new();
+        let cancel_token = CancellationToken::new();
 
         for i in 0..num_workers {
             let tensors: Vec<Arc<dyn TorchTensor>> =
                 vec![Arc::new(MockTensor::new(vec![2, NUM_BLOCKS, 4096]))];
 
             let config = KvbmWorkerConfig::builder()
+                .cancel_token(cancel_token.child_token())
                 .num_device_blocks(NUM_BLOCKS)
                 .tensors(tensors)
                 .device_id(i)
@@ -332,6 +331,110 @@ mod tests {
         let new_device_blocks = block_manager.onboard_blocks(host_blocks, None).await??;
 
         assert_eq!(new_device_blocks.len(), NUM_BLOCKS);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_g4_storage_agent_uses_runtime_block_manager_index() -> Result<()> {
+        init_logging();
+
+        const BLOCK_SIZE: usize = 4;
+
+        let (leader, mut workers) = build_leader_and_workers(1).await?;
+
+        let cancel_token = CancellationToken::new();
+
+        let config = KvBlockManagerConfig::builder()
+            .runtime(
+                KvManagerRuntimeConfig::builder()
+                    .worker_id(0)
+                    .cancellation_token(cancel_token.clone())
+                    .build()?,
+            )
+            .model(
+                KvManagerModelConfig::builder()
+                    .num_layers(1)
+                    .outer_dim(1)
+                    .page_size(BLOCK_SIZE)
+                    .inner_dim(1)
+                    .build()?,
+            )
+            .device_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .host_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .disk_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .build()?;
+
+        let resources = DistributedLeaderWorkerResources::new(
+            Some(Arc::new(leader)),
+            cancel_token.child_token(),
+        )?;
+
+        let block_manager = KvBlockManager::<
+            Logical<DistributedLeaderWorkerResources>,
+            BasicMetadata,
+        >::new(config, resources)
+        .await?;
+
+        let device_pool = block_manager.device().unwrap();
+        let disk_pool = block_manager.disk().unwrap();
+
+        let mut device_blocks = device_pool.allocate_blocks(NUM_BLOCKS).await?;
+        let mut sequence_hashes = Vec::new();
+        for block in &mut device_blocks {
+            block.init_sequence(42)?;
+            for _ in 0..BLOCK_SIZE {
+                block.add_token(42)?;
+            }
+            block.commit()?;
+            sequence_hashes.push(block.sequence_hash().unwrap());
+        }
+
+        let immutable_device_blocks = device_pool.register_blocks(device_blocks).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(disk_blocks.len(), NUM_BLOCKS);
+
+        drop(immutable_device_blocks);
+
+        let expected_block_index = block_manager.g4_block_index().unwrap();
+        let mut worker = workers.pop().unwrap();
+        let agent = worker
+            .into_g4_storage_agent_for_block_manager(
+                G4StorageWorker {
+                    worker_id: 0,
+                    endpoint: "inproc://g4-runtime-test".to_string(),
+                },
+                &block_manager,
+            )
+            .await?;
+
+        assert!(Arc::ptr_eq(&agent.block_index(), &expected_block_index));
+
+        let hits = agent.query_blocks(sequence_hashes.as_slice()).await;
+        assert_eq!(hits.len(), NUM_BLOCKS);
+        for sequence_hash in sequence_hashes {
+            assert!(hits.iter().any(|hit| hit.sequence_hash == sequence_hash));
+        }
 
         Ok(())
     }

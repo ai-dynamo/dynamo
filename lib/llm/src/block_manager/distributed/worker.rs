@@ -9,7 +9,8 @@ use utils::*;
 use zmq::*;
 
 use crate::block_manager::{
-    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage, WorkerID,
+    BasicMetadata, BlockMetadata, KvBlockManager, LayoutConfigBuilder, NixlLayout, Storage,
+    WorkerID,
     block::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
@@ -697,6 +698,21 @@ impl KvbmWorker {
             Arc::new(handler),
             block_index,
         ))
+    }
+
+    pub async fn into_g4_storage_agent_for_block_manager<
+        Locality: locality::LocalityProvider,
+        Metadata: BlockMetadata,
+    >(
+        &mut self,
+        worker: G4StorageWorker,
+        block_manager: &KvBlockManager<Locality, Metadata>,
+    ) -> anyhow::Result<G4StorageAgent> {
+        let block_index = block_manager.g4_block_index().ok_or_else(|| {
+            anyhow::anyhow!("block manager has no disk-backed G4 block index available")
+        })?;
+
+        self.into_g4_storage_agent(worker, block_index).await
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
