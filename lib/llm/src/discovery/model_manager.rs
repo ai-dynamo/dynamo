@@ -557,6 +557,7 @@ impl ModelManager {
             component: router_endpoint_id.component.clone(),
             endpoint: router_endpoint_id.name.clone(),
             transport,
+            device_type: None,
         };
 
         discovery.register(discovery_spec).await?;

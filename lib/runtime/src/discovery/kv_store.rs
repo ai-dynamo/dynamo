@@ -613,6 +613,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -639,6 +640,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         };
         client.register(spec1).await.unwrap();
 
@@ -647,6 +649,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         };
         client.register(spec2).await.unwrap();
 
@@ -655,6 +658,7 @@ mod tests {
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         };
         client.register(spec3).await.unwrap();
 
@@ -703,6 +707,7 @@ mod tests {
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
+                device_type: None,
             };
             client_clone.register(spec).await.unwrap();
         });

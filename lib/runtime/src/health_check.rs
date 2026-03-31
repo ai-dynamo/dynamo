@@ -481,6 +481,7 @@ mod integration_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 12345,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                device_type: None,
             },
             payload.clone(),
         );
@@ -516,6 +517,7 @@ mod integration_tests {
                     namespace: "test_namespace".to_string(),
                     instance_id: i,
                     transport: crate::component::TransportType::Nats(endpoint.clone()),
+                    device_type: None,
                 },
                 payload,
             );
@@ -559,6 +561,7 @@ mod integration_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 999,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                device_type: None,
             },
             payload.clone(),
         );

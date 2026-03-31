@@ -45,6 +45,7 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouterMode {
     RoundRobin,
+    DeviceAwareWeighted,
     Random,
     PowerOfTwoChoices,
     KV,
@@ -57,6 +58,7 @@ impl From<RouterMode> for RsRouterMode {
     fn from(mode: RouterMode) -> Self {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
+            RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
             RouterMode::Random => Self::Random,
             RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
