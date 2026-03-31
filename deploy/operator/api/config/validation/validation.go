@@ -128,21 +128,11 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 }
 
 func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
 	if !checkpoint.Enabled {
-		return allErrs
+		return nil
 	}
 
-	storagePath := fldPath.Child("storage")
-	if checkpoint.Storage.PVC.PVCName == "" {
-		allErrs = append(allErrs, field.Required(storagePath.Child("pvc", "pvcName"), "checkpoint PVC name is required"))
-	}
-	if checkpoint.Storage.PVC.BasePath == "" {
-		allErrs = append(allErrs, field.Required(storagePath.Child("pvc", "basePath"), "checkpoint PVC base path is required"))
-	}
-
-	return allErrs
+	return nil
 }
 
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.

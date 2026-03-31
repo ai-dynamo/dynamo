@@ -1054,6 +1054,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
+	if r.Config.Checkpoint.Enabled {
+		if err := checkpoint.InjectCheckpointIntoPodSpec(
+			ctx,
+			r.Client,
+			opt.dynamoComponentDeployment.Namespace,
+			podSpec,
+			checkpointInfo,
+		); err != nil {
+			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+		}
+	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
 	if len(podSpec.Containers) == 0 {

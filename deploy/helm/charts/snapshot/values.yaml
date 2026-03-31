@@ -26,7 +26,7 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # PVC name - must match operator configuration
+    # PVC name used by the snapshot-agent checkpoint store
     name: snapshot-pvc
     # PVC size
     size: 1Ti
@@ -35,7 +35,7 @@ storage:
     # Access mode - ReadWriteMany required for multi-pod access
     accessMode: ReadWriteMany
     # PVC mount path inside the snapshot-agent pod.
-    # This must match the operator checkpoint.storage.pvc.basePath setting.
+    # Restore targets derive checkpoint paths from this mount.
     basePath: /checkpoints
 
   # S3 configuration (when type=s3)

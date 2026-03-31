@@ -21,11 +21,12 @@ import (
 	"context"
 	"testing"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,18 +39,6 @@ const (
 	testHash      = "abc123def4567890"
 	testNamespace = "default"
 )
-
-func testPVCConfig() *configv1alpha1.CheckpointConfiguration {
-	return &configv1alpha1.CheckpointConfiguration{
-		Enabled: true,
-		Storage: configv1alpha1.CheckpointStorageConfiguration{
-			PVC: configv1alpha1.CheckpointPVCConfig{
-				PVCName:  "snapshot-pvc",
-				BasePath: "/checkpoints",
-			},
-		},
-	}
-}
 
 func testIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
 	return nvidiacomv1alpha1.DynamoCheckpointIdentity{
@@ -73,11 +62,45 @@ func testScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
+	_ = appsv1.AddToScheme(s)
 	return s
 }
 
 func testInfo() *CheckpointInfo {
 	return &CheckpointInfo{Enabled: true, Hash: testHash}
+}
+
+func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotworkload.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      "checkpoints",
+							MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "checkpoints",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "snapshot-pvc",
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
 }
 
 type createHookClient struct {
@@ -163,7 +186,8 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
-		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
@@ -199,17 +223,15 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			name    string
 			podSpec *corev1.PodSpec
 			info    *CheckpointInfo
-			config  *configv1alpha1.CheckpointConfiguration
+			reader  client.Reader
 			errMsg  string
 		}{
-			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, testPVCConfig(), "identity is nil"},
-			{"no containers", &corev1.PodSpec{}, testInfo(), testPVCConfig(), "no container found"},
-			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
-			}, "checkpoint pvc name is required"},
+			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
+			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container found"},
+			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := InjectCheckpointIntoPodSpec(tc.podSpec, tc.info, tc.config)
+				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
@@ -219,7 +241,8 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("falls back to first container when main not found", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "img", Command: []string{"python3"}}}}
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
-		require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, testPVCConfig()))
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 	})
 }

@@ -233,17 +233,6 @@ dynamo-operator:
     # -- Path written by worker when model is loaded and ready for checkpointing
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
 
-    # Storage configuration
-    # These settings tell the operator which snapshot PVC to mount into restore targets.
-    # They must match the snapshot chart install in the namespace.
-    storage:
-      # -- PVC storage configuration for the snapshot checkpoint store
-      pvc:
-        # -- Name of the PVC created by the snapshot chart
-        pvcName: "snapshot-pvc"
-        # -- Base path within the PVC for storing checkpoints
-        basePath: "/checkpoints"
-
 # Grove component - distributed inference orchestration
 # Installation is controlled by global.grove.install above.
 grove:

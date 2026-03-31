@@ -18,12 +18,13 @@
 package checkpoint
 
 import (
+	"context"
 	"fmt"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	corev1 "k8s.io/api/core/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
@@ -38,9 +39,11 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 }
 
 func InjectCheckpointIntoPodSpec(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	checkpointConfig *configv1alpha1.CheckpointConfiguration,
 ) error {
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
@@ -72,33 +75,22 @@ func InjectCheckpointIntoPodSpec(
 	if mainContainer == nil {
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
-	if checkpointConfig == nil {
-		return fmt.Errorf("checkpoint config is required")
+	if reader == nil {
+		return fmt.Errorf("checkpoint client is required")
 	}
-	if checkpointConfig.Storage.PVC.PVCName == "" {
-		return fmt.Errorf("checkpoint pvc name is required")
-	}
-
-	storageConfig := snapshotworkload.Storage{
-		Type:     snapshotworkload.StorageTypePVC,
-		PVCName:  checkpointConfig.Storage.PVC.PVCName,
-		BasePath: checkpointConfig.Storage.PVC.BasePath,
-	}
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
-		info.Hash,
-		info.ArtifactVersion,
-		storageConfig,
-	)
-	if err != nil {
-		return err
-	}
-	snapshotworkload.PrepareRestorePodSpec(
+	if err := snapshotworkload.PrepareRestorePodSpecForCheckpoint(
+		ctx,
+		reader,
+		namespace,
 		podSpec,
 		mainContainer,
-		resolvedStorage,
+		info.Hash,
+		info.ArtifactVersion,
 		commonconsts.SeccompProfilePath,
 		info.Ready,
-	)
+	); err != nil {
+		return err
+	}
 
 	hasPodInfoVolume := false
 	for _, volume := range podSpec.Volumes {

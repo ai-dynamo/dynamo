@@ -74,12 +74,6 @@ func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 		Checkpoint: configv1alpha1.CheckpointConfiguration{
 			Enabled:                    true,
 			ReadyForCheckpointFilePath: "/tmp/ready-for-checkpoint",
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				PVC: configv1alpha1.CheckpointPVCConfig{
-					PVCName:  "snapshot-pvc",
-					BasePath: "/checkpoints",
-				},
-			},
 		},
 	}
 }

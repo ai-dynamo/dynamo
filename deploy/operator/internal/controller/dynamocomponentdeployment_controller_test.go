@@ -29,6 +29,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -1255,6 +1256,40 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add corev1 to scheme: %v", err)
 	}
+	if err := appsv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
+	}
+
+	snapshotAgentDaemonSet := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: "default",
+			Labels: map[string]string{
+				snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotworkload.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      "checkpoints",
+							MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "checkpoints",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "snapshot-pvc",
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
 
 	makeDCD := func(checkpointRef string) *v1alpha1.DynamoComponentDeployment {
 		return &v1alpha1.DynamoComponentDeployment{
@@ -1291,6 +1326,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
+		objs = append(objs, snapshotAgentDaemonSet.DeepCopy())
 		return &DynamoComponentDeploymentReconciler{
 			Client: fake.NewClientBuilder().
 				WithScheme(s).
@@ -1299,12 +1335,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			Config: &configv1alpha1.OperatorConfiguration{
 				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: configv1alpha1.CheckpointStorageConfiguration{
-						PVC: configv1alpha1.CheckpointPVCConfig{
-							PVCName:  "snapshot-pvc",
-							BasePath: "/checkpoints",
-						},
-					},
 				},
 			},
 		}
@@ -1480,6 +1510,36 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
+		objs = append(objs, &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-agent",
+				Namespace: "default",
+				Labels: map[string]string{
+					snapshotworkload.SnapshotAgentLabelKey: snapshotworkload.SnapshotAgentLabelValue,
+				},
+			},
+			Spec: appsv1.DaemonSetSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: snapshotworkload.SnapshotAgentContainerName,
+							VolumeMounts: []corev1.VolumeMount{{
+								Name:      "checkpoints",
+								MountPath: "/checkpoints",
+							}},
+						}},
+						Volumes: []corev1.Volume{{
+							Name: "checkpoints",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "snapshot-pvc",
+								},
+							},
+						}},
+					},
+				},
+			},
+		})
 		return &DynamoComponentDeploymentReconciler{
 			Client: fake.NewClientBuilder().
 				WithScheme(s).
@@ -1488,12 +1548,6 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 			Config: &configv1alpha1.OperatorConfiguration{
 				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: configv1alpha1.CheckpointStorageConfiguration{
-						PVC: configv1alpha1.CheckpointPVCConfig{
-							PVCName:  "snapshot-pvc",
-							BasePath: "/checkpoints",
-						},
-					},
 				},
 			},
 		}

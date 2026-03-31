@@ -12,22 +12,19 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
+
+	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 )
 
-type snapshotStorage struct {
-	PVCName  string
-	BasePath string
-}
-
-func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, string, snapshotStorage, error) {
+func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, string, snapshotworkload.Storage, error) {
 	pod, err := loadPod(manifestPath)
 	if err != nil {
-		return nil, nil, "", snapshotStorage{}, err
+		return nil, nil, "", snapshotworkload.Storage{}, err
 	}
 
 	clientset, currentNamespace, err := loadClientset(kubeContext)
 	if err != nil {
-		return nil, nil, "", snapshotStorage{}, err
+		return nil, nil, "", snapshotworkload.Storage{}, err
 	}
 
 	namespace := currentNamespace
@@ -43,7 +40,7 @@ func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride 
 
 	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
 	if err != nil {
-		return nil, nil, "", snapshotStorage{}, err
+		return nil, nil, "", snapshotworkload.Storage{}, err
 	}
 	return pod, clientset, namespace, storage, nil
 }
@@ -74,59 +71,15 @@ func loadClientset(kubeContext string) (kubernetes.Interface, string, error) {
 	return clientset, namespace, nil
 }
 
-func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotStorage, error) {
+func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotworkload.Storage, error) {
 	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=snapshot",
+		LabelSelector: snapshotworkload.SnapshotAgentLabelSelector,
 	})
 	if err != nil {
-		return snapshotStorage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
-	}
-	if len(daemonSets.Items) == 0 {
-		return snapshotStorage{}, fmt.Errorf("no snapshot-agent daemonset found in namespace %s", namespace)
+		return snapshotworkload.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
 	}
 
-	for _, daemonSet := range daemonSets.Items {
-		mountPaths := map[string]string{}
-		for _, container := range daemonSet.Spec.Template.Spec.Containers {
-			if container.Name != "agent" {
-				continue
-			}
-			for _, mount := range container.VolumeMounts {
-				if strings.TrimSpace(mount.MountPath) == "" {
-					continue
-				}
-				mountPaths[mount.Name] = mount.MountPath
-			}
-		}
-
-		for _, volume := range daemonSet.Spec.Template.Spec.Volumes {
-			if volume.PersistentVolumeClaim == nil {
-				continue
-			}
-			basePath, ok := mountPaths[volume.Name]
-			if !ok || strings.TrimSpace(basePath) == "" {
-				continue
-			}
-			claimName := strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName)
-			if claimName == "" {
-				continue
-			}
-			return snapshotStorage{
-				PVCName:  claimName,
-				BasePath: strings.TrimRight(basePath, "/"),
-			}, nil
-		}
-	}
-
-	names := make([]string, 0, len(daemonSets.Items))
-	for _, daemonSet := range daemonSets.Items {
-		names = append(names, daemonSet.Name)
-	}
-	return snapshotStorage{}, fmt.Errorf(
-		"snapshot-agent daemonset in %s does not mount a PVC-backed checkpoint volume (%s)",
-		namespace,
-		strings.Join(names, ", "),
-	)
+	return snapshotworkload.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
 }
 
 func loadPod(manifestPath string) (*corev1.Pod, error) {

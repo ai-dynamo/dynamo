@@ -124,23 +124,19 @@ func TestValidateOperatorConfiguration_NamespaceScopedLeaseRenewExceedsDuration(
 	}
 }
 
-func TestValidateOperatorConfiguration_CheckpointMissingPVCConfig(t *testing.T) {
+func TestValidateOperatorConfiguration_CheckpointEnabledRequiresNoStorageConfig(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.PVC.PVCName = ""
-	cfg.Checkpoint.Storage.PVC.BasePath = ""
 
 	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 2 {
-		t.Errorf("expected 2 errors for missing checkpoint pvc config, got %d: %v", len(errs), errs)
+	if len(errs) != 0 {
+		t.Errorf("expected no errors for checkpoint config without storage settings, got: %v", errs)
 	}
 }
 
 func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = false
-	cfg.Checkpoint.Storage.PVC.PVCName = ""
-	cfg.Checkpoint.Storage.PVC.BasePath = ""
 
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 0 {

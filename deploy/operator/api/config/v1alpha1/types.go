@@ -238,24 +238,6 @@ type CheckpointConfiguration struct {
 	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
 	// +kubebuilder:default="/tmp/ready-for-checkpoint"
 	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
-	// Storage holds storage backend configuration
-	Storage CheckpointStorageConfiguration `json:"storage"`
-}
-
-// CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
-type CheckpointStorageConfiguration struct {
-	// PVC holds the snapshot PVC settings the operator needs for restore pod wiring.
-	PVC CheckpointPVCConfig `json:"pvc"`
-}
-
-// CheckpointPVCConfig holds PVC storage configuration.
-type CheckpointPVCConfig struct {
-	// PVCName is the name of the PVC
-	// +kubebuilder:default="snapshot-pvc"
-	PVCName string `json:"pvcName"`
-	// BasePath is the base directory within the PVC
-	// +kubebuilder:default="/checkpoints"
-	BasePath string `json:"basePath"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.
