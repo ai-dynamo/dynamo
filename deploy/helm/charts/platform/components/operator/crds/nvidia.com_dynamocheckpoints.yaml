@@ -8239,7 +8239,7 @@ spec:
                     type: object
                   type: array
                 createdAt:
-                  description: CreatedAt is the timestamp when the checkpoint tar was created
+                  description: CreatedAt is the timestamp when the checkpoint became ready
                   format: date-time
                   type: string
                 identityHash:

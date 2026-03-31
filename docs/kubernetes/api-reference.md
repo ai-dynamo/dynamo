@@ -320,7 +320,7 @@ _Appears in:_
 | `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
-| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
+| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
 

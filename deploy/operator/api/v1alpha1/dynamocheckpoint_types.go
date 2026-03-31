@@ -142,7 +142,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// CreatedAt is the timestamp when the checkpoint tar was created
+	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 
