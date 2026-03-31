@@ -192,6 +192,7 @@ class K8sConfig:
     image: str = ""
     frontend_port: int = 8000
     worker_replicas: int = 1
+    frontend_replicas: int = 1
     deploy_template: str = ""  # path to deploy.yaml template
     reset_strategy: str = "graph"  # none | frontend | graph
     request_plane: str = "tcp"
@@ -210,6 +211,7 @@ class K8sConfig:
             "image": self.image,
             "frontend_port": self.frontend_port,
             "worker_replicas": self.worker_replicas,
+            "frontend_replicas": self.frontend_replicas,
             "deploy_template": self.deploy_template,
             "reset_strategy": self.reset_strategy,
             "request_plane": self.request_plane,

@@ -12,8 +12,9 @@
 #   ${MODEL_PATH}            - HF model ID
 #   ${MODEL_NAME}            - Served model name
 #   ${NUM_WORKERS}           - Mocker workers per pod
+#   ${FRONTEND_REPLICAS}     - Number of frontend pods (default: 1)
 #   ${WORKER_REPLICAS}       - Number of worker pods
-#   ${SPEEDUP_RATIO}         - Mocker speedup ratio (0 = infinite)
+#   ${SPEEDUP_RATIO}         - Mocker speedup ratio (use large value for near-instant)
 #
 # Usage:
 #   python3 sweep_runner.py --mode k8s --deploy-template dgd/templates/mocker.yaml \
@@ -28,7 +29,7 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      replicas: 1
+      replicas: ${FRONTEND_REPLICAS}
       extraPodSpec:
 ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
         mainContainer:

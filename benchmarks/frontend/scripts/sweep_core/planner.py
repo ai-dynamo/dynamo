@@ -97,6 +97,8 @@ def print_plan(plan: SweepPlan) -> None:
     if config.mode == "k8s":
         print(f"  Namespace:      {config.k8s.namespace}")
         print(f"  Endpoint:       {config.k8s.endpoint}")
+        if config.k8s.frontend_replicas > 1:
+            print(f"  FE replicas:    {config.k8s.frontend_replicas}")
         if config.k8s.dgd_name:
             print(f"  DGD:            {config.k8s.dgd_name}")
         if config.k8s.deploy_template:

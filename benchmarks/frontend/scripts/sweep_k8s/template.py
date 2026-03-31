@@ -71,6 +71,7 @@ def build_substitution_dict(
         "DGD_NAME": k8s.dgd_name,
         "FRONTEND_PORT": str(k8s.frontend_port),
         "WORKER_REPLICAS": str(k8s.worker_replicas),
+        "FRONTEND_REPLICAS": str(k8s.frontend_replicas),
         "SPEEDUP_RATIO": str(config.speedup_ratio),
         "REQUEST_PLANE": k8s.request_plane,
         "EVENT_PLANE": k8s.event_plane,

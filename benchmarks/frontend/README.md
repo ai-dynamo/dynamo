@@ -57,7 +57,7 @@ python3 sweep_runner.py \
     --concurrency 32 \
     --isl 512 \
     --benchmark-duration 30 \
-    --speedup-ratio 0
+    --speedup-ratio 1000000
 ```
 
 **Full local sweep:**
@@ -77,7 +77,7 @@ python3 sweep_runner.py \
     --concurrency 4096 \
     --num-requests 16384,32768 \
     --workers 1,2,4,8 \
-    --speedup-ratio 0
+    --speedup-ratio 1000000
 ```
 
 Results are written to `artifacts/sweep_<timestamp>/`.
@@ -161,7 +161,7 @@ All flags for `sweep_runner.py`:
 | `--osl` | `256` | Output sequence length. |
 | `--workers` | `2` | Comma-separated worker counts per model. |
 | `--num-models` | `1` | Number of model instances. |
-| `--speedup-ratio` | `1.0` | Mocker speedup (0 = infinite speed). |
+| `--speedup-ratio` | `1.0` | Mocker speedup divisor; use large values (e.g., 1000000) for near-instant mocker. |
 | `--benchmark-duration` | `60` | aiperf duration in seconds. |
 | `--num-requests` | none | Comma-separated request counts (overrides `--benchmark-duration`). |
 | `--rps` | none | Comma-separated target request rates (req/s). |

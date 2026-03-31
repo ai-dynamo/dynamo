@@ -34,7 +34,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         epilog="""Examples:
   # Local smoke test
   python3 sweep_runner.py --tokenizers hf,fastokens --concurrency 32 --isl 512 \\
-      --benchmark-duration 30 --speedup-ratio 0
+      --benchmark-duration 30 --speedup-ratio 1000000
 
   # K8s sweep with DGD
   python3 sweep_runner.py --mode k8s --tokenizers hf,fastokens --concurrency 50,100 --isl 512
@@ -45,7 +45,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
   # Transport saturation (high concurrency, vary workers)
   python3 sweep_runner.py --tokenizers hf --concurrency 4096 \\
-      --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 0
+      --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 1000000
 
   # Dry run
   python3 sweep_runner.py --dry-run --tokenizers hf,fastokens --concurrency 32,64 --isl 512,1024
@@ -177,6 +177,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--worker-replicas", type=int, default=1, help="Number of worker pod replicas"
     )
     k8s_group.add_argument(
+        "--frontend-replicas",
+        type=int,
+        default=1,
+        help="Number of frontend pod replicas",
+    )
+    k8s_group.add_argument(
         "--request-plane", default="tcp", help="Request plane transport"
     )
     k8s_group.add_argument(
@@ -234,6 +240,7 @@ def config_from_args(args: argparse.Namespace) -> SweepConfig:
         image=args.image,
         frontend_port=args.frontend_port,
         worker_replicas=args.worker_replicas,
+        frontend_replicas=args.frontend_replicas,
         deploy_template=args.deploy_template,
         reset_strategy=args.reset_strategy,
         request_plane=args.request_plane,

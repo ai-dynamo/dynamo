@@ -11,6 +11,7 @@
 #   ${ROUTER_MODE}           - Frontend router mode
 #   ${MODEL}                 - HF model ID
 #   ${MODEL_NAME}            - Served model name
+#   ${FRONTEND_REPLICAS}     - Number of frontend pods (default: 1)
 #   ${WORKER_REPLICAS}       - Number of vLLM worker pods
 #
 # Usage:
@@ -27,7 +28,7 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      replicas: 1
+      replicas: ${FRONTEND_REPLICAS}
       extraPodSpec:
 ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
         mainContainer:

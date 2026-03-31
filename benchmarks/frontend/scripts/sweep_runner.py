@@ -20,7 +20,7 @@ Sweep dimensions (all configurable):
 Usage:
     # Local smoke test (2 runs)
     python3 sweep_runner.py --tokenizers hf,fastokens --concurrency 32 --isl 512 \\
-        --benchmark-duration 30 --speedup-ratio 0
+        --benchmark-duration 30 --speedup-ratio 1000000
 
     # Full local sweep with mocker
     python3 sweep_runner.py --tokenizers hf,fastokens --concurrency 32,64 --isl 512,1024,2048
@@ -35,7 +35,7 @@ Usage:
 
     # Transport saturation sweep
     python3 sweep_runner.py --tokenizers hf --concurrency 4096 \\
-        --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 0
+        --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 1000000
 
     # Dry run
     python3 sweep_runner.py --dry-run --tokenizers hf,fastokens --concurrency 32,64 --isl 512,1024
