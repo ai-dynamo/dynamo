@@ -271,6 +271,36 @@ where
     }
 }
 
+pub fn read_from_remote<RB, WB>(
+    sources: &[RB],
+    targets: &mut [WB],
+    ctx: Arc<TransferContext>,
+) -> Result<oneshot::Receiver<()>, TransferError>
+where
+    RB: ReadableBlock,
+    WB: WritableBlock,
+    <RB as StorageTypeProvider>::StorageType: Remote + NixlDescriptor,
+    <WB as StorageTypeProvider>::StorageType: Local + NixlDescriptor,
+{
+    if sources.is_empty() && targets.is_empty() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).unwrap();
+        return Ok(rx);
+    }
+
+    if sources.len() != targets.len() {
+        return Err(TransferError::CountMismatch(sources.len(), targets.len()));
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let transfer_fut = nixl::write_blocks_to(sources, targets, &ctx, NixlTransfer::Read)?;
+    ctx.async_rt_handle().spawn(async move {
+        transfer_fut.await;
+        tx.send(()).unwrap();
+    });
+    Ok(rx)
+}
+
 pub trait WriteTo<Target> {
     fn write_to(
         &self,

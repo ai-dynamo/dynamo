@@ -344,6 +344,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             .context("Failed to serialize local blockset")
     }
 
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.resources.nixl_agent.clone()
+    }
+
     /// Imports a remote blockset configuration from a serialized object.
     // TODO: NIXL will validate the every descriptor list against the memory registration list for
     // a given agent; this is can be an expensive operation. To avoid this, NIXL offers the ability

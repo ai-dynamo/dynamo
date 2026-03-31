@@ -21,9 +21,9 @@ use dynamo_llm::block_manager::config::{
 };
 use dynamo_llm::block_manager::distributed::{
     FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbOfferRequest,
-    G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
-    G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
+    G3pbFetchRequest, G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest,
+    G3pbOfferRequest, G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit,
+    G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
@@ -303,6 +303,43 @@ impl G3pbPeerRuntime {
         Ok(())
     }
 
+    async fn query_blocks(
+        &self,
+        agent: &G3pbStorageAgent,
+        sequence_hashes: &[u64],
+    ) -> Vec<G3pbQueryHit> {
+        let mut hits = Vec::new();
+        let mut missing = Vec::new();
+        {
+            let state = self.state.read().expect("g3pb runtime state poisoned");
+            for sequence_hash in sequence_hashes {
+                if let Some(block) = state.committed.get(sequence_hash) {
+                    hits.push(G3pbQueryHit {
+                        worker_id: self.worker_id,
+                        sequence_hash: *sequence_hash,
+                        size_bytes: block.meta.size_bytes,
+                        checksum: block.meta.checksum,
+                    });
+                } else {
+                    missing.push(*sequence_hash);
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            hits.extend(agent.query_blocks(&missing).await);
+        }
+
+        hits
+    }
+
+    fn load_remote_blockset(
+        &self,
+        blockset: dynamo_llm::block_manager::block::nixl::SerializedNixlBlockSet,
+    ) -> Result<()> {
+        self.block_manager.import_remote_blockset(blockset)
+    }
+
     fn fetch_descriptors(&self, sequence_hashes: &[u64]) -> Result<G3pbFetchBlocksResponse, G3pbError> {
         let state = self.state.read().expect("g3pb runtime state poisoned");
         let mut block_ids = Vec::with_capacity(sequence_hashes.len());
@@ -367,7 +404,12 @@ async fn query_blocks(
     State(state): State<AppState>,
     Json(request): Json<G3pbQueryRequest>,
 ) -> Json<Vec<G3pbQueryHit>> {
-    Json(state.agent.query_blocks(&request.sequence_hashes).await)
+    Json(
+        state
+            .runtime
+            .query_blocks(&state.agent, &request.sequence_hashes)
+            .await,
+    )
 }
 
 async fn offer_blocks(
@@ -397,6 +439,17 @@ async fn commit_put_blocks(
         .runtime
         .commit_staged_blocks(&state.agent, &request.sequence_hashes)
         .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn load_remote_blockset(
+    State(state): State<AppState>,
+    Json(request): Json<G3pbLoadRemoteRequest>,
+) -> Result<StatusCode, StatusCode> {
+    state
+        .runtime
+        .load_remote_blockset(request.blockset)
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|_| StatusCode::BAD_REQUEST)
 }
@@ -437,6 +490,8 @@ fn build_agent(worker_id: u64) -> Result<NixlAgent> {
     let agent = NixlAgent::new(&worker_id.to_string())?;
     let (_, ucx_params) = agent.get_plugin_params("UCX")?;
     agent.create_backend("UCX", &ucx_params)?;
+    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
+    agent.create_backend("POSIX", &posix_params)?;
     Ok(agent)
 }
 
@@ -471,6 +526,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/offer", post(offer_blocks))
         .route("/put", post(put_blocks))
+        .route("/load_remote", post(load_remote_blockset))
         .route("/stage_put", post(stage_put_blocks))
         .route("/commit_put", post(commit_put_blocks))
         .route("/put_payload", post(put_payload_blocks))

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use dynamo_llm::block_manager::KvBlockManager;
@@ -10,17 +11,22 @@ use dynamo_llm::block_manager::block::{
     BasicMetadata, BlockDataProvider, BlockDataProviderMut, MutableBlock, data::BlockDataExt,
     locality::LocalityProvider,
 };
+use dynamo_llm::block_manager::block::transfer::{
+    PoolConfig, TransferContext, WriteTo, read_from_remote,
+};
 use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G3pbFetchRequest, G3pbFetchResponse, G3pbHealthResponse, G3pbOfferRequest, G3pbOfferResponse,
-    G3pbPeer, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
-    G3pbTransferBlock, route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner,
-    route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
+    G3pbCommitRequest, G3pbFetchBlocksResponse, G3pbFetchRequest, G3pbHealthResponse,
+    G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock,
+    G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse,
+    route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
-use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, PinnedStorage};
+use dynamo_llm::block_manager::storage::{
+    DeviceAllocator, PinnedAllocator, PinnedStorage, nixl::NixlAgent,
+};
 use futures::future::join_all;
 use reqwest::Client;
 use tokio_util::sync::CancellationToken;
@@ -281,14 +287,14 @@ async fn prepare_demo_blocks(
     Ok(demo_blocks)
 }
 
-async fn build_local_runtime(args: &Args) -> Result<LocalBlockManager> {
+async fn build_local_runtime(args: &Args, agent: NixlAgent) -> Result<LocalBlockManager> {
     let cancel_token = CancellationToken::new();
     let mut block_manager_config = KvBlockManagerConfig::builder()
         .runtime(
             KvManagerRuntimeConfig::builder()
                 .worker_id(args.worker_id)
                 .cancellation_token(cancel_token.clone())
-                .disable_nixl()
+                .use_nixl_agent(agent)
                 .build()?,
         )
         .model(
@@ -320,10 +326,41 @@ async fn build_local_runtime(args: &Args) -> Result<LocalBlockManager> {
     LocalBlockManager::new(block_manager_config).await
 }
 
+fn build_agent(worker_id: u64) -> Result<NixlAgent> {
+    let agent = NixlAgent::new(&worker_id.to_string())?;
+    let (_, ucx_params) = agent.get_plugin_params("UCX")?;
+    agent.create_backend("UCX", &ucx_params)?;
+    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
+    agent.create_backend("POSIX", &posix_params)?;
+    Ok(agent)
+}
+
+fn build_transfer_context(
+    args: &Args,
+    nixl_agent: Arc<Option<NixlAgent>>,
+) -> Result<Arc<TransferContext>> {
+    let pool_config = PoolConfig {
+        enable_pool: true,
+        max_concurrent_transfers: 4,
+        max_transfer_batch_size: args.count.max(1),
+        num_outer_components: 1,
+        num_layers: 1,
+    };
+
+    Ok(Arc::new(TransferContext::new(
+        nixl_agent,
+        DeviceAllocator::new(args.device_id)?.ctx().new_stream()?,
+        tokio::runtime::Handle::current(),
+        Some(pool_config),
+    )?))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse()?;
-    let block_manager = build_local_runtime(&args).await?;
+    let nixl_agent = build_agent(args.worker_id)?;
+    let block_manager = build_local_runtime(&args, nixl_agent.clone()).await?;
+    let transfer_context = build_transfer_context(&args, block_manager.nixl_agent())?;
     println!(
         "local worker ready: worker_id={} device_blocks={} host_blocks={}",
         block_manager.worker_id(),
@@ -334,6 +371,7 @@ async fn main() -> Result<()> {
     let demo_blocks = prepare_demo_blocks(&args, &block_manager).await?;
     let uploaded_demo_blocks = &demo_blocks[..args.count];
     let missing_demo_block = &demo_blocks[args.count];
+    let local_blockset = block_manager.export_local_blockset()?;
 
     let client = Client::new();
     let health_checks = join_all(args.backend_urls.iter().map(|backend_url| {
@@ -377,20 +415,28 @@ async fn main() -> Result<()> {
         );
     }
 
+    for (worker_id, backend_url) in &backend_urls_by_worker {
+        client
+            .post(format!("{backend_url}/load_remote"))
+            .json(&G3pbLoadRemoteRequest {
+                blockset: local_blockset.clone(),
+            })
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("failed to publish local blockset to worker {worker_id}"))?;
+    }
+
+    let demo_blocks_by_hash: HashMap<u64, &DemoBlock> = demo_blocks
+        .iter()
+        .map(|block| (block.sequence_hash, block))
+        .collect();
     let blocks: Vec<G3pbPutBlock> = uploaded_demo_blocks
         .iter()
         .map(|block| G3pbPutBlock {
             sequence_hash: block.sequence_hash,
             size_bytes: block.size_bytes,
             checksum: None,
-        })
-        .collect();
-    let transfer_blocks: Vec<G3pbTransferBlock> = uploaded_demo_blocks
-        .iter()
-        .zip(blocks.iter())
-        .map(|(demo, meta)| G3pbTransferBlock {
-            meta: meta.clone(),
-            payload: demo.payload.clone(),
         })
         .collect();
 
@@ -423,19 +469,22 @@ async fn main() -> Result<()> {
         accepted_by_worker.insert(worker_id, accepted.into_iter().collect());
     }
 
-    let accepted_blocks: Vec<G3pbTransferBlock> = transfer_blocks
+    let accepted_blocks: Vec<G3pbPutBlock> = blocks
         .iter()
         .filter(|block| {
-            select_g3pb_owner(block.meta.sequence_hash, &remote_workers)
+            select_g3pb_owner(block.sequence_hash, &remote_workers)
                 .and_then(|owner| accepted_by_worker.get(&owner.worker_id))
-                .is_some_and(|accepted| accepted.contains(&block.meta.sequence_hash))
+                .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
         })
         .cloned()
         .collect();
 
-    let payloads_by_owner =
-        route_g3pb_transfer_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
-    for result in join_all(payloads_by_owner.into_iter().map(|(worker_id, blocks)| {
+    let host_pool = block_manager
+        .host()
+        .context("local block manager has no host pool for G3pb staging")?;
+    let mut imported_workers = HashSet::new();
+    let staged_by_owner = route_g3pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
+    let staged_responses = join_all(staged_by_owner.into_iter().map(|(worker_id, blocks)| {
         let client = client.clone();
         let backend_url = backend_urls_by_worker
             .get(&worker_id)
@@ -443,24 +492,53 @@ async fn main() -> Result<()> {
             .with_context(|| format!("missing backend url for worker {worker_id}"));
         async move {
             let backend_url = backend_url?;
-            client
-                .post(format!("{backend_url}/put_payload"))
-                .json(&G3pbPutPayloadRequest { blocks })
+            let response: G3pbStageBlocksResponse = client
+                .post(format!("{backend_url}/stage_put"))
+                .json(&G3pbStageBlocksRequest {
+                    blocks: blocks.clone(),
+                })
                 .send()
                 .await?
-                .error_for_status()?;
-            Ok::<_, anyhow::Error>(worker_id)
+                .error_for_status()?
+                .json()
+                .await?;
+            Ok::<_, anyhow::Error>((worker_id, backend_url, blocks, response))
         }
     }))
-    .await
-    {
-        let worker_id = result?;
-        println!("uploaded accepted payloads to worker {worker_id}");
+    .await;
+    for result in staged_responses {
+        let (worker_id, backend_url, blocks, response) = result?;
+        if imported_workers.insert(worker_id) {
+            block_manager.import_remote_blockset(response.blockset.clone())?;
+        }
+
+        let mut local_host_blocks = host_pool.allocate_blocks(blocks.len()).await?;
+        for (block, meta) in local_host_blocks.iter_mut().zip(blocks.iter()) {
+            let demo = demo_blocks_by_hash
+                .get(&meta.sequence_hash)
+                .with_context(|| format!("missing demo block {}", meta.sequence_hash))?;
+            complete_block(block, &demo.tokens)?;
+            write_block_payload(block, &demo.payload)?;
+        }
+
+        let mut remote_blocks = block_manager.get_remote_blocks_mutable(&response.descriptors)?;
+        let notify = local_host_blocks.write_to(&mut remote_blocks, transfer_context.clone())?;
+        notify.await.context("remote stage_put transfer dropped")?;
+
+        client
+            .post(format!("{backend_url}/commit_put"))
+            .json(&G3pbCommitRequest {
+                sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        println!("uploaded accepted blocks to worker {worker_id} via staged NIXL transfer");
     }
 
     let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks
         .iter()
-        .map(|block| block.meta.clone())
+        .cloned()
         .collect();
     if !duplicate_offer_blocks.is_empty() {
         let duplicate_offer_routes =
@@ -557,8 +635,8 @@ async fn main() -> Result<()> {
     );
 
     let fetch_routes = route_g3pb_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
-    let mut fetched_blocks = Vec::new();
-    for result in join_all(
+    let mut fetched_transfer_count = 0usize;
+    let fetch_responses = join_all(
         fetch_routes
             .into_iter()
             .map(|(worker_id, sequence_hashes)| {
@@ -569,115 +647,98 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("missing backend url for worker {worker_id}"));
                 async move {
                     let backend_url = backend_url?;
-                    let fetched: G3pbFetchResponse = client
+                    let fetched: G3pbFetchBlocksResponse = client
                         .post(format!("{backend_url}/fetch"))
-                        .json(&G3pbFetchRequest { sequence_hashes })
+                        .json(&G3pbFetchRequest {
+                            sequence_hashes: sequence_hashes.clone(),
+                        })
                         .send()
                         .await?
                         .error_for_status()?
                         .json()
                         .await?;
-                    Ok::<_, anyhow::Error>(fetched.blocks)
+                    Ok::<_, anyhow::Error>((worker_id, sequence_hashes, fetched))
                 }
             }),
     )
-    .await
-    {
-        fetched_blocks.extend(result?);
-    }
+    .await;
+    for result in fetch_responses {
+        let (worker_id, sequence_hashes, fetched) = result?;
+        fetched_transfer_count += sequence_hashes.len();
+        if imported_workers.insert(worker_id) {
+            block_manager.import_remote_blockset(fetched.blockset.clone())?;
+        }
 
-    fetched_blocks.sort_by_key(|block| {
-        fetch_hashes
-            .iter()
-            .position(|sequence_hash| *sequence_hash == block.meta.sequence_hash)
-            .unwrap_or(usize::MAX)
-    });
-    let fetched = G3pbFetchResponse {
-        blocks: fetched_blocks,
-    };
+        let remote_blocks = block_manager.get_remote_blocks_immutable(&fetched.descriptors)?;
+        let mut local_host_blocks = host_pool.allocate_blocks(sequence_hashes.len()).await?;
+        for (block, sequence_hash) in local_host_blocks.iter_mut().zip(sequence_hashes.iter()) {
+            let demo = demo_blocks_by_hash
+                .get(sequence_hash)
+                .with_context(|| format!("missing demo block {}", sequence_hash))?;
+            complete_block(block, &demo.tokens)?;
+        }
 
-    for expected in uploaded_demo_blocks
-        .iter()
-        .filter(|block| fetch_hashes.contains(&block.sequence_hash))
-    {
-        let actual = fetched
-            .blocks
-            .iter()
-            .find(|block| block.meta.sequence_hash == expected.sequence_hash)
-            .with_context(|| format!("missing fetched block {}", expected.sequence_hash))?;
+        let notify =
+            read_from_remote(&remote_blocks, &mut local_host_blocks, transfer_context.clone())?;
+        notify.await.context("remote fetch transfer dropped")?;
+
+        let immutable_host_blocks = host_pool.register_blocks(local_host_blocks).await?;
         anyhow::ensure!(
-            actual.payload == expected.payload,
-            "payload mismatch for sequence hash {}",
-            expected.sequence_hash
+            immutable_host_blocks.len() == sequence_hashes.len(),
+            "expected {} registered host blocks, got {}",
+            sequence_hashes.len(),
+            immutable_host_blocks.len()
+        );
+
+        for sequence_hash in &sequence_hashes {
+            let expected = demo_blocks_by_hash
+                .get(sequence_hash)
+                .with_context(|| format!("missing demo block {}", sequence_hash))?;
+            let host_block = immutable_host_blocks
+                .iter()
+                .find(|block| block.sequence_hash() == *sequence_hash)
+                .with_context(|| {
+                    format!("missing registered host block for fetched sequence hash {sequence_hash}")
+                })?;
+            anyhow::ensure!(
+                read_block_payload(host_block)? == expected.payload,
+                "host registration payload mismatch for sequence hash {}",
+                sequence_hash
+            );
+        }
+
+        let onboarded_blocks = block_manager
+            .onboard_blocks(immutable_host_blocks.clone(), None)
+            .await??;
+        anyhow::ensure!(
+            onboarded_blocks.len() == sequence_hashes.len(),
+            "expected {} onboarded device blocks, got {}",
+            sequence_hashes.len(),
+            onboarded_blocks.len()
         );
     }
-
-    let host_pool = block_manager
-        .host()
-        .context("local block manager has no host pool for fetched G3pb blocks")?;
     let device_pool = block_manager
         .device()
         .context("local block manager has no device pool for onboarded G3pb blocks")?;
-    let fetched_demo_blocks: Vec<_> = uploaded_demo_blocks
-        .iter()
-        .filter(|block| fetch_hashes.contains(&block.sequence_hash))
-        .collect();
-    let mut mutable_host_blocks = host_pool.allocate_blocks(fetched_demo_blocks.len()).await?;
-    for (mutable_host_block, expected) in mutable_host_blocks.iter_mut().zip(&fetched_demo_blocks) {
-        complete_block(mutable_host_block, &expected.tokens)?;
-        write_block_payload(mutable_host_block, &expected.payload)?;
-    }
-
-    let immutable_host_blocks = host_pool.register_blocks(mutable_host_blocks).await?;
-    anyhow::ensure!(
-        immutable_host_blocks.len() == fetched_demo_blocks.len(),
-        "expected {} registered host blocks, got {}",
-        fetched_demo_blocks.len(),
-        immutable_host_blocks.len()
-    );
-
-    for expected in &fetched_demo_blocks {
-        let host_block = immutable_host_blocks
-            .iter()
-            .find(|block| block.sequence_hash() == expected.sequence_hash)
-            .with_context(|| {
-                format!(
-                    "missing registered host block for fetched sequence hash {}",
-                    expected.sequence_hash
-                )
-            })?;
-        anyhow::ensure!(
-            read_block_payload(host_block)? == expected.payload,
-            "host registration payload mismatch for sequence hash {}",
-            expected.sequence_hash
-        );
-    }
-
-    let onboarded_blocks = block_manager
-        .onboard_blocks(immutable_host_blocks.clone(), None)
-        .await??;
-    anyhow::ensure!(
-        onboarded_blocks.len() == fetched_demo_blocks.len(),
-        "expected {} onboarded device blocks, got {}",
-        fetched_demo_blocks.len(),
-        onboarded_blocks.len()
-    );
-
-    let onboarded_sequence_hashes: Vec<_> = onboarded_blocks
-        .iter()
-        .map(|block| block.sequence_hash())
-        .collect();
     let matched_device_blocks = device_pool
         .match_sequence_hashes(fetch_hashes.as_slice())
         .await?;
     anyhow::ensure!(
-        matched_device_blocks.len() == fetched_demo_blocks.len(),
+        matched_device_blocks.len() == fetch_hashes.len(),
         "expected {} device-pool matches after onboard, got {}",
-        fetched_demo_blocks.len(),
+        fetch_hashes.len(),
         matched_device_blocks.len()
     );
+    let onboarded_sequence_hashes: Vec<_> = matched_device_blocks
+        .iter()
+        .map(|block| block.sequence_hash())
+        .collect();
 
-    let transferred_bytes: usize = fetched.blocks.iter().map(|block| block.payload.len()).sum();
+    let transferred_bytes: usize = fetch_hashes
+        .iter()
+        .filter_map(|sequence_hash| demo_blocks_by_hash.get(sequence_hash))
+        .map(|block| block.payload.len())
+        .sum();
 
     println!("queried hashes: {:?}", query_hashes);
     println!("cache misses carried as fallback: {:?}", cache_miss_hashes);
@@ -690,16 +751,16 @@ async fn main() -> Result<()> {
     }
     println!(
         "onboarded {} fetched blocks into local device pool with sequence hashes {:?}",
-        onboarded_blocks.len(),
+        matched_device_blocks.len(),
         onboarded_sequence_hashes
     );
     println!(
-        "transferred {} blocks / {} bytes via the smoke HTTP transfer backend",
-        fetched.blocks.len(),
+        "transferred {} blocks / {} bytes via staged G3PB NIXL descriptors",
+        fetched_transfer_count,
         transferred_bytes
     );
     println!(
-        "note: this validates HTTP query/fetch plus local host registration and device onboard; real remote KVBM data-plane integration is still a separate step."
+        "note: this validates staged remote host writes, remote host reads, local host registration, and device onboard over the G3PB smoke path."
     );
 
     Ok(())

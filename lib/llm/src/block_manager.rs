@@ -189,6 +189,10 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
         self.state.export_local_blockset()
     }
 
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.state.nixl_agent()
+    }
+
     /// Imports a remote blockset configuration from a serialized object.
     pub fn import_remote_blockset(
         &self,

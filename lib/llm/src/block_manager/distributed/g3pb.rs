@@ -113,6 +113,11 @@ pub struct G3pbCommitRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct G3pbLoadRemoteRequest {
+    pub blockset: SerializedNixlBlockSet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct G3pbFetchBlocksResponse {
     pub worker_id: WorkerID,
     pub blockset: SerializedNixlBlockSet,

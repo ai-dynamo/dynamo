@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 22:08:11 UTC
+Last updated: 2026-03-31 21:48:30 UTC
 
 ## Active state
 
@@ -81,6 +81,27 @@ Last updated: 2026-03-31 22:08:11 UTC
     - pass after adding staged NIXL descriptor endpoints and backend host runtime
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
     - pass after the transport type additions (`13 passed`)
+- worker transport-contract milestone:
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
+    - pass after rewriting the worker smoke around `load_remote`, `stage_put`,
+      `commit_put`, immutable descriptor fetch, and remote-read helper wiring
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_nixl_transfer_smoke --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+- host-only backend descriptor/control smoke:
+  - backend:
+    `target/debug/kvbm_g3pb_backend --listen 127.0.0.1:58183 --worker-id 53 --host-blocks 16`
+    - pass
+  - `curl http://127.0.0.1:58183/health`
+    - pass
+  - `offer -> stage_put -> commit_put -> query` for `sequence_hash=9001`
+    - pass after making backend query authoritative over staged-committed hashes
+- full worker/backend smoke:
+  - command:
+    `target/debug/kvbm_g3pb_worker_smoke --backend-url http://127.0.0.1:58183`
+  - current status:
+    fail
+  - current terminal error:
+    `createXferReq: no specified or potential backend had the required registrations to be able to do the transfer`
 
 ### Decisions confirmed in this run so far
 
@@ -112,11 +133,21 @@ Last updated: 2026-03-31 22:08:11 UTC
 - shared transport structs live in `distributed/g3pb.rs`, and
   `BlockDescriptorList` now has a public constructor so the backend binary can
   emit descriptor lists directly
+- the backend also needs explicit remote-agent handshake:
+  the worker must publish its local serialized blockset to each backend through
+  `load_remote` before any `stage_put` / `fetch` transfer so the peer agent can
+  load the worker’s UCX metadata
+- the worker now builds its transfer context from the block manager’s exported
+  NIXL agent state instead of a separate sibling agent instance
 
 ### Remaining work in this run
 
-- reconnect the worker smoke remote data path to the new staged NIXL/UCX
-  `device/host <-> remote CPU staging` flow instead of HTTP payload exchange
+- resolve the last NIXL backend-registration failure for
+  `PinnedStorage(local host) -> remote host staging` transfer creation
+- add KVBM-side `G3PB` admission policy wiring:
+  - default admission when a block has been reused at least once
+  - environment override `G3PB_OFFLOAD_ALL` for eager admission of every block
+  - keep `G1 -> G3PB` semantics as copy/replication, not ownership transfer
 - revalidate the next slice in layers:
   - worker-side compile/tests after the smoke rewrite
   - `kvbm_nixl_transfer_smoke`
@@ -134,30 +165,43 @@ Last updated: 2026-03-31 22:08:11 UTC
   - `commit_put` marks staged hashes visible to `query`
   - `fetch` now returns serialized blockset metadata plus an immutable
     `BlockDescriptorList` instead of inline bytes
-- the remaining gap is entirely worker-side:
-  - create/upload local source blocks through NIXL write into the returned
-    remote mutable descriptor list
-  - import each peer blockset once and cache that import locally
-  - fetch remote immutable descriptor lists and issue NIXL reads into local
-    host blocks before local onboard
-  - remove the old `put_payload` / byte-fetch assumptions from the smoke output
+- the rewritten worker already does:
+  - `load_remote`
+  - `stage_put`
+  - remote-blockset import
+  - `commit_put`
+  - immutable descriptor fetch
+  - `read_from_remote`
+- but the first `stage_put` write still fails when NIXL tries to create the
+  actual transfer request for local pinned-host blocks to remote host staging
+- the error persists after:
+  - publishing local blockset metadata to the backend
+  - switching the transfer context to the block manager’s own registered
+    NIXL agent
+  - enabling `POSIX` alongside `UCX` on both worker and backend agents
+- the remaining unresolved question is whether this transport slice needs:
+  - `SystemStorage` rather than `PinnedStorage`
+  - a different backend/registration mix
+  - or reuse of an existing KVBM transfer-handler path instead of the ad hoc
+    smoke `TransferContext`
 
 ### Exact next step
 
 - next file:
   `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - next commands:
-  - update `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs` to:
-    - build a UCX-enabled local NIXL agent/runtime instead of `disable_nixl()`
-    - stage accepted uploads with `stage_put`
-    - import backend blocksets once per worker id
-    - issue NIXL writes into remote mutable descriptors
-    - `commit_put` after transfer completion
-    - fetch immutable descriptors and issue NIXL reads into local host blocks
-    - keep the final local host registration/device onboard validation
+  - compare the failing host-staging path with the already-working
+    leader/worker and offload registration setup in:
+    - `lib/llm/src/block_manager/distributed/worker.rs`
+    - `lib/llm/src/block_manager/offload.rs`
+  - determine whether remote host-host transfer requires:
+    - `SystemStorage` instead of `PinnedStorage`
+    - additional NIXL backends or registration changes
+    - or reuse of an existing KVBM transfer helper
   - rerun:
     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
     - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
+    - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_nixl_transfer_smoke --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
     - `target/debug/kvbm_nixl_transfer_smoke`
     - host-only backend smoke using descriptor endpoints
     - full `target/debug/kvbm_g3pb_worker_smoke ...`
