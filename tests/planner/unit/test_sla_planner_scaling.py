@@ -9,11 +9,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.exceptions import DeploymentValidationError
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.budget import _initialize_gpu_counts
+from dynamo.planner.core.decode import DecodePlanner
+from dynamo.planner.core.prefill import PrefillPlanner
+from dynamo.planner.core.state import PlannerSharedState
+from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.offline.dryrun import run_sla_planner_dryrun
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -26,7 +28,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def mock_prometheus_metrics():
-    with patch("dynamo.planner.utils.planner_core.Gauge") as mock_gauge:
+    with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
         yield
 
@@ -418,8 +420,6 @@ class TestDryrunGpuDefaults:
 
     def test_dryrun_defaults_gpu_counts_when_none(self):
         """Test that dryrun sets default GPU counts of 1 when None"""
-        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
-
         config = self._build_dryrun_config(
             prefill_engine_num_gpu=None, decode_engine_num_gpu=None
         )
@@ -434,7 +434,6 @@ class TestDryrunGpuDefaults:
 
     def test_dryrun_preserves_cli_gpu_counts(self):
         """Test that dryrun preserves GPU counts provided via config"""
-        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
 
         config = self._build_dryrun_config(
             prefill_engine_num_gpu=2, decode_engine_num_gpu=4

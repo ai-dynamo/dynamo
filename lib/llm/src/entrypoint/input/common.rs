@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::{
     backend::{Backend, ExecutionContext},
@@ -28,6 +29,7 @@ use crate::{
 };
 
 use anyhow::Context as _;
+use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -45,6 +47,45 @@ pub struct PreparedEngine {
     pub inspect_template: bool,
     pub card: Option<ModelDeploymentCard>,
     pub request_template: Option<RequestTemplate>,
+}
+
+async fn wait_for_min_initial_workers(
+    client: &Client,
+    min_initial_workers: usize,
+) -> anyhow::Result<()> {
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    if min_initial_workers == 1 {
+        client.wait_for_instances().await?;
+        return Ok(());
+    }
+
+    let mut watcher = client.instance_avail_watcher();
+    loop {
+        let available = watcher.borrow_and_update().len();
+        if available >= min_initial_workers {
+            return Ok(());
+        }
+
+        tokio::time::timeout(Duration::from_secs(120), watcher.changed())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "timed out waiting for {} initial workers for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "instance watcher closed before {} workers appeared for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?;
+    }
 }
 
 impl PreparedEngine {
@@ -254,6 +295,7 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -264,6 +306,8 @@ where
     } else {
         client.clone()
     };
+
+    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
     // Get threshold value and wrap monitor for PushRouter
     // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
