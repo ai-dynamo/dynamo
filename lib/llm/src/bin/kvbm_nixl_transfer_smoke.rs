@@ -170,8 +170,10 @@ async fn build_leader_and_workers(args: &Args) -> Result<(KvbmLeader, Vec<KvbmWo
             num_blocks_overriden: NUM_BLOCKS,
         })
         .disk_blocks_config(KvbmLeaderNumBlocksConfig {
-            cache_size_in_gb: 0.0,
-            num_blocks_overriden: NUM_BLOCKS,
+                cache_size_in_gb: 0.0,
+                // Keep this smoke on the host/device path only. Configuring disk
+                // blocks causes the worker to eagerly initialize the GDS backend.
+                num_blocks_overriden: 0,
         })
         .leader_pub_url(args.leader_pub_url.clone())
         .leader_ack_url(args.leader_ack_url.clone())

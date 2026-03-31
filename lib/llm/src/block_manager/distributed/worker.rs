@@ -94,6 +94,8 @@ pub fn load_and_validate_tensors(
 
 fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
+    let (_, ucx_params) = agent.get_plugin_params("UCX")?;
+    agent.create_backend("UCX", &ucx_params)?;
     if use_gds {
         let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
         agent.create_backend("GDS_MT", &gds_params)?;
