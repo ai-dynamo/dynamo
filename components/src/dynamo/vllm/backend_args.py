@@ -335,9 +335,10 @@ class DynamoVllmConfig(ConfigBase):
                 raise ValueError(
                     f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
                 )
-            # NO-OP here, '--multimodal-worker' may be specified with '--disaggregation-mode=prefill'
-            # as prefill workers in P/D disaggregation or without for aggregation. In both cases,
-            # 'self.disaggregation_mode' will be properly setup.
+            # only set 'self.disaggregation_mode' if it is not already set, '--multimodal-worker' may be specified with
+            # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
+            if self.disaggregation_mode is None:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).

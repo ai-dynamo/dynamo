@@ -48,7 +48,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     @pytest.mark.parametrize(
         "mode",
         [
-            None,  # Not specified, should default to AGGREGATED
+            None,  # Not specified
             DisaggregationMode.AGGREGATED,
             # DisaggregationMode.PREFILL, # test in 'test_prefill_worker' below
             DisaggregationMode.DECODE,
@@ -59,13 +59,13 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_worker = True
-        if mode is None or mode == DisaggregationMode.AGGREGATED:
-            with pytest.warns(DeprecationWarning):
+        with pytest.warns(DeprecationWarning):
+            if mode is None or mode == DisaggregationMode.AGGREGATED:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-        else:
-            with pytest.raises(ValueError):
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
+            else:
+                with pytest.raises(ValueError):
+                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
 
     # special case of 'test_agg_worker' above, test the prefill worker case
     def test_prefill_worker(self):
@@ -79,7 +79,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     @pytest.mark.parametrize(
         "mode",
         [
-            None,  # Not specified, should default to AGGREGATED
+            None,  # Not specified
             DisaggregationMode.AGGREGATED,
             DisaggregationMode.PREFILL,
             DisaggregationMode.DECODE,
@@ -90,18 +90,18 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_encode_worker = True
-        if mode is None or mode == DisaggregationMode.ENCODE:
-            with pytest.warns(DeprecationWarning):
+        with pytest.warns(DeprecationWarning):
+            if mode is None or mode == DisaggregationMode.ENCODE:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.ENCODE
-        else:
-            with pytest.raises(ValueError):
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
+            else:
+                with pytest.raises(ValueError):
+                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
 
     @pytest.mark.parametrize(
         "mode",
         [
-            None,  # Not specified, should default to AGGREGATED
+            None,  # Not specified
             DisaggregationMode.AGGREGATED,
             DisaggregationMode.PREFILL,
             DisaggregationMode.DECODE,
@@ -112,10 +112,10 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_decode_worker = True
-        if mode is None or mode == DisaggregationMode.DECODE:
-            with pytest.warns(DeprecationWarning):
+        with pytest.warns(DeprecationWarning):
+            if mode is None or mode == DisaggregationMode.DECODE:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.DECODE
-        else:
-            with pytest.raises(ValueError):
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
+            else:
+                with pytest.raises(ValueError):
+                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
