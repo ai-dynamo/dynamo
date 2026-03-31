@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dependencies required by profiler and deploy utils. The standalone
+# dynamo-planner image installs both this file and requirements.planner.txt.
+
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@5d419f99d60fdae0d3911cba06a9b571f3b2965c
+aiofiles<=25.1.0
+kubernetes_asyncio==32.0.0
