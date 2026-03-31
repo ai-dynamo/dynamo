@@ -108,3 +108,16 @@ pub struct TokenizeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_strs: Option<Vec<String>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetokenizeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub tokens: Vec<TokenIdType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DetokenizeResponse {
+    pub prompt: String,
+}
