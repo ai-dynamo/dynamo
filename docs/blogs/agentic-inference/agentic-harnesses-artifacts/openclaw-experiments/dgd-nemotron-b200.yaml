@@ -1,0 +1,59 @@
+# Nemotron-3-Super-120B-A12B-NVFP4 on 1x B200 (aggregated)
+# For OpenClaw multi-turn experiments (agentic harnesses blog)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-openclaw-exp
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/sglang-runtime:mkosec-56083205d
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --namespace
+          - nemotron-exp
+          - --http-port
+          - "8000"
+          - --enable-anthropic-api
+          env:
+          - name: DYN_STRIP_ANTHROPIC_PREAMBLE
+            value: "1"
+          - name: HF_HOME
+            value: /scratch/hf_cache
+    Worker:
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/sglang-runtime:mkosec-56083205d
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --namespace
+          - nemotron-exp
+          - --model
+          - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+          - --dyn-reasoning-parser
+          - nemotron_deci
+          - --mem-fraction-static
+          - "0.85"
+          - --quantization
+          - fp8
+          - --enable-cache-report
+          env:
+          - name: HF_HOME
+            value: /scratch/hf_cache
+          - name: TORCHINDUCTOR_DISABLE
+            value: "1"
