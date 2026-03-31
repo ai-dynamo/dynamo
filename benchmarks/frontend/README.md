@@ -4,7 +4,7 @@
 # Frontend Performance Benchmark Suite
 
 A configurable sweep runner for measuring Dynamo frontend tokenizer performance.
-It drives [aiperf](https://github.com/AI-Infra-Bench/aiperf) load against a
+It drives [aiperf](https://github.com/ai-dynamo/aiperf) load against a
 frontend/mocker (or frontend/vLLM) stack and collects throughput, latency, and
 observability data across a grid of parameters.
 
