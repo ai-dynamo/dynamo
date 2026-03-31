@@ -16,6 +16,7 @@ use dynamo_llm::block_manager::storage::{
 use dynamo_llm::block_manager::Storage;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 struct MockTensor {
@@ -185,6 +186,7 @@ async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)
     )?)];
 
     let worker_config = KvbmWorkerConfig::builder()
+        .cancel_token(CancellationToken::new())
         .num_device_blocks(args.num_device_blocks)
         .page_size(args.page_size)
         .dtype_width_bytes(args.dtype_width_bytes)
