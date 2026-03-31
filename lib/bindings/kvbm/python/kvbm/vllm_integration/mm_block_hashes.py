@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -20,47 +20,25 @@ from typing import Any, Optional
 
 
 def _hash_features_to_u64(features: Any) -> int:
-    """Return a stable u64 hash of arbitrary feature data."""
-    # vLLM MultiModalFeatureSpec: prefer identifier (per-item cache key) and
-    # tensor data; avoid str(feature) which is not a stable unique key for VLMs.
-    if features is not None and hasattr(features, "identifier"):
-        ident = getattr(features, "identifier", None)
-        data = getattr(features, "data", None)
-        if ident is not None or data is not None:
-            h = hashlib.sha256()
-            if ident is not None:
-                h.update(str(ident).encode())
-            if data is not None:
-                _update_hash(h, data)
-            return struct.unpack("<Q", h.digest()[:8])[0]
+    """Return a stable u64 hash for a multimodal feature.
 
-    h = hashlib.sha256()
-    _update_hash(h, features)
+    Aligned with vLLM's native prefix cache which uses
+    ``request.mm_hashes[i]`` (== ``feature.identifier``) as the sole
+    extra key for block-hash computation.  ``identifier`` is already a
+    content-addressable blake3 hex digest of the raw image pixels,
+    model id, and processor kwargs, so re-hashing the tensor data is
+    redundant.
+
+    Falls back to ``str(features)`` for objects without ``identifier``.
+    """
+    ident = getattr(features, "identifier", None) if features is not None else None
+    if ident is not None:
+        h = hashlib.sha256(str(ident).encode())
+        return struct.unpack("<Q", h.digest()[:8])[0]
+
+    # Fallback for non-standard feature objects.
+    h = hashlib.sha256(str(features).encode())
     return struct.unpack("<Q", h.digest()[:8])[0]
-
-
-def _update_hash(h: "hashlib._Hash", obj: Any) -> None:
-    """Recursively feed obj into the running SHA-256 digest."""
-    try:
-        import torch
-
-        if isinstance(obj, torch.Tensor):
-            h.update(obj.cpu().contiguous().numpy().tobytes())
-            return
-    except ImportError:
-        pass
-
-    if isinstance(obj, (bytes, bytearray)):
-        h.update(obj)
-    elif isinstance(obj, dict):
-        for k in sorted(obj.keys(), key=str):
-            h.update(str(k).encode())
-            _update_hash(h, obj[k])
-    elif isinstance(obj, (list, tuple)):
-        for item in obj:
-            _update_hash(h, item)
-    else:
-        h.update(str(obj).encode())
 
 
 def compute_mm_block_hashes(
@@ -99,14 +77,18 @@ def compute_mm_block_hashes(
 
     # vLLM 0.18+: Request no longer has top-level mm_positions; each
     # MultiModalFeatureSpec carries PlaceholderRange as mm_position.
+    # Derive paired (position, feature) to keep alignment when some features
+    # lack a position.
     if not mm_positions and mm_features:
-        derived = [getattr(f, "mm_position", None) for f in mm_features]
-        mm_positions = [p for p in derived if p is not None]
+        pairs = [(getattr(f, "mm_position", None), f) for f in mm_features]
+        pairs = [(p, f) for p, f in pairs if p is not None]
+        mm_positions = [p for p, _ in pairs]
+        features_list = [f for _, f in pairs]
+    else:
+        features_list = list(mm_features) if mm_features else []
 
     if not mm_positions:
         return result
-
-    features_list = list(mm_features) if mm_features else []
 
     for i, pos_range in enumerate(mm_positions):
         feature = features_list[i] if i < len(features_list) else None

@@ -11,44 +11,36 @@ block hashes and text-only blocks remain None (prefix-sharable).
 
 from __future__ import annotations
 
-import importlib.util
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-# Import mm_block_hashes directly from source file to avoid the installed kvbm
-# package whose __init__.py transitively imports vllm.
-_mm_hashes_path = (
-    Path(__file__).resolve().parents[2]
-    / "lib"
-    / "bindings"
-    / "kvbm"
-    / "python"
-    / "kvbm"
-    / "vllm_integration"
-    / "mm_block_hashes.py"
-)
-_spec = importlib.util.spec_from_file_location("mm_block_hashes", _mm_hashes_path)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+from .common import check_module_available
 
-_hash_features_to_u64 = _mod._hash_features_to_u64
-_update_hash = _mod._update_hash
-compute_mm_block_hashes = _mod.compute_mm_block_hashes
+# kvbm.vllm_integration.__init__ transitively imports vllm connectors,
+# so both kvbm and vllm must be importable.
+HAS_DEPS = check_module_available("kvbm") and check_module_available("vllm")
+
+if HAS_DEPS:
+    from kvbm.vllm_integration.mm_block_hashes import (  # noqa: E402
+        _hash_features_to_u64,
+        compute_mm_block_hashes,
+    )
 
 pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.vllm,
+    pytest.mark.skipif(not HAS_DEPS, reason="requires kvbm and vllm"),
 ]
 
 
 # ---------------------------------------------------------------------------
 # Minimal stubs that mirror vLLM's PlaceholderRange / MultiModalFeatureSpec
-# so tests run without a vLLM install.
+# so tests don't depend on vLLM types at runtime.
 # ---------------------------------------------------------------------------
 
 
@@ -100,22 +92,24 @@ class TestHashFeaturesToU64:
         )
         assert _hash_features_to_u64(feat) == _hash_features_to_u64(feat)
 
-    def test_identifier_only_vs_data_only(self):
-        """Feature with identifier-only vs data-only should differ."""
-        feat_ident = FakeFeatureSpec(
+    def test_same_identifier_ignores_data(self):
+        """Hash depends only on identifier, not on data (aligned with vLLM)."""
+        feat_no_data = FakeFeatureSpec(
             data=None,
             modality="image",
             identifier="abc",
             mm_position=FakePlaceholderRange(0, 5),
         )
-        feat_data = FakeFeatureSpec(
+        feat_with_data = FakeFeatureSpec(
             data={"pixels": b"\x00\x01\x02"},
             modality="image",
             identifier="abc",
             mm_position=FakePlaceholderRange(0, 5),
         )
-        # Both have the same identifier, but one has data → different hash
-        assert _hash_features_to_u64(feat_ident) != _hash_features_to_u64(feat_data)
+        # Same identifier → same hash regardless of data
+        assert _hash_features_to_u64(feat_no_data) == _hash_features_to_u64(
+            feat_with_data
+        )
 
     def test_none_feature_returns_int(self):
         """None feature should still produce a valid u64 hash."""
@@ -214,10 +208,16 @@ class TestComputeMmBlockHashes:
         feat_duck = [_feat("duck_image_hash", 0, 16)]
 
         result_bus = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=feat_bus, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=feat_bus,
+            num_tokens=16,
+            block_size=16,
         )
         result_duck = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=feat_duck, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=feat_duck,
+            num_tokens=16,
+            block_size=16,
         )
 
         assert result_bus[0] is not None
@@ -230,10 +230,16 @@ class TestComputeMmBlockHashes:
         features = [_feat("same_hash", 0, 16)]
 
         r1 = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=16,
+            block_size=16,
         )
         r2 = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=16,
+            block_size=16,
         )
         assert r1 == r2
 
@@ -244,7 +250,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(8, 16)]  # tokens [8, 24)
         features = [_feat("img1", 8, 16)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=32, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=32,
+            block_size=16,
         )
         # Block 0: tokens [0,16) overlaps with [8,24)
         # Block 1: tokens [16,32) overlaps with [8,24)
@@ -256,7 +265,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 16)]
         features = [_feat("img1", 0, 16)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=32, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=32,
+            block_size=16,
         )
         assert result[0] is not None
         assert result[1] is None
@@ -268,7 +280,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 16), _pos(32, 16)]
         features = [_feat("img_a", 0, 16), _feat("img_b", 32, 16)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=64, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=64,
+            block_size=16,
         )
         assert result[0] is not None  # img_a
         assert result[1] is None  # text
@@ -282,7 +297,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 8), _pos(8, 8)]
         features = [_feat("img_a", 0, 8), _feat("img_b", 8, 8)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=16,
+            block_size=16,
         )
         assert result[0] is not None
 
@@ -302,7 +320,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 0)]
         features = [_feat("img1", 0, 0)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=16, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=16,
+            block_size=16,
         )
         assert result == [None]
 
@@ -311,7 +332,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 20)]
         features = [_feat("img1", 0, 20)]
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=20, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=20,
+            block_size=16,
         )
         # ceil(20/16) = 2 blocks
         assert len(result) == 2
@@ -323,7 +347,10 @@ class TestComputeMmBlockHashes:
         positions = [_pos(0, 16), _pos(16, 16)]
         features = [_feat("img1", 0, 16)]  # only one feature for two positions
         result = compute_mm_block_hashes(
-            mm_positions=positions, mm_features=features, num_tokens=32, block_size=16
+            mm_positions=positions,
+            mm_features=features,
+            num_tokens=32,
+            block_size=16,
         )
         assert result[0] is not None  # from feature
         assert result[1] is not None  # from hash=0 fallback
@@ -355,3 +382,49 @@ class TestComputeMmBlockHashes:
             block_size=16,
         )
         assert result[0] is not None
+
+    def test_derive_positions_skips_none_keeps_alignment(self):
+        """When deriving positions, features with mm_position=None must be
+        skipped without misaligning the remaining (position, feature) pairs."""
+
+        @dataclass
+        class _NoPosition:
+            data: Any
+            modality: str
+            identifier: str
+            # no mm_position attribute
+
+        feat_a = _feat("img_a", 0, 16)
+        feat_no_pos = _NoPosition(data=None, modality="image", identifier="img_orphan")
+        feat_c = _feat("img_c", 32, 16)
+
+        result = compute_mm_block_hashes(
+            mm_positions=None,
+            mm_features=[feat_a, feat_no_pos, feat_c],
+            num_tokens=48,
+            block_size=16,
+        )
+        assert len(result) == 3
+        hash_a = result[0]
+        hash_c = result[2]
+        assert hash_a is not None
+        assert result[1] is None  # text gap
+        assert hash_c is not None
+
+        # Verify block 0 got img_a's hash, not img_orphan's
+        expected_a = compute_mm_block_hashes(
+            mm_positions=None,
+            mm_features=[_feat("img_a", 0, 16)],
+            num_tokens=48,
+            block_size=16,
+        )[0]
+        assert hash_a == expected_a
+
+        # Verify block 2 got img_c's hash, not img_orphan's
+        expected_c = compute_mm_block_hashes(
+            mm_positions=None,
+            mm_features=[_feat("img_c", 32, 16)],
+            num_tokens=48,
+            block_size=16,
+        )[2]
+        assert hash_c == expected_c
