@@ -54,16 +54,15 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if opts.WrapLaunchJob {
-		container := checkpointTargetContainer(&podTemplate.Spec)
-		if container == nil {
+		if len(podTemplate.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires one worker container")
 		}
-		if len(container.Command) == 0 {
+		if len(podTemplate.Spec.Containers[0].Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
-		container.Command, container.Args = wrapWithCudaCheckpointLaunchJob(
-			container.Command,
-			container.Args,
+		podTemplate.Spec.Containers[0].Command, podTemplate.Spec.Containers[0].Args = wrapWithCudaCheckpointLaunchJob(
+			podTemplate.Spec.Containers[0].Command,
+			podTemplate.Spec.Containers[0].Args,
 		)
 	}
 
@@ -174,21 +173,4 @@ func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string,
 	wrappedArgs = append(wrappedArgs, command...)
 	wrappedArgs = append(wrappedArgs, args...)
 	return []string{"cuda-checkpoint"}, wrappedArgs
-}
-
-func checkpointTargetContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-
-	var fallback *corev1.Container
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == "main" {
-			return &podSpec.Containers[i]
-		}
-		if fallback == nil {
-			fallback = &podSpec.Containers[i]
-		}
-	}
-	return fallback
 }

@@ -99,7 +99,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -
 
 ### 4. Create a `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, a worker container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
+The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, the first container in `spec.containers`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -120,7 +120,7 @@ spec:
       spec:
         ...
         containers:
-          - name: main
+          - name: worker
             image: registry.example.com/dynamo/vllm-placeholder:1.0.0
             ...
 ```
@@ -273,7 +273,7 @@ snapshotctl checkpoint \
   --namespace ${NAMESPACE}
 ```
 
-The checkpoint manifest must be for a pod, and contain one worker container named `main`, which must use a placeholder image.
+The checkpoint manifest must be for a pod, contain exactly one worker container, and use a placeholder image.
 If you do not pass `--checkpoint-id`, `snapshotctl` generates one and prints it:
 
 ```text
@@ -406,7 +406,7 @@ This is also the path that `snapshotctl` uses when it resolves checkpoint storag
 
 ### `snapshotctl` manifest is rejected or the restore target is wrong
 
-`snapshotctl` only accepts a single-container `Pod` manifest. For consistency with the operator-managed flow, use `main` as the worker container name.
+`snapshotctl` only accepts a single-container `Pod` manifest.
 
 ```bash
 snapshotctl checkpoint --manifest ./worker-pod.yaml --namespace ${NAMESPACE}

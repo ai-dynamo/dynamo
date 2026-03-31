@@ -148,7 +148,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 }
 
-func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
+func TestValidateRestorePodSpecUsesFirstContainer(t *testing.T) {
 	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
@@ -161,14 +161,14 @@ func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
 			Name: CheckpointVolumeName,
 		}},
 		Containers: []corev1.Container{
-			{Name: "sidecar"},
 			{
-				Name: "main",
+				Name: "worker",
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      CheckpointVolumeName,
 					MountPath: "/checkpoints",
 				}},
 			},
+			{Name: "sidecar"},
 		},
 	}
 
@@ -179,6 +179,6 @@ func TestValidateRestorePodSpecPrefersMainContainer(t *testing.T) {
 	}
 
 	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("expected restore pod spec to validate against main container, got %v", err)
+		t.Fatalf("expected restore pod spec to validate against first container, got %v", err)
 	}
 }

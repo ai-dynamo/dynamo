@@ -40,7 +40,7 @@ spec:
             persistentVolumeClaim:
               claimName: hf-cache-pvc
         containers:
-          - name: main
+          - name: worker
             image: registry.example.com/dynamo/vllm-placeholder:1.0.0
             command:
               - python3
