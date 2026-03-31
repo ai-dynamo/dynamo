@@ -15,10 +15,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-LOAD_GENERATOR_DIR = Path(__file__).resolve().parents[2] / "tests" / "unit"
+from dynamo.planner.tests.unit.load_generator import LoadGenerator
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -30,15 +29,6 @@ PORT_FORWARD_SETUP_DELAY = 3
 FINAL_STABILIZATION_DELAY = 60
 MONITORING_INTERVAL = 15
 BUFFER_DURATION = 90
-
-
-def _load_generator_class():
-    if str(LOAD_GENERATOR_DIR) not in sys.path:
-        sys.path.insert(0, str(LOAD_GENERATOR_DIR))
-
-    from load_generator import LoadGenerator
-
-    return LoadGenerator
 
 
 @dataclass
@@ -162,7 +152,7 @@ class ScalingE2ETest:
         self.save_results = save_results
         self.mode = mode
         self.k8s_monitor = KubernetesMonitor(namespace)
-        self.load_generator = _load_generator_class()(
+        self.load_generator = LoadGenerator(
             base_url=base_url, save_results=save_results
         )
 
