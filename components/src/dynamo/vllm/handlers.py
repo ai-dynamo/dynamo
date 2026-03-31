@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import logging
 import os
 
@@ -2005,6 +2006,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "index": output_idx,
                         "token_ids": output.token_ids[previous_total_toks:],
                     }
+                    disaggregated_params = self._build_disaggregated_params(
+                        None, routed_experts=output.routed_experts
+                    )
+                    if disaggregated_params is not None:
+                        out["disaggregated_params"] = disaggregated_params
 
                     # Extract logprobs for new tokens if available
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -2566,7 +2572,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 yield output
 
     def _build_disaggregated_params(
-        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+        self,
+        kv_transfer_params,
+        embedding_params=None,
+        expanded_prompt_token_ids=None,
+        routed_experts=None,
     ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
@@ -2577,6 +2587,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             disaggregated_params[
                 "expanded_prompt_token_ids"
             ] = expanded_prompt_token_ids
+        if routed_experts is not None:
+            disaggregated_params["routed_experts"] = base64.b64encode(
+                routed_experts.tobytes()
+            ).decode("utf-8")
 
         return disaggregated_params if disaggregated_params else None
 
