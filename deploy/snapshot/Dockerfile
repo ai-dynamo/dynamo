@@ -18,7 +18,7 @@ ARG DOCKER_PROXY
 ARG GO_VERSION=1.25
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
-#   --build-arg CRIU_REPO=https://github.com/galletas1712/criu.git
+#   --build-arg CRIU_REPO=https://github.com/<owner>/criu.git
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
