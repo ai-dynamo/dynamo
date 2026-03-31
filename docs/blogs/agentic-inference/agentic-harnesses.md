@@ -284,7 +284,7 @@ Claude Code stress-tests the system prompt and single-session tool loop. OpenCla
 
 OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. A user might ask a question over Telegram, follow up on WhatsApp an hour later, and the same conversation history grows across both. The system prompt is shorter than Claude Code's 54K-token payload, but it never changes. That makes prefix caching straightforward in theory and exposes a different failure mode in practice: whether the backend can sustain cache reuse over many turns without the prefix drifting.
 
-We ran three experiments against the same Dynamo + TRT-LLM deployment used for the Claude Code measurements: Nemotron-3-Super-120B-A12B-NVFP4 on B200, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, and the `nemotron_deci` reasoning parser.
+We ran three experiments against the same Dynamo + TRT-LLM deployment used for the Claude Code measurements: Nemotron-3-Super-120B-A12B-NVFP4 on B200, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
 
 ### Cache Stability Across Turns
 
@@ -302,7 +302,15 @@ Reasoning fidelity was perfect: `30/30` turns produced reasoning blocks when exp
 
 This result matters for OpenClaw specifically because its long-lived sessions accumulate many reasoning-containing turns. If even one prior turn's reasoning were dropped or reordered in the replay path, the prefix would diverge and cache reuse would break silently. The Nemotron-3-Super model with the `nemotron_deci` parser maintained correct `<think>` block separation across all tested multi-turn sequences.
 
-One expected limitation: the model did not produce structured tool calls in the Anthropic `tool_use` format, even when tools were provided and the prompt explicitly requested calculator use. This is a model behavior characteristic of Nemotron-3-Super in NVFP4 mode rather than a Dynamo issue. The model reasons about the computation inline rather than emitting a `<TOOLCALL>` block. For the dispatch experiment, this meant we could not measure tool-call dispatch timing. The reasoning and content fidelity results stand on their own.
+### Streaming Dispatch Across Multi-Turn Chat
+
+The third experiment measured tool-call dispatch timing in a 5-turn multi-turn conversation with simulated 50ms tool latency. Each turn asks a math question that triggers one calculator tool call. Two harness variants: buffered (wait for `message_stop`, then execute tools) and dispatch-aware (start tool execution on `content_block_stop` for `tool_use` blocks). Five runs of each variant.
+
+An earlier attempt at this experiment failed because the worker was configured with `--dyn-tool-call-parser nemotron_deci`, which looks for `<TOOLCALL>` tags. Nemotron-3-Super actually generates tool calls in the `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>` XML format, which is the `qwen3_coder` pattern. Switching to `--dyn-tool-call-parser qwen3_coder` produced correct `tool_use` blocks immediately, with `stop_reason: "tool_use"` and properly parsed `name` and `input` fields. The reasoning parser (`nemotron_deci` for `<think>` tags) was correct all along.
+
+With the parser fixed, all `50/50` turns produced exactly one structured tool call in the Anthropic `tool_use` format. The dispatch-aware harness received the `content_block_stop` event and started tool execution about `14ms` before `message_stop` on average. Over the full 5-turn conversation, the buffered harness averaged `1,126ms` per turn while the dispatch-aware harness averaged `1,120ms`. The difference is modest and within noise, consistent with the single-tool-call workload and the results from the earlier streaming dispatch section.
+
+The important result here is not the timing delta. It is that the parser fix unblocked tool-call generation entirely. The model was always capable of producing structured tool calls; the wrong parser was silently discarding them. That is a useful lesson for deployment: when a model appears to reason about tools inline rather than emitting tool-call blocks, the first thing to check is whether the configured parser matches the model's actual output format.
 
 ### What OpenClaw Adds to the Story
 
