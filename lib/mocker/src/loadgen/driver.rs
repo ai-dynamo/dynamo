@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use anyhow::{Result, anyhow, bail};
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use super::types::{ReadyTurn, ReplayRequestHashes, Trace};
@@ -76,7 +77,7 @@ impl PartialOrd for ReadySession {
 pub struct WorkloadDriver {
     mode: DriverMode,
     sessions: Vec<SessionRuntime>,
-    in_flight: HashMap<Uuid, InFlightTurn>,
+    in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
 }
 
@@ -136,7 +137,7 @@ impl WorkloadDriver {
         Ok(Self {
             mode,
             sessions,
-            in_flight: HashMap::new(),
+            in_flight: FxHashMap::default(),
             ready_sessions,
         })
     }

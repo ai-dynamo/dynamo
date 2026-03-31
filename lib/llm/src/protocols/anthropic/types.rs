@@ -154,7 +154,22 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                     ..Default::default()
                 })
             },
-            chat_template_args: None,
+            // chat_template_args may be augmented by the Anthropic handler
+            // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
+            // when a reasoning parser is configured. The conversion layer only
+            // forwards the client's explicit thinking preference here; the handler
+            // has access to parsing_options and makes the final decision.
+            chat_template_args: if req
+                .thinking
+                .as_ref()
+                .is_some_and(|t| t.thinking_type == "enabled")
+            {
+                let mut args = std::collections::HashMap::new();
+                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                Some(args)
+            } else {
+                None
+            },
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })

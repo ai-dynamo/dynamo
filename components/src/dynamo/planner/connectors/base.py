@@ -12,3 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from abc import ABC, abstractmethod
+
+from dynamo.planner.config.defaults import SubComponentType
+
+
+# TODO: add ability to scale component to X replicas
+class PlannerConnector(ABC):
+    @abstractmethod
+    async def add_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ) -> None:
+        """Add a component to the planner"""
+        pass
+
+    @abstractmethod
+    async def remove_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ) -> None:
+        """Remove a component from the planner"""
+        pass

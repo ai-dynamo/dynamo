@@ -203,6 +203,82 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
     }
 }
 
+/// Inject `reasoning_content` back into the `content` field as `<think>` blocks.
+///
+/// Chat templates only reference `{{ message.content }}` — they don't know about
+/// `reasoning_content`. Without this injection, the model's prior chain-of-thought
+/// is silently dropped across turns.
+///
+/// Uses `<think>`/`</think>` delimiters — the same tags that reasoning models emit
+/// and that the reasoning parser strips on output. Reasoning is prepended to content
+/// to match the original generation order (`<think>...</think> response`).
+///
+/// Segments are concatenated rather than interleaved with tool_calls because Jinja
+/// templates render `tool_calls` separately from `content`. The model still sees
+/// all reasoning text before the template-rendered tool call block.
+fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let reasoning = match msg.get("reasoning_content") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                format!("<think>{}</think>", s)
+            }
+            Some(serde_json::Value::Array(segments)) => {
+                let mut result = String::new();
+                for seg in segments {
+                    if let Some(s) = seg.as_str()
+                        && !s.is_empty()
+                    {
+                        result.push_str("<think>");
+                        result.push_str(s);
+                        result.push_str("</think>");
+                    }
+                }
+                if result.is_empty() {
+                    continue;
+                }
+                result
+            }
+            _ => continue,
+        };
+
+        match msg.get("content") {
+            // Content is a string or null — prepend reasoning as text
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                msg["content"] = serde_json::Value::String(format!("{}{}", reasoning, s));
+            }
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {
+                msg["content"] = serde_json::Value::String(reasoning);
+            }
+            // Content is an array (multimodal) — prepend as a text part
+            Some(serde_json::Value::Array(_)) => {
+                let think_part = serde_json::json!({
+                    "type": "text",
+                    "text": reasoning
+                });
+                if let Some(arr) = msg.get_mut("content").and_then(|v| v.as_array_mut()) {
+                    arr.insert(0, think_part);
+                }
+            }
+            // Other types (number, bool, object) — skip, don't corrupt
+            _ => continue,
+        }
+
+        // Remove so the template doesn't see both the injected <think> in content
+        // and the original reasoning_content field.
+        if let Some(obj) = msg.as_object_mut() {
+            obj.remove("reasoning_content");
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
@@ -377,6 +453,14 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         .unwrap();
 
         normalize_tool_arguments_in_messages(&mut messages_for_template);
+
+        // Inject reasoning_content as <think> blocks into content — but only if
+        // the template doesn't handle it natively. Templates like Nemotron and
+        // Qwen3 reference reasoning_content directly in their Jinja logic; injecting
+        // would produce duplicate <think> blocks.
+        if !self.template_handles_reasoning {
+            inject_reasoning_content_into_messages(&mut messages_for_template);
+        }
 
         let ctx = context! {
             messages => messages_for_template,
@@ -1310,6 +1394,339 @@ NORMAL_MODE
             result.contains("TOOL_MODE"),
             "With exclude_tools=false and tool_choice=none, tools should NOT be stripped. Got: {}",
             result
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_segments_with_tool_calls() {
+        // Assistant message with reasoning_content segments and tool_calls
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "What is sqrt(144) and sqrt(256)?"
+            },
+            {
+                "role": "assistant",
+                "content": "Let me calculate those.",
+                "reasoning_content": ["I need to compute sqrt(144)", "Now sqrt(256)", ""],
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
+                        }
+                    },
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(256)\"}"
+                        }
+                    }
+                ]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[1];
+
+        // reasoning_content should be removed
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "reasoning_content should be removed after injection"
+        );
+
+        // content should have <think> blocks prepended (empty segment skipped)
+        let content = assistant["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("<think>I need to compute sqrt(144)</think>"),
+            "content should start with first reasoning segment, got: {}",
+            content
+        );
+        assert!(
+            content.contains("<think>Now sqrt(256)</think>"),
+            "content should contain second reasoning segment"
+        );
+        // Empty third segment should NOT produce <think></think>
+        assert!(
+            !content.contains("<think></think>"),
+            "empty segments should be skipped"
+        );
+        // Original content should be preserved at the end
+        assert!(
+            content.ends_with("Let me calculate those."),
+            "original content should be at the end, got: {}",
+            content
+        );
+
+        // tool_calls should be untouched
+        assert!(assistant.get("tool_calls").is_some());
+        assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_text_variant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning_content": "Let me think about this carefully."
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[0];
+        assert!(assistant.get("reasoning_content").is_none());
+        let content = assistant["content"].as_str().unwrap();
+        assert_eq!(
+            content,
+            "<think>Let me think about this carefully.</think>The answer is 42."
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_null_content() {
+        // reasoning_content present but content is null
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": "Thinking...",
+                "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let content = messages[0]["content"].as_str().unwrap();
+        assert_eq!(content, "<think>Thinking...</think>");
+        assert!(messages[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_skips_non_assistant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "hello",
+                "reasoning_content": "should not be touched"
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        // User message should be untouched
+        assert!(messages[0].get("reasoning_content").is_some());
+    }
+
+    // Helper: create a formatter with a minimal chat template for render tests
+    fn make_test_formatter() -> HfTokenizerConfigJsonFormatter {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        // Minimal template that renders content verbatim — enough to verify
+        // that reasoning_content injection works through the full pipeline.
+        let template = r#"{%- for message in messages %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap()
+    }
+
+    // Verify reasoning_content (Text variant) from a prior assistant turn
+    // appears as a <think> block in the rendered prompt.
+    #[test]
+    fn test_reasoning_content_text_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "What is sqrt(144)?"},
+                {
+                    "role": "assistant",
+                    "content": "The answer is 12.",
+                    "reasoning_content": "I need to compute the square root of 144."
+                },
+                {"role": "user", "content": "Are you sure?"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        assert!(
+            rendered.contains("<think>I need to compute the square root of 144.</think>"),
+            "reasoning_content must appear as <think> block, got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("The answer is 12."),
+            "original content must be preserved"
+        );
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Verify a full agentic flow: assistant reasons, calls a tool, gets a
+    // result, then reasons again before answering. Both reasoning turns must
+    // survive into the rendered prompt.
+    #[test]
+    fn test_reasoning_content_agentic_tool_call_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "What is sqrt(144) + sqrt(256)?"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "I need to compute both square roots. Let me start with sqrt(144).",
+                    "tool_calls": [{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_0",
+                    "content": "12"
+                },
+                {
+                    "role": "assistant",
+                    "content": "sqrt(144) = 12 and sqrt(256) = 16, so the answer is 28.",
+                    "reasoning_content": "Got 12 for sqrt(144). Now sqrt(256) = 16. Sum is 28."
+                },
+                {"role": "user", "content": "Thanks!"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // First assistant turn: reasoning with tool call, null content
+        assert!(
+            rendered.contains("<think>I need to compute both square roots"),
+            "first turn reasoning must be in prompt, got: {}",
+            rendered
+        );
+        // Second assistant turn: reasoning with final answer
+        assert!(
+            rendered.contains("<think>Got 12 for sqrt(144)"),
+            "second turn reasoning must be in prompt"
+        );
+        assert!(
+            rendered.contains("the answer is 28"),
+            "final answer content must be preserved"
+        );
+        // No raw reasoning_content in output
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Template that does NOT reference reasoning_content — injection should happen.
+    #[test]
+    fn test_reasoning_injected_when_template_ignores_it() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        // Formatter uses a simple template that doesn't reference reasoning_content
+        assert!(!formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "injection must happen when template ignores reasoning_content, got: {}",
+            rendered
+        );
+    }
+
+    // Template that DOES reference reasoning_content — injection must be skipped.
+    #[test]
+    fn test_reasoning_not_injected_when_template_handles_it() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        // Template that natively renders reasoning_content (like Nemotron/Qwen3)
+        let template = r#"{%- for message in messages %}{%- if message.role == "assistant" and message.reasoning_content is defined and message.reasoning_content %}<think>{{ message.reasoning_content }}</think>
+{%- endif %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Verify detection worked
+        assert!(formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // Template renders reasoning natively — no duplicate injection
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "template must render reasoning_content natively, got: {}",
+            rendered
+        );
+        // Must NOT have double <think> blocks
+        let think_count = rendered.matches("<think>").count();
+        assert_eq!(
+            think_count, 1,
+            "must have exactly one <think> block (from template), got {} in: {}",
+            think_count, rendered
         );
     }
 }
