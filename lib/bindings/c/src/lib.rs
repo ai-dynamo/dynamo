@@ -466,15 +466,8 @@ impl RouterHandles {
             .await
             .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
-                if !self.prefill_router.is_activated() && self.prefill_router.enforce_disagg() {
-                    tracing::error!(
-                        "Prefill router not activated and enforce_disagg=true; failing request"
-                    );
-                    QueryRouterResult::ErrDisaggEnforced
-                } else {
-                    tracing::error!(error = ?e, "Prefill query failed");
-                    QueryRouterResult::ErrQueryFailed
-                }
+                tracing::error!(error = ?e, "Prefill query failed");
+                QueryRouterResult::ErrQueryFailed
             })
     }
 

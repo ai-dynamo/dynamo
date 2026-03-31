@@ -414,11 +414,6 @@ type RoutingResult struct {
 	TokenData []int64
 }
 
-// ErrDisaggEnforced is returned when enforce_disagg=true and the prefill
-// router is not activated. Callers should fail the request instead of
-// falling back to aggregated mode.
-var ErrDisaggEnforced = fmt.Errorf("disaggregated mode enforced but prefill workers not available")
-
 // CallRoutePrefillRequest routes a request to the best prefill worker.
 // It tokenizes the request and queries only the prefill router.
 func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
@@ -445,9 +440,6 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	var result C.CRoutingResult
 	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
-		if rc == C.QUERY_ROUTER_ERR_DISAGG_ENFORCED {
-			return nil, ErrDisaggEnforced
-		}
 		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
 	}
 
