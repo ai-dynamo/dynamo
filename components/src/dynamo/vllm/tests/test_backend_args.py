@@ -21,6 +21,25 @@ pytestmark = [
 ]
 
 
+def create_config() -> DynamoVllmConfig:
+    """
+    Create a config with default values. This is needed as the config
+    is instantiated by the argparse parser with dynamically generated fields,
+    so we need to create a config with default values manually if not using
+    from_cli_args() method.
+
+    All multimodal flags are False, disaggregation mode is None.
+    Returns:
+        DynamoVllmConfig: A config with default values.
+    """
+    config = DynamoVllmConfig()
+    config.disaggregation_mode = None
+    config.multimodal_worker = False
+    config.multimodal_encode_worker = False
+    config.multimodal_decode_worker = False
+    return config
+
+
 class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     """
     Test suite for resolving disaggregation mode when legacy multimodal flags are set.
@@ -37,7 +56,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_agg_worker(self, mode):
-        config = DynamoVllmConfig()
+        config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_worker = True
         if mode is None or mode == DisaggregationMode.AGGREGATED:
@@ -50,7 +69,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
 
     # special case of 'test_agg_worker' above, test the prefill worker case
     def test_prefill_worker(self):
-        config = DynamoVllmConfig()
+        config = create_config()
         config.disaggregation_mode = DisaggregationMode.PREFILL
         config.multimodal_worker = True
         with pytest.warns(DeprecationWarning):
@@ -68,7 +87,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_encode_worker(self, mode):
-        config = DynamoVllmConfig()
+        config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_encode_worker = True
         if mode is None or mode == DisaggregationMode.ENCODE:
@@ -90,7 +109,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         ],
     )
     def test_decode_worker(self, mode):
-        config = DynamoVllmConfig()
+        config = create_config()
         config.disaggregation_mode = mode
         config.multimodal_decode_worker = True
         if mode is None or mode == DisaggregationMode.DECODE:
