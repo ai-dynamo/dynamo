@@ -30,25 +30,9 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http_client import MAX_CONNECTIONS, get_http_client
+from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
-
-# Process-global semaphore, lazily initialized on first use.
-# Defaults to MAX_CONNECTIONS so we never exceed the connection pool.
-_fetch_semaphore: asyncio.Semaphore | None = None
-
-
-def _get_fetch_semaphore() -> asyncio.Semaphore:
-    """Return a process-global semaphore to throttle concurrent HTTP fetches."""
-    global _fetch_semaphore
-    if _fetch_semaphore is None:
-        _fetch_semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
-        logger.info(
-            f"Image fetch semaphore initialized: concurrency={MAX_CONNECTIONS}"
-        )
-    return _fetch_semaphore
-
 
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
@@ -80,6 +64,7 @@ class ImageLoader:
         self._http_timeout = http_timeout
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._cache_lock = asyncio.Lock()
         self._enable_frontend_decoding = enable_frontend_decoding
         # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
@@ -96,9 +81,10 @@ class ImageLoader:
         # For HTTP(S) URLs, check cache first
         if parsed_url.scheme in ("http", "https"):
             image_url_lower = image_url.lower()
-            if image_url_lower in self._image_cache:
-                logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower]
+            async with self._cache_lock:
+                if image_url_lower in self._image_cache:
+                    logger.debug(f"Image found in cache for URL: {image_url}")
+                    return self._image_cache[image_url_lower]
 
         try:
             if parsed_url.scheme == "data":
@@ -121,8 +107,7 @@ class ImageLoader:
                 with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                     http_client = get_http_client(self._http_timeout)
 
-                    async with _get_fetch_semaphore():
-                        response = await http_client.get(image_url)
+                    response = await http_client.get(image_url)
                     response.raise_for_status()
 
                     if not response.content:
@@ -158,22 +143,31 @@ class ImageLoader:
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):
                 image_url_lower = image_url.lower()
-                # Cache the image for future use, and evict the oldest image if the cache is full
-                if self._cache_queue.full():
-                    oldest_image_url = await self._cache_queue.get()
-                    del self._image_cache[oldest_image_url]
-
-                self._image_cache[image_url_lower] = image_converted
-                await self._cache_queue.put(image_url_lower)
+                async with self._cache_lock:
+                    if image_url_lower not in self._image_cache:
+                        if self._cache_queue.full():
+                            oldest_image_url = await self._cache_queue.get()
+                            del self._image_cache[oldest_image_url]
+                        self._image_cache[image_url_lower] = image_converted
+                        await self._cache_queue.put(image_url_lower)
 
             return image_converted
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP {e.response.status_code} loading image: '{image_url}'")
+            raise
+        except httpx.TimeoutException as e:
+            logger.error(
+                f"{type(e).__name__} loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"Timeout loading image: '{image_url}'")
         except httpx.HTTPError as e:
-            logger.error(f"HTTP error loading image: {e}")
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
         except Exception as e:
-            logger.error(f"Error loading image: {e}")
-            raise ValueError(f"Failed to load image: {e}")
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}")
 
     async def load_image_batch(
         self,
