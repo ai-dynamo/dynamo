@@ -1,6 +1,58 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:28:08 UTC
+Last updated: 2026-03-31 02:31:37 UTC
+
+Current in-progress run (2026-03-31 02:31:37 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `PLANS.md`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+- Current implementation slice for this run:
+  - make owner-grouped `G4StorageClient::query_blocks(...)` fan out
+    concurrently across owners instead of awaiting each owner bucket serially
+  - preserve the existing cache-miss-tolerant behavior when an owner is
+    missing locally while reducing avoidable query latency across multiple
+    owners
+- Why this slice:
+  - this follow-up is already listed in `PLANS.md` as remaining work
+  - it is self-contained inside the existing in-process G4 client path and does
+    not require new runtime discovery or RPC ownership wiring
+  - it improves the cheap metadata-query path that the design doc explicitly
+    calls out as important for prefix/LRU protection
+- In-progress edits:
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+    - changed `G4StorageClient::query_blocks(...)` to issue per-owner queries
+      concurrently with `join_all(...)` instead of awaiting each owner bucket
+      serially
+    - added a test-only query delay hook on `G4StorageAgent` so concurrency can
+      be observed without changing non-test behavior
+    - added a focused timing-based unit test covering multi-owner concurrent
+      query fanout
+- Validation completed in this run:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml block_manager::distributed::g4::tests::client_query_blocks_fans_out_across_owners_concurrently --lib`
+    -> pass (`1 passed`, finished in `0.08s`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`7 passed`)
+- Validation notes from this run:
+  - cargo again serialized on the shared package/artifact lock in this
+    container; both test commands completed successfully after the rebuild
+- Remaining work after this run:
+  - add the actual runtime owner/callsite that passes the shared
+    `KvBlockManager::g4_block_index()` into `KvbmWorker::into_g4_storage_agent(...)`
+  - wire that agent/index pair into real discovery or request routing so the
+    runtime can execute actual remote `query -> fetch -> onboard`
+  - add remote access/touch metadata and prefix-aware recency updates so G4
+    query hits can protect trie prefixes and remote LRU state
+  - design and implement an explicit metadata-admission write path
+    (`offer(...)` / `offer_and_put(...)`) before expensive payload transfer
+- Exact next file or command to touch:
+  - file: `lib/llm/src/block_manager/distributed/g4.rs`
+  - then: the runtime construction site that will own both a `KvBlockManager`
+    and a `KvbmWorker`
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
 
 Current in-progress run (2026-03-31 02:28:08 UTC):
 

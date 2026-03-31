@@ -16,6 +16,7 @@ use crate::tokens::{SequenceHash, compute_hash_v2};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -229,6 +230,8 @@ pub struct G4StorageAgent {
     worker_id: WorkerID,
     transfer: Arc<dyn G4TransferExecutor>,
     block_index: Arc<G4BlockIndex>,
+    #[cfg(test)]
+    query_delay: Option<Duration>,
 }
 
 impl G4StorageAgent {
@@ -245,6 +248,8 @@ impl G4StorageAgent {
             worker_id,
             transfer,
             block_index,
+            #[cfg(test)]
+            query_delay: None,
         }
     }
 
@@ -256,11 +261,22 @@ impl G4StorageAgent {
         self.block_index.clone()
     }
 
+    #[cfg(test)]
+    fn with_query_delay(mut self, query_delay: Duration) -> Self {
+        self.query_delay = Some(query_delay);
+        self
+    }
+
     pub async fn put_blocks(&self, blocks: Vec<G4PutBlock>) {
         self.block_index.put_blocks(blocks).await;
     }
 
     pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G4QueryHit> {
+        #[cfg(test)]
+        if let Some(query_delay) = self.query_delay {
+            tokio::time::sleep(query_delay).await;
+        }
+
         self.block_index
             .query_blocks(self.worker_id, sequence_hashes)
             .await
@@ -364,13 +380,18 @@ impl G4StorageClient {
             }
         }
 
-        let mut hits = HashMap::new();
-        for (worker_id, sequence_hashes) in grouped {
-            let Some(agent) = self.agents.get(&worker_id) else {
-                continue;
-            };
+        let queries = grouped
+            .into_iter()
+            .filter_map(|(worker_id, sequence_hashes)| {
+                self.agents
+                    .get(&worker_id)
+                    .cloned()
+                    .map(|agent| async move { agent.query_blocks(&sequence_hashes).await })
+            });
 
-            for hit in agent.query_blocks(&sequence_hashes).await {
+        let mut hits = HashMap::new();
+        for owner_hits in join_all(queries).await {
+            for hit in owner_hits {
                 hits.insert(hit.sequence_hash, hit);
             }
         }
@@ -430,6 +451,7 @@ mod tests {
 
     use anyhow::anyhow;
     use tokio::sync::Mutex;
+    use tokio::time::Instant;
 
     #[derive(Default)]
     struct MockTransferExecutor {
@@ -640,6 +662,61 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[&1234].worker_id, owner.worker_id);
         assert_eq!(hits[&1234].disk_block_idx, 55);
+    }
+
+    #[tokio::test]
+    async fn client_query_blocks_fans_out_across_owners_concurrently() {
+        let worker_list = workers();
+        let mut by_owner = HashMap::<WorkerID, SequenceHash>::new();
+
+        for sequence_hash in 1..=1024_u64 {
+            let owner = select_g4_owner(sequence_hash, &worker_list).unwrap();
+            by_owner.entry(owner.worker_id).or_insert(sequence_hash);
+            if by_owner.len() >= 2 {
+                break;
+            }
+        }
+
+        assert!(by_owner.len() >= 2, "expected at least two owners");
+
+        let delay = Duration::from_millis(75);
+        let mut agents = HashMap::new();
+        let mut query_hashes = Vec::new();
+
+        for worker in &worker_list {
+            if let Some(sequence_hash) = by_owner.get(&worker.worker_id) {
+                let agent = Arc::new(
+                    G4StorageAgent::new(
+                        worker.worker_id,
+                        Arc::new(MockTransferExecutor::default()),
+                    )
+                    .with_query_delay(delay),
+                );
+                agent
+                    .put_blocks(vec![G4PutBlock {
+                        sequence_hash: *sequence_hash,
+                        disk_block_idx: worker.worker_id as usize,
+                        size_bytes: 4096,
+                        checksum: None,
+                    }])
+                    .await;
+                agents.insert(worker.worker_id, agent);
+                query_hashes.push(*sequence_hash);
+            }
+        }
+
+        let client = G4StorageClient::new(worker_list, agents, Duration::from_millis(50));
+
+        let start = Instant::now();
+        let hits = client.query_blocks(&query_hashes).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(hits.len(), query_hashes.len());
+        assert!(
+            elapsed < delay * query_hashes.len() as u32,
+            "expected concurrent owner fanout, elapsed={elapsed:?}, delay={delay:?}, owners={}",
+            query_hashes.len()
+        );
     }
 
     #[tokio::test]
