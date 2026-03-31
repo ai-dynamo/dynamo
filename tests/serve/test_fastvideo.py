@@ -47,6 +47,22 @@ fastvideo_configs = {
         env={},
         request_payloads=[video_generation_payload_default()],
     ),
+    "aggregated_flash_attn": FastVideoConfig(
+        name="aggregated_flash_attn",
+        directory=fastvideo_local_dir,
+        command=["bash", os.path.join(fastvideo_local_dir, "run_local.sh")],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.fastvideo,
+            pytest.mark.nightly,
+            pytest.mark.slow,
+            pytest.mark.timeout(1800),
+        ],
+        model="FastVideo/LTX2-Distilled-Diffusers",
+        timeout=1800,
+        env={"WORKER_EXTRA_ARGS": "--attention-backend FLASH_ATTN"},
+        request_payloads=[video_generation_payload_default()],
+    ),
 }
 
 

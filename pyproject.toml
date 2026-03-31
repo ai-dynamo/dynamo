@@ -65,11 +65,10 @@ sglang = [
     "cupy-cuda12x>=13.0.0",
 ]
 
-# TODO: Need to find a way to define flash_attn properly (hopefully new code from FastVideo will simplify this and doesn't need custom patch from https://github.com/RandNMR73/flash-attention/tree/fa4-compile
-# TODO: Pin to new released version with FP4Config once released: https://github.com/hao-ai-lab/FastVideo/issues/1171
 fastvideo = [
     "uvloop",
-    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git",
+    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git@833a33b66318125ac449f05a87aa7ada1a1b120d",
+    "flash-attn-4==4.0.0b5",
 ]
 
 mocker = [
