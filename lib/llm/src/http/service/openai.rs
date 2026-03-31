@@ -43,6 +43,8 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
+use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::prompt::PromptFormatter;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
@@ -55,6 +57,10 @@ use crate::protocols::openai::{
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    tokenization::{
+        DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
+        TokenizeRequest, TokenizeResponse,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -324,6 +330,169 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
         // Pass through if it is not a 422
         response
     }
+}
+
+fn bad_request<T: Into<String>>(message: T) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: message.into(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+        }),
+    )
+}
+
+fn resolve_tokenizer_model_name(
+    state: &Arc<service_v2::State>,
+    requested_model: Option<&str>,
+) -> Result<String, ErrorResponse> {
+    if let Some(model) = requested_model {
+        if state.manager().has_model_any(model) {
+            return Ok(model.to_string());
+        }
+        return Err(ErrorMessage::model_not_found());
+    }
+
+    let served_models = state.manager().model_display_names();
+    if served_models.len() == 1 {
+        return Ok(served_models.into_iter().next().unwrap());
+    }
+
+    let card_models: HashSet<String> = state
+        .manager()
+        .get_model_cards()
+        .into_iter()
+        .map(|card| card.display_name)
+        .collect();
+    if card_models.len() == 1 {
+        return Ok(card_models.into_iter().next().unwrap());
+    }
+
+    Err(bad_request(
+        "Model must be specified when more than one model is served.",
+    ))
+}
+
+fn resolve_model_card(
+    state: &Arc<service_v2::State>,
+    requested_model: Option<&str>,
+) -> Result<(String, ModelDeploymentCard), ErrorResponse> {
+    let model = resolve_tokenizer_model_name(state, requested_model)?;
+    let card = state
+        .manager()
+        .get_model_cards()
+        .into_iter()
+        .find(|card| card.display_name == model)
+        .ok_or_else(|| {
+            ErrorMessage::internal_server_error(&format!(
+                "Tokenizer metadata is not available for model '{}'",
+                model
+            ))
+        })?;
+    Ok((model, card))
+}
+
+fn extract_assistant_content_text(
+    content: &dynamo_protocols::types::ChatCompletionRequestAssistantMessageContent,
+) -> String {
+    use dynamo_protocols::types::ChatCompletionRequestAssistantMessageContent as Content;
+    use dynamo_protocols::types::ChatCompletionRequestAssistantMessageContentPart as Part;
+
+    match content {
+        Content::Text(text) => text.clone(),
+        Content::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Text(text) => Some(text.text.clone()),
+                Part::Refusal(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+}
+
+fn apply_continue_final_message(
+    rendered_prompt: String,
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
+) -> Result<String, ErrorResponse> {
+    use dynamo_protocols::types::ChatCompletionRequestMessage as Message;
+
+    let Some(Message::Assistant(message)) = messages.last() else {
+        return Err(bad_request(
+            "Cannot set `continue_final_message` to True when the final message is not from the assistant.",
+        ));
+    };
+
+    let Some(content) = message.content.as_ref() else {
+        return Err(bad_request(
+            "Cannot set `continue_final_message` to True when the final assistant message has no content.",
+        ));
+    };
+
+    let final_message = extract_assistant_content_text(content);
+    let trimmed_final_message = final_message.trim();
+    if trimmed_final_message.is_empty() {
+        return Err(bad_request(
+            "Cannot set `continue_final_message` to True when the final assistant message content is empty.",
+        ));
+    }
+
+    // Use rfind to locate the last occurrence of the assistant content in the rendered prompt,
+    // then truncate everything after it (e.g. EOS tokens, generation prompts). This assumes the
+    // final assistant message text appears only once at the end of the rendered output.
+    let Some(final_msg_loc) = rendered_prompt.rfind(trimmed_final_message) else {
+        return Err(ErrorMessage::internal_server_error(
+            "Failed to trim rendered prompt for `continue_final_message`.",
+        ));
+    };
+
+    Ok(rendered_prompt[..final_msg_loc + trimmed_final_message.len()].to_string())
+}
+
+fn make_tokenize_chat_completion_request(
+    model: String,
+    request: &TokenizeChatRequest,
+) -> NvCreateChatCompletionRequest {
+    let inner = dynamo_protocols::types::CreateChatCompletionRequest {
+        model,
+        messages: request.messages.clone(),
+        tools: request.tools.clone(),
+        ..Default::default()
+    };
+
+    NvCreateChatCompletionRequest {
+        inner,
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: Some(request.merged_chat_template_kwargs()),
+        media_io_kwargs: request.media_io_kwargs.clone(),
+        unsupported_fields: Default::default(),
+    }
+}
+
+fn render_tokenize_chat_prompt(
+    card: &ModelDeploymentCard,
+    model: String,
+    request: &TokenizeChatRequest,
+) -> Result<String, ErrorResponse> {
+    request.validate().map_err(bad_request)?;
+
+    let formatter =
+        PromptFormatter::from_mdc_with_chat_template(card, request.chat_template.as_deref())
+            .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to build chat formatter"))?;
+    let wrapped_request = make_tokenize_chat_completion_request(model, request);
+    let mut prompt = match formatter {
+        PromptFormatter::OAI(formatter) => formatter.render(&wrapped_request),
+    }
+    .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to render chat prompt"))?;
+
+    if request.continue_final_message {
+        prompt = apply_continue_final_message(prompt, &request.messages)?;
+    }
+
+    Ok(prompt)
 }
 
 /// Return the request ID for the current request.
@@ -1920,6 +2089,102 @@ struct ModelListing {
     max_output_tokens: Option<u64>,
 }
 
+async fn tokenize(
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<TokenizeRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let (_, card) = resolve_model_card(&state, request.model())?;
+    let tokenizer = card
+        .tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+
+    let (tokens, token_strs) = match request {
+        TokenizeRequest::Completion(TokenizeCompletionRequest {
+            prompt,
+            add_special_tokens,
+            return_token_strs,
+            ..
+        }) => {
+            let encoding = tokenizer
+                .encode_with_special_tokens(&prompt, add_special_tokens)
+                .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to tokenize prompt"))?;
+            let token_ids = encoding.token_ids().to_vec();
+            let token_strs = if return_token_strs {
+                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
+                })?)
+            } else {
+                None
+            };
+            (token_ids, token_strs)
+        }
+        TokenizeRequest::Chat(request) => {
+            let model = request
+                .model
+                .clone()
+                .unwrap_or_else(|| card.display_name.clone());
+            let prompt = render_tokenize_chat_prompt(&card, model, &request)?;
+            let encoding = tokenizer
+                .encode_with_special_tokens(&prompt, request.add_special_tokens)
+                .map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt")
+                })?;
+            let token_ids = encoding.token_ids().to_vec();
+            let token_strs = if request.return_token_strs {
+                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
+                })?)
+            } else {
+                None
+            };
+            (token_ids, token_strs)
+        }
+    };
+
+    Ok(Json(TokenizeResponse {
+        count: tokens.len(),
+        max_model_len: card.context_length,
+        tokens,
+        token_strs,
+    })
+    .into_response())
+}
+
+async fn detokenize(
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<DetokenizeRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let (_, card) = resolve_model_card(&state, request.model.as_deref())?;
+    let tokenizer = card
+        .tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+    let prompt = tokenizer
+        .decode(&request.tokens, false)
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?;
+
+    Ok(Json(DetokenizeResponse { prompt }).into_response())
+}
+
+pub fn tokenization_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
+    let tokenize_path = "/tokenize";
+    let detokenize_path = "/detokenize";
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, tokenize_path),
+        RouteDoc::new(axum::http::Method::POST, detokenize_path),
+    ];
+    let router = Router::new()
+        .route(tokenize_path, post(tokenize))
+        .route(detokenize_path, post(detokenize))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (docs, router)
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(
@@ -2538,19 +2803,112 @@ pub fn audios_router(
 mod tests {
 
     use super::*;
-    use crate::discovery::ModelManagerError;
+    use crate::discovery::{ModelManager, ModelManagerError};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
+    use crate::protocols::openai::tokenization::DetokenizeRequest;
+    use axum::extract::State;
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateCompletionRequest,
+        ChatCompletionRequestUserMessageContent, ChatCompletionTool, CreateChatCompletionRequest,
+        CreateCompletionRequest, FunctionObject,
     };
+    use dynamo_runtime::discovery::{MockDiscovery, SharedMockRegistry};
+    use std::collections::HashMap as StdHashMap;
+    use tokio_util::sync::CancellationToken;
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+    const TOKENIZE_MODEL_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+    );
+    const DETOKENIZE_MODEL_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/sample-models/TinyLlama_v1.1"
+    );
+
+    fn make_tokenize_state_with_path(
+        model_name: &str,
+        model_path: &str,
+    ) -> (Arc<service_v2::State>, ModelDeploymentCard) {
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.set_name(model_name);
+
+        let manager = Arc::new(ModelManager::new());
+        manager
+            .save_model_card(&format!("__test_model_card_{model_name}"), card.clone())
+            .unwrap();
+        manager
+            .add_prefill_model(model_name, card.mdcsum())
+            .unwrap();
+
+        let discovery = Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
+        let state = Arc::new(service_v2::State::new(
+            manager,
+            discovery,
+            CancellationToken::new(),
+        ));
+        (state, card)
+    }
+
+    fn make_tokenize_state(model_name: &str) -> (Arc<service_v2::State>, ModelDeploymentCard) {
+        make_tokenize_state_with_path(model_name, TOKENIZE_MODEL_PATH)
+    }
+
+    async fn response_json<T: serde::de::DeserializeOwned>(response: Response) -> T {
+        let body = response.into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn sample_chat_messages() -> Vec<ChatCompletionRequestMessage> {
+        vec![
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("Hi there!".to_string()),
+                name: None,
+            }),
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                    "Nice to meet you!".to_string(),
+                )),
+                reasoning_content: None,
+                refusal: None,
+                name: None,
+                audio: None,
+                tool_calls: None,
+                function_call: None,
+            }),
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(
+                    "Can I ask a question?".to_string(),
+                ),
+                name: None,
+            }),
+        ]
+    }
+
+    fn sample_tools() -> Vec<ChatCompletionTool> {
+        vec![ChatCompletionTool {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string"
+                        }
+                    }
+                })),
+                strict: None,
+            },
+        }]
+    }
 
     fn http_error_from_engine(code: u16) -> Result<(), anyhow::Error> {
         Err(HttpError {
@@ -3460,6 +3818,350 @@ mod tests {
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
         );
+    }
+
+    #[test]
+    fn test_apply_continue_final_message_trims_rendered_prompt() {
+        let rendered_prompt = "USER: Hi\nASSISTANT: Sure.</s><|assistant|>".to_string();
+        let messages = vec![
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("Hi".to_string()),
+                name: None,
+            }),
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                    "Sure.".to_string(),
+                )),
+                reasoning_content: None,
+                refusal: None,
+                name: None,
+                audio: None,
+                tool_calls: None,
+                function_call: None,
+            }),
+        ];
+
+        let trimmed = apply_continue_final_message(rendered_prompt, &messages).unwrap();
+        assert_eq!(trimmed, "USER: Hi\nASSISTANT: Sure.");
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_completion_route_matches_tokenizer() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let prompt = "This is a completion tokenize test.";
+
+        for add_special_tokens in [false, true] {
+            let response = tokenize(
+                State(state.clone()),
+                Json(TokenizeRequest::Completion(TokenizeCompletionRequest {
+                    model: Some("test-model".to_string()),
+                    prompt: prompt.to_string(),
+                    add_special_tokens,
+                    return_token_strs: false,
+                })),
+            )
+            .await
+            .unwrap();
+            let body: TokenizeResponse = response_json(response).await;
+            let expected = tokenizer
+                .encode_with_special_tokens(prompt, add_special_tokens)
+                .unwrap();
+
+            assert_eq!(body.tokens, expected.token_ids());
+            assert_eq!(body.count, expected.token_ids().len());
+            assert_eq!(body.max_model_len, card.context_length);
+            assert!(body.token_strs.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_chat_route_matches_rendered_prompt() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let messages = sample_chat_messages();
+
+        for add_generation_prompt in [false, true] {
+            for add_special_tokens in [false, true] {
+                let request = TokenizeChatRequest {
+                    model: Some("test-model".to_string()),
+                    messages: messages.clone(),
+                    add_generation_prompt,
+                    return_token_strs: false,
+                    continue_final_message: false,
+                    add_special_tokens,
+                    chat_template: None,
+                    chat_template_kwargs: None,
+                    media_io_kwargs: None,
+                    mm_processor_kwargs: None,
+                    tools: None,
+                };
+                let prompt =
+                    render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
+                let expected = tokenizer
+                    .encode_with_special_tokens(&prompt, add_special_tokens)
+                    .unwrap();
+
+                let response = tokenize(
+                    State(state.clone()),
+                    Json(TokenizeRequest::Chat(TokenizeChatRequest {
+                        model: Some("test-model".to_string()),
+                        messages: messages.clone(),
+                        add_generation_prompt,
+                        return_token_strs: false,
+                        continue_final_message: false,
+                        add_special_tokens,
+                        chat_template: None,
+                        chat_template_kwargs: None,
+                        media_io_kwargs: None,
+                        mm_processor_kwargs: None,
+                        tools: None,
+                    })),
+                )
+                .await
+                .unwrap();
+                let body: TokenizeResponse = response_json(response).await;
+                assert_eq!(body.tokens, expected.token_ids());
+                assert_eq!(body.count, expected.token_ids().len());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_chat_route_with_tools_and_continue_final_message() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let mut messages = sample_chat_messages();
+        messages.push(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
+                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                    "Sure,".to_string(),
+                )),
+                reasoning_content: None,
+                refusal: None,
+                name: None,
+                audio: None,
+                tool_calls: None,
+                function_call: None,
+            },
+        ));
+        let tools = sample_tools();
+
+        let request = TokenizeChatRequest {
+            model: Some("test-model".to_string()),
+            messages: messages.clone(),
+            add_generation_prompt: false,
+            return_token_strs: false,
+            continue_final_message: true,
+            add_special_tokens: true,
+            chat_template: None,
+            chat_template_kwargs: None,
+            media_io_kwargs: None,
+            mm_processor_kwargs: None,
+            tools: Some(tools.clone()),
+        };
+        let prompt =
+            render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
+        let expected = tokenizer.encode_with_special_tokens(&prompt, true).unwrap();
+
+        let response = tokenize(
+            State(state),
+            Json(TokenizeRequest::Chat(TokenizeChatRequest {
+                model: Some("test-model".to_string()),
+                messages: messages.clone(),
+                add_generation_prompt: false,
+                return_token_strs: false,
+                continue_final_message: true,
+                add_special_tokens: true,
+                chat_template: None,
+                chat_template_kwargs: None,
+                media_io_kwargs: None,
+                mm_processor_kwargs: None,
+                tools: Some(tools),
+            })),
+        )
+        .await
+        .unwrap();
+        let body: TokenizeResponse = response_json(response).await;
+        assert_eq!(body.tokens, expected.token_ids());
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_route_returns_token_strings() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let prompt = "Return token strings please.";
+
+        let response = tokenize(
+            State(state),
+            Json(TokenizeRequest::Completion(TokenizeCompletionRequest {
+                model: Some("test-model".to_string()),
+                prompt: prompt.to_string(),
+                add_special_tokens: true,
+                return_token_strs: true,
+            })),
+        )
+        .await
+        .unwrap();
+        let body: TokenizeResponse = response_json(response).await;
+        let expected = tokenizer.encode_with_special_tokens(prompt, true).unwrap();
+        let expected_token_strs = tokenizer
+            .convert_ids_to_tokens(expected.token_ids())
+            .unwrap();
+
+        assert_eq!(body.tokens, expected.token_ids());
+        assert_eq!(body.token_strs, Some(expected_token_strs));
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_chat_rejects_incompatible_flags() {
+        let (state, _) = make_tokenize_state("test-model");
+        let messages = sample_chat_messages();
+
+        let error = tokenize(
+            State(state),
+            Json(TokenizeRequest::Chat(TokenizeChatRequest {
+                model: Some("test-model".to_string()),
+                messages,
+                add_generation_prompt: true,
+                return_token_strs: false,
+                continue_final_message: true,
+                add_special_tokens: false,
+                chat_template: None,
+                chat_template_kwargs: None,
+                media_io_kwargs: None,
+                mm_processor_kwargs: None,
+                tools: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        let response = error.into_response();
+        let body: ErrorMessage = response_json(response).await;
+        assert!(body.message.contains(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_detokenize_route_round_trips_prompt() {
+        let (state, card) = make_tokenize_state_with_path("test-model", DETOKENIZE_MODEL_PATH);
+        let tokenizer = card.tokenizer().unwrap();
+        let prompt = "This is a detokenize test prompt.";
+        let tokens = tokenizer
+            .encode_with_special_tokens(prompt, false)
+            .unwrap()
+            .token_ids()
+            .to_vec();
+
+        let response = detokenize(
+            State(state),
+            Json(DetokenizeRequest {
+                model: Some("test-model".to_string()),
+                tokens,
+            }),
+        )
+        .await
+        .unwrap();
+        let body: DetokenizeResponse = response_json(response).await;
+        assert_eq!(body.prompt, prompt);
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_route_defaults_model_when_only_one_is_served() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let prompt = "Single served model default.";
+        let expected = tokenizer.encode_with_special_tokens(prompt, true).unwrap();
+
+        let response = tokenize(
+            State(state),
+            Json(TokenizeRequest::Completion(TokenizeCompletionRequest {
+                model: None,
+                prompt: prompt.to_string(),
+                add_special_tokens: true,
+                return_token_strs: false,
+            })),
+        )
+        .await
+        .unwrap();
+        let body: TokenizeResponse = response_json(response).await;
+        assert_eq!(body.tokens, expected.token_ids());
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_chat_route_supports_request_chat_template_override() {
+        let (state, card) = make_tokenize_state("test-model");
+        let tokenizer = card.tokenizer().unwrap();
+        let messages = sample_chat_messages();
+        let custom_template = concat!(
+            "{% for message in messages %}",
+            "[[{{ message['role'] }}]] {{ message['content'] }}\n",
+            "{% endfor %}",
+            "{% if add_generation_prompt %}[[assistant]] {% endif %}"
+        );
+
+        let request = TokenizeChatRequest {
+            model: Some("test-model".to_string()),
+            messages: messages.clone(),
+            add_generation_prompt: true,
+            return_token_strs: false,
+            continue_final_message: false,
+            add_special_tokens: false,
+            chat_template: Some(custom_template.to_string()),
+            chat_template_kwargs: Some(StdHashMap::from([(
+                "unused_value".to_string(),
+                serde_json::Value::String("ignored".to_string()),
+            )])),
+            media_io_kwargs: None,
+            mm_processor_kwargs: Some(StdHashMap::from([(
+                "image".to_string(),
+                serde_json::json!({"size": "ignored"}),
+            )])),
+            tools: None,
+        };
+        let prompt =
+            render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
+        let expected = tokenizer
+            .encode_with_special_tokens(&prompt, false)
+            .unwrap();
+
+        let response = tokenize(
+            State(state),
+            Json(TokenizeRequest::Chat(TokenizeChatRequest {
+                model: Some("test-model".to_string()),
+                messages,
+                add_generation_prompt: true,
+                return_token_strs: false,
+                continue_final_message: false,
+                add_special_tokens: false,
+                chat_template: Some(custom_template.to_string()),
+                chat_template_kwargs: Some(StdHashMap::from([(
+                    "unused_value".to_string(),
+                    serde_json::Value::String("ignored".to_string()),
+                )])),
+                media_io_kwargs: None,
+                mm_processor_kwargs: Some(StdHashMap::from([(
+                    "image".to_string(),
+                    serde_json::json!({"size": "ignored"}),
+                )])),
+                tools: None,
+            })),
+        )
+        .await
+        .unwrap();
+        let body: TokenizeResponse = response_json(response).await;
+        assert_eq!(body.tokens, expected.token_ids());
+    }
+
+    #[test]
+    fn test_tokenization_router_registers_root_paths() {
+        let (state, _) = make_tokenize_state("test-model");
+        let (docs, _) = tokenization_router(state);
+        let docs = docs.iter().map(|doc| doc.to_string()).collect::<Vec<_>>();
+
+        assert!(docs.contains(&"POST /tokenize".to_string()));
+        assert!(docs.contains(&"POST /detokenize".to_string()));
     }
 
     // ── streaming dispatch tests ──────────────────────────────────────

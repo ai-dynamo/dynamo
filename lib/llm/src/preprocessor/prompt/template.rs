@@ -4,6 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Ok, Result};
+use either::Either;
 use minijinja::Environment;
 
 use crate::model_card::{ModelDeploymentCard, PromptContextMixin, PromptFormatterArtifact};
@@ -19,11 +20,19 @@ use tokcfg::ChatTemplateValue;
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+        Self::from_mdc_with_chat_template(mdc, None)
+    }
+
+    pub fn from_mdc_with_chat_template(
+        mdc: &ModelDeploymentCard,
+        chat_template_override: Option<&str>,
+    ) -> Result<PromptFormatter> {
         // Special handling for DeepSeek-V3.2(-Speciale) which doesn't provide Jinja chat_template
         let name_lower = mdc.display_name.to_lowercase();
         if name_lower.contains("deepseek")
             && name_lower.contains("v3.2")
             && !name_lower.contains("exp")
+            && chat_template_override.is_none()
         {
             tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
             return Ok(Self::OAI(Arc::new(
@@ -54,57 +63,64 @@ impl PromptFormatter {
                         crate::log_json_err(&file.display().to_string(), &contents, err)
                     })?;
 
+                if let Some(chat_template) = chat_template_override {
+                    config.chat_template =
+                        Some(ChatTemplateValue(Either::Left(chat_template.to_string())));
+                }
+
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                match mdc.chat_template_file.as_ref() {
-                    Some(PromptFormatterArtifact::HfChatTemplateJinja {
-                        file: checked_file,
-                        ..
-                    }) => {
-                        let Some(path) = checked_file.path() else {
-                            anyhow::bail!(
-                                "HfChatTemplateJinja for {} is a URL, cannot load",
-                                mdc.display_name
-                            );
-                        };
-                        let chat_template = std::fs::read_to_string(path)
-                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                        config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
-                    }
-                    Some(PromptFormatterArtifact::HfChatTemplateJson {
-                        file: checked_file,
-                        ..
-                    }) => {
-                        let Some(path) = checked_file.path() else {
-                            anyhow::bail!(
-                                "HfChatTemplateJson for {} is a URL, cannot load",
-                                mdc.display_name
-                            );
-                        };
-                        let raw = std::fs::read_to_string(path)
-                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                        let wrapper: serde_json::Value =
-                            serde_json::from_str(&raw).with_context(|| {
-                                format!("Failed to parse '{}' as JSON", path.display())
-                            })?;
-                        let field = wrapper.get("chat_template").ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "'{}' does not contain a 'chat_template' field",
-                                path.display()
-                            )
-                        })?;
-                        let value = serde_json::from_value::<ChatTemplateValue>(field.clone())
-                            .with_context(|| {
-                                format!(
-                                    "Failed to deserialize 'chat_template' in '{}'",
+                if chat_template_override.is_none() {
+                    match mdc.chat_template_file.as_ref() {
+                        Some(PromptFormatterArtifact::HfChatTemplateJinja {
+                            file: checked_file,
+                            ..
+                        }) => {
+                            let Some(path) = checked_file.path() else {
+                                anyhow::bail!(
+                                    "HfChatTemplateJinja for {} is a URL, cannot load",
+                                    mdc.display_name
+                                );
+                            };
+                            let chat_template = std::fs::read_to_string(path)
+                                .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                            config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                        }
+                        Some(PromptFormatterArtifact::HfChatTemplateJson {
+                            file: checked_file,
+                            ..
+                        }) => {
+                            let Some(path) = checked_file.path() else {
+                                anyhow::bail!(
+                                    "HfChatTemplateJson for {} is a URL, cannot load",
+                                    mdc.display_name
+                                );
+                            };
+                            let raw = std::fs::read_to_string(path)
+                                .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                            let wrapper: serde_json::Value =
+                                serde_json::from_str(&raw).with_context(|| {
+                                    format!("Failed to parse '{}' as JSON", path.display())
+                                })?;
+                            let field = wrapper.get("chat_template").ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "'{}' does not contain a 'chat_template' field",
                                     path.display()
                                 )
                             })?;
-                        config.chat_template = Some(value);
+                            let value = serde_json::from_value::<ChatTemplateValue>(field.clone())
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to deserialize 'chat_template' in '{}'",
+                                        path.display()
+                                    )
+                                })?;
+                            config.chat_template = Some(value);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
                 Self::from_parts(
                     config,
