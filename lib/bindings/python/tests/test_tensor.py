@@ -13,6 +13,12 @@ from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
+
 
 @pytest.mark.asyncio
 async def test_register(runtime: DistributedRuntime):

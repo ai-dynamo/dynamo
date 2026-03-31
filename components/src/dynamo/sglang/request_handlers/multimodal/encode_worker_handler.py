@@ -190,10 +190,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
             for url in image_urls
         ]
+        preprocessed_request = PreprocessedRequest.model_validate(raw_request)
 
         # Build SglangMultimodalRequest from the pre-tokenized request
         request = SglangMultimodalRequest(
-            request=PreprocessedRequest(**raw_request),
+            request=preprocessed_request,
             multimodal_inputs=multimodal_groups,
         )
 

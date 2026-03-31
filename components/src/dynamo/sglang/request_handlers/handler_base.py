@@ -5,7 +5,6 @@ import asyncio
 import inspect
 import logging
 import random
-import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import (
@@ -20,12 +19,12 @@ from typing import (
 )
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -516,40 +515,18 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            bootstrap_host = (
+                NetworkAddress(dist_init.resolved().host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
         else:
-            bootstrap_host = get_local_ip_auto()
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
+            bootstrap_host = (
+                NetworkAddress(get_local_ip_auto(), bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
 
         return bootstrap_host, bootstrap_port
 

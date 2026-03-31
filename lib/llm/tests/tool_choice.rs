@@ -157,7 +157,7 @@ async fn test_named_tool_choice_parses_json() {
         .expect("choice generation");
 
     let response = apply_jail_transformation(raw_response, tool_choice).await;
-    let choice = &response.choices[0];
+    let choice = &response.inner.choices[0];
 
     assert_eq!(
         choice.finish_reason,
@@ -199,7 +199,7 @@ async fn test_required_tool_choice_parses_json_array() {
         .expect("choice generation");
 
     let response = apply_jail_transformation(raw_response, tool_choice).await;
-    let choice = &response.choices[0];
+    let choice = &response.inner.choices[0];
 
     assert_eq!(
         choice.finish_reason,
@@ -259,7 +259,7 @@ async fn test_tool_choice_parse_failure_returns_as_content() {
         .expect("choice generation");
 
     let response = apply_jail_transformation(raw_response, tool_choice).await;
-    let delta = &response.choices[0].delta;
+    let delta = &response.inner.choices[0].delta;
 
     // Jail stream behavior: if parsing fails, return accumulated content as-is
     // This matches marker-based FC behavior
@@ -317,11 +317,11 @@ async fn test_streaming_named_tool_buffers_until_finish() {
 
     let response = &all_responses[0];
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Stop)
     );
 
-    let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
+    let tool_calls = response.inner.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(
         tool_calls[0].function.as_ref().unwrap().name.as_deref(),
@@ -384,11 +384,11 @@ async fn test_streaming_required_tool_parallel() {
 
     let response = &all_responses[0];
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
 
-    let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
+    let tool_calls = response.inner.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 2);
 
     assert_eq!(
@@ -445,8 +445,12 @@ fn test_no_tool_choice_outputs_normal_text() {
         .expect("normal text");
 
     assert_eq!(
-        response.choices[0].delta.content.as_ref().map(get_text),
+        response.inner.choices[0]
+            .delta
+            .content
+            .as_ref()
+            .map(get_text),
         Some("Hello world")
     );
-    assert!(response.choices[0].delta.tool_calls.is_none());
+    assert!(response.inner.choices[0].delta.tool_calls.is_none());
 }

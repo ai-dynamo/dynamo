@@ -51,7 +51,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.13
+FROM nvcr.io/nvidia/distroless/go:v4.0.3
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .

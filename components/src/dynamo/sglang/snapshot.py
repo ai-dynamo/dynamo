@@ -3,12 +3,17 @@
 
 """Dynamo Snapshot integration for SGLang workers."""
 
+
 import logging
 import time
 
 import sglang as sgl
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.utils.snapshot import (
+    CheckpointConfig,
+    EngineSnapshotController,
+    _try_release_memory,
+)
 
 from .request_handlers.handler_base import SGLangEngineQuiesceController
 
@@ -37,16 +42,26 @@ async def prepare_snapshot_engine(
 
     logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver + weights CPU backup so weights survive CRIU
-    # (mirrors vLLM's enable_sleep_mode = True)
+    # Enable memory_saver so GPU memory can be released for CRIU.
+    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
+    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
     server_args.enable_memory_saver = True
-    server_args.enable_weights_cpu_backup = True
+    try:
+        from gpu_memory_service.integrations.sglang import is_gms_active
+
+        _using_gms = is_gms_active()
+    except ImportError:
+        _using_gms = False
+    if not _using_gms:
+        server_args.enable_weights_cpu_backup = True
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
     )
+
+    _try_release_memory("after_engine_load")
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,

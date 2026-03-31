@@ -57,7 +57,17 @@ REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
         "multimodal",
         "performance",
     },
-    "Hardware": {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8", "h100", "k8s"},
+    "Hardware": {
+        "gpu_0",
+        "gpu_1",
+        "gpu_2",
+        "gpu_4",
+        "gpu_8",
+        "h100",
+        "k8s",
+        "xpu_1",
+        "xpu_2",
+    },
 }
 
 STUB_MODULES = [

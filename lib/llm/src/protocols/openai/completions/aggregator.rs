@@ -86,8 +86,8 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
                     // Aggregate nvext field (take the last non-None value)
-                    if delta.inner.nvext.is_some() {
-                        aggregator.nvext = delta.inner.nvext;
+                    if delta.nvext.is_some() {
+                        aggregator.nvext = delta.nvext;
                     }
 
                     // handle the choices
@@ -168,10 +168,12 @@ impl DeltaAggregator {
             object: "text_completion".to_string(),
             system_fingerprint: aggregator.system_fingerprint,
             choices,
-            nvext: aggregator.nvext,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: aggregator.nvext,
+        };
 
         Ok(response)
     }
@@ -256,10 +258,9 @@ mod tests {
                 logprobs,
             }],
             object: "text_completion".to_string(),
-            nvext: None,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse { inner, nvext: None };
 
         Annotated {
             data: Some(response),
@@ -387,10 +388,9 @@ mod tests {
                 },
             ],
             object: "text_completion".to_string(),
-            nvext: None,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse { inner, nvext: None };
 
         let annotated_delta = Annotated {
             data: Some(response),

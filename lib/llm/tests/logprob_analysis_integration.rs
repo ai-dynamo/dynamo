@@ -397,14 +397,16 @@ fn create_response_with_linear_probs(
     };
 
     NvCreateChatCompletionStreamResponse {
-        id: "test_id".to_string(),
-        choices: vec![choice],
-        created: 1234567890,
-        model: "test-model".to_string(),
-        service_tier: None,
-        system_fingerprint: None,
-        object: "chat.completion.chunk".to_string(),
-        usage: None,
+        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            id: "test_id".to_string(),
+            choices: vec![choice],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+        },
         nvext: None,
     }
 }
@@ -479,14 +481,16 @@ fn create_multi_choice_response(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
-        id: "test_id".to_string(),
-        choices,
-        created: 1234567890,
-        model: "test-model".to_string(),
-        service_tier: None,
-        system_fingerprint: None,
-        object: "chat.completion.chunk".to_string(),
-        usage: None,
+        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            id: "test_id".to_string(),
+            choices,
+            created: 1234567890,
+            model: "test-model".to_string(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+        },
         nvext: None,
     }
 }

@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
+use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 
 use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
 
@@ -197,8 +197,14 @@ async fn query(
     let indexer = ie.indexer.clone();
     drop(ie);
 
-    let block_hashes =
-        compute_block_hash_for_seq(&req.token_ids, block_size, None, req.lora_name.as_deref());
+    let block_hashes = compute_block_hash_for_seq(
+        &req.token_ids,
+        block_size,
+        BlockHashOptions {
+            lora_name: req.lora_name.as_deref(),
+            ..Default::default()
+        },
+    );
     match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,

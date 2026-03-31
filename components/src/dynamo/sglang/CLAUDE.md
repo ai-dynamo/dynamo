@@ -4,6 +4,29 @@ Dynamo's SGLang backend wraps SGLang's inference engine (`sgl.Engine`) and diffu
 generator (`DiffGenerator`) behind Dynamo's distributed runtime. It handles model
 registration, request routing, metrics, and disaggregated serving.
 
+## SGLang Backwards Compatibility
+
+SGLang is pre-1.0 and regularly moves/renames internal APIs between releases. We
+support the current version plus 1 version back (N and N-1). The pattern:
+
+1. **All SGLang imports that have broken (or may break) across versions go through
+   `_compat.py`**, never directly from `sglang.*` in component code.
+2. `_compat.py` uses try/except ImportError: new path first, old path fallback.
+3. When SGLang introduces a new class/function that doesn't exist in older versions
+   (e.g., `NetworkAddress`), add a minimal polyfill in the except branch -- just
+   enough surface area to cover what Dynamo actually calls.
+4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
+   version it supports and when it can be removed, e.g.:
+   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+5. When a new SGLang version is released and the old N-1 falls outside the support
+   window, delete the corresponding fallback branches and polyfills from `_compat.py`.
+   If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
+
+**When you encounter a new SGLang API breakage**: add the affected imports to
+`_compat.py` following the existing pattern. Do not scatter try/except blocks across
+component files. Do not version-check with `sglang.__version__` -- import probing is
+more reliable since SGLang's internal layout doesn't always match the version string.
+
 ## Entry Point
 
 `__main__.py` -> `main.py:main()` -> `main.py:worker()`
@@ -272,6 +295,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
+  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

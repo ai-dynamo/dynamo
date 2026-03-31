@@ -5,14 +5,15 @@
 //!
 //! Enabled by setting `DYN_MOCKER_KV_CACHE_TRACE=1` or `true`.
 
-use dynamo_runtime::config::environment_names::mocker;
 use std::env;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+
 /// Check the env var to enable KV cache allocation/eviction trace logs.
 pub static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    env::var(mocker::DYN_MOCKER_KV_CACHE_TRACE)
+    env::var(DYN_MOCKER_KV_CACHE_TRACE)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 });

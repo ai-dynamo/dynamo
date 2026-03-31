@@ -414,6 +414,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		NodeName:              w.config.NodeName,
 		PodName:               pod.Name,
 		PodNamespace:          pod.Namespace,
+		Clientset:             w.clientset,
 	}
 	if err := executor.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
 		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
@@ -512,6 +513,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		PodName:               pod.Name,
 		PodNamespace:          pod.Namespace,
 		ContainerName:         containerName,
+		Clientset:             w.clientset,
 	}
 	restoredPID, err := executor.Restore(ctx, w.containerd, log, req)
 	if err != nil {

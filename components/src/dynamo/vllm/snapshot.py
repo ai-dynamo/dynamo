@@ -4,7 +4,11 @@
 import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.utils.snapshot import (
+    CheckpointConfig,
+    EngineSnapshotController,
+    _try_release_memory,
+)
 
 from .args import Config
 from .handlers import VllmEngineQuiesceController
@@ -32,6 +36,7 @@ async def prepare_snapshot_engine(
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
+    _try_release_memory("after_engine_load")
     snapshot_controller = EngineSnapshotController(
         engine=engine,
         quiesce_controller=VllmEngineQuiesceController(engine[0]),

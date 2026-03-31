@@ -7,7 +7,7 @@ import argparse
 import logging
 from typing import Optional
 
-from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class OmniArgGroup(ArgGroup):
     """Diffusion pipeline kwargs passed through to AsyncOmni() constructor.
 
-    These are NOT part of AsyncOmniEngineArgs (which handles vLLM engine-level
+    These are NOT part of OmniEngineArgs (which handles vLLM engine-level
     args like model, tp, max_model_len). Instead they are direct constructor
     kwargs for AsyncOmni and need Dynamo-side env-var (DYN_OMNI_*) support,
     so we define them here rather than relying on the upstream arg parser.
@@ -197,7 +197,7 @@ class OmniConfig(DynamoRuntimeConfig):
     served_model_name: Optional[str] = None
 
     # vLLM-Omni engine args
-    engine_args: AsyncOmniEngineArgs
+    engine_args: OmniEngineArgs
 
     # OmniArgGroup fields (populated by from_cli_args)
     stage_configs_path: Optional[str] = None
@@ -248,7 +248,7 @@ def parse_omni_args() -> OmniConfig:
         "vLLM-Omni Engine Options. Please refer to vLLM-Omni documentation for more details."
     )
     vllm_parser = FlexibleArgumentParser(add_help=False)
-    AsyncOmniEngineArgs.add_cli_args(vllm_parser, async_args_only=False)
+    OmniEngineArgs.add_cli_args(vllm_parser)
 
     for action in vllm_parser._actions:
         if not action.option_strings:
@@ -265,7 +265,7 @@ def parse_omni_args() -> OmniConfig:
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
 
-    engine_args = AsyncOmniEngineArgs.from_cli_args(vllm_args)
+    engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 
     if getattr(engine_args, "served_model_name", None) is not None:
         served = engine_args.served_model_name

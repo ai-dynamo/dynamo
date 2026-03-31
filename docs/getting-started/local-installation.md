@@ -171,7 +171,7 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-vLLM automatically enables KV event publishing when prefix caching is active. In a future release, KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
+KV events are disabled by default for all backends. Add `--kv-events-config` explicitly only when you want KV event publishing enabled.
 
 ## Test Your Deployment
 

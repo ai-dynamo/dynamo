@@ -21,6 +21,7 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
+    patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
 
@@ -28,9 +29,13 @@ logger = logging.getLogger(__name__)
 
 # Apply patches at module import time.
 # This module is only imported when load_format="gms" is used.
+# Because SGLang scheduler processes use multiprocessing spawn, these patches
+# must run inside the child process.  The import chain that triggers this is:
+#   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
+patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/criu"
@@ -31,6 +32,7 @@ type RestoreRequest struct {
 	PodName               string
 	PodNamespace          string
 	ContainerName         string
+	Clientset             kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -125,12 +127,25 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
+			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
+			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, common.HostProcPath, placeholderPID)
+			if err != nil {
+				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)
+			}
+			log.Info("nvidia-smi fallback discovered target GPU UUIDs", "uuids", targetGPUUUIDs)
+		}
+		if len(targetGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
 		}
-		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs)
+		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
+		log.Info("GPU UUIDs for device map",
+			"source_uuids", m.CUDA.SourceGPUUUIDs,
+			"target_uuids", targetGPUUUIDs,
+			"device_map", cudaDeviceMap,
+		)
 	}
 
 	return &types.RestoreContainerSnapshot{

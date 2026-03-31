@@ -24,7 +24,8 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

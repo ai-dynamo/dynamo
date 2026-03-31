@@ -241,12 +241,12 @@ async fn test_streaming_without_usage() {
     for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Chunk {} should have usage: None when stream_options not set",
                 i
             );
             assert!(
-                !response.choices.is_empty(),
+                !response.inner.choices.is_empty(),
                 "Chunk {} should have choices",
                 i
             );
@@ -286,12 +286,12 @@ async fn test_streaming_with_usage_compliance() {
     for (i, chunk) in chunks.iter().take(3).enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Content chunk {} should have usage: None",
                 i
             );
             assert!(
-                !response.choices.is_empty(),
+                !response.inner.choices.is_empty(),
                 "Content chunk {} should have choices",
                 i
             );
@@ -301,15 +301,15 @@ async fn test_streaming_with_usage_compliance() {
     // Verify the final chunk is the usage-only chunk
     if let Some(final_response) = &chunks[3].data {
         assert!(
-            final_response.choices.is_empty(),
+            final_response.inner.choices.is_empty(),
             "Final usage chunk should have empty choices array"
         );
         assert!(
-            final_response.usage.is_some(),
+            final_response.inner.usage.is_some(),
             "Final usage chunk should have usage statistics"
         );
 
-        let usage = final_response.usage.as_ref().unwrap();
+        let usage = final_response.inner.usage.as_ref().unwrap();
         assert_eq!(
             usage.completion_tokens, 3,
             "Should have 3 completion tokens"
@@ -359,18 +359,18 @@ async fn test_streaming_with_continuous_usage() {
     for (i, chunk) in chunks.iter().take(3).enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_some(),
+                response.inner.usage.is_some(),
                 "Content chunk {} should have usage: Some",
                 i
             );
             assert!(
-                !response.choices.is_empty(),
+                !response.inner.choices.is_empty(),
                 "Content chunk {} should have choices",
                 i
             );
 
             // Verify usage counts are properly accumulated for each chunk
-            let usage = response.usage.as_ref().unwrap();
+            let usage = response.inner.usage.as_ref().unwrap();
             assert_eq!(
                 usage.completion_tokens,
                 i as u32 + 1,
@@ -392,15 +392,15 @@ async fn test_streaming_with_continuous_usage() {
     // Verify the final chunk is the usage-only chunk
     if let Some(final_response) = &chunks[3].data {
         assert!(
-            final_response.choices.is_empty(),
+            final_response.inner.choices.is_empty(),
             "Final usage chunk should have empty choices array"
         );
         assert!(
-            final_response.usage.is_some(),
+            final_response.inner.usage.is_some(),
             "Final usage chunk should have usage statistics"
         );
 
-        let usage = final_response.usage.as_ref().unwrap();
+        let usage = final_response.inner.usage.as_ref().unwrap();
         assert_eq!(
             usage.completion_tokens, 3,
             "Should have 3 completion tokens"
@@ -464,7 +464,7 @@ async fn test_streaming_with_usage_false() {
     for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Chunk {} should have usage: None when include_usage is false",
                 i
             );
@@ -560,7 +560,7 @@ async fn test_nonstreaming_has_usage_field() {
 
     // Aggregate the streaming chunks into a single non-streaming response
     // This simulates what the HTTP service does for non-streaming requests
-    let result = dynamo_async_openai::types::CreateChatCompletionResponse::from_annotated_stream(
+    let result = dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionResponse::from_annotated_stream(
         transformed_stream,
         ParsingOptions::default(),
     )
@@ -570,12 +570,12 @@ async fn test_nonstreaming_has_usage_field() {
     let response = result.unwrap();
 
     assert!(
-        response.usage.is_some(),
+        response.inner.usage.is_some(),
         "Non-streaming chat completion response MUST have a usage field populated. \
          This is required for OpenAI API compliance."
     );
 
-    let usage = response.usage.unwrap();
+    let usage = response.inner.usage.unwrap();
 
     // Verify usage contains valid token counts
     // In our mock, we generated 3 tokens (from the 3 backend outputs)
@@ -725,7 +725,11 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
 
     assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
     if let Some(final_resp) = &chunks[3].data {
-        let usage = final_resp.usage.as_ref().expect("Usage must be present");
+        let usage = final_resp
+            .inner
+            .usage
+            .as_ref()
+            .expect("Usage must be present");
         let cached = usage
             .prompt_tokens_details
             .as_ref()

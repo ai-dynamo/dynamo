@@ -11,10 +11,12 @@ pub mod runtime;
 pub mod server;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::min_initial_workers_from_env;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -198,6 +200,33 @@ pub async fn run_with_runtime(
     run_common(&config, &registry, cancel_token).await
 }
 
+async fn wait_for_min_initial_workers(
+    registry: &WorkerRegistry,
+    cancel_token: &CancellationToken,
+) -> anyhow::Result<()> {
+    let min_initial_workers = min_initial_workers_from_env()?;
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    loop {
+        let registered_workers = registry.list().len();
+        if registered_workers >= min_initial_workers {
+            return Ok(());
+        }
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!(
+                    "shutdown triggered before {} indexer workers appeared",
+                    min_initial_workers
+                );
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
 async fn run_common(
     config: &IndexerConfig,
     registry: &Arc<WorkerRegistry>,
@@ -245,6 +274,7 @@ async fn run_common(
         }
     }
 
+    wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
 
     #[cfg(feature = "metrics")]

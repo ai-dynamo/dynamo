@@ -6,7 +6,7 @@
 import pytest
 from pydantic import ValidationError
 
-from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig
 
 pytestmark = [
     pytest.mark.gpu_0,

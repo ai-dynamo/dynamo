@@ -26,7 +26,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM-Omni Image Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM-Omni Image Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_curl_footer <<CURL
+curl -s -X POST http://localhost:${HTTP_PORT}/v1/images/generations \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "model": "${MODEL}",
+    "prompt": "A red apple on a white table",
+    "size": "512x512",
+    "num_inference_steps": 20
+  }' | jq
+CURL
 
 
 python -m dynamo.frontend &

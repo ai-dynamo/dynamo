@@ -263,26 +263,26 @@ impl RoutingOverheadMetrics {
     pub fn observe(
         &self,
         hash_elapsed: Duration,
-        find_matches_elapsed: Duration,
         seq_hash_elapsed: Duration,
+        find_matches_elapsed: Duration,
         total_elapsed: Duration,
     ) {
         self.block_hashing
             .observe(hash_elapsed.as_secs_f64() * 1000.0);
+        self.seq_hashing
+            .observe(seq_hash_elapsed.saturating_sub(hash_elapsed).as_secs_f64() * 1000.0);
         self.indexer_find_matches.observe(
             find_matches_elapsed
-                .saturating_sub(hash_elapsed)
+                .saturating_sub(seq_hash_elapsed)
                 .as_secs_f64()
                 * 1000.0,
         );
-        self.seq_hashing.observe(
-            seq_hash_elapsed
+        self.scheduling.observe(
+            total_elapsed
                 .saturating_sub(find_matches_elapsed)
                 .as_secs_f64()
                 * 1000.0,
         );
-        self.scheduling
-            .observe(total_elapsed.saturating_sub(seq_hash_elapsed).as_secs_f64() * 1000.0);
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
     }
 }
@@ -557,7 +557,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             total: make("test_total_ms"),
         };
 
-        // Out-of-order durations: each phase < previous (would panic without saturating_sub)
+        // Out-of-order cumulative durations: each phase < previous (would panic without saturating_sub)
         metrics.observe(
             Duration::from_millis(10),
             Duration::from_millis(5),

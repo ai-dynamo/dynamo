@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - model-download.yaml
+
+patches:
+  - target:
+      kind: Job
+      name: model-download
+    patch: |
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: model-download
+      spec:
+        template:
+          spec:
+            containers:
+              - name: model-download
+                resources:
+                  requests:
+                    memory: "4Gi"

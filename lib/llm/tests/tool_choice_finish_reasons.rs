@@ -116,7 +116,7 @@ async fn test_named_tool_choice_preserves_length_finish_reason() {
 
     // Critical: Length finish reason should be preserved, NOT replaced with Stop
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Length),
         "Length finish reason must be preserved for tool_choice=named"
     );
@@ -139,7 +139,7 @@ fn test_required_tool_choice_preserves_length_finish_reason() {
 
     // Critical: Length finish reason should be preserved, NOT replaced with ToolCalls
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Length),
         "Length finish reason must be preserved for tool_choice=required"
     );
@@ -169,7 +169,7 @@ fn test_named_tool_choice_preserves_content_filter() {
 
     // Critical: ContentFilter finish reason should be preserved
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ContentFilter),
         "ContentFilter finish reason must be preserved for tool_choice=named"
     );
@@ -192,7 +192,7 @@ fn test_required_tool_choice_preserves_content_filter() {
 
     // Critical: ContentFilter finish reason should be preserved
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ContentFilter),
         "ContentFilter finish reason must be preserved for tool_choice=required"
     );
@@ -222,7 +222,7 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
 
     // Normal completion: Stop should remain Stop for named tool choice
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Stop),
     );
 }
@@ -247,7 +247,7 @@ async fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
 
     // Normal completion: Stop should become ToolCalls for required tool choice
     assert_eq!(
-        response.choices[0].finish_reason,
+        response.inner.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ToolCalls),
     );
 }

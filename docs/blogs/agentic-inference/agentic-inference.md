@@ -123,6 +123,7 @@ config = {"overlap_score_weight": 2.0} if len(token_ids) > 8192 else {}
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",
+    update_indexer=True,
     router_config_override=config
 )
 

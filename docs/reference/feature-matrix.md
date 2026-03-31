@@ -122,10 +122,10 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [tools]: ../user-guides/tool-calling
 
 {/* Multimodal */}
-[mm]: ../user-guides/multimodal
-[mm-vllm]: ../user-guides/multimodal/multimodal-vllm
-[mm-trtllm]: ../user-guides/multimodal/multimodal-trtllm
-[mm-sglang]: ../user-guides/multimodal/multimodal-sglang
+[mm]: ../features/multimodal/README.md
+[mm-vllm]: ../features/multimodal/multimodal-vllm.md
+[mm-trtllm]: ../features/multimodal/multimodal-trtllm.md
+[mm-sglang]: ../features/multimodal/multimodal-sglang.md
 
 {/* Feature-specific */}
 [lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model

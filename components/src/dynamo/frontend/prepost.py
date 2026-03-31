@@ -79,6 +79,7 @@ def _prepare_request(
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -107,9 +108,15 @@ def _prepare_request(
             tool_parser = tool_parser_class(tokenizer)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
+    # Strip tools from the template when tool_choice=none so the model doesn't
+    # see them and generate raw XML tool calls in its response.
     tool_dicts = (
         [tool.model_dump() for tool in request_for_sampling.tools]
         if request_for_sampling.tools
+        and not (
+            exclude_tools_when_tool_choice_none
+            and request_for_sampling.tool_choice == "none"
+        )
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
@@ -155,6 +162,7 @@ async def preprocess_chat_request(
     tokenizer: TokenizerLike,
     renderer,
     tool_parser_class: type[ToolParser] | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -163,7 +171,10 @@ async def preprocess_chat_request(
         messages,
         chat_params,
     ) = _prepare_request(
-        request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=tool_parser_class,
+        exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

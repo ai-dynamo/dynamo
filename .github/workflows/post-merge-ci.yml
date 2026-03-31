@@ -25,7 +25,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -50,7 +50,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -75,7 +75,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
@@ -96,11 +96,11 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -111,11 +111,11 @@ jobs:
 
   sglang-dev-pipeline:
     name: sglang-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -126,11 +126,11 @@ jobs:
 
   trtllm-dev-pipeline:
     name: trtllm-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -150,7 +150,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
@@ -174,7 +174,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
@@ -188,6 +188,16 @@ jobs:
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
       copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
+  # FRONTEND IMAGE BUILD
+  # ============================================================================
+  frontend-image:
+    name: Frontend Image
+    uses: ./.github/workflows/build-frontend-image.yaml
+    with:
+      skip_change_detection: true
     secrets: inherit
 
   # ============================================================================
@@ -211,7 +221,7 @@ jobs:
         with:
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -322,7 +332,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda12-amd64
+      image_suffix: vllm-runtime-cuda12
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -334,7 +344,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda12-amd64
+      image_suffix: sglang-runtime-cuda12
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -346,7 +356,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime-cuda13-amd64
+      image_suffix: trtllm-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -354,7 +364,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     runs-on: prod-default-small-v2
     steps:
     - uses: actions/checkout@v4
@@ -366,9 +376,37 @@ jobs:
         vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
+  # ============================================================================
+  # GAIE DEPLOY TEST
+  # ============================================================================
+  deploy-test-gaie:
+    name: GAIE Deploy Test
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, frontend-image, vllm-pipeline]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
+
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -383,7 +421,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -404,7 +442,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:

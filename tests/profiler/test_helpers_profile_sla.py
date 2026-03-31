@@ -20,7 +20,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from dynamo.planner.utils.planner_config import (
+    from dynamo.planner.config.planner_config import (
         PlannerConfig,
         PlannerPreDeploymentSweepMode,
     )
@@ -821,7 +821,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             import asyncio
             from unittest.mock import AsyncMock, patch
 
-            from dynamo.planner.utils.planner_config import (
+            from dynamo.planner.config.planner_config import (
                 PlannerPreDeploymentSweepMode,
             )
             from dynamo.profiler.profile_sla import run_profile
@@ -919,7 +919,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             import asyncio
             from unittest.mock import AsyncMock, patch
 
-            from dynamo.planner.utils.planner_config import (
+            from dynamo.planner.config.planner_config import (
                 PlannerPreDeploymentSweepMode,
             )
             from dynamo.profiler.profile_sla import run_profile

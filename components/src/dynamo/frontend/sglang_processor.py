@@ -89,6 +89,7 @@ def _map_finish_reason(raw: str | None) -> str | None:
 _w_tokenizer: Any = None
 _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
+_w_exclude_tools_when_tool_choice_none: bool = True
 
 
 @dataclass
@@ -104,12 +105,15 @@ def _init_worker(
     model_path: str,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
+    global _w_exclude_tools_when_tool_choice_none
     _w_tokenizer = get_tokenizer(model_path)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
+    _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
 
 def _preprocess_worker(
@@ -123,6 +127,7 @@ def _preprocess_worker(
         tokenizer=_w_tokenizer,
         tool_call_parser_name=_w_tool_call_parser_name,
         reasoning_parser_name=_w_reasoning_parser_name,
+        exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
     )
 
     n = request.get("n", 1)
@@ -218,6 +223,7 @@ class SglangProcessor:
         self.is_kv_router = isinstance(router, KvRouter)
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
+        self.exclude_tools_when_tool_choice_none = True
         self.eos_token_id = eos_token_id
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
@@ -275,6 +281,7 @@ class SglangProcessor:
                 tokenizer=self.tokenizer,
                 tool_call_parser_name=self.tool_call_parser_name,
                 reasoning_parser_name=self.reasoning_parser_name,
+                exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
             )
 
             if self.debug_perf:
@@ -576,6 +583,7 @@ class SglangEngineFactory:
                     source_path,
                     tool_call_parser_name,
                     reasoning_parser_name,
+                    self.config.exclude_tools_when_tool_choice_none,
                 ),
             )
             futures = [
@@ -611,6 +619,9 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+        )
+        gen.exclude_tools_when_tool_choice_none = (
+            self.config.exclude_tools_when_tool_choice_none
         )
 
         return PythonAsyncEngine(gen.generator, loop)

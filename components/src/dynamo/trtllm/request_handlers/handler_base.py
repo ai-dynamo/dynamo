@@ -81,6 +81,7 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
+    max_seq_len: Optional[int] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -111,6 +112,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
+        self.max_seq_len = config.max_seq_len
 
     def check_error(self, result: dict) -> bool:
         """
@@ -749,8 +751,18 @@ class HandlerBase(BaseGenerativeHandler):
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
+        elif self.max_seq_len is not None:
+            if self.multimodal_processor and processed_input is not None:
+                logging.debug(
+                    "Skipping dynamic max_tokens default for multimodal request..."
+                )
+            else:
+                token_ids = request.get("token_ids", [])
+                input_length = len(token_ids)
+                dynamic_default = max(1, self.max_seq_len - input_length)
+                sampling_params.max_tokens = dynamic_default
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:

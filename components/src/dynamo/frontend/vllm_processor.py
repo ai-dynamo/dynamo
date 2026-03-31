@@ -85,6 +85,7 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.exclude_tools_when_tool_choice_none = True
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -125,6 +126,7 @@ class VllmProcessor:
             tokenizer=self.tokenizer,
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
+            exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
         )
 
         request_for_sampling = pre.request_for_sampling
@@ -471,6 +473,9 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+        )
+        gen.exclude_tools_when_tool_choice_none = (
+            self.config.exclude_tools_when_tool_choice_none
         )
 
         return PythonAsyncEngine(gen.generator, loop)

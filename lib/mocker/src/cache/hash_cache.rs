@@ -3,12 +3,12 @@
 
 use crate::common::evictor::LRUEvictor;
 use dynamo_tokens::blocks::UniqueBlock;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// Hash-based KV cache with O(1) block lookups, maintaining active (ref-counted) and
 /// inactive (LRU-evictable) pools.
 pub struct HashCache {
-    active_blocks: HashMap<UniqueBlock, usize>,
+    active_blocks: FxHashMap<UniqueBlock, usize>,
     inactive_blocks: LRUEvictor<UniqueBlock>,
     max_capacity: usize,
 }
@@ -17,7 +17,7 @@ impl HashCache {
     /// Create a new HashCache with the given maximum block capacity.
     pub fn new(max_capacity: usize) -> Self {
         Self {
-            active_blocks: HashMap::new(),
+            active_blocks: FxHashMap::default(),
             inactive_blocks: LRUEvictor::default(),
             max_capacity,
         }
@@ -148,7 +148,7 @@ impl HashCache {
     }
 
     /// Direct access to active blocks map (for tests that check ref counts).
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+    pub fn active_blocks(&self) -> &FxHashMap<UniqueBlock, usize> {
         &self.active_blocks
     }
 }

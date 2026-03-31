@@ -51,8 +51,10 @@ class frontend_perf:
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
     TEMPLATE_SECONDS = "template_seconds"
-    # Per-token detokenization cost (microseconds)
-    DETOKENIZE_PER_TOKEN_US = "detokenize_per_token_us"
+    # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    DETOKENIZE_TOTAL_US = "detokenize_total_us"
+    # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    DETOKENIZE_TOKEN_COUNT = "detokenize_token_count"
     # Event loop delay canary (sleep 10ms, measure drift)
     EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
     # Count of event loop stalls (delay > 5ms)
@@ -245,16 +247,18 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+    # Prefix for request-plane (transport-agnostic) metrics at AddressedPushRouter
+    REQUEST_PLANE = "dynamo_request_plane"
     # Prefix for tokio runtime metrics
     TOKIO = "dynamo_tokio"
     # Prefix for standalone KV indexer metrics
     KVINDEXER = "dynamo_kvindexer"
-    # Prefix for request-plane metrics at AddressedPushRouter
-    REQUEST_PLANE = "dynamo_request_plane"
     # Prefix for transport-layer metrics (TCP / NATS)
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
+    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
 
 
 class request_plane:

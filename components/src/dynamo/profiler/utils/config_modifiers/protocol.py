@@ -19,7 +19,7 @@ import copy
 import logging
 from typing import Any, Protocol, Tuple
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     Container,

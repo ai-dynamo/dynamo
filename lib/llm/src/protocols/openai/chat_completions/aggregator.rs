@@ -136,16 +136,16 @@ impl DeltaAggregator {
                 if aggregator.error.is_none()
                     && let Some(delta) = delta.data
                 {
-                    aggregator.id = delta.id;
-                    aggregator.model = delta.model;
-                    aggregator.created = delta.created;
-                    aggregator.service_tier = delta.service_tier;
+                    aggregator.id = delta.inner.id;
+                    aggregator.model = delta.inner.model;
+                    aggregator.created = delta.inner.created;
+                    aggregator.service_tier = delta.inner.service_tier;
 
                     // Aggregate usage statistics if available.
-                    if let Some(usage) = delta.usage {
+                    if let Some(usage) = delta.inner.usage {
                         aggregator.usage = Some(usage);
                     }
-                    if let Some(system_fingerprint) = delta.system_fingerprint {
+                    if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
 
@@ -155,7 +155,7 @@ impl DeltaAggregator {
                     }
 
                     // Aggregate choices incrementally.
-                    for choice in delta.choices {
+                    for choice in delta.inner.choices {
                         let state_choice =
                             aggregator
                                 .choices
@@ -267,14 +267,16 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
-            id: aggregator.id,
-            created: aggregator.created,
-            usage: aggregator.usage,
-            model: aggregator.model,
-            object: "chat.completion".to_string(),
-            system_fingerprint: aggregator.system_fingerprint,
-            choices,
-            service_tier: aggregator.service_tier,
+            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                id: aggregator.id,
+                created: aggregator.created,
+                usage: aggregator.usage,
+                model: aggregator.model,
+                object: "chat.completion".to_string(),
+                system_fingerprint: aggregator.system_fingerprint,
+                choices,
+                service_tier: aggregator.service_tier,
+            },
             nvext: aggregator.nvext,
         };
 
@@ -360,7 +362,7 @@ pub trait ChatCompletionAggregator {
     ) -> Result<NvCreateChatCompletionResponse, String>;
 }
 
-impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompletionResponse {
+impl ChatCompletionAggregator for NvCreateChatCompletionResponse {
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
@@ -445,14 +447,16 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            model: "meta/llama-3.1-8b-instruct".to_string(),
-            created: 1234567890,
-            service_tier: None,
-            usage: None,
-            system_fingerprint: None,
-            choices: vec![choice],
-            object: "chat.completion".to_string(),
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "meta/llama-3.1-8b-instruct".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
             nvext: None,
         };
 
@@ -479,13 +483,13 @@ mod tests {
         let response = result.unwrap();
 
         // Verify that the response is empty and has default values
-        assert_eq!(response.id, "");
-        assert_eq!(response.model, "");
-        assert_eq!(response.created, 0);
-        assert!(response.usage.is_none());
-        assert!(response.system_fingerprint.is_none());
-        assert_eq!(response.choices.len(), 0);
-        assert!(response.service_tier.is_none());
+        assert_eq!(response.inner.id, "");
+        assert_eq!(response.inner.model, "");
+        assert_eq!(response.inner.created, 0);
+        assert!(response.inner.usage.is_none());
+        assert!(response.inner.system_fingerprint.is_none());
+        assert_eq!(response.inner.choices.len(), 0);
+        assert!(response.inner.service_tier.is_none());
     }
 
     #[tokio::test]
@@ -511,13 +515,13 @@ mod tests {
         let response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.id, "test_id");
-        assert_eq!(response.model, "meta/llama-3.1-8b-instruct");
-        assert_eq!(response.created, 1234567890);
-        assert!(response.usage.is_none());
-        assert!(response.system_fingerprint.is_none());
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.id, "test_id");
+        assert_eq!(response.inner.model, "meta/llama-3.1-8b-instruct");
+        assert_eq!(response.inner.created, 1234567890);
+        assert!(response.inner.usage.is_none());
+        assert!(response.inner.system_fingerprint.is_none());
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
@@ -525,7 +529,7 @@ mod tests {
         );
         assert!(choice.finish_reason.is_none());
         assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
-        assert!(response.service_tier.is_none());
+        assert!(response.inner.service_tier.is_none());
     }
 
     #[tokio::test]
@@ -562,8 +566,8 @@ mod tests {
         let response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
@@ -630,8 +634,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         assert_eq!(choice.index, 0);
         assert_eq!(
@@ -653,43 +657,49 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            model: "test_model".to_string(),
-            created: 1234567890,
-            service_tier: None,
-            usage: None,
-            system_fingerprint: None,
-            choices: vec![
-                dynamo_async_openai::types::ChatChoiceStream {
-                    index: 0,
-                    delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                        role: Some(dynamo_async_openai::types::Role::Assistant),
-                        content: Some(ChatCompletionMessageContent::Text("Choice 0".to_string())),
-                        function_call: None,
-                        tool_calls: None,
-                        refusal: None,
-                        reasoning_content: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "test_model".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![
+                    dynamo_async_openai::types::ChatChoiceStream {
+                        index: 0,
+                        delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+                            role: Some(dynamo_async_openai::types::Role::Assistant),
+                            content: Some(ChatCompletionMessageContent::Text(
+                                "Choice 0".to_string(),
+                            )),
+                            function_call: None,
+                            tool_calls: None,
+                            refusal: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                        stop_reason: None,
+                        logprobs: None,
                     },
-                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
-                    stop_reason: None,
-                    logprobs: None,
-                },
-                dynamo_async_openai::types::ChatChoiceStream {
-                    index: 1,
-                    delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                        role: Some(dynamo_async_openai::types::Role::Assistant),
-                        content: Some(ChatCompletionMessageContent::Text("Choice 1".to_string())),
-                        function_call: None,
-                        tool_calls: None,
-                        refusal: None,
-                        reasoning_content: None,
+                    dynamo_async_openai::types::ChatChoiceStream {
+                        index: 1,
+                        delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+                            role: Some(dynamo_async_openai::types::Role::Assistant),
+                            content: Some(ChatCompletionMessageContent::Text(
+                                "Choice 1".to_string(),
+                            )),
+                            function_call: None,
+                            tool_calls: None,
+                            refusal: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                        stop_reason: None,
+                        logprobs: None,
                     },
-                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
-                    stop_reason: None,
-                    logprobs: None,
-                },
-            ],
-            object: "chat.completion".to_string(),
+                ],
+                object: "chat.completion".to_string(),
+            },
             nvext: None,
         };
 
@@ -711,9 +721,9 @@ mod tests {
         let mut response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.choices.len(), 2);
-        response.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
-        let choice0 = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 2);
+        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(
             choice0.message.content.as_ref().unwrap(),
@@ -728,7 +738,7 @@ mod tests {
             dynamo_async_openai::types::Role::Assistant
         );
 
-        let choice1 = &response.choices[1];
+        let choice1 = &response.inner.choices[1];
         assert_eq!(choice1.index, 1);
         assert_eq!(
             choice1.message.content.as_ref().unwrap(),
@@ -773,8 +783,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // Verify tool calls are present
         assert!(choice.message.tool_calls.is_some());
@@ -816,8 +826,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // Verify tool calls are present
         assert!(choice.message.tool_calls.is_some());
@@ -859,8 +869,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // Verify tool calls are present
         assert!(choice.message.tool_calls.is_some());
@@ -900,8 +910,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // Verify no tool calls are present
         assert!(choice.message.tool_calls.is_none());
@@ -928,7 +938,7 @@ mod tests {
 
         // Manually set empty tool calls array
         if let Some(ref mut data) = annotated_delta.data {
-            data.choices[0].delta.tool_calls = Some(vec![]); // Empty tool calls array
+            data.inner.choices[0].delta.tool_calls = Some(vec![]); // Empty tool calls array
         }
 
         let data = annotated_delta.data.unwrap();
@@ -945,8 +955,8 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // Verify tool calls array is empty
         assert!(choice.message.tool_calls.is_none());
@@ -992,8 +1002,8 @@ mod tests {
         let response = result.unwrap();
 
         // There should be one choice
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // The tool_calls field should be present and parsed
         assert!(choice.message.tool_calls.is_some());
@@ -1050,8 +1060,8 @@ mod tests {
         let response = result.unwrap();
 
         // There should be one choice
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
 
         // The finish_reason should be ToolCalls, not Stop, because tool calls are present
         assert_eq!(

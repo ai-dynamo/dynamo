@@ -4,6 +4,9 @@
 """Shared Dynamo snapshot helpers for checkpoint lifecycle."""
 
 import asyncio
+import ctypes
+import ctypes.util
+import gc
 import logging
 import os
 import signal
@@ -234,3 +237,48 @@ def reload_snapshot_restore_identity() -> tuple[str, str]:
     # Snapshot restore only runs in Kubernetes-managed pods, so discovery resets here.
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
     return get_worker_namespace(), "kubernetes"
+
+
+def _try_release_memory(label: str) -> None:
+    """Force Python GC and glibc malloc_trim to return freed memory to the OS.
+
+    Logs RSS before/after so you can see how much memory was actually reclaimable.
+    """
+    pid = os.getpid()
+
+    def _get_rss_kb() -> int:
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except Exception:
+            pass
+        return 0
+
+    rss_before = _get_rss_kb()
+
+    collected = gc.collect()
+    rss_after_gc = _get_rss_kb()
+
+    try:
+        libc_name = ctypes.util.find_library("c")
+        if libc_name:
+            libc = ctypes.CDLL(libc_name)
+            libc.malloc_trim(0)
+    except Exception as e:
+        logger.debug("[MemRelease:%s] malloc_trim failed: %s", label, e)
+
+    rss_after_trim = _get_rss_kb()
+
+    logger.info(
+        "[MemRelease:%s] gc.collect freed %d objects, "
+        "RSS: %.2f MiB -> %.2f MiB (gc) -> %.2f MiB (malloc_trim), "
+        "reclaimed=%.2f MiB",
+        label,
+        collected,
+        rss_before / 1024,
+        rss_after_gc / 1024,
+        rss_after_trim / 1024,
+        (rss_before - rss_after_trim) / 1024,
+    )

@@ -47,6 +47,8 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+
 
 def setup_engine_factory(
     runtime: DistributedRuntime,
@@ -225,10 +227,14 @@ async def async_main():
     elif config.router_mode == "direct":
         router_mode = RouterMode.Direct
         kv_router_config = None
+    elif config.router_mode == "power-of-two":
+        router_mode = RouterMode.PowerOfTwoChoices
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
         router_mode,
         kv_router_config,

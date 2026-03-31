@@ -22,7 +22,7 @@ pytestmark = [
 
 def _make_omni_config(**overrides) -> OmniConfig:
     """Build a minimal OmniConfig with valid defaults, applying overrides."""
-    defaults = {
+    defaults: dict = {
         # DynamoRuntimeConfig fields
         "namespace": "dynamo",
         "component": "backend",
@@ -113,3 +113,37 @@ def test_omni_config_valid_boundary_ratio(ratio):
     """boundary_ratio within (0, 1] should pass."""
     config = _make_omni_config(boundary_ratio=ratio)
     config.validate()  # should not raise
+
+
+# --- vllm_omni API compatibility guards ---
+# These tests catch regressions when vllm_omni is upgraded.
+
+
+def test_omni_engine_args_importable():
+    """vllm_omni.engine.arg_utils must export a usable engine args class."""
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    assert hasattr(OmniEngineArgs, "add_cli_args")
+    assert hasattr(OmniEngineArgs, "from_cli_args")
+
+
+def test_omni_engine_args_add_cli_args_no_extra_params():
+    """add_cli_args must accept a parser and no other required args."""
+
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    try:
+        from vllm.utils import FlexibleArgumentParser
+    except ImportError:
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    parser = FlexibleArgumentParser(add_help=False)
+    OmniEngineArgs.add_cli_args(parser)
+
+
+def test_omni_config_imports_cleanly():
+    """OmniConfig and parse_omni_args must be importable without error."""
+    from dynamo.vllm.omni.args import OmniConfig, parse_omni_args
+
+    assert OmniConfig is not None
+    assert callable(parse_omni_args)

@@ -298,6 +298,7 @@ impl ListenerRecord {
         }
     }
 
+    #[allow(dead_code)]
     fn status(&self) -> ListenerStatus {
         self.runtime.lock().status
     }

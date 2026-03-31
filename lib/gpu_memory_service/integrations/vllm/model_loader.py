@@ -49,10 +49,24 @@ def register_gms_loader(load_format: str = "gms") -> None:
     class GMSModelLoader(BaseModelLoader):
         """vLLM model loader that loads weights via GPU Memory Service."""
 
+        # Keys in model_loader_extra_config that are GMS-specific and should
+        # not be passed to the fallback DefaultModelLoader.
+        _GMS_EXTRA_KEYS = frozenset({"gms_read_only"})
+
         def __init__(self, load_config):
             super().__init__(load_config)
+            # Strip GMS-specific keys before creating the fallback loader,
+            # otherwise DefaultModelLoader rejects unknown extra config.
+            extra = getattr(load_config, "model_loader_extra_config", None) or {}
+            clean_extra = {
+                k: v for k, v in extra.items() if k not in self._GMS_EXTRA_KEYS
+            }
             self.default_loader = DefaultModelLoader(
-                replace(load_config, load_format="auto")
+                replace(
+                    load_config,
+                    load_format="auto",
+                    model_loader_extra_config=clean_extra,
+                )
             )
 
         def download_model(self, model_config) -> None:

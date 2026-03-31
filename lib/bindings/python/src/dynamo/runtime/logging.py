@@ -205,7 +205,12 @@ def configure_sglang_logging(dyn_level: int) -> None:
                 "handlers": ["dynamo"],
                 "level": sglang_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["dynamo"],
+                "level": sglang_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,
@@ -260,7 +265,12 @@ def configure_vllm_logging(dyn_level: int) -> None:
                 "handlers": ["vllm_stderr"],
                 "level": vllm_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["vllm_stderr"],
+                "level": vllm_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,

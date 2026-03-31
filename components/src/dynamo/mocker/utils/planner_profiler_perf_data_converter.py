@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dynamo.planner.utils.perf_interpolation import (
+from dynamo.planner.core.throughput.interpolation import (
     DecodeInterpolator,
     PrefillInterpolator,
 )

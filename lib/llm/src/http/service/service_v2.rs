@@ -29,6 +29,12 @@ use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::{
+    frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
+    request_plane::ensure_request_plane_metrics_registered_prometheus,
+    tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
+    transport_metrics::ensure_transport_metrics_registered_prometheus,
+};
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -306,9 +312,14 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             tokio::select! {
                 result = server => {
-                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    cancel_token.cancel();
+                    result?;
                 }
                 _ = observer.cancelled() => {
                     state_cancel.cancel();
@@ -341,6 +352,9 @@ impl HttpService {
                 }
             })?;
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
@@ -353,6 +367,7 @@ impl HttpService {
                 })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
+            cancel_token.cancel();
         }
 
         Ok(())
@@ -459,6 +474,19 @@ impl HttpServiceConfigBuilder {
             if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
                 tracing::warn!("Failed to register routing overhead metrics: {}", e);
             }
+        }
+
+        if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register request-plane metrics: {}", e);
+        }
+        if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register frontend perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_tokio_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register tokio perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register transport metrics: {}", e);
         }
 
         let mut router = axum::Router::new();

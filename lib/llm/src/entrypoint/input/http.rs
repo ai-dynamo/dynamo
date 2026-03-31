@@ -53,7 +53,6 @@ pub async fn run(
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
-
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =

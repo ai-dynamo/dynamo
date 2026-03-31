@@ -23,8 +23,8 @@ import numpy as np
 import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import MockerComponentName
-from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.config.backend_components import MockerComponentName
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,

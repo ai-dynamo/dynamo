@@ -42,6 +42,7 @@ pub struct SchedulingRequest {
     pub overlaps: OverlapScores,
     pub decode_blocks: HashMap<WorkerWithDpRank, usize>,
     pub prefill_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub track_prefill_tokens: bool,
     pub router_config_override: Option<RouterConfigOverride>,
     pub update_states: bool,
     pub lora_name: Option<String>,
