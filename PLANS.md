@@ -1,6 +1,71 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:20:50 UTC
+Last updated: 2026-03-31 02:28:08 UTC
+
+Current in-progress run (2026-03-31 02:28:08 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager.rs`
+  - `lib/llm/src/block_manager/state.rs`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+- Current implementation slice for this run:
+  - make `KvbmWorker::into_g4_storage_agent(...)` accept the runtime-owned
+    shared `G4BlockIndex`
+  - ensure the first real worker-side agent construction path can reuse the
+    same index already populated by normal disk offload registration
+  - cover that seam with a targeted unit test instead of leaving the worker API
+    on a divergent default-index path
+- Why this slice:
+  - `KvBlockManagerState` now owns and exports the shared `G4BlockIndex`, but
+    the only worker-side `G4StorageAgent` constructor still creates a fresh
+    default index
+  - that means runtime disk registration and agent-visible G4 metadata can
+    diverge even before discovery / RPC wiring exists
+  - the smallest remaining runtime seam is therefore aligning worker agent
+    construction with the already-exported index, not adding new networking
+- In-progress edits:
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+    - changed `KvbmWorker::into_g4_storage_agent(...)` to require an
+      `Arc<G4BlockIndex>` from the caller
+    - routed worker-side agent construction through a small helper that uses
+      `G4StorageAgent::new_with_index(...)`
+    - added a focused unit test that asserts the worker helper preserves the
+      exact shared index instance instead of allocating a fresh one
+  - compile follow-up handled during this run:
+    - added the explicit `WorkerID`, `G4BlockIndex`, and
+      `g4::G4TransferExecutor` imports needed by the new helper/test seam
+- Validation completed in this run:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml build_g4_storage_agent_reuses_runtime_block_index --lib`
+    -> pass (`1 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`6 passed`)
+- Validation notes from this run:
+  - the first test attempt failed to compile because `worker.rs` did not yet
+    import `WorkerID` and `G4TransferExecutor`; fixed in the same run and the
+    rerun passed
+- Remaining work after this run:
+  - add the actual runtime owner/callsite that passes
+    `KvBlockManager::g4_block_index()` into
+    `KvbmWorker::into_g4_storage_agent(...)`; today the worker API is aligned,
+    but nothing in-tree constructs that agent from the real block-manager
+    runtime yet
+  - wire that runtime-owned agent/index pair into discovery or request routing
+    so remote `query -> fetch -> onboard` can use the shared metadata path
+  - add integration coverage once that runtime seam exists across distinct
+    owners rather than only local/in-process unit tests
+- Exact next file or command to touch:
+  - file: `lib/llm/src/block_manager/distributed/worker.rs`
+  - then: the runtime construction site that will call
+    `KvbmWorker::into_g4_storage_agent(worker, kvbm.g4_block_index().unwrap())`
+    or equivalent guarded wiring
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml build_g4_storage_agent_reuses_runtime_block_index --lib`
 
 Current in-progress run (2026-03-31 02:20:50 UTC):
 
@@ -236,6 +301,18 @@ Current run outcome:
   - once the runtime seam is wired, add a broader distributed integration test
     that exercises `query -> fetch -> onboard` across distinct owners instead of
     only unit coverage
+  - make `KvbmWorker::into_g4_storage_agent(...)` reuse the runtime-owned
+    `G4BlockIndex` from block-manager state instead of creating a fresh default
+    index, so disk offload registration and agent-visible metadata stay aligned
+  - make owner-grouped `query_blocks(...)` fan out concurrently across owners
+    instead of awaiting each owner bucket serially
+  - add remote access/touch metadata and prefix-aware recency updates so cheap
+    `query_blocks(...)` can protect trie prefixes and remote LRU state
+  - add an explicit metadata-admission write path (`offer(...)` or
+    `offer_and_put(...)`) before expensive payload transfer; the current
+    `put_blocks(...)` seam is still metadata registration only
+  - keep local-miss / reusable-prefix selection above the raw G4 client seam;
+    do not make `query_blocks(...)` implicitly decide which blocks are needed
 - Exact next command or file to touch:
   - file: `lib/llm/src/block_manager/distributed/g4.rs`
   - then: `lib/llm/src/block_manager/distributed/worker.rs`
@@ -305,6 +382,10 @@ For the first pass, keep the G4 API block-centric:
 1. `query_blocks(sequence_hashes)`
 2. `fetch_blocks(sequence_hashes)`
 3. `put_blocks(blocks)`
+
+Use cheap `query_blocks(...)` aggressively to protect prefix and LRU state. For trie-gated reuse, querying a reusable prefix is much cheaper than a cache miss, and query hits should be treated as meaningful access signals for remote recency accounting.
+
+Prefer cheap metadata admission before expensive payload transfer on writes. An `offer_and_put(...)` style flow is preferred when the API is refined: the sender should first ask whether the remote owner wants the block before initiating the payload transfer, so we avoid unnecessary network and disk traffic for blocks the remote side would reject, deprioritize, or already consider sufficiently covered.
 
 If payload sizing becomes awkward, it is acceptable to split writes into a
 metadata-first plus bytes-second flow later:

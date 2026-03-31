@@ -9,12 +9,13 @@ use utils::*;
 use zmq::*;
 
 use crate::block_manager::{
-    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
+    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage, WorkerID,
     block::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
     },
     connector::scheduler::TransferSchedulerClient,
+    distributed::{G4BlockIndex, g4::G4TransferExecutor},
     layout::LayoutType,
     offload::{max_concurrent_transfers, max_transfer_batch_size},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
@@ -425,6 +426,14 @@ pub struct KvbmWorker {
 }
 
 impl KvbmWorker {
+    fn build_g4_storage_agent(
+        worker_id: WorkerID,
+        transfer: Arc<dyn G4TransferExecutor>,
+        block_index: Arc<G4BlockIndex>,
+    ) -> G4StorageAgent {
+        G4StorageAgent::new_with_index(worker_id, transfer, block_index)
+    }
+
     pub async fn new(config: KvbmWorkerConfig, layout_blocking: bool) -> anyhow::Result<Self> {
         tracing::info!(
             "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype_width_bytes={}",
@@ -672,6 +681,7 @@ impl KvbmWorker {
     pub async fn into_g4_storage_agent(
         &mut self,
         worker: G4StorageWorker,
+        block_index: Arc<G4BlockIndex>,
     ) -> anyhow::Result<G4StorageAgent> {
         let handler_rx = self
             .block_transfer_handler_rx
@@ -682,7 +692,11 @@ impl KvbmWorker {
             .await
             .map_err(|_| anyhow::anyhow!("block transfer handler dropped before readiness"))?;
 
-        Ok(G4StorageAgent::new(worker.worker_id, Arc::new(handler)))
+        Ok(Self::build_g4_storage_agent(
+            worker.worker_id,
+            Arc::new(handler),
+            block_index,
+        ))
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
@@ -777,6 +791,36 @@ impl KvbmWorker {
         cancel_token.cancelled().await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use anyhow::Result;
+
+    #[derive(Default)]
+    struct NoopTransferExecutor;
+
+    #[async_trait]
+    impl G4TransferExecutor for NoopTransferExecutor {
+        async fn execute_transfer(&self, _request: BlockTransferRequest) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn build_g4_storage_agent_reuses_runtime_block_index() {
+        let block_index = Arc::new(G4BlockIndex::default());
+        let agent = KvbmWorker::build_g4_storage_agent(
+            41,
+            Arc::new(NoopTransferExecutor),
+            block_index.clone(),
+        );
+
+        assert_eq!(agent.worker_id(), 41);
+        assert!(Arc::ptr_eq(&agent.block_index(), &block_index));
     }
 }
 
