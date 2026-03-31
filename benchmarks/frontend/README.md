@@ -3,21 +3,15 @@
 
 # Frontend Performance Benchmark Suite
 
-A configurable sweep runner for measuring Dynamo frontend tokenizer performance.
-It drives [aiperf](https://github.com/ai-dynamo/aiperf) load against a
-frontend/mocker (or frontend/vLLM) stack and collects throughput, latency, and
-observability data across a grid of parameters.
+A configurable sweep runner for measuring Dynamo frontend model serving performance.  It drives [aiperf](https://github.com/ai-dynamo/aiperf) load against a frontend/mocker (or frontend/vLLM) stack and collects throughput, latency, and observability data across a grid of parameters.
 
-The primary use case is **HuggingFace tokenizer vs. fastokens comparison** --
-sweeping across concurrency levels, input sequence lengths (ISL), and worker
-counts to quantify the tokenizer's impact on end-to-end performance.
+The primary use case is **HuggingFace tokenizer vs. fastokens comparison** -- sweeping across concurrency levels, input sequence lengths (ISL), and worker counts to quantify the tokenizer's impact on end-to-end performance.
 
 ---
 
 ## Architecture
 
-The codebase follows a three-layer design that separates pure logic from
-execution and infrastructure concerns:
+The codebase follows a three-layer design that separates pure logic from execution and infrastructure concerns.
 
 | Layer | Package | Responsibility |
 |-------|---------|----------------|
@@ -25,9 +19,7 @@ execution and infrastructure concerns:
 | **Executors** | `scripts/sweep_executors/` | `SweepExecutor` protocol with two implementations -- `LocalExecutor` (delegates to `run_perf.sh`) and `K8sDgdExecutor` (DynamoGraphDeployment-based k8s runs). |
 | **K8s helpers** | `scripts/sweep_k8s/` | kubectl wrappers, DGD patching, template rendering, aiperf Job launching, and Prometheus metrics capture. |
 
-The entry point is `scripts/sweep_runner.py`, a thin CLI that wires the three
-layers together: it builds a `SweepPlan` from CLI arguments, selects an
-executor based on `--mode`, and feeds the plan to the orchestrator.
+The entry point is `scripts/sweep_runner.py`, a thin CLI that wires the three layers together: it builds a `SweepPlan` from CLI arguments, selects an executor based on `--mode`, and feeds the plan to the orchestrator.
 
 **Data flow:**
 
@@ -47,8 +39,7 @@ CLI args --> SweepConfig --> SweepPlan (Cartesian grid of RunSpecs)
 
 ## Quick Start -- Local
 
-Local mode starts a mocker backend and frontend process on the current machine,
-runs aiperf against them, and tears everything down between runs.
+Local mode starts a mocker backend and frontend process on the current machine, runs aiperf against them, and tears everything down between runs.
 
 **Prerequisites:**
 
@@ -95,8 +86,7 @@ Results are written to `artifacts/sweep_<timestamp>/`.
 
 ## Quick Start -- Kubernetes
 
-K8s mode deploys a DynamoGraphDeployment (DGD) into a Kubernetes namespace and
-launches aiperf as an in-cluster Job that targets the frontend service endpoint.
+K8s mode deploys a DynamoGraphDeployment (DGD) into a Kubernetes namespace and launches aiperf as an in-cluster Job that targets the frontend service endpoint.
 
 ### Prerequisites
 
@@ -122,9 +112,7 @@ python3 sweep_runner.py \
 
 ### Example: template-based deployment
 
-When `--deploy-template` is provided, the runner renders the template with
-per-run variables (tokenizer, workers, model, etc.) and applies it via kubectl
-before each run group:
+When `--deploy-template` is provided, the runner renders the template with per-run variables (tokenizer, workers, model, etc.) and applies it via kubectl before each run group:
 
 ```bash
 python3 sweep_runner.py \
@@ -140,10 +128,7 @@ python3 sweep_runner.py \
 
 ### How aiperf runs in-cluster
 
-The sweep runner creates a short-lived Kubernetes Job in the same namespace as
-the DGD. The Job pod runs `aiperf` against the frontend's in-cluster service
-DNS name (e.g., `dynamo-bench-mocker-frontend:8000`). Once the Job completes,
-artifacts are copied back to the local host via `kubectl cp`.
+The sweep runner creates a short-lived Kubernetes Job in the same namespace as the DGD. The Job pod runs `aiperf` against the frontend's in-cluster service DNS name (e.g., `dynamo-bench-mocker-frontend:8000`). Once the Job completes, artifacts are copied back to the local host via `kubectl cp`.
 
 ### Reset strategy
 
