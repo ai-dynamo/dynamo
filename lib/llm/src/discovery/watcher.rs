@@ -478,7 +478,11 @@ impl ModelWatcher {
             // once and only when a local pipeline actually needs it.  Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
             // they rely on a Python chat_engine_factory for tokenization.
-            let tokenizer = if card.has_tokenizer() {
+            // When a chat_engine_factory handles chat and no completions are
+            // needed, skip tokenizer loading entirely — even if the file exists.
+            let needs_rust_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_rust_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
             } else {
                 None
