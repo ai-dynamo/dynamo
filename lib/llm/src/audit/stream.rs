@@ -90,14 +90,16 @@ where
                 tracing::warn!("audit: aggregation future canceled/failed");
                 // Return minimal response if aggregation failed
                 NvCreateChatCompletionResponse {
-                    id: String::new(),
-                    created: 0,
-                    usage: None,
-                    model: String::new(),
-                    object: "chat.completion".to_string(),
-                    system_fingerprint: None,
-                    choices: vec![],
-                    service_tier: None,
+                    inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                        id: String::new(),
+                        created: 0,
+                        usage: None,
+                        model: String::new(),
+                        object: "chat.completion".to_string(),
+                        system_fingerprint: None,
+                        choices: vec![],
+                        service_tier: None,
+                    },
                     nvext: None,
                 }
             })
@@ -125,14 +127,16 @@ where
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
                 let fallback = NvCreateChatCompletionResponse {
-                    id: String::new(),
-                    created: 0,
-                    usage: None,
-                    model: String::new(),
-                    object: "chat.completion".to_string(),
-                    system_fingerprint: None,
-                    choices: vec![],
-                    service_tier: None,
+                    inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                        id: String::new(),
+                        created: 0,
+                        usage: None,
+                        model: String::new(),
+                        object: "chat.completion".to_string(),
+                        system_fingerprint: None,
+                        choices: vec![],
+                        service_tier: None,
+                    },
                     nvext: None,
                 };
                 let _ = tx.send(fallback.clone());
@@ -145,14 +149,16 @@ where
         rx.await.unwrap_or_else(|_| {
             tracing::warn!("fold aggregation future canceled");
             NvCreateChatCompletionResponse {
-                id: String::new(),
-                created: 0,
-                usage: None,
-                model: String::new(),
-                object: "chat.completion".to_string(),
-                system_fingerprint: None,
-                choices: vec![],
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                    id: String::new(),
+                    created: 0,
+                    usage: None,
+                    model: String::new(),
+                    object: "chat.completion".to_string(),
+                    system_fingerprint: None,
+                    choices: vec![],
+                    service_tier: None,
+                },
                 nvext: None,
             }
         })
@@ -171,8 +177,8 @@ pub fn final_response_to_one_chunk_stream(
 ) -> std::pin::Pin<
     Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
 > {
-    let mut choices: Vec<ChatChoiceStream> = Vec::with_capacity(resp.choices.len());
-    for (idx, ch) in resp.choices.iter().enumerate() {
+    let mut choices: Vec<ChatChoiceStream> = Vec::with_capacity(resp.inner.choices.len());
+    for (idx, ch) in resp.inner.choices.iter().enumerate() {
         // Convert FunctionCall to FunctionCallStream if present
         #[allow(deprecated)]
         let function_call = ch.message.function_call.as_ref().map(|fc| {
@@ -222,14 +228,16 @@ pub fn final_response_to_one_chunk_stream(
     }
 
     let chunk = NvCreateChatCompletionStreamResponse {
-        id: resp.id.clone(),
-        object: "chat.completion.chunk".to_string(),
-        created: resp.created,
-        model: resp.model.clone(),
-        system_fingerprint: resp.system_fingerprint.clone(),
-        service_tier: resp.service_tier.clone(),
-        choices,
-        usage: resp.usage.clone(),
+        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            id: resp.inner.id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created: resp.inner.created,
+            model: resp.inner.model.clone(),
+            system_fingerprint: resp.inner.system_fingerprint.clone(),
+            service_tier: resp.inner.service_tier.clone(),
+            choices,
+            usage: resp.inner.usage.clone(),
+        },
         nvext: resp.nvext.clone(),
     };
 
@@ -275,14 +283,16 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices: vec![choice],
-            created: 1234567890,
-            model: "test-model".to_string(),
-            system_fingerprint: Some("test-fingerprint".to_string()),
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices: vec![choice],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
 
@@ -314,14 +324,16 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices: vec![choice],
-            created: 1234567890,
-            model: "test-model".to_string(),
-            system_fingerprint: Some("test-fingerprint".to_string()),
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices: vec![choice],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
 
@@ -339,7 +351,7 @@ mod tests {
         chunk
             .data
             .as_ref()
-            .and_then(|d| d.choices.first())
+            .and_then(|d| d.inner.choices.first())
             .and_then(|c| c.delta.content.as_ref())
             .and_then(|content| match content {
                 ChatCompletionMessageContent::Text(text) => Some(text.clone()),
@@ -396,7 +408,7 @@ mod tests {
         assert_eq!(results.len(), 0, "Empty stream should produce no chunks");
 
         // Verify fallback response (aggregation will fail on empty stream)
-        assert_eq!(final_resp.object, "chat.completion");
+        assert_eq!(final_resp.inner.object, "chat.completion");
         // Should get fallback response, not panic
     }
 
@@ -415,7 +427,7 @@ mod tests {
         assert_eq!(extract_content(&results[0]), "Single chunk");
 
         // Verify aggregation
-        assert_eq!(final_resp.object, "chat.completion");
+        assert_eq!(final_resp.inner.object, "chat.completion");
     }
 
     #[tokio::test]
@@ -423,32 +435,34 @@ mod tests {
         // Test that metadata (id, event, comment) is preserved through passthrough
         let chunk_with_metadata = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![{
-                    #[allow(deprecated)]
-                    ChatChoiceStream {
-                        index: 0,
-                        delta: ChatCompletionStreamResponseDelta {
-                            role: Some(Role::Assistant),
-                            content: Some(ChatCompletionMessageContent::Text(
-                                "Content".to_string(),
-                            )),
-                            tool_calls: None,
-                            function_call: None,
-                            refusal: None,
-                            reasoning_content: None,
-                        },
-                        finish_reason: None,
-                        stop_reason: None,
-                        logprobs: None,
-                    }
-                }],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![{
+                        #[allow(deprecated)]
+                        ChatChoiceStream {
+                            index: 0,
+                            delta: ChatCompletionStreamResponseDelta {
+                                role: Some(Role::Assistant),
+                                content: Some(ChatCompletionMessageContent::Text(
+                                    "Content".to_string(),
+                                )),
+                                tool_calls: None,
+                                function_call: None,
+                                refusal: None,
+                                reasoning_content: None,
+                            },
+                            finish_reason: None,
+                            stop_reason: None,
+                            logprobs: None,
+                        }
+                    }],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             }),
             id: Some("correlation-123".to_string()),
@@ -481,7 +495,7 @@ mod tests {
         let (resp1, resp2) = tokio::join!(future1, future2);
 
         // Both should complete successfully
-        assert_eq!(resp1.object, "chat.completion");
-        assert_eq!(resp2.object, "chat.completion");
+        assert_eq!(resp1.inner.object, "chat.completion");
+        assert_eq!(resp2.inner.object, "chat.completion");
     }
 }

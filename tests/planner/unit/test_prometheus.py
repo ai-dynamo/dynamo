@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dynamo import prometheus_names
-from dynamo.planner.utils.prometheus import (
+from dynamo.planner.monitoring.traffic_metrics import (
     FrontendMetric,
     FrontendMetricContainer,
     PrometheusAPIClient,

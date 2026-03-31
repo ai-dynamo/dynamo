@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.global_planner_connector import GlobalPlannerConnector
-from dynamo.planner.remote_planner_client import RemotePlannerClient
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
-from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
+from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.connectors.remote_client import RemotePlannerClient
+from dynamo.planner.errors import EmptyTargetReplicasError
 
 
 async def _async_responses(*items):
@@ -231,7 +231,7 @@ async def test_connector_initialization(connector, connector_runtime):
     assert connector.remote_client is None
 
     with patch(
-        "dynamo.planner.global_planner_connector.RemotePlannerClient"
+        "dynamo.planner.connectors.global_planner.RemotePlannerClient"
     ) as mock_client_class:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
