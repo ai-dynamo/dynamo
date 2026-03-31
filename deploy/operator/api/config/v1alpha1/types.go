@@ -21,11 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Checkpoint storage type constants
-const (
-	CheckpointStorageTypePVC = "pvc"
-)
-
 // +kubebuilder:object:root=true
 
 // OperatorConfiguration is the Schema for the operator configuration.
@@ -249,10 +244,7 @@ type CheckpointConfiguration struct {
 
 // CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
 type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type. Only pvc is currently supported.
-	// +kubebuilder:default="pvc"
-	Type string `json:"type"`
-	// PVC configuration (used when Type=pvc)
+	// PVC holds the snapshot PVC settings the operator needs for restore pod wiring.
 	PVC CheckpointPVCConfig `json:"pvc"`
 }
 

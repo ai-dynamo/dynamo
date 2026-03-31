@@ -30,14 +30,12 @@ import (
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
 	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
 	hash := ""
-	location := ""
-	storageType := ""
+	artifactVersion := ""
 	if enabled {
 		hash = checkpointInfo.Hash
-		location = checkpointInfo.Location
-		storageType = string(checkpointInfo.StorageType)
+		artifactVersion = checkpointInfo.ArtifactVersion
 	}
-	snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, location, storageType)
+	snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -78,16 +76,19 @@ func InjectCheckpointIntoPodSpec(
 	if checkpointConfig == nil {
 		return fmt.Errorf("checkpoint config is required")
 	}
+	if checkpointConfig.Storage.PVC.PVCName == "" {
+		return fmt.Errorf("checkpoint pvc name is required")
+	}
 
 	storageConfig := snapshotworkload.Storage{
-		Type:     checkpointConfig.Storage.Type,
+		Type:     snapshotworkload.StorageTypePVC,
 		PVCName:  checkpointConfig.Storage.PVC.PVCName,
 		BasePath: checkpointConfig.Storage.PVC.BasePath,
 	}
 	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(
 		info.Hash,
+		info.ArtifactVersion,
 		info.Location,
-		string(info.StorageType),
 		storageConfig,
 	)
 	if err != nil {

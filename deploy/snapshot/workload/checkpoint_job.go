@@ -25,7 +25,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
-	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.Storage.Location, opts.Storage.Type)
+	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.ArtifactVersion)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
 		injectLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)

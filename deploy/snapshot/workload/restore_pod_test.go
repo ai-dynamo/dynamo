@@ -24,11 +24,11 @@ func TestNewRestorePod(t *testing.T) {
 			}},
 		},
 	}, PodOptions{
-		Namespace:    "test-ns",
-		CheckpointID: "hash",
+		Namespace:       "test-ns",
+		CheckpointID:    "hash",
+		ArtifactVersion: "2",
 		Storage: Storage{
 			Type:     StorageTypePVC,
-			Location: "/checkpoints/hash",
 			PVCName:  "snapshot-pvc",
 			BasePath: "/checkpoints",
 		},
@@ -44,8 +44,8 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint id label: %#v", restorePod.Labels)
 	}
-	if restorePod.Annotations[CheckpointLocationAnnotation] != "/checkpoints/hash" {
-		t.Fatalf("expected checkpoint location annotation: %#v", restorePod.Annotations)
+	if restorePod.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
+		t.Fatalf("expected checkpoint artifact version annotation: %#v", restorePod.Annotations)
 	}
 	if restorePod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)

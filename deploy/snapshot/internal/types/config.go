@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,7 @@ import (
 type AgentConfig struct {
 	NodeName            string          `yaml:"-"`
 	RestrictedNamespace string          `yaml:"-"`
+	Storage             StorageSpec     `yaml:"storage"`
 	Overlay             OverlaySettings `yaml:"overlay"`
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
@@ -27,6 +29,16 @@ func (c *AgentConfig) LoadEnvOverrides() {
 }
 
 func (c *AgentConfig) Validate() error {
+	storageType := strings.TrimSpace(c.Storage.Type)
+	if storageType == "" {
+		storageType = "pvc"
+	}
+	if storageType != "pvc" {
+		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q", storageType)}
+	}
+	if strings.TrimSpace(c.Storage.BasePath) == "" {
+		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath is required"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -34,6 +46,12 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	return c.Restore.Validate()
+}
+
+// StorageSpec holds snapshot storage settings that are local to the agent deployment.
+type StorageSpec struct {
+	Type     string `yaml:"type"`
+	BasePath string `yaml:"basePath"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

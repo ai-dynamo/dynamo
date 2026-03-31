@@ -43,7 +43,6 @@ func testPVCConfig() *configv1alpha1.CheckpointConfiguration {
 	return &configv1alpha1.CheckpointConfiguration{
 		Enabled: true,
 		Storage: configv1alpha1.CheckpointStorageConfiguration{
-			Type: configv1alpha1.CheckpointStorageTypePVC,
 			PVC: configv1alpha1.CheckpointPVCConfig{
 				PVCName:  "snapshot-pvc",
 				BasePath: "/checkpoints",
@@ -208,7 +207,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, testPVCConfig(), "identity is nil"},
 			{"no containers", &corev1.PodSpec{}, testInfo(), testPVCConfig(), "no container found"},
 			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
+				Storage: configv1alpha1.CheckpointStorageConfiguration{PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
 			}, "checkpoint pvc name is required"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

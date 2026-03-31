@@ -207,7 +207,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 
-	checkpointLocation, checkpointStorageType, err := checkpointStorageFromPod(pod)
+	checkpointLocation, err := w.checkpointLocationFromPod(pod, checkpointID)
 	if err != nil {
 		w.release(podKey)
 		w.log.Error(err, "Checkpoint pod is missing storage metadata", "pod", podKey, "checkpoint_id", checkpointID)
@@ -229,7 +229,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointID))
 
 	go func() {
-		if err := w.runCheckpoint(ctx, pod, job, checkpointID, checkpointLocation, checkpointStorageType, podKey); err != nil {
+		if err := w.runCheckpoint(ctx, pod, job, checkpointID, checkpointLocation, podKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
 			opLog.Error(err, "Checkpoint controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
@@ -263,7 +263,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	checkpointLocation, checkpointStorageType, err := checkpointStorageFromPod(pod)
+	checkpointLocation, err := w.checkpointLocationFromPod(pod, checkpointID)
 	if err != nil {
 		w.log.Error(err, "Restore pod is missing storage metadata", "pod", podKey, "checkpoint_id", checkpointID)
 		return
@@ -307,7 +307,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointID))
 
 	go func() {
-		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, checkpointStorageType, restoreAttemptKey); err != nil {
+		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -321,7 +321,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 //  3. Call executor.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
 //  4. SIGUSR1 the process on success (notify workload), SIGKILL on failure (terminate immediately)
 //  5. Mark job as completed or failed
-func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, checkpointLocation, checkpointStorageType, podKey string) error {
+func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, checkpointLocation, podKey string) error {
 	releasePodOnExit := true
 	defer func() {
 		if releasePodOnExit {
@@ -396,15 +396,14 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 
 	// Step 1: Run the checkpoint orchestrator
 	req := executor.CheckpointRequest{
-		ContainerID:           containerID,
-		ContainerName:         containerName,
-		CheckpointID:          checkpointID,
-		CheckpointLocation:    checkpointLocation,
-		CheckpointStorageType: checkpointStorageType,
-		NodeName:              w.config.NodeName,
-		PodName:               pod.Name,
-		PodNamespace:          pod.Namespace,
-		Clientset:             w.clientset,
+		ContainerID:        containerID,
+		ContainerName:      containerName,
+		CheckpointID:       checkpointID,
+		CheckpointLocation: checkpointLocation,
+		NodeName:           w.config.NodeName,
+		PodName:            pod.Name,
+		PodNamespace:       pod.Namespace,
+		Clientset:          w.clientset,
 	}
 	if err := executor.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
 		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
@@ -463,7 +462,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 //  3. SIGCONT the restored process to wake it up
 //  4. Wait for the pod to become Ready
 //  5. Mark the container instance as completed
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, checkpointStorageType, restoreAttemptKey string) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey string) error {
 	releaseOnExit := true
 	defer func() {
 		if releaseOnExit {
@@ -496,14 +495,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 
 	// Step 1: Run the restore orchestrator (inspect + nsrestore)
 	req := executor.RestoreRequest{
-		CheckpointID:          checkpointID,
-		CheckpointLocation:    checkpointLocation,
-		CheckpointStorageType: checkpointStorageType,
-		NSRestorePath:         w.config.Restore.NSRestorePath,
-		PodName:               pod.Name,
-		PodNamespace:          pod.Namespace,
-		ContainerName:         containerName,
-		Clientset:             w.clientset,
+		CheckpointID:       checkpointID,
+		CheckpointLocation: checkpointLocation,
+		NSRestorePath:      w.config.Restore.NSRestorePath,
+		PodName:            pod.Name,
+		PodNamespace:       pod.Namespace,
+		ContainerName:      containerName,
+		Clientset:          w.clientset,
 	}
 	restoredPID, err := executor.Restore(ctx, w.containerd, log, req)
 	if err != nil {
@@ -579,19 +577,17 @@ func (w *NodeController) release(podKey string) {
 	delete(w.inFlight, podKey)
 }
 
-func checkpointStorageFromPod(pod *corev1.Pod) (string, string, error) {
-	checkpointLocation := strings.TrimSpace(pod.Annotations[snapshotworkload.CheckpointLocationAnnotation])
-	if checkpointLocation == "" {
-		return "", "", fmt.Errorf("missing %s annotation", snapshotworkload.CheckpointLocationAnnotation)
+func (w *NodeController) checkpointLocationFromPod(pod *corev1.Pod, checkpointID string) (string, error) {
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
+		checkpointID,
+		strings.TrimSpace(pod.Annotations[snapshotworkload.CheckpointArtifactVersionAnnotation]),
+		snapshotworkload.Storage{
+			Type:     w.config.Storage.Type,
+			BasePath: w.config.Storage.BasePath,
+		},
+	)
+	if err != nil {
+		return "", err
 	}
-
-	checkpointStorageType := strings.TrimSpace(pod.Annotations[snapshotworkload.CheckpointStorageAnnotation])
-	if checkpointStorageType == "" {
-		return "", "", fmt.Errorf("missing %s annotation", snapshotworkload.CheckpointStorageAnnotation)
-	}
-	if checkpointStorageType != "pvc" {
-		return "", "", fmt.Errorf("checkpoint storage type %q is not supported", checkpointStorageType)
-	}
-
-	return checkpointLocation, checkpointStorageType, nil
+	return resolvedStorage.Location, nil
 }

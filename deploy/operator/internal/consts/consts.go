@@ -149,8 +149,6 @@ const (
 	KubeLabelIsRestoreTarget                = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
 	KubeAnnotationCheckpointArtifactVersion = "nvidia.com/snapshot-artifact-version"     // Checkpoint artifact generation; changing it triggers a new immutable capture attempt
 	DefaultCheckpointArtifactVersion        = "1"
-	KubeAnnotationCheckpointLocation        = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
-	KubeAnnotationCheckpointStorageType     = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
 	DefaultCheckpointJobTTLSeconds          = int32(300)
 
 	// Environment variables injected into pods

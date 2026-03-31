@@ -25,14 +25,13 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID          string
-	CheckpointLocation    string
-	CheckpointStorageType string
-	NSRestorePath         string
-	PodName               string
-	PodNamespace          string
-	ContainerName         string
-	Clientset             kubernetes.Interface
+	CheckpointID       string
+	CheckpointLocation string
+	NSRestorePath      string
+	PodName            string
+	PodNamespace       string
+	ContainerName      string
+	Clientset          kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -75,9 +74,6 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 }
 
 func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
-	if req.CheckpointStorageType != "pvc" {
-		return nil, fmt.Errorf("checkpoint storage type %q is not supported", req.CheckpointStorageType)
-	}
 	if req.CheckpointLocation == "" {
 		return nil, fmt.Errorf("checkpoint location is required")
 	}

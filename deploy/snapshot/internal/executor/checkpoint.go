@@ -23,15 +23,14 @@ import (
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID           string
-	ContainerName         string
-	CheckpointID          string
-	CheckpointLocation    string
-	CheckpointStorageType string
-	NodeName              string
-	PodName               string
-	PodNamespace          string
-	Clientset             kubernetes.Interface
+	ContainerID        string
+	ContainerName      string
+	CheckpointID       string
+	CheckpointLocation string
+	NodeName           string
+	PodName            string
+	PodNamespace       string
+	Clientset          kubernetes.Interface
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -44,9 +43,6 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	if req.CheckpointStorageType != "pvc" {
-		return fmt.Errorf("checkpoint storage type %q is not supported", req.CheckpointStorageType)
-	}
 	if req.CheckpointLocation == "" {
 		return fmt.Errorf("checkpoint location is required")
 	}

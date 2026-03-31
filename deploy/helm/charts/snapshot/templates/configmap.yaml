@@ -10,6 +10,12 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    storage:
+      type: {{ .Values.storage.type | quote }}
+      {{- if eq .Values.storage.type "pvc" }}
+      basePath: {{ .Values.storage.pvc.basePath | quote }}
+      {{- end }}
+
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 

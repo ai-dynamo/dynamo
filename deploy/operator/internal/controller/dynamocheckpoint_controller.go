@@ -224,7 +224,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	version := desiredArtifactVersion(ckpt)
 	jobName := desiredCheckpointJobName(ckpt, hash)
 	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(hash, version, snapshotworkload.Storage{
-		Type:     r.Config.Checkpoint.Storage.Type,
+		Type:     snapshotworkload.StorageTypePVC,
 		PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 		BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
 	})
@@ -391,7 +391,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 				ckpt.Status.IdentityHash,
 				desiredArtifactVersion(ckpt),
 				snapshotworkload.Storage{
-					Type:     r.Config.Checkpoint.Storage.Type,
+					Type:     snapshotworkload.StorageTypePVC,
 					PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 					BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
 				},
@@ -493,7 +493,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		hash,
 		desiredArtifactVersion(ckpt),
 		snapshotworkload.Storage{
-			Type:     r.Config.Checkpoint.Storage.Type,
+			Type:     snapshotworkload.StorageTypePVC,
 			PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
 			BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
 		},
@@ -649,10 +649,11 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 	return snapshotworkload.NewCheckpointJob(podTemplate, snapshotworkload.CheckpointJobOptions{
 		PodOptions: snapshotworkload.PodOptions{
-			Namespace:      ckpt.Namespace,
-			CheckpointID:   hash,
-			Storage:        resolvedStorage,
-			SeccompProfile: consts.SeccompProfilePath,
+			Namespace:       ckpt.Namespace,
+			CheckpointID:    hash,
+			ArtifactVersion: desiredArtifactVersion(ckpt),
+			Storage:         resolvedStorage,
+			SeccompProfile:  consts.SeccompProfilePath,
 		},
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,

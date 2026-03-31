@@ -20,21 +20,24 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type CheckpointInfo struct {
-	Enabled        bool
-	Exists         bool
-	Identity       *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	Hash           string
-	Location       string
-	StorageType    nvidiacomv1alpha1.DynamoCheckpointStorageType
-	CheckpointName string
-	Ready          bool
+	Enabled         bool
+	Exists          bool
+	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	Hash            string
+	ArtifactVersion string
+	Location        string
+	StorageType     nvidiacomv1alpha1.DynamoCheckpointStorageType
+	CheckpointName  string
+	Ready           bool
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -44,15 +47,26 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	}
 
 	return &CheckpointInfo{
-		Enabled:        true,
-		Exists:         true,
-		Identity:       &ckpt.Spec.Identity,
-		Hash:           hash,
-		Location:       ckpt.Status.Location,
-		StorageType:    ckpt.Status.StorageType,
-		CheckpointName: ckpt.Name,
-		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:         true,
+		Exists:          true,
+		Identity:        &ckpt.Spec.Identity,
+		Hash:            hash,
+		ArtifactVersion: checkpointArtifactVersion(ckpt),
+		Location:        ckpt.Status.Location,
+		StorageType:     ckpt.Status.StorageType,
+		CheckpointName:  ckpt.Name,
+		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
+}
+
+func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	if ckpt != nil && ckpt.Annotations != nil {
+		version := strings.TrimSpace(ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+		if version != "" {
+			return version
+		}
+	}
+	return consts.DefaultCheckpointArtifactVersion
 }
 
 func ResolveCheckpointForService(

@@ -27,17 +27,14 @@ func ResolveCheckpointStorage(checkpointID string, version string, storage Stora
 	return resolved, nil
 }
 
-func ResolveRestoreStorage(checkpointID string, location string, storageType string, storage Storage) (Storage, error) {
+func ResolveRestoreStorage(checkpointID string, version string, location string, storage Storage) (Storage, error) {
 	resolved, err := resolveStorageConfig(storage)
 	if err != nil {
 		return Storage{}, err
 	}
-	if strings.TrimSpace(storageType) != "" && strings.TrimSpace(storageType) != resolved.Type {
-		return Storage{}, fmt.Errorf("checkpoint storage type %q does not match configured storage type %q", storageType, resolved.Type)
-	}
 	location = strings.TrimSpace(location)
 	if location == "" {
-		resolved, err = ResolveCheckpointStorage(checkpointID, "", storage)
+		resolved, err = ResolveCheckpointStorage(checkpointID, version, storage)
 		if err != nil {
 			return Storage{}, err
 		}
@@ -55,17 +52,13 @@ func resolveStorageConfig(storage Storage) (Storage, error) {
 	if storageType != StorageTypePVC {
 		return Storage{}, fmt.Errorf("checkpoint storage type %q is not supported", storageType)
 	}
-	pvcName := strings.TrimSpace(storage.PVCName)
-	if pvcName == "" {
-		return Storage{}, fmt.Errorf("checkpoint pvc name is required")
-	}
 	basePath := strings.TrimSpace(storage.BasePath)
 	if basePath == "" {
 		return Storage{}, fmt.Errorf("checkpoint base path is required")
 	}
 	return Storage{
 		Type:     storageType,
-		PVCName:  pvcName,
+		PVCName:  strings.TrimSpace(storage.PVCName),
 		BasePath: strings.TrimRight(basePath, "/"),
 	}, nil
 }

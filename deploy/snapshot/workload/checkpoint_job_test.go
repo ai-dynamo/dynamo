@@ -25,13 +25,10 @@ func TestNewCheckpointJob(t *testing.T) {
 		},
 	}, CheckpointJobOptions{
 		PodOptions: PodOptions{
-			Namespace:    "test-ns",
-			CheckpointID: "hash",
-			Storage: Storage{
-				Type:     StorageTypePVC,
-				Location: "/checkpoints/hash",
-			},
-			SeccompProfile: DefaultSeccompLocalhostProfile,
+			Namespace:       "test-ns",
+			CheckpointID:    "hash",
+			ArtifactVersion: "2",
+			SeccompProfile:  DefaultSeccompLocalhostProfile,
 		},
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
@@ -51,8 +48,8 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Spec.Template.Labels[CheckpointSourceLabel] != "true" {
 		t.Fatalf("expected checkpoint source label on template: %#v", job.Spec.Template.Labels)
 	}
-	if job.Spec.Template.Annotations[CheckpointLocationAnnotation] != "/checkpoints/hash" {
-		t.Fatalf("expected checkpoint location annotation on template: %#v", job.Spec.Template.Annotations)
+	if job.Spec.Template.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
+		t.Fatalf("expected checkpoint artifact version annotation on template: %#v", job.Spec.Template.Annotations)
 	}
 	if len(job.Spec.Template.Spec.Volumes) != 0 {
 		t.Fatalf("expected no checkpoint volume, got %#v", job.Spec.Template.Spec.Volumes)

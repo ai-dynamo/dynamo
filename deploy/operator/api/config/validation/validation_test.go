@@ -124,17 +124,6 @@ func TestValidateOperatorConfiguration_NamespaceScopedLeaseRenewExceedsDuration(
 	}
 }
 
-func TestValidateOperatorConfiguration_CheckpointInvalidStorageType(t *testing.T) {
-	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = "nfs"
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for invalid storage type, got %d: %v", len(errs), errs)
-	}
-}
-
 func TestValidateOperatorConfiguration_CheckpointMissingPVCConfig(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = true
@@ -150,7 +139,8 @@ func TestValidateOperatorConfiguration_CheckpointMissingPVCConfig(t *testing.T) 
 func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = false
-	cfg.Checkpoint.Storage.Type = "invalid"
+	cfg.Checkpoint.Storage.PVC.PVCName = ""
+	cfg.Checkpoint.Storage.PVC.BasePath = ""
 
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 0 {

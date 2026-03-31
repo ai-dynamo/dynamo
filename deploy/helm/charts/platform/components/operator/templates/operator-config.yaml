@@ -136,7 +136,6 @@ data:
       readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
       {{- end }}
       storage:
-        type: {{ (.Values.checkpoint.storage.type | default "pvc") | quote }}
         pvc:
           pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "snapshot-pvc") | quote }}
           basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}

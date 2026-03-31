@@ -1,43 +1,41 @@
 package workload
 
+import "strings"
+
 const (
-	CheckpointSourceLabel          = "nvidia.com/snapshot-is-checkpoint-source"
-	CheckpointIDLabel              = "nvidia.com/snapshot-checkpoint-id"
-	RestoreTargetLabel             = "nvidia.com/snapshot-is-restore-target"
-	CheckpointLocationAnnotation   = "nvidia.com/snapshot-checkpoint-location"
-	CheckpointStorageAnnotation    = "nvidia.com/snapshot-checkpoint-storage-type"
-	CheckpointStatusAnnotation     = "nvidia.com/snapshot-checkpoint-status"
-	RestoreStatusAnnotation        = "nvidia.com/snapshot-restore-status"
-	RestoreContainerIDAnnotation   = "nvidia.com/snapshot-restore-container-id"
-	CheckpointVolumeName           = "checkpoint-storage"
-	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
-	StorageTypePVC                 = "pvc"
+	CheckpointSourceLabel               = "nvidia.com/snapshot-is-checkpoint-source"
+	CheckpointIDLabel                   = "nvidia.com/snapshot-checkpoint-id"
+	RestoreTargetLabel                  = "nvidia.com/snapshot-is-restore-target"
+	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
+	CheckpointStatusAnnotation          = "nvidia.com/snapshot-checkpoint-status"
+	RestoreStatusAnnotation             = "nvidia.com/snapshot-restore-status"
+	RestoreContainerIDAnnotation        = "nvidia.com/snapshot-restore-container-id"
+	CheckpointVolumeName                = "checkpoint-storage"
+	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
+	StorageTypePVC                      = "pvc"
 )
 
-func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, location string, storageType string) {
+func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
-	delete(annotations, CheckpointLocationAnnotation)
-	delete(annotations, CheckpointStorageAnnotation)
+	delete(annotations, CheckpointArtifactVersionAnnotation)
 
 	labels[CheckpointSourceLabel] = "true"
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}
-	if location != "" {
-		annotations[CheckpointLocationAnnotation] = location
+	artifactVersion = strings.TrimSpace(artifactVersion)
+	if artifactVersion == "" {
+		artifactVersion = DefaultCheckpointArtifactVersion
 	}
-	if storageType != "" {
-		annotations[CheckpointStorageAnnotation] = storageType
-	}
+	annotations[CheckpointArtifactVersionAnnotation] = artifactVersion
 }
 
-func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, location string, storageType string) {
+func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
-	delete(annotations, CheckpointLocationAnnotation)
-	delete(annotations, CheckpointStorageAnnotation)
+	delete(annotations, CheckpointArtifactVersionAnnotation)
 
 	if !enabled {
 		return
@@ -47,10 +45,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}
-	if location != "" {
-		annotations[CheckpointLocationAnnotation] = location
+	artifactVersion = strings.TrimSpace(artifactVersion)
+	if artifactVersion == "" {
+		artifactVersion = DefaultCheckpointArtifactVersion
 	}
-	if storageType != "" {
-		annotations[CheckpointStorageAnnotation] = storageType
-	}
+	annotations[CheckpointArtifactVersionAnnotation] = artifactVersion
 }

@@ -69,7 +69,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(checkpointID, "", snapshotworkload.StorageTypePVC, snapshotworkload.Storage{
+	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(checkpointID, snapshotworkload.DefaultCheckpointArtifactVersion, "", snapshotworkload.Storage{
 		Type:     snapshotworkload.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
@@ -88,10 +88,11 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			},
 			Spec: *pod.Spec.DeepCopy(),
 		}, snapshotworkload.PodOptions{
-			Namespace:      namespace,
-			CheckpointID:   checkpointID,
-			Storage:        resolvedStorage,
-			SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
+			Namespace:       namespace,
+			CheckpointID:    checkpointID,
+			ArtifactVersion: snapshotworkload.DefaultCheckpointArtifactVersion,
+			Storage:         resolvedStorage,
+			SeccompProfile:  snapshotworkload.DefaultSeccompLocalhostProfile,
 		})
 		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
@@ -120,7 +121,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		for key, value := range pod.Annotations {
 			annotations[key] = value
 		}
-		snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, resolvedStorage.Location, resolvedStorage.Type)
+		snapshotworkload.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotworkload.DefaultCheckpointArtifactVersion)
 		patch, err := json.Marshal(map[string]any{
 			"metadata": map[string]any{
 				"labels":      labels,

@@ -234,12 +234,9 @@ dynamo-operator:
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
 
     # Storage configuration
-    # These settings tell the operator where to find checkpoint storage
-    # Must match the configuration in the snapshot chart
+    # These settings tell the operator which snapshot PVC to mount into restore targets.
+    # They must match the snapshot chart install in the namespace.
     storage:
-      # -- Storage backend type for checkpoints. Only `pvc` is currently supported.
-      type: "pvc"
-
       # -- PVC storage configuration for the snapshot checkpoint store
       pvc:
         # -- Name of the PVC created by the snapshot chart

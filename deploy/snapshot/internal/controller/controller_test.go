@@ -32,6 +32,10 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 	return &NodeController{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
+			Storage: types.StorageSpec{
+				Type:     snapshotworkload.StorageTypePVC,
+				BasePath: t.TempDir(),
+			},
 		},
 		clientset: fake.NewClientset(objs...),
 		log:       testr.New(t),
@@ -207,14 +211,7 @@ func TestReconcileCheckpointPod(t *testing.T) {
 				}
 			}
 
-			var annotations map[string]string
-			if tc.hash != "" {
-				annotations = map[string]string{
-					snapshotworkload.CheckpointLocationAnnotation: "/checkpoints/" + tc.hash,
-					snapshotworkload.CheckpointStorageAnnotation:  "pvc",
-				}
-			}
-			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
+			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, nil)
 			objs := []runtime.Object{job}
 			if tc.lease != nil {
 				objs = append(objs, tc.lease)
@@ -390,21 +387,12 @@ func TestReconcileRestorePod(t *testing.T) {
 			}
 
 			w := makeTestController(t)
-			checkpointDir := t.TempDir()
-
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
 					snapshotworkload.RestoreStatusAnnotation:      tc.annotationStatus,
 					snapshotworkload.RestoreContainerIDAnnotation: tc.annotationContainerID,
 				}
-			}
-			if tc.hash != "" {
-				if annotations == nil {
-					annotations = make(map[string]string)
-				}
-				annotations[snapshotworkload.CheckpointLocationAnnotation] = filepath.Join(checkpointDir, tc.hash)
-				annotations[snapshotworkload.CheckpointStorageAnnotation] = "pvc"
 			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)
@@ -415,7 +403,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			}}
 
 			if tc.createDir && tc.hash != "" {
-				dir := filepath.Join(checkpointDir, tc.hash)
+				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotworkload.DefaultCheckpointArtifactVersion)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatalf("failed to create checkpoint dir: %v", err)
 				}
@@ -474,6 +462,10 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 	w := &NodeController{
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
+			Storage: types.StorageSpec{
+				Type:     snapshotworkload.StorageTypePVC,
+				BasePath: t.TempDir(),
+			},
 		},
 		clientset: clientset,
 		log:       testr.New(t),
@@ -484,7 +476,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "pvc", "default/test-pod")
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "default/test-pod")
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

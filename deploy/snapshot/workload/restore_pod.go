@@ -5,10 +5,11 @@ import "fmt"
 import corev1 "k8s.io/api/core/v1"
 
 type PodOptions struct {
-	Namespace      string
-	CheckpointID   string
-	Storage        Storage
-	SeccompProfile string
+	Namespace       string
+	CheckpointID    string
+	ArtifactVersion string
+	Storage         Storage
+	SeccompProfile  string
 }
 
 func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
@@ -19,7 +20,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.Storage.Location, opts.Storage.Type)
+	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
 	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever

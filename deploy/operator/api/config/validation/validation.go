@@ -135,10 +135,6 @@ func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldP
 	}
 
 	storagePath := fldPath.Child("storage")
-	if checkpoint.Storage.Type != "" && checkpoint.Storage.Type != configv1alpha1.CheckpointStorageTypePVC {
-		allErrs = append(allErrs, field.NotSupported(storagePath.Child("type"), checkpoint.Storage.Type,
-			[]string{configv1alpha1.CheckpointStorageTypePVC}))
-	}
 	if checkpoint.Storage.PVC.PVCName == "" {
 		allErrs = append(allErrs, field.Required(storagePath.Child("pvc", "pvcName"), "checkpoint PVC name is required"))
 	}

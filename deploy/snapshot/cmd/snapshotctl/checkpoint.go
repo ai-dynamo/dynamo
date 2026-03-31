@@ -72,10 +72,11 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotworkload.CheckpointJobOptions{
 		PodOptions: snapshotworkload.PodOptions{
-			Namespace:      namespace,
-			CheckpointID:   checkpointID,
-			Storage:        resolvedStorage,
-			SeccompProfile: snapshotworkload.DefaultSeccompLocalhostProfile,
+			Namespace:       namespace,
+			CheckpointID:    checkpointID,
+			ArtifactVersion: snapshotworkload.DefaultCheckpointArtifactVersion,
+			Storage:         resolvedStorage,
+			SeccompProfile:  snapshotworkload.DefaultSeccompLocalhostProfile,
 		},
 		Name:          checkpointJobName,
 		WrapLaunchJob: !opts.DisableCudaCheckpointJobFile,
