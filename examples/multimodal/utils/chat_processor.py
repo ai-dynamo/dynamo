@@ -27,10 +27,15 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import TokensPrompt
 from vllm.renderers.registry import renderer_from_config
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to old structure
+try:
+    from vllm.inputs.llm import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
 
 
 class StubEngineClient:

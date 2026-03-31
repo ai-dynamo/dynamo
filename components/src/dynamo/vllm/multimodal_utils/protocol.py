@@ -22,14 +22,20 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
-from vllm.inputs.data import TokensPrompt
 from vllm.logprobs import PromptLogprobs
-from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
 from dynamo.common.multimodal.embedding_transfer import TransferRequest
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to old structure
+try:
+    from vllm.inputs.llm import MultiModalUUIDDict  # noqa: F401
+    from vllm.inputs.llm import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
+    from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 
 
 class Request(BaseModel):

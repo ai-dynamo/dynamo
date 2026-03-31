@@ -20,7 +20,6 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
@@ -45,6 +44,12 @@ except ImportError:
         BaseModelPath,
         OpenAIServingModels,
     )
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to old structure
+try:
+    from vllm.inputs.llm import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
 
 
 class StubEngineClient:
