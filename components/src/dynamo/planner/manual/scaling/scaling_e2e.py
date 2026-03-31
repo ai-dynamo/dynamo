@@ -61,7 +61,7 @@ class KubernetesMonitor:
         except subprocess.TimeoutExpired:
             logger.error("kubectl command timed out: %s", " ".join(cmd))
             return False, ""
-        except Exception as exc:
+        except OSError as exc:
             logger.error("kubectl command failed: %s", exc)
             return False, ""
 
@@ -113,7 +113,7 @@ class KubernetesMonitor:
             )
             self.pod_history.append(counts)
             return counts
-        except Exception as exc:
+        except json.JSONDecodeError as exc:
             logger.error("Failed to parse pod counts: %s", exc)
             return None
 
@@ -349,9 +349,9 @@ async def main():
         logger.info("Detailed results saved to: %s", results_file)
         logger.info("=" * 60)
         return 0 if validation["test_passed"] else 1
-    except Exception as exc:
-        logger.error("Test failed with error: %s", exc)
-        return 1
+    except Exception:
+        logger.exception("Test failed unexpectedly")
+        raise
 
 
 if __name__ == "__main__":

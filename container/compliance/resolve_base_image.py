@@ -75,6 +75,12 @@ def main() -> None:
         return
 
     if args.target == "planner":
+        if args.framework != "dynamo":
+            print(
+                "ERROR: --target planner is only supported for --framework dynamo",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         planner_cfg = ctx.get("dynamo", {})
         runtime_image = planner_cfg.get("planner_runtime_image")
         runtime_image_tag = planner_cfg.get("planner_runtime_image_tag")

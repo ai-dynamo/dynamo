@@ -17,6 +17,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
+    pytest.mark.sglang,
     pytest.mark.planner,
 ]
 logger = logging.getLogger(__name__)

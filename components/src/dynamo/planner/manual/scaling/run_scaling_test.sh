@@ -9,10 +9,11 @@ NAMESPACE=${NAMESPACE:-default}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_FILE="$SCRIPT_DIR/scaling_e2e.py"
 FRONTEND_PORT=8000
-LOCAL_PORT=8000
+LOCAL_PORT=""
 DEPLOYMENT_NAME="vllm-disagg-planner"
 SAVE_RESULTS=false
 MODE="throughput"
+DEPLOYED_BY_US=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +35,21 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+find_free_local_port() {
+    local python_cmd="python3"
+    if ! command -v python3 &> /dev/null; then
+        python_cmd="python"
+    fi
+
+    "$python_cmd" - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
 }
 
 check_prerequisites() {
@@ -108,18 +124,14 @@ deploy_planner() {
     log_success "Frontend pod is ready"
 
     log_info "Waiting for planner pod..."
-    kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=planner,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s || true
+    kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=planner,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s
     sleep 30
 }
 
 setup_port_forward() {
     log_info "Setting up port forwarding..."
-
-    if lsof -ti:$LOCAL_PORT &> /dev/null; then
-        log_warning "Port $LOCAL_PORT is already in use, attempting to free it..."
-        kill "$(lsof -ti:$LOCAL_PORT)" 2>/dev/null || true
-        sleep 2
-    fi
+    LOCAL_PORT=$(find_free_local_port)
+    log_info "Using local port $LOCAL_PORT for frontend port-forward"
 
     local frontend_service="vllm-disagg-planner-frontend"
     kubectl port-forward service/"$frontend_service" "$LOCAL_PORT:$FRONTEND_PORT" -n "$NAMESPACE" >/dev/null 2>&1 &
@@ -152,6 +164,13 @@ cleanup_deployment() {
     kubectl wait --for=delete dynamographdeployment/"$DEPLOYMENT_NAME" -n "$NAMESPACE" --timeout=120s || true
 }
 
+cleanup() {
+    cleanup_port_forward
+    if [ "$DEPLOYED_BY_US" = true ]; then
+        cleanup_deployment
+    fi
+}
+
 run_test() {
     log_info "Running scaling test (graduated 8->18 req/s, mode=$MODE)..."
 
@@ -160,7 +179,7 @@ run_test() {
         python_cmd="python"
     fi
 
-    local test_args="--namespace $NAMESPACE --mode $MODE"
+    local test_args="--namespace $NAMESPACE --mode $MODE --base-url http://localhost:$LOCAL_PORT"
     if [ "$SAVE_RESULTS" = true ]; then
         test_args="$test_args --save-results"
         log_info "Results will be saved to components/src/dynamo/planner/tests/e2e_scaling_results"
@@ -206,20 +225,15 @@ main() {
     fi
 
     check_prerequisites
-    trap cleanup_port_forward EXIT
+    trap cleanup EXIT
 
-    local deployed_by_us=false
     if ! check_existing_deployment; then
         deploy_planner
-        deployed_by_us=true
+        DEPLOYED_BY_US=true
     fi
 
     setup_port_forward
     run_test
-
-    if [ "$deployed_by_us" = true ]; then
-        cleanup_deployment
-    fi
 }
 
 main "$@"
