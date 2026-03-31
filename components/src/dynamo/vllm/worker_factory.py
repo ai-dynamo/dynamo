@@ -54,23 +54,6 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
 
-    def validate_config(self, config: Config) -> None:
-        # Sanity check if one may still using legacy config.
-        if (
-            config.multimodal_decode_worker
-            and config.disaggregation_mode == DisaggregationMode.PREFILL
-        ):
-            raise ValueError(
-                "Multimodal decode worker with PREFILL disaggregation mode is not supported."
-            )
-        if (
-            config.multimodal_worker
-            and config.disaggregation_mode == DisaggregationMode.DECODE
-        ):
-            raise ValueError(
-                "Multimodal worker with DECODE disaggregation mode is not supported."
-            )
-
     async def create(
         self,
         runtime: DistributedRuntime,
@@ -80,7 +63,6 @@ class WorkerFactory:
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
-        self.validate_config(config)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             await self._create_multimodal_encode_worker(

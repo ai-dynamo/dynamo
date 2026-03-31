@@ -226,6 +226,9 @@ class DynamoVllmConfig(ConfigBase):
            Raise if legacy booleans are also set.
         2. If legacy --is-prefill-worker or --is-decode-worker is set,
            emit DeprecationWarning and translate to enum.
+        3. If legacy multimodal flags are set, translate to enum,
+           emit DeprecationWarning and translate to enum, raise if conflicting
+           with --disaggregation-mode.
         3. Apply default (AGGREGATED) if nothing was provided.
         4. Sync boolean fields from the resolved enum value.
         """
@@ -269,51 +272,7 @@ class DynamoVllmConfig(ConfigBase):
             or self.multimodal_encode_worker
             or self.multimodal_worker
         ):
-            if self.multimodal_decode_worker:
-                warnings.warn(
-                    "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                if (
-                    self.disaggregation_mode is not None
-                    and self.disaggregation_mode != DisaggregationMode.DECODE
-                ):
-                    raise ValueError(
-                        f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
-                    )
-                self.disaggregation_mode = DisaggregationMode.DECODE
-            if self.multimodal_encode_worker:
-                warnings.warn(
-                    "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                if (
-                    self.disaggregation_mode is not None
-                    and self.disaggregation_mode != DisaggregationMode.ENCODE
-                ):
-                    raise ValueError(
-                        f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
-                    )
-                self.disaggregation_mode = DisaggregationMode.ENCODE
-            if self.multimodal_worker:
-                warnings.warn(
-                    "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                if (
-                    self.disaggregation_mode is not None
-                    and self.disaggregation_mode != DisaggregationMode.AGGREGATED
-                    and self.disaggregation_mode != DisaggregationMode.PREFILL
-                ):
-                    raise ValueError(
-                        f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
-                    )
-                # NO-OP here, '--multimodal-worker' may be specified with '--disaggregation-mode=prefill'
-                # as prefill workers in P/D disaggregation or without for aggregation. In both cases,
-                # 'self.disaggregation_mode' will be properly setup.
+            self._resolve_disaggregation_model_from_legacy_multimodal_flags()
 
         # Apply default if neither new flag nor legacy flags were provided
         if self.disaggregation_mode is None:
@@ -322,6 +281,63 @@ class DynamoVllmConfig(ConfigBase):
         # Sync booleans from enum (canonical source of truth)
         self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
         self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
+
+    def _resolve_disaggregation_model_from_legacy_multimodal_flags(self) -> None:
+        """
+        Resolve disaggregation mode from legacy multimodal flags, emit DeprecationWarning
+        and raise ValueError if conflicting with --disaggregation-mode.
+
+        Transformation rules:
+        1. If --multimodal-decode-worker is set, use DisaggregationMode.DECODE.
+        2. If --multimodal-encode-worker is set, use DisaggregationMode.ENCODE.
+        3. If --multimodal-worker is set, default to DisaggregationMode.AGGREGATED unless
+           --disaggregation-mode is set.
+        """
+        if self.multimodal_decode_worker:
+            warnings.warn(
+                "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if (
+                self.disaggregation_mode is not None
+                and self.disaggregation_mode != DisaggregationMode.DECODE
+            ):
+                raise ValueError(
+                    f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
+                )
+            self.disaggregation_mode = DisaggregationMode.DECODE
+        if self.multimodal_encode_worker:
+            warnings.warn(
+                "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if (
+                self.disaggregation_mode is not None
+                and self.disaggregation_mode != DisaggregationMode.ENCODE
+            ):
+                raise ValueError(
+                    f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
+                )
+            self.disaggregation_mode = DisaggregationMode.ENCODE
+        if self.multimodal_worker:
+            warnings.warn(
+                "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if (
+                self.disaggregation_mode is not None
+                and self.disaggregation_mode != DisaggregationMode.AGGREGATED
+                and self.disaggregation_mode != DisaggregationMode.PREFILL
+            ):
+                raise ValueError(
+                    f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
+                )
+            # NO-OP here, '--multimodal-worker' may be specified with '--disaggregation-mode=prefill'
+            # as prefill workers in P/D disaggregation or without for aggregation. In both cases,
+            # 'self.disaggregation_mode' will be properly setup.
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).
