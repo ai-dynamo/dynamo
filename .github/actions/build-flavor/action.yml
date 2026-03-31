@@ -2,8 +2,12 @@ name: 'Build Flavor'
 description: 'Build a single Dynamo framework image (checkout → login → tag → builder → dockerfile → build → test image → summary)'
 inputs:
   framework:
-    description: 'Framework name (vllm, sglang, trtllm)'
+    description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
     required: true
+  builder_flavor:
+    description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'
+    required: false
+    default: ''
   target:
     description: 'Target stage for Docker rendering'
     required: true
@@ -128,7 +132,7 @@ runs:
       uses: ./.github/actions/init-dynamo-builder
       with:
         builder_name: ${{ inputs.builder_name }}
-        flavor: ${{ inputs.framework }}
+        flavor: ${{ inputs.builder_flavor != '' && inputs.builder_flavor || inputs.framework }}
         arch: ${{ inputs.platform }}
         cuda_version: ${{ inputs.cuda_version }}
         fresh_builder: ${{ inputs.fresh_builder }}
@@ -213,7 +217,7 @@ runs:
       uses: ./.github/actions/builder-refresher
       with:
         builder_name: ${{ inputs.builder_name }}
-        flavor: ${{ inputs.framework }}
+        flavor: ${{ inputs.builder_flavor != '' && inputs.builder_flavor || inputs.framework }}
         arch: ${{ inputs.platform }}
         cuda_version: ${{ inputs.cuda_version }}
     - name: Build and Push Test Image

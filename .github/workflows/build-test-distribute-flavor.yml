@@ -7,9 +7,14 @@ on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework name (vllm, sglang, trtllm)'
+        description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
         required: true
         type: string
+      builder_flavor:
+        description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'
+        required: false
+        type: string
+        default: ''
       target:
         description: 'Target stage for Docker rendering'
         required: true
@@ -194,6 +199,7 @@ jobs:
         uses: ./.github/actions/build-flavor
         with:
           framework: ${{ inputs.framework }}
+          builder_flavor: ${{ inputs.builder_flavor }}
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
