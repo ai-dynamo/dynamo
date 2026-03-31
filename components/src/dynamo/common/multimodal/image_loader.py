@@ -118,13 +118,13 @@ class ImageLoader:
                 f"{type(e).__name__} loading image: '{image_url}' "
                 f"(timeout={self._http_timeout}s)"
             )
-            raise ValueError(f"Timeout loading image: '{image_url}'")
+            raise ValueError(f"Timeout loading image: '{image_url}'") from e
         except httpx.HTTPError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
-            raise ValueError(f"Failed to load image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
 
     async def _fetch_and_cache(
         self, key: str, image_url: str, parsed_url: Any
@@ -176,7 +176,7 @@ class ImageLoader:
                     try:
                         image_bytes = base64.b64decode(data, validate=True)
                     except binascii.Error as e:
-                        raise ValueError(f"Invalid base64 encoding: {e}")
+                        raise ValueError(f"Invalid base64 encoding: {e}") from e
                     image_data = BytesIO(image_bytes)
 
             elif parsed_url.scheme in ("", "file"):
@@ -195,7 +195,7 @@ class ImageLoader:
 
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
-            raise ValueError(f"Failed to load image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
 
     async def load_image_batch(
         self,
