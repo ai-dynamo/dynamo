@@ -10,13 +10,12 @@ mod leader;
 mod worker;
 
 pub use g3pb::{
-    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbFetchResponse, G3pbFoyerStorageConfig, G3pbHealthResponse,
-    G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock,
-    G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest,
-    G3pbStageBlocksResponse, G3pbStorageAgent, G3pbStorageClient, G3pbTransferBlock,
-    route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner,
-    route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
+    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse, G3pbFetchRequest,
+    G3pbFetchResponse, G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest,
+    G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock, G3pbPutPayloadRequest,
+    G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse,
+    G3pbStorageAgent, G3pbStorageClient, G3pbTransferBlock, route_g3pb_put_blocks_by_owner,
+    route_g3pb_sequence_hashes_by_owner, route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
@@ -124,14 +123,12 @@ mod tests {
 
     async fn build_leader_and_workers(num_workers: usize) -> Result<(KvbmLeader, Vec<KvbmWorker>)> {
         let mut workers = Vec::new();
-        let cancel_token = CancellationToken::new();
 
         for i in 0..num_workers {
             let tensors: Vec<Arc<dyn TorchTensor>> =
                 vec![Arc::new(MockTensor::new(vec![2, NUM_BLOCKS, 4096]))];
 
             let config = KvbmWorkerConfig::builder()
-                .cancel_token(cancel_token.child_token())
                 .num_device_blocks(NUM_BLOCKS)
                 .tensors(tensors)
                 .device_id(i)

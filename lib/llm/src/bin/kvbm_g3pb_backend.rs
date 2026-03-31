@@ -20,14 +20,31 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest,
-    G3pbOfferRequest, G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit,
-    G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
+    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse, G3pbFetchRequest,
+    G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest, G3pbOfferRequest,
+    G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
+    G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
 use dynamo_llm::block_manager::{CancellationToken, KvBlockManager};
+use serde_json::json;
+
+fn make_descriptor_list(
+    worker_id: u64,
+    block_set_idx: usize,
+    mutability: BlockMutability,
+    block_indices: Vec<usize>,
+) -> Result<BlockDescriptorList> {
+    anyhow::ensure!(!block_indices.is_empty(), "block descriptor list cannot be empty");
+
+    Ok(serde_json::from_value(json!({
+        "worker_id": worker_id,
+        "block_set_idx": block_set_idx,
+        "mutability": mutability,
+        "block_indices": block_indices,
+    }))?)
+}
 
 #[derive(Clone, Debug)]
 struct Args {
@@ -81,24 +98,40 @@ impl Args {
                         .parse()?
                 }
                 "--device-id" => {
-                    args.device_id = it.next().context("missing value for --device-id")?.parse()?
+                    args.device_id = it
+                        .next()
+                        .context("missing value for --device-id")?
+                        .parse()?
                 }
                 "--host-blocks" => {
-                    args.host_blocks =
-                        it.next().context("missing value for --host-blocks")?.parse()?
+                    args.host_blocks = it
+                        .next()
+                        .context("missing value for --host-blocks")?
+                        .parse()?
                 }
                 "--page-size" => {
-                    args.page_size = it.next().context("missing value for --page-size")?.parse()?
+                    args.page_size = it
+                        .next()
+                        .context("missing value for --page-size")?
+                        .parse()?
                 }
                 "--inner-dim" => {
-                    args.inner_dim = it.next().context("missing value for --inner-dim")?.parse()?
+                    args.inner_dim = it
+                        .next()
+                        .context("missing value for --inner-dim")?
+                        .parse()?
                 }
                 "--num-layers" => {
-                    args.num_layers =
-                        it.next().context("missing value for --num-layers")?.parse()?
+                    args.num_layers = it
+                        .next()
+                        .context("missing value for --num-layers")?
+                        .parse()?
                 }
                 "--outer-dim" => {
-                    args.outer_dim = it.next().context("missing value for --outer-dim")?.parse()?
+                    args.outer_dim = it
+                        .next()
+                        .context("missing value for --outer-dim")?
+                        .parse()?
                 }
                 "--dtype-width-bytes" => {
                     args.dtype_width_bytes = it
@@ -210,11 +243,7 @@ impl G3pbPeerRuntime {
         })
     }
 
-    async fn offer_blocks(
-        &self,
-        agent: &G3pbStorageAgent,
-        blocks: &[G3pbPutBlock],
-    ) -> Vec<u64> {
+    async fn offer_blocks(&self, agent: &G3pbStorageAgent, blocks: &[G3pbPutBlock]) -> Vec<u64> {
         let offerable: Vec<_> = {
             let guard = self.state.read().expect("g3pb runtime state poisoned");
             blocks
@@ -237,12 +266,14 @@ impl G3pbPeerRuntime {
             .host()
             .context("backend runtime has no host staging pool")?;
         let mutable_blocks = host_pool.allocate_blocks(blocks.len()).await?;
-
         let block_set_idx = mutable_blocks
             .first()
             .map(|block| block.block_data().block_set_id())
             .context("no host blocks allocated for staging")?;
-        let block_ids = mutable_blocks.iter().map(|block| block.block_id()).collect::<Vec<_>>();
+        let block_ids = mutable_blocks
+            .iter()
+            .map(|block| block.block_id())
+            .collect::<Vec<_>>();
 
         let mut state = self.state.write().expect("g3pb runtime state poisoned");
         for meta in &blocks {
@@ -271,7 +302,7 @@ impl G3pbPeerRuntime {
         Ok(G3pbStageBlocksResponse {
             worker_id: self.worker_id,
             blockset: self.blockset.clone(),
-            descriptors: BlockDescriptorList::new(
+            descriptors: make_descriptor_list(
                 self.worker_id,
                 block_set_idx,
                 BlockMutability::Mutable,
@@ -340,7 +371,10 @@ impl G3pbPeerRuntime {
         self.block_manager.import_remote_blockset(blockset)
     }
 
-    fn fetch_descriptors(&self, sequence_hashes: &[u64]) -> Result<G3pbFetchBlocksResponse, G3pbError> {
+    fn fetch_descriptors(
+        &self,
+        sequence_hashes: &[u64],
+    ) -> Result<G3pbFetchBlocksResponse, G3pbError> {
         let state = self.state.read().expect("g3pb runtime state poisoned");
         let mut block_ids = Vec::with_capacity(sequence_hashes.len());
         let mut block_set_idx = None;
@@ -364,7 +398,7 @@ impl G3pbPeerRuntime {
         Ok(G3pbFetchBlocksResponse {
             worker_id: self.worker_id,
             blockset: self.blockset.clone(),
-            descriptors: BlockDescriptorList::new(
+            descriptors: make_descriptor_list(
                 self.worker_id,
                 block_set_idx,
                 BlockMutability::Immutable,
@@ -416,7 +450,10 @@ async fn offer_blocks(
     State(state): State<AppState>,
     Json(request): Json<G3pbOfferRequest>,
 ) -> Json<G3pbOfferResponse> {
-    let accepted = state.runtime.offer_blocks(&state.agent, &request.blocks).await;
+    let accepted = state
+        .runtime
+        .offer_blocks(&state.agent, &request.blocks)
+        .await;
 
     Json(G3pbOfferResponse { accepted })
 }
