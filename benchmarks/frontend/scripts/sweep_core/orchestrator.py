@@ -110,7 +110,7 @@ def run(plan: SweepPlan, executor: "SweepExecutor") -> List[RunResult]:
                 generate_report(run_dir)
 
             # Write incremental CSV + summary
-            write_csv(results, csv_path)
+            write_csv(results, csv_path, config)
             write_summary(results, summary_path)
 
             # Cooldown between runs
@@ -121,7 +121,7 @@ def run(plan: SweepPlan, executor: "SweepExecutor") -> List[RunResult]:
         print("\n\nInterrupted! Partial results saved.")
     finally:
         # Final write
-        write_csv(results, csv_path)
+        write_csv(results, csv_path, config)
         write_summary(results, summary_path)
         # Cleanup executor
         executor.cleanup()

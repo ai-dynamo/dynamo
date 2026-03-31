@@ -20,6 +20,7 @@ from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 from sweep_k8s import aiperf as k8s_aiperf
 from sweep_k8s import dgd as k8s_dgd
 from sweep_k8s import template as k8s_template
+from sweep_k8s.kubectl import apply_secret_literal
 from sweep_k8s.metrics import capture_metrics
 
 
@@ -36,6 +37,15 @@ class K8sDgdExecutor:
         self._config = config
         k8s = config.k8s
 
+        if k8s.deploy and not k8s.deploy_template:
+            raise ValueError(
+                "--deploy requires --deploy-template; otherwise pre-deploy the DGD and omit --deploy"
+            )
+        if k8s.deploy_template and not k8s.deploy:
+            raise ValueError(
+                "--deploy-template mutates cluster resources; pass --deploy to allow template application"
+            )
+
         if k8s.deploy_template:
             self._template_path = Path(k8s.deploy_template)
             if not self._template_path.exists():
@@ -43,6 +53,17 @@ class K8sDgdExecutor:
                     f"Deploy template not found: {self._template_path}"
                 )
             print(f"  Using deploy template: {self._template_path}")
+
+        if k8s.hf_token:
+            print(
+                f"  Updating HuggingFace token secret: {k8s_template.DEFAULT_HF_TOKEN_SECRET_NAME}"
+            )
+            apply_secret_literal(
+                k8s_template.DEFAULT_HF_TOKEN_SECRET_NAME,
+                k8s.namespace,
+                "HF_TOKEN",
+                k8s.hf_token,
+            )
 
         # Compute the in-cluster endpoint for aiperf Jobs.
         # The user-provided --endpoint may be port-forwarded (e.g. localhost:18000),
@@ -195,6 +216,8 @@ class K8sDgdExecutor:
             num_requests=aiperf.num_requests,
             request_rate=aiperf.request_rate,
             export_level=k8s.export_level,
+            image_pull_secret=k8s.image_pull_secret,
+            hf_token_secret_name=k8s_template.DEFAULT_HF_TOKEN_SECRET_NAME,
         )
 
         if success:

@@ -179,6 +179,19 @@ def apply_yaml(yaml_content: str, namespace: str) -> None:
     )
 
 
+def apply_secret_literal(name: str, namespace: str, key: str, value: str) -> None:
+    """Create or update an opaque Secret from a literal value."""
+    secret_yaml = f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: {name}
+type: Opaque
+stringData:
+  {key}: {json.dumps(value)}
+"""
+    apply_yaml(secret_yaml, namespace)
+
+
 def wait_for_pod_deletion(
     name: str,
     namespace: str,

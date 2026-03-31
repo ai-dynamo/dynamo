@@ -21,6 +21,8 @@ from typing import Optional
 
 from sweep_k8s.kubectl import run_kubectl
 
+DEFAULT_HF_TOKEN_SECRET_NAME = "hf-token-secret"
+
 
 def _build_aiperf_script(
     model_name: str,
@@ -118,12 +120,20 @@ def _build_job_yaml(
     job_name: str,
     namespace: str,
     script: str,
+    image_pull_secret: str = "",
+    hf_token_secret_name: str = DEFAULT_HF_TOKEN_SECRET_NAME,
 ) -> str:
     """Build the aiperf k8s Job YAML.
 
     Uses python:3.12-slim with pip-installed aiperf (same pattern as
     recipes/qwen3-235b-a22b-fp8/trtllm/agg/perf.yaml).
     """
+    image_pull_secret_block = ""
+    if image_pull_secret:
+        image_pull_secret_block = f"""
+      imagePullSecrets:
+        - name: {image_pull_secret}"""
+
     return f"""apiVersion: batch/v1
 kind: Job
 metadata:
@@ -143,8 +153,7 @@ spec:
         job-name: {job_name}
     spec:
       restartPolicy: Never
-      imagePullSecrets:
-        - name: nvcrimagepullsecret
+{image_pull_secret_block}
       securityContext:
         sysctls:
           - name: net.ipv4.ip_local_port_range
@@ -166,7 +175,7 @@ spec:
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: hf-token-secret
+                  name: {hf_token_secret_name}
                   key: HF_TOKEN
             - name: PYTHONUNBUFFERED
               value: "1"
@@ -376,6 +385,8 @@ def run_aiperf(
     warmup_duration: Optional[int] = None,
     warmup_count: Optional[int] = None,
     export_level: str = "summary",
+    image_pull_secret: str = "",
+    hf_token_secret_name: str = DEFAULT_HF_TOKEN_SECRET_NAME,
     timeout: int = 600,
 ) -> bool:
     """Run aiperf as a k8s Job inside the namespace.
@@ -400,6 +411,8 @@ def run_aiperf(
         warmup_duration: Optional warmup duration in seconds.
         warmup_count: Optional warmup request count.
         export_level: aiperf export level (summary, records, raw).
+        image_pull_secret: Optional image pull secret for the Job pod.
+        hf_token_secret_name: Secret name that stores HF_TOKEN.
         timeout: Job timeout in seconds.
 
     Returns:
@@ -430,6 +443,8 @@ def run_aiperf(
         job_name=job_name,
         namespace=namespace,
         script=script,
+        image_pull_secret=image_pull_secret,
+        hf_token_secret_name=hf_token_secret_name,
     )
 
     # Create the Job

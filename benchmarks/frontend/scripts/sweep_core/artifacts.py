@@ -18,7 +18,7 @@ from typing import List
 from sweep_core.models import RunResult, SweepConfig
 
 
-def write_csv(results: List[RunResult], csv_path: Path) -> None:
+def write_csv(results: List[RunResult], csv_path: Path, config: SweepConfig) -> None:
     """Write incremental CSV results file (called after each run)."""
     fieldnames = [
         "run_id",
@@ -52,7 +52,7 @@ def write_csv(results: List[RunResult], csv_path: Path) -> None:
                 "isl": spec.aiperf.isl,
                 "osl": spec.aiperf.osl,
                 "workers": spec.deploy.workers,
-                "speedup_ratio": 0,  # filled by config
+                "speedup_ratio": config.speedup_ratio,
                 "status": r.status,
                 "req_per_sec": f"{r.req_per_sec:.2f}"
                 if r.req_per_sec is not None
@@ -119,11 +119,14 @@ def write_sweep_config(
         "mode": config.mode,
         "model": config.model,
         "model_name": config.model_name,
-        "backends": ",".join(config.tokenizers),
+        "backend": config.backend,
+        "backends": config.backend,
+        "tokenizers": ",".join(config.tokenizers),
         "isl_list": ",".join(str(i) for i in config.isls),
         "concurrency_list": ",".join(str(c) for c in config.concurrencies),
         "benchmark_duration": config.benchmark_duration or "N/A",
         "osl": config.osl,
+        "speedup_ratio": config.speedup_ratio,
         "output_dir": config.output_dir,
         "total_runs": total_runs,
         "isolation_policy": config.isolation_policy,

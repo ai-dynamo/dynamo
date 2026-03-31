@@ -29,6 +29,7 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
         mainContainer:
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
@@ -45,13 +46,14 @@ spec:
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: hf-token-secret
+                  name: ${HF_TOKEN_SECRET_NAME}
                   key: HF_TOKEN
 
     VllmWorker:
       componentType: worker
       replicas: ${WORKER_REPLICAS}
       extraPodSpec:
+${WORKER_IMAGE_PULL_SECRETS_BLOCK}
         mainContainer:
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
@@ -64,7 +66,7 @@ spec:
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: hf-token-secret
+                  name: ${HF_TOKEN_SECRET_NAME}
                   key: HF_TOKEN
           resources:
             limits:

@@ -26,4 +26,3 @@ def generate_report(run_dir: Path) -> None:
         print(f"    Report generation failed: {e}")
     except Exception as e:
         print(f"    Report generation failed: {e}")
-        raise

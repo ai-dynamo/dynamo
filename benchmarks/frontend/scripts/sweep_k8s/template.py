@@ -25,6 +25,23 @@ TOKENIZER_TEMPLATE_MAP = {
     "fastokens": "fast",
 }
 
+DEFAULT_HF_TOKEN_SECRET_NAME = "hf-token-secret"
+
+
+def _indent_block(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(f"{prefix}{line}" if line else "" for line in text.splitlines())
+
+
+def _build_image_pull_secrets_block(image_pull_secret: str) -> str:
+    if not image_pull_secret:
+        return ""
+    return _indent_block(
+        f"""imagePullSecrets:
+  - name: {image_pull_secret}""",
+        8,
+    )
+
 
 def build_substitution_dict(
     deploy: DeployDimension,
@@ -36,6 +53,7 @@ def build_substitution_dict(
     dictionary suitable for string.Template substitution.
     """
     k8s = config.k8s
+    hf_token_secret_name = DEFAULT_HF_TOKEN_SECRET_NAME
     variables: Dict[str, str] = {
         # Deploy dimensions
         "DYN_TOKENIZER_BACKEND": TOKENIZER_TEMPLATE_MAP.get(
@@ -57,6 +75,13 @@ def build_substitution_dict(
         "REQUEST_PLANE": k8s.request_plane,
         "EVENT_PLANE": k8s.event_plane,
         "ROUTER_MODE": k8s.router_mode,
+        "HF_TOKEN_SECRET_NAME": hf_token_secret_name,
+        "FRONTEND_IMAGE_PULL_SECRETS_BLOCK": _build_image_pull_secrets_block(
+            k8s.image_pull_secret
+        ),
+        "WORKER_IMAGE_PULL_SECRETS_BLOCK": _build_image_pull_secrets_block(
+            k8s.image_pull_secret
+        ),
     }
 
     # Add any env_overrides from the deploy dimension
