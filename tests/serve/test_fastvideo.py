@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import dataclasses
 import importlib.util
 import os
@@ -69,7 +70,7 @@ fastvideo_configs = {
 @pytest.fixture(params=params_with_model_mark(fastvideo_configs))
 def fastvideo_config_test(request):
     """Fixture that provides FastVideo serve test configurations."""
-    return fastvideo_configs[request.param]
+    return copy.deepcopy(fastvideo_configs[request.param])
 
 
 @pytest.mark.fastvideo
@@ -77,22 +78,25 @@ def fastvideo_config_test(request):
 def test_fastvideo_deployment(
     fastvideo_config_test,
     request,
+    tmp_path,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
 ):
     """Smoke test the built-in FastVideo backend behind the shared frontend."""
-    config = dataclasses.replace(
-        fastvideo_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+    runtime_dir = (
+        tmp_path / f"dynamo-fastvideo-serve-{dynamo_dynamic_ports.frontend_port}"
     )
-    runtime_dir = f"/tmp/dynamo-fastvideo-serve-{dynamo_dynamic_ports.frontend_port}"
-    config.env.update(
-        {
-            "MODEL": config.model,
+    config = dataclasses.replace(
+        fastvideo_config_test,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        env={
+            **fastvideo_config_test.env,
+            "MODEL": fastvideo_config_test.model,
             "PYTHON_BIN": sys.executable,
             "HTTP_PORT": str(dynamo_dynamic_ports.frontend_port),
-            "DISCOVERY_DIR": f"{runtime_dir}/discovery",
-            "LOG_DIR": f"{runtime_dir}/logs",
-        }
+            "DISCOVERY_DIR": str(runtime_dir / "discovery"),
+            "LOG_DIR": str(runtime_dir / "logs"),
+        },
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
