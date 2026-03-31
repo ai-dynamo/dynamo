@@ -42,6 +42,7 @@ testing-kvbm = []
 testing-nixl-gds = []
 level-zero = ["dynamo-memory/level-zero", "dep:syclrc", "kvbm-kernels/level-zero"]
 sycl-kernel = ["level-zero", "kvbm-kernels/sycl-kernel"]
+ocl-kernel = ["level-zero", "kvbm-kernels/ocl-kernel"]
 bench-xpu = ["level-zero", "dep:clap"]
 # Skip CUDA compilation/linking — forward to kvbm-kernels/no-cuda
 no-cuda = ["kvbm-kernels/no-cuda"]

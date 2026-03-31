@@ -3,26 +3,31 @@
 
 //! KV cache transfer benchmark for Intel XPU (Level Zero).
 //!
-//! Compares the SPIR-V vectorized_copy kernel against individual
+//! Compares vectorized_copy kernel against individual
 //! `append_memcpy` for layerwise vs fully-contiguous block transfers
 //! using Llama 3.1 70B KV cache dimensions.
 //!
 //! # Backends
 //!
-//! - **vectorized** — SPIR-V kernel on the CCS (compute) engine.
+//! - **vectorized** — SPIR-V kernel on the CCS (compute) engine
+//!   (requires `ocl-kernel` feature).
 //!   Uploads (src, dst) pointer arrays to device, then one kernel
 //!   dispatch copies all chunks in parallel.
+//! - **vec_indirect** — Same SPIR-V kernel, but all 4 arguments are
+//!   packed into a 32-byte device buffer and uploaded via BCS memcpy
+//!   (requires `ocl-kernel` feature).
+//!   Eliminates per-dispatch `zeKernelSetArgumentValue` calls.
 //! - **memcpy** — Individual `zeCommandListAppendMemoryCopy` calls
 //!   on the BCS (copy / blitter) engine, one per chunk.
+//! - **vectorized_sycl** — SYCL kernel (always available).
+//!   Same algorithm as `vectorized`, but dispatched via the SYCL runtime
+//!   (`sycl::queue`) instead of raw Level Zero command lists.
 //!
 //! # Transfer directions
 //!
-//! - **D2D** — Device-to-device on the same GPU. Both backends work.
-//! - **H2D / D2H** — Host-to-device / device-to-host via PCIe.
-//!   Only `memcpy` (BCS) works reliably. The `vectorized` (CCS) kernel
-//!   dereferences host-pinned pointers from the GPU, which exceeds the
-//!   xe driver watchdog timeout (~5 s) on discrete GPUs and triggers
-//!   `ZE_RESULT_ERROR_DEVICE_LOST` with a CCS engine reset.
+//! - **D2D** — Device-to-device on the same GPU.
+//! - **H2D** — Host-to-device (upload) via PCIe.
+//! - **D2H** — Device-to-host (download) via PCIe.
 //!
 //! # Transfer patterns
 //!
@@ -31,7 +36,7 @@
 //!   `full_block_size` each. One copy pair per block.
 //! - **lw_to_fc** — Layerwise (scattered) → fully-contiguous.
 //!   Source: `NUM_LAYERS` independent allocations (one per layer),
-//!   each holding all blocks’ K+V for that layer.
+//!   each holding all blocks' K+V for that layer.
 //!   Destination: one contiguous allocation holding all blocks packed
 //!   sequentially.  This models the real TLB / memory-controller
 //!   pressure of a scatter-gather KV cache transfer.
@@ -44,11 +49,39 @@
 //!   The L0 driver pins on-the-fly or stages through an internal
 //!   bounce buffer, so H2D/D2H bandwidth is typically lower.
 //!
+//! # Compatibility matrix
+//!
+//! | direction | backend          | fc_to_fc | lw_to_fc | host mem       |
+//! |-----------|------------------|----------|----------|----------------|
+//! | **D2D**   | vectorized‡      | OK       | OK       | n/a            |
+//! | **D2D**   | vec_indirect‡    | OK       | OK       | n/a            |
+//! | **D2D**   | memcpy           | OK       | OK       | n/a            |
+//! | **D2D**   | vectorized_sycl  | OK       | OK       | n/a            |
+//! | **H2D**   | vectorized‡      | WARN†    | WARN†    | pinned         |
+//! | **H2D**   | vec_indirect‡    | WARN†    | WARN†    | pinned         |
+//! | **H2D**   | memcpy           | OK       | OK       | pinned, system |
+//! | **H2D**   | vectorized_sycl  | OK       | OK       | pinned         |
+//! | **D2H**   | vectorized‡      | OK       | OK       | pinned         |
+//! | **D2H**   | vec_indirect‡    | OK       | OK       | pinned         |
+//! | **D2H**   | memcpy           | OK       | OK       | pinned, system |
+//! | **D2H**   | vectorized_sycl  | OK       | OK       | pinned         |
+//!
+//! \* `vectorized_sycl` requires `libvectorized_copy_sycl.so` at runtime.
+//!
+//! ‡ Requires `--features ocl-kernel`.
+//!
+//! † H2D with CCS kernel backends (vectorized, vec_indirect) triggers
+//!   `ZE_RESULT_ERROR_DEVICE_LOST` at exactly `--tokens-per-block 32`
+//!   (64 KB chunk = BMG GPU page size). All other tpb values (16, 64,
+//!   128) work. This appears to be a driver-level page-boundary bug.
+//!   The SYCL backend avoids this — likely due to different command
+//!   queue mode / preemption settings in the DPC++ runtime.
+//!
 //! # Limitations
 //!
-//! - The vectorized backend panics with DEVICE_LOST on H2D/D2H for
-//!   discrete GPUs (B580, BMG). Use `--backend memcpy` or
-//!   `--direction d2d` on these devices.
+//! - CCS kernel backends may DEVICE_LOST on H2D at tpb=32 on discrete
+//!   GPUs (see compatibility matrix above). Use `--backend memcpy` or
+//!   `--backend sycl` for H2D, or avoid `--tokens-per-block 32`.
 //! - Only one KV cache shape is modeled (Llama 3.1 70B bf16).
 //!   Dimensions are compile-time constants.
 //!
@@ -57,71 +90,76 @@
 //! # Usage
 //!
 //! ```sh
-//! # Run ALL safe configurations (skips vectorized H2D/D2H which causes DEVICE_LOST):
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction d2d --backend vectorized,memcpy \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null && \
+//! # ── Safe full sweep (avoids tpb=32 H2D vectorized) ────────────────
+//!
+//! # D2D: all L0 backends + memcpy (needs ocl-kernel for vectorized)
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vec_indirect,memcpy \
+//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!
+//! # H2D/D2H: memcpy (BCS) — always safe
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction h2d,d2h --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
 //!
-//! # Run ALL configurations including vectorized H2D/D2H (may DEVICE_LOST):
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction h2d,d2h,d2d --backend vectorized,memcpy \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//! # D2H: vectorized (CCS) — works on B580
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2h --backend vectorized,vec_indirect \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
 //!
-//! # Run all D2D configurations (both backends, both patterns):
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction d2d 2>/dev/null
+//! # H2D: vectorized (CCS) — skip tpb=32 to avoid DEVICE_LOST
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --tokens-per-block 16,64,128 --direction h2d \
+//!   --backend vectorized,vec_indirect \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # ── Single-direction examples ─────────────────────────────
 //!
 //! # D2D vectorized, LW→FC pattern only:
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
 //!   --direction d2d --backend vectorized --pattern lw_to_fc
 //!
-//! # H2D/D2H (memcpy only — vectorized causes DEVICE_LOST on discrete GPUs):
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction h2d,d2h --backend memcpy
-//!
-//! # Compare pinned vs system host memory for H2D:
+//! # Compare pinned vs system host memory for H2D (BCS):
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction h2d --backend memcpy --host-mem pinned,system
+//!
+//! # Direct-args vs indirect-args (L0 kernel only):
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vec_indirect \
+//!   --pattern lw_to_fc --num-blocks 32,64,128
 //!
 //! # Quick smoke test on device 2:
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --device 2 --num-blocks 1,4 --tokens-per-block 16 \
 //!   --warmup 3 --iters 10
 //!
-//! # --- SYCL kernel A/B comparison (requires sycl-kernel feature) ---
+//! # ── SYCL kernel (always available) ───────────────────────────
 //!
-//! # L0 SPIR-V vs SYCL kernel, D2D:
-//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
-//!   --direction d2d --backend vectorized,vectorized_sycl --pattern lw_to_fc \
-//!   --num-blocks 32,64,128 2>/dev/null
+//! # L0 SPIR-V vs SYCL kernel, D2D (needs ocl-kernel for L0 backends):
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vec_indirect,sycl \
+//!   --pattern lw_to_fc --num-blocks 32,64,128 2>/dev/null
 //!
-//! # Just the SYCL kernel:
-//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
-//!   --direction d2d --backend sycl
-//!
-//! # Direct-args vs indirect-args (L0 kernel only)
+//! # SYCL H2D (works at all tpb values, unlike L0 vectorized):
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//! --direction d2d --backend vectorized,vec_indirect \
-//! --pattern lw_to_fc --num-blocks 32,64,128
+//!   --direction h2d --backend sycl \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned
 //!
-//! # All three backends
-//! cargo run --example kvbench_xpu --features kvbench-xpu,sycl-kernel --release -- \
-//! --direction d2d --backend vectorized,vec_indirect,sycl \
-//! --pattern lw_to_fc --num-blocks 32,64,128
+//! # All backends head-to-head, D2D:
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vec_indirect,sycl,memcpy \
+//!   --pattern lw_to_fc --num-blocks 32,64,128 2>/dev/null
 //! ```
 
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use clap::Parser;
+#[cfg(feature = "ocl-kernel")]
 use syclrc::level_zero::ze::sys;
 use syclrc::{ZeDevice, ZeHostSlice, ZeImmediateCmdList, ZeKernel, ZeModule, ZeSlice};
 
 use kvbm_kernels::ze_vectorized_copy as vc;
-#[cfg(feature = "sycl-kernel")]
 use kvbm_kernels::sycl_vectorized_copy::SyclVectorizedCopy;
 
 // ---------------------------------------------------------------------------
@@ -257,40 +295,43 @@ impl Pattern {
 
 #[derive(Clone, Copy, Debug)]
 enum Backend {
+    #[cfg(feature = "ocl-kernel")]
     Vectorized,
+    #[cfg(feature = "ocl-kernel")]
     VectorizedIndirect,
     Memcpy,
-    #[cfg(feature = "sycl-kernel")]
     VectorizedSycl,
 }
 
 impl Backend {
     fn label(&self) -> &'static str {
         match self {
+            #[cfg(feature = "ocl-kernel")]
             Backend::Vectorized => "vectorized",
+            #[cfg(feature = "ocl-kernel")]
             Backend::VectorizedIndirect => "vec_indirect",
             Backend::Memcpy => "memcpy",
-            #[cfg(feature = "sycl-kernel")]
             Backend::VectorizedSycl => "vectorized_sycl",
         }
     }
 
     fn from_str(s: &str) -> Option<Self> {
         match s {
+            #[cfg(feature = "ocl-kernel")]
             "vectorized" | "vec" => Some(Backend::Vectorized),
+            #[cfg(feature = "ocl-kernel")]
             "vectorized_indirect" | "vec_indirect" | "indirect" => Some(Backend::VectorizedIndirect),
             "memcpy" | "append_memcpy" => Some(Backend::Memcpy),
-            #[cfg(feature = "sycl-kernel")]
             "vectorized_sycl" | "vec_sycl" | "sycl" => Some(Backend::VectorizedSycl),
             _ => None,
         }
     }
 
     fn all_labels() -> &'static str {
-        if cfg!(feature = "sycl-kernel") {
+        if cfg!(feature = "ocl-kernel") {
             "vectorized (or vec), vec_indirect (or indirect), memcpy (or append_memcpy), vectorized_sycl (or sycl)"
         } else {
-            "vectorized (or vec), vec_indirect (or indirect), memcpy (or append_memcpy)"
+            "memcpy (or append_memcpy), vectorized_sycl (or sycl)"
         }
     }
 }
@@ -470,6 +511,7 @@ fn build_lw_pairs(
 // Execute one iteration (shared by warmup and timed loops)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "ocl-kernel")]
 unsafe fn execute_vectorized(
     cmd_copy: &ZeImmediateCmdList,
     cmd_compute: &ZeImmediateCmdList,
@@ -521,6 +563,7 @@ unsafe fn execute_vectorized(
     cmd_compute.host_synchronize(u64::MAX).expect("sync compute");
 }
 
+#[cfg(feature = "ocl-kernel")]
 /// Indirect-args variant: uploads a 32-byte args buffer via BCS instead of
 /// calling set_arg per dispatch. Mirrors the production ze.rs path.
 unsafe fn execute_vectorized_indirect(
@@ -613,7 +656,6 @@ unsafe fn execute_memcpy(
     cmd_copy.host_synchronize(u64::MAX).expect("sync");
 }
 
-#[cfg(feature = "sycl-kernel")]
 fn get_sycl_vc(dev: &Arc<ZeDevice>) -> &'static SyclVectorizedCopy {
     use std::sync::OnceLock;
     static SYCL_VC: OnceLock<SyclVectorizedCopy> = OnceLock::new();
@@ -626,7 +668,6 @@ fn get_sycl_vc(dev: &Arc<ZeDevice>) -> &'static SyclVectorizedCopy {
     })
 }
 
-#[cfg(feature = "sycl-kernel")]
 unsafe fn execute_vectorized_sycl(
     cmd_copy: &ZeImmediateCmdList,
     sycl_vc: &SyclVectorizedCopy,
@@ -676,6 +717,7 @@ unsafe fn execute_vectorized_sycl(
 // Run one benchmark configuration
 // ---------------------------------------------------------------------------
 
+#[allow(unused_variables)]
 fn run_benchmark(
     dev: &Arc<ZeDevice>,
     cmd_copy: &ZeImmediateCmdList,
@@ -723,8 +765,8 @@ fn run_benchmark(
     // Scratch for vectorized backend (device-side pointer arrays).
     let ptr_array_bytes = num_copies * std::mem::size_of::<u64>();
     let needs_ptr_arrays = match backend {
+        #[cfg(feature = "ocl-kernel")]
         Backend::Vectorized | Backend::VectorizedIndirect => true,
-        #[cfg(feature = "sycl-kernel")]
         Backend::VectorizedSycl => true,
         _ => false,
     };
@@ -740,6 +782,7 @@ fn run_benchmark(
     };
 
     // Set kernel arguments once (they don't change across iterations).
+    #[cfg(feature = "ocl-kernel")]
     if matches!(backend, Backend::Vectorized) {
         let k = kernel.expect("vectorized backend requires kernel");
         let src_ptr = src_addrs_dev.as_ref().unwrap().as_ptr() as u64;
@@ -755,6 +798,7 @@ fn run_benchmark(
     }
 
     // Indirect-args: allocate 32-byte args device buffer, set arg 0 once.
+    #[cfg(feature = "ocl-kernel")]
     let args_dev: Option<ZeSlice<u8>> = if matches!(backend, Backend::VectorizedIndirect) {
         let buf = unsafe { dev.alloc_device::<u8>(vc::INDIRECT_ARGS_BYTES).expect("alloc args_dev") };
         let ptr = buf.as_ptr() as u64;
@@ -768,6 +812,7 @@ fn run_benchmark(
     for _ in 0..warmup_iters {
         unsafe {
             match backend {
+                #[cfg(feature = "ocl-kernel")]
                 Backend::Vectorized => execute_vectorized(
                     cmd_copy,
                     cmd_compute.expect("vectorized needs CCS"),
@@ -779,6 +824,7 @@ fn run_benchmark(
                     ptr_array_bytes,
                     num_copies,
                 ),
+                #[cfg(feature = "ocl-kernel")]
                 Backend::VectorizedIndirect => execute_vectorized_indirect(
                     cmd_copy,
                     cmd_compute.expect("indirect needs CCS"),
@@ -795,7 +841,6 @@ fn run_benchmark(
                 Backend::Memcpy => {
                     execute_memcpy(cmd_copy, &src_addrs, &dst_addrs, copy_size, num_copies)
                 }
-                #[cfg(feature = "sycl-kernel")]
                 Backend::VectorizedSycl => execute_vectorized_sycl(
                     cmd_copy,
                     get_sycl_vc(dev),
@@ -817,6 +862,7 @@ fn run_benchmark(
         let t0 = std::time::Instant::now();
         unsafe {
             match backend {
+                #[cfg(feature = "ocl-kernel")]
                 Backend::Vectorized => execute_vectorized(
                     cmd_copy,
                     cmd_compute.expect("vectorized needs CCS"),
@@ -828,6 +874,7 @@ fn run_benchmark(
                     ptr_array_bytes,
                     num_copies,
                 ),
+                #[cfg(feature = "ocl-kernel")]
                 Backend::VectorizedIndirect => execute_vectorized_indirect(
                     cmd_copy,
                     cmd_compute.expect("indirect needs CCS"),
@@ -844,7 +891,6 @@ fn run_benchmark(
                 Backend::Memcpy => {
                     execute_memcpy(cmd_copy, &src_addrs, &dst_addrs, copy_size, num_copies)
                 }
-                #[cfg(feature = "sycl-kernel")]
                 Backend::VectorizedSycl => execute_vectorized_sycl(
                     cmd_copy,
                     get_sycl_vc(dev),
@@ -969,17 +1015,18 @@ fn main() {
         ZeImmediateCmdList::new_copy(dev.clone()).expect("Failed to create copy cmd list");
 
     // Compute (CCS) resources — only when a kernel-based backend is requested.
+    #[cfg(feature = "ocl-kernel")]
     let needs_compute = backends.iter().any(|b| matches!(b,
         Backend::Vectorized | Backend::VectorizedIndirect));
-    #[cfg(feature = "sycl-kernel")]
-    let needs_compute = needs_compute || backends.iter().any(|b| matches!(b, Backend::VectorizedSycl));
+    #[cfg(not(feature = "ocl-kernel"))]
+    let needs_compute = backends.iter().any(|b| matches!(b, Backend::VectorizedSycl));
 
     let cmd_compute = if needs_compute {
         Some(ZeImmediateCmdList::new_compute(dev.clone()).expect("Failed to create compute cmd list"))
     } else {
         None
     };
-    let (module, kernel, kernel_indirect) = if needs_compute {
+    let (module, kernel, kernel_indirect) = if cfg!(feature = "ocl-kernel") && needs_compute {
         let m = Arc::new(
             ZeModule::from_spirv(&dev, vc::SPIRV, None).expect("Failed to compile SPIR-V module"),
         );

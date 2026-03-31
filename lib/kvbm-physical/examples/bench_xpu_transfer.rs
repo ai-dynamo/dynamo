@@ -30,13 +30,14 @@
 //!   LD_LIBRARY_PATH=target/debug/build/kvbm-kernels-<hash>/out:$LD_LIBRARY_PATH \
 //!     ./target/debug/examples/bench_xpu_transfer --device 0
 //!
-//!   # With SYCL kernel (requires libvectorized_copy_sycl.so):
-//!   #   1. Build the SYCL shared library: make -C lib/kvbm-kernels/sycl
-//!   #   2. Build Rust with the sycl-kernel feature:
+//!   # SYCL kernel is the default D2D backend. Build the .so first:
+//!   #   make -C lib/kvbm-kernels/sycl
+//!   # Then point LD_LIBRARY_PATH to include it.
+//!
+//!   # With L0 SPIR-V kernel override (requires ocl-kernel feature):
 //!   cargo build --example bench_xpu_transfer -p kvbm-physical \
-//!     --features kvbm-physical/bench-xpu,kvbm-physical/no-cuda,kvbm-physical/sycl-kernel
-//!   #   3. Run with KVBM_USE_SYCL_KERNEL=1:
-//!   KVBM_USE_SYCL_KERNEL=1 \
+//!     --features kvbm-physical/bench-xpu,kvbm-physical/no-cuda,kvbm-physical/ocl-kernel
+//!   KVBM_USE_L0_KERNEL=1 \
 //!     LD_LIBRARY_PATH=lib/kvbm-kernels/sycl:target/debug/build/kvbm-kernels-<hash>/out:$LD_LIBRARY_PATH \
 //!     ./target/debug/examples/bench_xpu_transfer --device 0
 //!

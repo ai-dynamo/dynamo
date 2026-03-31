@@ -41,11 +41,15 @@ kvbench-xpu = ["dep:clap", "dep:syclrc", "level-zero"]
 # Expose SPIR-V vectorized_copy kernel for Level Zero / Intel XPU.
 # The ze_vectorized_copy module is always compiled (it has no external deps),
 # but this feature is provided so consumers can express the intent.
-level-zero = []
+level-zero = ["dep:libloading"]
 
-# Enable SYCL kernel path (runtime-loads libvectorized_copy_sycl.so).
-# Requires libloading for dlopen at runtime.
-sycl-kernel = ["dep:libloading", "level-zero"]
+# SYCL kernel is now always available when level-zero is enabled.
+# This feature is kept as a no-op alias for backward compatibility.
+sycl-kernel = ["level-zero"]
+
+# Enable optional L0 SPIR-V (OCL) kernel backends (vectorized, vec_indirect).
+# These are provided as fallback/comparison alternatives to the default SYCL kernel.
+ocl-kernel = ["level-zero"]
 
 # Skip CUDA compilation and linking entirely (forces stub path).
 # Use this when building for XPU-only targets without libcudart.
