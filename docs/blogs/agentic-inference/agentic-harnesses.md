@@ -278,45 +278,92 @@ The simple text-generation capture is a useful example because it shows both pre
 
 comes back with the Responses-shaped structure intact: a reasoning item, a message item, the original `max_output_tokens`, and the usual top-level fields. At the same time, it shows the current edge of the implementation. `output_tokens_details.reasoning_tokens` is still `0` even though reasoning content is clearly present in the response. That is exactly the kind of detail a Codex-style client notices.
 
-## OpenClaw: Long-Lived Sessions and Background Loops
+## OpenClaw: Integration Testing and Parser Discovery
 
-Claude Code stress-tests the system prompt and single-session tool loop. OpenClaw stress-tests what happens when sessions stay alive across channels, turns accumulate over hours, and the client is a background loop rather than an interactive terminal.
+Claude Code stress-tests the system prompt and single-session tool loop. OpenClaw stress-tests what happens when sessions stay alive across channels, turns accumulate over hours, and the client is a background loop rather than an interactive terminal. But the most useful thing OpenClaw gave us was a structured integration test for the hardest parsing problem in the stack: combined reasoning and tool calls in a single response.
 
-OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. A user might ask a question over Telegram, follow up on WhatsApp an hour later, and the same conversation history grows across both. The system prompt is shorter than Claude Code's 54K-token payload, but it never changes. That makes prefix caching straightforward in theory and exposes a different failure mode in practice: whether the backend can sustain cache reuse over many turns without the prefix drifting.
+OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. That makes it a good vehicle for testing whether the full parsing pipeline holds up under realistic multi-turn conditions with tools and thinking interleaved.
 
-We ran three experiments against the same Dynamo + TRT-LLM deployment used for the Claude Code measurements: Nemotron-3-Super-120B-A12B-NVFP4 on B200, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
+We ran experiments against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
+
+### Parser Names Map to Output Format, Not Model Family
+
+The first thing we had to learn was that parser selection is about the token format the model emits, not the model's name or family.
+
+Nemotron-3-Super ships with a reasoning format that uses `<think>` tags and a tool call format that uses `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>` XML. The reasoning parser that handles `<think>` tags is called `nemotron_deci`. That name makes sense. But the tool call parser that handles the XML format is called `qwen3_coder`, because Qwen models popularized that output shape. An earlier attempt used `--dyn-tool-call-parser nemotron_deci` for both, which looks for `<TOOLCALL>` tags that Nemotron-3-Super never emits. The model was generating perfectly valid tool calls; the wrong parser was silently discarding them.
+
+The naming is confusing because it conflates two different things. Parser names describe the output format they consume, not the model family they were designed for. Once you know that, the correct configuration falls out: `--dyn-reasoning-parser nemotron_deci` (for `<think>` tags) and `--dyn-tool-call-parser qwen3_coder` (for the XML tool call format). Getting one wrong does not produce an error. It produces silence where structured output should be.
+
+### Combined Reasoning and Tool Calls
+
+The hardest parsing test is when both parsers have to operate on the same token stream. A model that reasons before calling a tool generates a response where `<think>` content flows first, followed by `<tool_call>` XML. Two different parsers, `nemotron_deci` for reasoning and `qwen3_coder` for tool calls, have to split that stream into the correct Anthropic Messages API content blocks without interfering with each other.
+
+We sent the same prompt five times through the Anthropic Messages API: a system prompt instructing the model to think step by step, two tool definitions (calculator and weather), and the user message "Think carefully about what 15 * 23 equals, then use the calculator to verify." The response structure from a representative round:
+
+```json
+{
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "I need to calculate 15 * 23. Let me think: 15 * 20 = 300, and 15 * 3 = 45, so 300 + 45 = 345. I'll use the calculator to verify.\n"
+    },
+    {
+      "type": "tool_use",
+      "id": "call-a3364797-3160-4e84-b567-5c495694d502",
+      "name": "calculator",
+      "input": { "expression": "15 * 23" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": { "input_tokens": 403, "output_tokens": 95 }
+}
+```
+
+Across all five non-streaming rounds: `5/5` produced both a `thinking` block and a `tool_use` block, `5/5` had them in the correct order (thinking before tool_use), `5/5` returned `stop_reason: "tool_use"`, and all five correctly parsed the tool name (`calculator`) and input (`{"expression": "15 * 23"}`). Mean latency was `1,187ms`, with the first request at `2,216ms` (cold) and subsequent requests settling to `771-1,097ms`.
+
+The thinking content itself shows the model doing real chain-of-thought: decomposing the multiplication into `15 * 20 = 300` and `15 * 3 = 45`, arriving at `345`, then deciding to call the calculator to verify. That reasoning appears as a structured `thinking` block, not as inline text that a client would have to parse.
+
+### Streaming Two Parsers at Once
+
+The streaming path makes the parser interaction more visible. A streaming request produces a sequence of SSE events, and the event type sequence shows exactly how the two parsers carve up the token stream:
+
+```text
+   1ms  message_start
+  82ms  content_block_start  type=thinking
+  82ms  content_block_delta  (thinking tokens stream here, ~7ms apart)
+   ...  (~70 thinking deltas over ~520ms)
+ 602ms  content_block_stop
+ 602ms  content_block_start  type=text
+ 602ms  content_block_delta
+ 800ms  content_block_stop
+ 800ms  content_block_start  type=tool_use
+ 800ms  content_block_delta
+ 800ms  content_block_stop
+ 814ms  message_delta        stop_reason=tool_use
+ 814ms  message_stop
+```
+
+The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
+
+Across five streaming rounds: `5/5` had both thinking and tool_use blocks in the correct order. Mean time to first thinking token was `83ms`. Mean time to tool_use block was `919ms`. Mean total stream time was `933ms`. The gap between the thinking block starting and the tool_use block arriving (mean `836ms`) is the model's generation time for the reasoning content plus the tool call tokens.
+
+One notable observation: the `tool_call_dispatch` event did not fire in any of the five streaming rounds (`0/5`). The `--enable-streaming-tool-dispatch` flag was set on the frontend, but dispatch events appear to require a different interaction between the tool call parser and the streaming path than what the current TRT-LLM backend produces. The tool_use block still arrives correctly as a `content_block_start` event, which is what clients like OpenClaw consume. Dispatch is an optimization for earlier notification; its absence does not affect correctness.
 
 ### Cache Stability Across Turns
 
-The first experiment measured TTFT across 8-turn multi-turn conversations under three conditions: a stable system prompt, a varying prompt (random preamble injected each turn), and a billing-header-style prefix that Dynamo strips before tokenization. Three rounds of each condition, all hitting the same endpoint.
+A separate experiment measured TTFT across 8-turn multi-turn conversations under three conditions: a stable system prompt, a varying prompt (random preamble injected each turn), and a billing-header-style prefix that Dynamo strips before tokenization. Three rounds of each condition.
 
 On TRT-LLM with B200, all three conditions converged to the same TTFT band. Stable-prefix turns averaged `118ms`, varying-prefix turns averaged `112ms`, and stripped-prefix turns averaged `116ms`. The differences are within noise. After the first turn or two of each session (which ran slightly higher at `120-136ms` as the cache warmed), subsequent turns settled into a `101-116ms` band regardless of condition.
 
 The story here is simpler than the Claude Code result but still useful. OpenClaw's shorter, static system prompt does not benefit as dramatically from preamble stripping because there is less prefix to invalidate. The billing header that costs `744ms` on a 52K-token Claude Code prompt has a proportionally smaller impact on a 2K-token OpenClaw prompt. But the invariant holds: stable prefixes stay in the fast path, and Dynamo's stripping keeps the stripped condition indistinguishable from stable.
 
-### Reasoning Fidelity in Multi-Turn Chat
-
-The second experiment tested whether Dynamo correctly preserves reasoning blocks (`thinking` content) across OpenClaw's multi-turn pattern. Three scenarios, each with two turns: the first turn triggers step-by-step reasoning, and the second turn asks a follow-up that references the prior reasoning.
-
-Reasoning fidelity was perfect: `30/30` turns produced reasoning blocks when expected, and block ordering was correct `30/30` times (thinking before content). On reasoning-heavy turns, the mean TTFT was `104ms`, with reasoning blocks averaging `1,100` characters of chain-of-thought.
-
-This result matters for OpenClaw specifically because its long-lived sessions accumulate many reasoning-containing turns. If even one prior turn's reasoning were dropped or reordered in the replay path, the prefix would diverge and cache reuse would break silently. The Nemotron-3-Super model with the `nemotron_deci` parser maintained correct `<think>` block separation across all tested multi-turn sequences.
-
-### Streaming Dispatch Across Multi-Turn Chat
-
-The third experiment measured tool-call dispatch timing in a 5-turn multi-turn conversation with simulated 50ms tool latency. Each turn asks a math question that triggers one calculator tool call. Two harness variants: buffered (wait for `message_stop`, then execute tools) and dispatch-aware (start tool execution on `content_block_stop` for `tool_use` blocks). Five runs of each variant.
-
-An earlier attempt at this experiment failed because the worker was configured with `--dyn-tool-call-parser nemotron_deci`, which looks for `<TOOLCALL>` tags. Nemotron-3-Super actually generates tool calls in the `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>` XML format, which is the `qwen3_coder` pattern. Switching to `--dyn-tool-call-parser qwen3_coder` produced correct `tool_use` blocks immediately, with `stop_reason: "tool_use"` and properly parsed `name` and `input` fields. The reasoning parser (`nemotron_deci` for `<think>` tags) was correct all along.
-
-With the parser fixed, all `50/50` turns produced exactly one structured tool call in the Anthropic `tool_use` format. The dispatch-aware harness received the `content_block_stop` event and started tool execution about `14ms` before `message_stop` on average. Over the full 5-turn conversation, the buffered harness averaged `1,126ms` per turn while the dispatch-aware harness averaged `1,120ms`. The difference is modest and within noise, consistent with the single-tool-call workload and the results from the earlier streaming dispatch section.
-
-The important result here is not the timing delta. It is that the parser fix unblocked tool-call generation entirely. The model was always capable of producing structured tool calls; the wrong parser was silently discarding them. That is a useful lesson for deployment: when a model appears to reason about tools inline rather than emitting tool-call blocks, the first thing to check is whether the configured parser matches the model's actual output format.
-
 ### What OpenClaw Adds to the Story
 
-The Claude Code experiments established that prefix stability, replay fidelity, and stream semantics matter for agentic serving. The OpenClaw experiments show the same invariants holding under a different access pattern: shorter prompts, longer sessions, multi-channel delivery, and background operation without an interactive user watching each response.
+The Claude Code experiments established that prefix stability, replay fidelity, and stream semantics matter for agentic serving. OpenClaw added two things.
 
-The practical takeaway is that the harness-facing fixes in Dynamo (preamble stripping, reasoning segment preservation, correct block ordering) are not Claude-Code-specific. They compose correctly with a different client that makes different assumptions about session lifetime and prompt structure.
+First, a concrete integration test for the hardest parsing case: two different parsers (`nemotron_deci` for reasoning, `qwen3_coder` for tool calls) splitting one token stream into correctly ordered Anthropic content blocks. That test passed `10/10` across both streaming and non-streaming paths, with correct block types, correct ordering, correct stop reasons, and correctly parsed tool arguments.
+
+Second, a deployment lesson that is easy to miss in documentation. Parser names in Dynamo describe the output format they consume, not the model they were designed for. A model called Nemotron uses a parser called `qwen3_coder` for its tool calls because the output format matches, not because of any Qwen lineage. When a model appears to reason about tools inline rather than emitting structured tool-call blocks, the first thing to check is whether the configured parser matches the model's actual output format.
 
 ## Closing the Loop
 
