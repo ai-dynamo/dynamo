@@ -1398,6 +1398,26 @@ pub mod nixl {
         // derived from block_set_idx via the NixlBlockSet on the receiving side.
     }
 
+    impl BlockDescriptorList {
+        pub fn new(
+            worker_id: WorkerID,
+            block_set_idx: usize,
+            mutability: BlockMutability,
+            block_indices: Vec<usize>,
+        ) -> Result<Self, BlockDescriptorSetError> {
+            if block_indices.is_empty() {
+                return Err(BlockDescriptorSetError::EmptyInput);
+            }
+
+            Ok(Self {
+                worker_id,
+                block_set_idx,
+                mutability,
+                block_indices,
+            })
+        }
+    }
+
     #[derive(Debug, Error)]
     pub enum BlockDescriptorSetError {
         #[error("Input block list cannot be empty")]

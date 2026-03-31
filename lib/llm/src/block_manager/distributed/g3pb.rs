@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::block_manager::WorkerID;
+use crate::block_manager::block::nixl::{BlockDescriptorList, SerializedNixlBlockSet};
 use crate::tokens::{SequenceHash, compute_hash_v2};
 
 use anyhow::Result;
@@ -92,6 +93,30 @@ pub struct G3pbFetchRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbFetchResponse {
     pub blocks: Vec<G3pbTransferBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct G3pbStageBlocksRequest {
+    pub blocks: Vec<G3pbPutBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct G3pbStageBlocksResponse {
+    pub worker_id: WorkerID,
+    pub blockset: SerializedNixlBlockSet,
+    pub descriptors: BlockDescriptorList,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct G3pbCommitRequest {
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct G3pbFetchBlocksResponse {
+    pub worker_id: WorkerID,
+    pub blockset: SerializedNixlBlockSet,
+    pub descriptors: BlockDescriptorList,
 }
 
 #[derive(Debug, thiserror::Error)]

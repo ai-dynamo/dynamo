@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 21:24:38 UTC
+Last updated: 2026-03-31 22:08:11 UTC
 
 ## Active state
 
@@ -76,6 +76,11 @@ Last updated: 2026-03-31 21:24:38 UTC
     `nixl smoke transfer complete: device->host 8 blocks, host->device 8 blocks`
   - emitted one UCX runtime warning about
     `IB_PCI_RELAXED_ORDERING=try`, but the smoke still completed successfully
+- backend transport-contract milestone:
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend`
+    - pass after adding staged NIXL descriptor endpoints and backend host runtime
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass after the transport type additions (`13 passed`)
 
 ### Decisions confirmed in this run so far
 
@@ -95,57 +100,66 @@ Last updated: 2026-03-31 21:24:38 UTC
   noting that the current Rust bindings do not yet support the partial metadata
   path needed for that import style; this is relevant to any attempt to bolt
   remote descriptor exchange directly onto the current older blockset APIs
+- backend implementation decision for this run:
+  keep `G3pbStorageAgent` as the metadata/query contract, but add a separate
+  backend-only pinned-host staging runtime that:
+  - allocates host blocks from a local KVBM host pool with a UCX-enabled NIXL agent
+  - reserves accepted `sequence_hash` values before transfer
+  - exposes serialized blocksets plus `BlockDescriptorList` responses for
+    mutable upload descriptors and immutable fetch descriptors
+  - commits staged hashes into the metadata agent only after the transfer
+    completion call so `query` stays visibility-safe
+- shared transport structs live in `distributed/g3pb.rs`, and
+  `BlockDescriptorList` now has a public constructor so the backend binary can
+  emit descriptor lists directly
 
 ### Remaining work in this run
 
-- reconnect the remote data path to real NIXL/UCX `device <-> CPU` transfers
-  instead of HTTP payload exchange
+- reconnect the worker smoke remote data path to the new staged NIXL/UCX
+  `device/host <-> remote CPU staging` flow instead of HTTP payload exchange
 - revalidate the next slice in layers:
-  - host-only `G3PB` backend smoke
+  - worker-side compile/tests after the smoke rewrite
   - `kvbm_nixl_transfer_smoke`
+  - host-only `G3PB` backend smoke with `stage_put` / `commit_put` / descriptor
+    fetch
   - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
 
 ### Concrete transport gap
 
-- current `G3PB` backend endpoints:
-  - `offer`
-  - `put`
-  - `put_payload`
-  - `query`
-  - `fetch`
-- current worker smoke uses those endpoints for both metadata and bytes:
-  - upload path: `offer -> put_payload`
-  - fetch path: `query -> fetch`
-- this means the peer only stores opaque bytes (`Vec<u8>`), not remote host
-  staging memory that another worker can import through NIXL
-- replacing the HTTP byte path requires a new seam, not just a small swap in
-  `kvbm_g3pb_worker_smoke.rs`:
-  - peer side must own registered pinned host staging blocks
-  - peer side must expose/import NIXL metadata or serialized remote layouts for
-    those staging blocks
-  - worker side must import the remote metadata and issue NIXL read/write
-    against those remote host blocks
-  - sequence-hash routing still stays in `G3PB`, but payload transport must no
-    longer be `Vec<u8>` based once the remote descriptors exist
+- new backend seam now exists:
+  - `offer` still determines ownership/admission
+  - `stage_put` allocates reserved remote mutable host blocks and returns:
+    - serialized remote blockset metadata
+    - a mutable `BlockDescriptorList`
+  - `commit_put` marks staged hashes visible to `query`
+  - `fetch` now returns serialized blockset metadata plus an immutable
+    `BlockDescriptorList` instead of inline bytes
+- the remaining gap is entirely worker-side:
+  - create/upload local source blocks through NIXL write into the returned
+    remote mutable descriptor list
+  - import each peer blockset once and cache that import locally
+  - fetch remote immutable descriptor lists and issue NIXL reads into local
+    host blocks before local onboard
+  - remove the old `put_payload` / byte-fetch assumptions from the smoke output
 
 ### Exact next step
 
 - next file:
-  `lib/llm/src/bin/kvbm_g3pb_backend.rs`
+  `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
 - next commands:
-  - extend the backend to allocate and retain pinned host staging blocks for
-    accepted `sequence_hash` entries rather than storing only `Vec<u8>`
-  - add a metadata endpoint that returns the remote NIXL-importable description
-    for those staging blocks
-  - then update `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs` to:
-    - import the remote metadata
-    - write accepted local host blocks to the peer via NIXL
-    - read fetched remote host blocks back via NIXL before local onboard
+  - update `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs` to:
+    - build a UCX-enabled local NIXL agent/runtime instead of `disable_nixl()`
+    - stage accepted uploads with `stage_put`
+    - import backend blocksets once per worker id
+    - issue NIXL writes into remote mutable descriptors
+    - `commit_put` after transfer completion
+    - fetch immutable descriptors and issue NIXL reads into local host blocks
+    - keep the final local host registration/device onboard validation
   - rerun:
     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
     - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
     - `target/debug/kvbm_nixl_transfer_smoke`
-    - host-only backend smoke
+    - host-only backend smoke using descriptor endpoints
     - full `target/debug/kvbm_g3pb_worker_smoke ...`
 
 ## Archived milestones (condensed)
