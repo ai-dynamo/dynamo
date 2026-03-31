@@ -511,8 +511,12 @@ impl Leader for KvConnectorLeader {
         tokens: Vec<u32>,
         extra_block_hashes: Option<Vec<Option<u64>>>,
     ) -> anyhow::Result<()> {
-        self.slot_manager()
-            .create_slot(&request.request_id, tokens, request.salt_hash, extra_block_hashes)?;
+        self.slot_manager().create_slot(
+            &request.request_id,
+            tokens,
+            request.salt_hash,
+            extra_block_hashes,
+        )?;
 
         self.inflight_requests.insert(request.request_id);
 

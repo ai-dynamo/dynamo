@@ -106,7 +106,12 @@ impl KvbmCacheManager {
     ) -> PyResult<Vec<SequenceHash>> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager
-            .create_slot(&request.request_id, request.salt_hash, tokens, extra_block_hashes)
+            .create_slot(
+                &request.request_id,
+                request.salt_hash,
+                tokens,
+                extra_block_hashes,
+            )
             .map_err(to_pyerr)
     }
 
@@ -439,7 +444,12 @@ impl<R: RequestKey> SlotManager<R> {
         if !self.slots.contains_key(request_id) {
             self.slots.insert(
                 request_id.clone(),
-                Slot::new_with_extra_hashes(tokens.into(), self.block_size, salt_hash, extra_block_hashes),
+                Slot::new_with_extra_hashes(
+                    tokens.into(),
+                    self.block_size,
+                    salt_hash,
+                    extra_block_hashes,
+                ),
             );
             tracing::debug!(
                 request_id,
