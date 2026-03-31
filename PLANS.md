@@ -80,7 +80,9 @@ Current in-progress run (2026-03-31 18:40:38 UTC):
     error from these files
 - Commits made in this run:
   - `00da166829` `Add G4 offer-and-put helpers`
-  - `b1208d0dbc` `Update G4 plan handoff`
+  - follow-up plan-only handoff refresh commits were also made in this run;
+    check `git log --oneline --max-count=4` for the exact detached-HEAD commit
+    sequence on this machine
 - Remaining work after this run:
   - rerun the blocked validation commands on the next host/container that has
     `cargo` and `rustc` installed
