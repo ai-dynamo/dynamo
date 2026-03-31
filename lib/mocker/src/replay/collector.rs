@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 use uuid::Uuid;
@@ -186,7 +185,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
 
 #[derive(Debug, Default)]
 pub(crate) struct TraceCollector {
-    requests: HashMap<Uuid, TraceRequestStats>,
+    requests: FxHashMap<Uuid, TraceRequestStats>,
 }
 
 impl TraceRequestStats {
@@ -259,11 +258,12 @@ impl TraceCollector {
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
         let requests = self.requests;
-        let mut ttfts = Vec::new();
-        let mut ttsts = Vec::new();
-        let mut tpots = Vec::new();
+        let request_count = requests.len();
+        let mut ttfts = Vec::with_capacity(request_count);
+        let mut ttsts = Vec::with_capacity(request_count);
+        let mut tpots = Vec::with_capacity(request_count);
         let mut itls = Vec::new();
-        let mut e2e_latencies = Vec::new();
+        let mut e2e_latencies = Vec::with_capacity(request_count);
         let mut output_token_throughput_per_user = Vec::new();
         let mut duration_ms = 0.0_f64;
         let mut total_input_tokens = 0usize;
@@ -309,10 +309,10 @@ impl TraceCollector {
         }
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
-        let itl_distribution = build_distribution_stats(&itls);
+        let itl_distribution = build_distribution_stats(itls);
         TraceSimulationReport {
             request_counts: TraceRequestCounts {
-                num_requests: requests.len(),
+                num_requests: request_count,
                 completed_requests,
                 total_input_tokens,
                 total_output_tokens,
@@ -332,16 +332,16 @@ impl TraceCollector {
                 total_reused_tokens as f64 / total_input_tokens as f64
             },
             latency: TraceLatencyStats {
-                ttft: build_distribution_stats(&ttfts),
-                ttst: build_distribution_stats(&ttsts),
-                tpot: build_distribution_stats(&tpots),
+                ttft: build_distribution_stats(ttfts),
+                ttst: build_distribution_stats(ttsts),
+                tpot: build_distribution_stats(tpots),
                 itl: TraceInterTokenLatencyStats {
                     max_ms: itl_distribution.max_ms,
                     distribution: itl_distribution,
                 },
-                e2e: build_distribution_stats(&e2e_latencies),
+                e2e: build_distribution_stats(e2e_latencies),
                 output_token_throughput_per_user: build_distribution_stats(
-                    &output_token_throughput_per_user,
+                    output_token_throughput_per_user,
                 ),
             },
         }
@@ -387,7 +387,7 @@ fn mean(values: &[f64]) -> f64 {
     }
 }
 
-fn build_distribution_stats(values: &[f64]) -> TraceDistributionStats {
+fn build_distribution_stats(mut values: Vec<f64>) -> TraceDistributionStats {
     if values.is_empty() {
         return TraceDistributionStats {
             mean_ms: 0.0,
@@ -402,24 +402,39 @@ fn build_distribution_stats(values: &[f64]) -> TraceDistributionStats {
         };
     }
 
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|left, right| left.total_cmp(right));
+    let min_ms = values
+        .iter()
+        .copied()
+        .min_by(|left, right| left.total_cmp(right))
+        .expect("non-empty values must have a minimum");
+    let max_ms = values
+        .iter()
+        .copied()
+        .max_by(|left, right| left.total_cmp(right))
+        .expect("non-empty values must have a maximum");
+
     TraceDistributionStats {
-        mean_ms: mean(values),
-        min_ms: sorted[0],
-        max_ms: *sorted.last().expect("sorted values must be non-empty"),
-        median_ms: percentile_sorted(&sorted, 50.0),
-        p75_ms: percentile_sorted(&sorted, 75.0),
-        p90_ms: percentile_sorted(&sorted, 90.0),
-        p95_ms: percentile_sorted(&sorted, 95.0),
-        p99_ms: percentile_sorted(&sorted, 99.0),
-        std_ms: std_dev(values),
+        mean_ms: mean(&values),
+        min_ms,
+        max_ms,
+        median_ms: percentile_in_place(&mut values, 50.0),
+        p75_ms: percentile_in_place(&mut values, 75.0),
+        p90_ms: percentile_in_place(&mut values, 90.0),
+        p95_ms: percentile_in_place(&mut values, 95.0),
+        p99_ms: percentile_in_place(&mut values, 99.0),
+        std_ms: std_dev(&values),
     }
 }
 
-fn percentile_sorted(sorted: &[f64], percentile: f64) -> f64 {
-    let rank = ((sorted.len() - 1) as f64 * percentile / 100.0).round() as usize;
-    sorted[rank.min(sorted.len() - 1)]
+fn percentile_in_place(values: &mut [f64], percentile: f64) -> f64 {
+    let rank = percentile_rank(values.len(), percentile);
+    let (_, selected, _) = values.select_nth_unstable_by(rank, |left, right| left.total_cmp(right));
+    *selected
+}
+
+fn percentile_rank(len: usize, percentile: f64) -> usize {
+    let rank = ((len - 1) as f64 * percentile / 100.0).round() as usize;
+    rank.min(len - 1)
 }
 
 fn std_dev(values: &[f64]) -> f64 {
@@ -437,4 +452,59 @@ fn std_dev(values: &[f64]) -> f64 {
         .sum::<f64>()
         / values.len() as f64;
     variance.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_distribution_stats_sorted(values: &[f64]) -> TraceDistributionStats {
+        if values.is_empty() {
+            return TraceDistributionStats {
+                mean_ms: 0.0,
+                min_ms: 0.0,
+                max_ms: 0.0,
+                median_ms: 0.0,
+                p75_ms: 0.0,
+                p90_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                std_ms: 0.0,
+            };
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        TraceDistributionStats {
+            mean_ms: mean(values),
+            min_ms: sorted[0],
+            max_ms: *sorted.last().expect("sorted values must be non-empty"),
+            median_ms: sorted[percentile_rank(sorted.len(), 50.0)],
+            p75_ms: sorted[percentile_rank(sorted.len(), 75.0)],
+            p90_ms: sorted[percentile_rank(sorted.len(), 90.0)],
+            p95_ms: sorted[percentile_rank(sorted.len(), 95.0)],
+            p99_ms: sorted[percentile_rank(sorted.len(), 99.0)],
+            std_ms: std_dev(values),
+        }
+    }
+
+    #[test]
+    fn build_distribution_stats_matches_sorted_baseline() {
+        let values = vec![
+            0.0, 1.0, 1.0, 2.5, 4.0, 4.0, 7.25, 9.5, 15.0, 22.0, 22.0, 100.0,
+        ];
+
+        let expected = build_distribution_stats_sorted(&values);
+        let actual = build_distribution_stats(values);
+
+        assert_eq!(actual.mean_ms, expected.mean_ms);
+        assert_eq!(actual.min_ms, expected.min_ms);
+        assert_eq!(actual.max_ms, expected.max_ms);
+        assert_eq!(actual.median_ms, expected.median_ms);
+        assert_eq!(actual.p75_ms, expected.p75_ms);
+        assert_eq!(actual.p90_ms, expected.p90_ms);
+        assert_eq!(actual.p95_ms, expected.p95_ms);
+        assert_eq!(actual.p99_ms, expected.p99_ms);
+        assert_eq!(actual.std_ms, expected.std_ms);
+    }
 }
