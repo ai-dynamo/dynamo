@@ -539,7 +539,7 @@ class ConcurrencyTracker:
 
         # Return a mock MediaOutput with a video tensor
         return SimpleNamespace(
-            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
             image=None,
             audio=None,
         )
@@ -672,7 +672,7 @@ class TestVideoHandlerResponseFormats:
         )
 
         mock_output = SimpleNamespace(
-            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
             image=None,
             audio=None,
         )
