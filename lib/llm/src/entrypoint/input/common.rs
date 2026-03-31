@@ -339,9 +339,7 @@ where
         RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
+        | RouterMode::LeastLoaded => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

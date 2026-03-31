@@ -189,7 +189,14 @@ class FrontendArgGroup(ArgGroup):
             "routes to the one with fewer in-flight requests. In disaggregated prefill "
             "mode, power-of-two skips bootstrap optimization and falls back to the "
             "synchronous prefill path.",
-            choices=["round-robin", "random", "power-of-two", "kv", "direct", "least-loaded"],
+            choices=[
+                "round-robin",
+                "random",
+                "power-of-two",
+                "kv",
+                "direct",
+                "least-loaded",
+            ],
         )
         add_argument(
             g,
