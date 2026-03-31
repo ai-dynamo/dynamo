@@ -29,7 +29,6 @@ from dynamo.common.protocols.video_protocol import (
     VideoData,
 )
 from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
@@ -39,6 +38,7 @@ from dynamo.common.utils.video_utils import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+from dynamo.vllm.omni.output_formatter import TextFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,10 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+
+        self._text_formatter = TextFormatter(
+            model_name=config.served_model_name or config.model,
+        )
 
         # Audio/TTS handler — composition, not inheritance.
         self.audio = AudioGenerationHandler(
@@ -193,10 +197,10 @@ class OmniHandler(BaseOmniHandler):
                         stage_output.final_output_type == "text"
                         and stage_output.request_output
                     ):
-                        chunk = self._format_text_chunk(
+                        chunk = self._text_formatter.format(
                             stage_output.request_output,
                             request_id,
-                            previous_text,
+                            previous_text=previous_text,
                         )
                         if chunk:
                             output = stage_output.request_output.outputs[0]
@@ -579,45 +583,3 @@ class OmniHandler(BaseOmniHandler):
                 error=str(e),
             )
             return error_response.model_dump()
-
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": (
-                        normalize_finish_reason(output.finish_reason)
-                        if output.finish_reason
-                        else None
-                    ),
-                }
-            ],
-        }
-
-        # Add usage on final chunk
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk

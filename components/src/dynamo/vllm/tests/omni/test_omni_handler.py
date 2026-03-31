@@ -144,62 +144,6 @@ class TestBuildEngineInputs:
         assert inputs.prompt["prompt"] == "Hello world"
 
 
-class TestFormatTextChunk:
-    def _make_output(self, text="hello world", finish_reason=None):
-        output = MagicMock()
-        output.text = text
-        output.finish_reason = finish_reason
-        request_output = MagicMock()
-        request_output.outputs = [output]
-        request_output.prompt_token_ids = [1, 2, 3]
-        return request_output
-
-    def test_delta_text(self):
-        """Delta content is the diff between current and previous text."""
-        handler = _make_handler()
-        ro = self._make_output("hello world")
-        chunk = handler._format_text_chunk(ro, "req-1", "hello ")
-        assert chunk["choices"][0]["delta"]["content"] == "world"
-
-    def test_no_outputs_returns_error(self):
-        """Empty engine outputs produce an error chunk."""
-        handler = _make_handler()
-        ro = MagicMock()
-        ro.outputs = []
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-    def test_finish_reason_included(self):
-        """Final chunk includes finish_reason and usage stats."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="stop")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "stop"
-        assert "usage" in chunk
-
-    def test_finish_reason_abort_normalized(self):
-        """Abort finish reason is normalized to 'cancelled'."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="abort")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "cancelled"
-
-    def test_finish_reason_none_when_not_finished(self):
-        """finish_reason is None when output has no finish_reason."""
-        handler = _make_handler()
-        ro = self._make_output("partial")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] is None
-
-
 class TestFormatImageChunk:
     @pytest.mark.asyncio
     async def test_chat_completion_format(self):
