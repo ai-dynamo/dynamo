@@ -2,7 +2,7 @@
 
 Aggregated and disaggregated DeepSeek-V3.1 (FP8 and [NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) on B200 GPUs, using **Dynamo-native KV routing** (no Inference Gateway).
 
-**Stack**: Dynamo Operator 1.0.0 · SGLang Runtime 0.9.1 · GKE with RDMA/RoCE · NIXL KV Transfer
+**Stack**: Dynamo Operator 1.0.0 · SGLang Runtime 0.9.1 (FP8) / 0.8.1 (NVFP4) · GKE with RDMA/RoCE · NIXL KV Transfer
 
 ---
 
