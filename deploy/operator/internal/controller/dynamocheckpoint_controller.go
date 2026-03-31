@@ -221,16 +221,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
 		}
 	}
-	version := desiredArtifactVersion(ckpt)
 	jobName := desiredCheckpointJobName(ckpt, hash)
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(hash, version, snapshotworkload.Storage{
-		Type:     snapshotworkload.StorageTypePVC,
-		PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
-		BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
-	})
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
@@ -249,8 +240,6 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	// Update status to Creating phase
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
 	ckpt.Status.JobName = jobName
-	ckpt.Status.Location = resolvedStorage.Location
-	ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type)
 	ckpt.Status.CreatedAt = nil
 	ckpt.Status.Message = ""
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
@@ -386,23 +375,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", "Checkpoint creation completed successfully")
 
-		if ckpt.Status.Location == "" || ckpt.Status.StorageType == "" {
-			resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
-				ckpt.Status.IdentityHash,
-				desiredArtifactVersion(ckpt),
-				snapshotworkload.Storage{
-					Type:     snapshotworkload.StorageTypePVC,
-					PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
-					BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
-				},
-			)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			ckpt.Status.Location = resolvedStorage.Location
-			ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type)
-		}
-
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		ckpt.Status.CreatedAt = &now
@@ -411,7 +383,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
 			Status:             metav1.ConditionTrue,
 			Reason:             "JobSucceeded",
-			Message:            fmt.Sprintf("Checkpoint job completed, available at %s", ckpt.Status.Location),
+			Message:            "Checkpoint job completed successfully",
 			LastTransitionTime: metav1.Now(),
 		})
 
@@ -488,18 +460,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	}
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
-	}
-	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
-		hash,
-		desiredArtifactVersion(ckpt),
-		snapshotworkload.Storage{
-			Type:     snapshotworkload.StorageTypePVC,
-			PVCName:  r.Config.Checkpoint.Storage.PVC.PVCName,
-			BasePath: r.Config.Checkpoint.Storage.PVC.BasePath,
-		},
-	)
-	if err != nil {
-		return nil, err
 	}
 	hasPodInfoVolume := false
 	for _, volume := range podTemplate.Spec.Volumes {
@@ -652,7 +612,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			Namespace:       ckpt.Namespace,
 			CheckpointID:    hash,
 			ArtifactVersion: desiredArtifactVersion(ckpt),
-			Storage:         resolvedStorage,
 			SeccompProfile:  consts.SeccompProfilePath,
 		},
 		Name:                  jobName,

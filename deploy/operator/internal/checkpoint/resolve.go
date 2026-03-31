@@ -34,8 +34,6 @@ type CheckpointInfo struct {
 	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
 	Hash            string
 	ArtifactVersion string
-	Location        string
-	StorageType     nvidiacomv1alpha1.DynamoCheckpointStorageType
 	CheckpointName  string
 	Ready           bool
 }
@@ -52,8 +50,6 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 		Identity:        &ckpt.Spec.Identity,
 		Hash:            hash,
 		ArtifactVersion: checkpointArtifactVersion(ckpt),
-		Location:        ckpt.Status.Location,
-		StorageType:     ckpt.Status.StorageType,
 		CheckpointName:  ckpt.Name,
 		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil

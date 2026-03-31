@@ -31,15 +31,11 @@ const (
 	DynamoCheckpointPhasePending DynamoCheckpointPhase = "Pending"
 	// DynamoCheckpointPhaseCreating indicates the checkpoint Job is running
 	DynamoCheckpointPhaseCreating DynamoCheckpointPhase = "Creating"
-	// DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC
+	// DynamoCheckpointPhaseReady indicates the checkpoint artifact is available
 	DynamoCheckpointPhaseReady DynamoCheckpointPhase = "Ready"
 	// DynamoCheckpointPhaseFailed indicates the checkpoint creation failed
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
-
-// DynamoCheckpointStorageType defines the storage backend used for the checkpoint artifact.
-// +kubebuilder:validation:Enum=pvc
-type DynamoCheckpointStorageType string
 
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
 // Two checkpoints with the same identity hash are considered equivalent
@@ -141,15 +137,6 @@ type DynamoCheckpointStatus struct {
 	// This hash is used to identify equivalent checkpoints
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-
-	// Location is the full path to the checkpoint artifact in the storage backend.
-	// For PVC this is typically /checkpoints/{checkpoint-id}/versions/{artifact-version}.
-	// +optional
-	Location string `json:"location,omitempty"`
-
-	// StorageType indicates the storage backend type used for this checkpoint.
-	// +optional
-	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
 	// JobName is the name of the checkpoint creation Job
 	// +optional

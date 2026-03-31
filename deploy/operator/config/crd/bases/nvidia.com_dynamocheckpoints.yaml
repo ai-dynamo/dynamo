@@ -8250,11 +8250,6 @@ spec:
                 jobName:
                   description: JobName is the name of the checkpoint creation Job
                   type: string
-                location:
-                  description: |-
-                    Location is the full path to the checkpoint artifact in the storage backend.
-                    For PVC this is typically /checkpoints/{checkpoint-id}/versions/{artifact-version}.
-                  type: string
                 message:
                   description: Message provides additional information about the current state
                   type: string
@@ -8265,11 +8260,6 @@ spec:
                     - Creating
                     - Ready
                     - Failed
-                  type: string
-                storageType:
-                  description: StorageType indicates the storage backend type used for this checkpoint.
-                  enum:
-                    - pvc
                   type: string
               type: object
           type: object

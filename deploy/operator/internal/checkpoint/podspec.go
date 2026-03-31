@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotworkload "github.com/ai-dynamo/dynamo/deploy/snapshot/workload"
 	corev1 "k8s.io/api/core/v1"
@@ -85,17 +84,14 @@ func InjectCheckpointIntoPodSpec(
 		PVCName:  checkpointConfig.Storage.PVC.PVCName,
 		BasePath: checkpointConfig.Storage.PVC.BasePath,
 	}
-	resolvedStorage, err := snapshotworkload.ResolveRestoreStorage(
+	resolvedStorage, err := snapshotworkload.ResolveCheckpointStorage(
 		info.Hash,
 		info.ArtifactVersion,
-		info.Location,
 		storageConfig,
 	)
 	if err != nil {
 		return err
 	}
-	info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type)
-	info.Location = resolvedStorage.Location
 	snapshotworkload.PrepareRestorePodSpec(
 		podSpec,
 		mainContainer,

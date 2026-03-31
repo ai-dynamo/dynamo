@@ -167,8 +167,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
-		assert.Equal(t, "/checkpoints/"+info.Hash+"/versions/"+consts.DefaultCheckpointArtifactVersion, info.Location)
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), info.StorageType)
 
 		volumes := map[string]corev1.Volume{}
 		for _, volume := range podSpec.Volumes {
@@ -250,8 +248,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
-				Location:     "/checkpoints/" + hash,
-				StorageType:  "pvc",
 			},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
@@ -264,7 +260,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.True(t, info.Exists)
 		assert.True(t, info.Ready)
 		assert.Equal(t, hash, info.Hash)
-		assert.Equal(t, "/checkpoints/"+hash, info.Location)
 		assert.Equal(t, hash, info.CheckpointName)
 	})
 
@@ -328,8 +323,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
-				Location:     "/checkpoints/" + hash,
-				StorageType:  "pvc",
 			},
 		}
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
