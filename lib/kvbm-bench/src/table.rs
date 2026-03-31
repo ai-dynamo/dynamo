@@ -27,7 +27,8 @@ impl BenchTable {
 
     /// Add a row of cells to the table.
     pub fn add_row(&mut self, cells: &[String]) {
-        self.table.add_row(cells.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        self.table
+            .add_row(cells.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         self.rows.push(cells.to_vec());
     }
 

@@ -1,0 +1,10 @@
+# Cartesian product sweep — all combinations will be run
+# transport: [tcp, uds, inprocess]
+transport: [inprocess]
+threads: [1, 2, 4, 8]
+clients: [1, 2, 4, 8, 16]
+storage_size: [1000, 100000, 1000000]
+batch_size: [1, 16, 64, 256]
+query_size: [1, 16, 256, 1000, 10000, 50000]
+mode: [query, register, mixed]
+duration_secs: [10]

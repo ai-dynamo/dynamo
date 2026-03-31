@@ -10,8 +10,7 @@ mod integration {
 
     use crate::core::{
         BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport, NoMetadata,
-        OffloadStatus, QueryType, Registry, RegistryCodec, RegistryTransport, ResponseType,
-        Storage, client, hub,
+        OffloadStatus, QueryType, Registry, RegistryCodec, ResponseType, Storage, client, hub,
     };
 
     /// Full end-to-end test: Client <-> Hub using in-process transport.
@@ -194,13 +193,10 @@ mod integration {
     /// Velo TCP end-to-end test.
     ///
     /// Run manually: `cargo test -- --ignored test_velo_e2e`
-    #[cfg(feature = "_velo_transport")]
     #[tokio::test]
     #[ignore]
     async fn test_velo_e2e() {
-        use crate::core::{
-            VeloClientTransport, VeloHubTransport,
-        };
+        use crate::core::{VeloClientTransport, VeloHubTransport};
 
         let port: u16 = 17560;
 
