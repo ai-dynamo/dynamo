@@ -21,6 +21,7 @@ use super::{
         request::BlockResult,
     },
 };
+use crate::block_manager::distributed::G4BlockIndex;
 use derive_getters::Dissolve;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -53,6 +54,7 @@ pub struct KvBlockManagerState<Locality: LocalityProvider, Metadata: BlockMetada
     disk_pool: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
     host_pool: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
     device_pool: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
+    g4_block_index: Option<Arc<G4BlockIndex>>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
@@ -74,6 +76,10 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
 
     pub fn worker_id(&self) -> WorkerID {
         self.resources.worker_id
+    }
+
+    pub fn g4_block_index(&self) -> Option<Arc<G4BlockIndex>> {
+        self.g4_block_index.clone()
     }
 
     pub(crate) async fn enqueue_offload_block<S: Storage + 'static>(
@@ -159,13 +165,22 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
         };
+        let g4_block_index = disk_pool
+            .as_ref()
+            .map(|_| Arc::new(G4BlockIndex::default()));
+        let disk_block_observer =
+            g4_block_index.clone().map(
+                |index| -> Arc<
+                    dyn offload::DiskBlockRegistrationObserver<locality::Logical<R>, Metadata>,
+                > { index },
+            );
 
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             offload_filters,
-            None,
+            disk_block_observer,
             offload_config,
         )?;
 
@@ -176,6 +191,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             disk_pool,
             host_pool,
             device_pool,
+            g4_block_index,
             local_block_set: NixlBlockSet::new(resources.worker_id),
             remote_block_sets: RwLock::new(HashMap::new()),
             offload_manager,
@@ -286,13 +302,21 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
         };
+        let g4_block_index = disk_pool
+            .as_ref()
+            .map(|_| Arc::new(G4BlockIndex::default()));
+        let disk_block_observer = g4_block_index.clone().map(
+            |index| -> Arc<dyn offload::DiskBlockRegistrationObserver<locality::Local, Metadata>> {
+                index
+            },
+        );
 
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             offload_filters,
-            None,
+            disk_block_observer,
             offload_config,
         )?;
 
@@ -303,6 +327,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             disk_pool,
             host_pool,
             device_pool,
+            g4_block_index,
             local_block_set,
             remote_block_sets: RwLock::new(HashMap::new()),
             offload_manager,

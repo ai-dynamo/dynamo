@@ -1,6 +1,71 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 02:05:22 UTC
+Last updated: 2026-03-31 02:20:50 UTC
+
+Current in-progress run (2026-03-31 02:20:50 UTC):
+
+- Mandatory context re-read completed in this run:
+  - `components/src/dynamo/sglang/AGENTS.md`
+  - `docs/backends/sglang/agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g4-nvme-raid-plan.md`
+  - `lib/llm/src/block_manager/distributed/g4.rs`
+  - `lib/llm/src/block_manager/distributed/worker.rs`
+  - `lib/llm/src/block_manager/distributed.rs`
+  - `lib/llm/src/block_manager/offload.rs`
+  - `lib/llm/src/block_manager/state.rs`
+  - `lib/llm/src/block_manager.rs`
+- Current implementation slice for this run:
+  - make `KvBlockManagerState` the real runtime owner of the shared `G4BlockIndex`
+  - pass that shared index into `OffloadManager::new(...)` so normal disk offload
+    registration updates G4 metadata outside test-only wiring
+  - expose the shared index through the public `KvBlockManager` surface for the
+    eventual runtime that will pair it with a real `G4StorageAgent`
+- Why this slice:
+  - the previous run added the observer hook and the shared index type, but the
+    main state construction path still passed `None` into `OffloadManager`
+  - the smallest missing runtime seam was therefore state ownership and
+    propagation of a real observer instance, not new RPC/discovery work
+- Milestone completed in this run:
+  - `lib/llm/src/block_manager/state.rs`
+    - added optional `g4_block_index` ownership to `KvBlockManagerState`
+    - instantiated the shared index whenever a disk pool exists
+    - passed that shared index to `OffloadManager::new(...)` as the runtime
+      disk registration observer in both local and logical state constructors
+    - exposed `KvBlockManagerState::g4_block_index()`
+  - `lib/llm/src/block_manager.rs`
+    - re-exported `G4BlockIndex`
+    - exposed `KvBlockManager::g4_block_index()`
+- Validation completed in this run:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    -> pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml test_host_to_disk_offload_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+    -> pass (`1 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml test_device_to_disk_bypass_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
+    -> pass (`1 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g4:: --lib`
+    -> pass (`6 passed`)
+- Validation notes from this run:
+  - the feature-gated offload tests still emit `get_mempolicy: Operation not permitted`
+    in this container but pass
+  - the feature-gated offload tests still emit the non-fatal UCX warning about
+    `IB_PCI_RELAXED_ORDERING=try`
+  - attempted a broader `KvBlockManager`-level runtime test under `--features testing-full`,
+    but the existing harness on this host fails earlier with `Invalid data pointer`;
+    removed that test rather than leave a non-actionable environment failure in-tree
+- Remaining work after this run:
+  - construct an actual runtime owner that pairs the exported `G4BlockIndex`
+    with a real `G4StorageAgent` / `G4StorageClient` request path
+  - wire the shared runtime index into whichever worker/discovery layer will own
+    live G4 membership and remote fetch/query routing
+  - add broader integration coverage once that runtime seam exists so the system
+    exercises real `query -> fetch -> onboard` across distinct owners
+- Exact next file or command to touch:
+  - file: `lib/llm/src/block_manager/distributed/worker.rs`
+  - then: the runtime construction site that will own `G4StorageAgent` /
+    `G4StorageClient` around the now-exported `KvBlockManager::g4_block_index()`
+  - next validation command:
+    `cargo test --manifest-path lib/llm/Cargo.toml test_host_to_disk_offload_updates_g4_disk_index --lib --features testing-cuda,testing-nixl`
 
 Current in-progress run (2026-03-31 01:57:22 UTC):
 
