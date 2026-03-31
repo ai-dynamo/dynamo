@@ -124,17 +124,19 @@ class AudioGenerationHandler:
     def _is_tts_model(self) -> bool:
         """Check if the loaded model is a Qwen3-TTS-style model.
 
-        Searches for a TTS model_stage in the engine's stage list or
-        stage configs. Supports multiple vLLM-Omni API versions.
+        Searches for a TTS model_stage in the engine's stage list,
+        stage configs, or model config. Supports multiple vLLM-Omni versions.
         """
-        # Try stage_list (v0.14-v0.16 API)
+        # Try stage_list
         stage_list = getattr(self.engine_client, "stage_list", None)
         if stage_list:
             for stage in stage_list:
-                if getattr(stage, "model_stage", None) in _TTS_MODEL_STAGES:
+                ms = getattr(stage, "model_stage", None)
+                logger.debug("_is_tts_model: stage=%s model_stage=%s", stage, ms)
+                if ms in _TTS_MODEL_STAGES:
                     return True
 
-        # Try stage_configs (v0.18+ API — stages may not expose model_stage directly)
+        # Try stage_configs
         stage_configs = getattr(self.engine_client, "stage_configs", None)
         if stage_configs:
             for cfg in stage_configs:
@@ -148,17 +150,25 @@ class AudioGenerationHandler:
                     if isinstance(engine_args, dict)
                     else getattr(engine_args, "model_stage", None)
                 )
+                logger.debug("_is_tts_model: stage_config model_stage=%s", ms)
                 if ms in _TTS_MODEL_STAGES:
                     return True
 
         # Try model_config.hf_config.model_type (universal fallback)
         try:
             model_type = self.engine_client.model_config.hf_config.model_type
+            logger.debug("_is_tts_model: hf_config.model_type=%s", model_type)
             if model_type in _TTS_MODEL_STAGES:
                 return True
-        except (AttributeError, TypeError):
-            pass
+        except (AttributeError, TypeError) as e:
+            logger.debug("_is_tts_model: hf_config fallback failed: %s", e)
 
+        logger.warning(
+            "_is_tts_model: could not detect TTS model. "
+            "stage_list=%s, stage_configs=%s",
+            stage_list is not None,
+            stage_configs is not None,
+        )
         return False
 
     # -- Audio engine input construction --------------------------------------
