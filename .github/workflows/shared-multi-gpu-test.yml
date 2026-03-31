@@ -95,7 +95,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
-          enable_mypy: 'false'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
