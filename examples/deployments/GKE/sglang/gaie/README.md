@@ -110,7 +110,7 @@ kubectl get crd inferencepools.inference.networking.k8s.io
 
 ### 4. Custom EPP Image
 
-The stock `dynamo-frontend:1.0.0` EPP image has a bug in the `dyn-decode-scorer` Rust FFI with Kubernetes-based service discovery. A custom image from the `main` branch is required.
+The `dynamo-frontend:1.0.0` EPP image does not include a recent fix for the `dyn-decode-scorer` Rust FFI with Kubernetes-based service discovery. A newer image with the fix is in the release pipeline, but until it ships you need to build a custom image from the `main` branch following the steps below.
 
 ---
 
