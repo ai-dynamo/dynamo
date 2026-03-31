@@ -258,39 +258,52 @@ def _planner_profile_data_npz_path() -> Path:
     )
 
 
-def _aic_replay_args():
-    return MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "block_size": 512,
-                "enable_prefix_caching": True,
-                "enable_chunked_prefill": False,
-                "max_num_seqs": 16,
-                "max_num_batched_tokens": 65536,
-                "num_gpu_blocks": 100000,
-                "speedup_ratio": 1.0,
-                "aic_backend": "vllm",
-                "aic_system": "h200_sxm",
-                "aic_tp_size": 1,
-                "aic_model_path": "Qwen/Qwen3-32B",
-            }
-        )
-    )
+AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
+AIC_PARITY_SYSTEM = "h200_sxm"
+AIC_PARITY_VERSIONS = {
+    "vllm": "0.12.0",
+    "sglang": "0.5.6.post2",
+}
 
 
-def _run_aic_static_point(isl: int, osl: int, batch_size: int):
+def _aic_replay_args(backend_name: str):
+    payload = {
+        "block_size": 512,
+        "enable_prefix_caching": True,
+        "enable_chunked_prefill": False,
+        "max_num_seqs": 16,
+        "max_num_batched_tokens": 65536,
+        "num_gpu_blocks": 100000,
+        "speedup_ratio": 1.0,
+        "aic_backend": backend_name,
+        "aic_system": AIC_PARITY_SYSTEM,
+        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
+        "aic_tp_size": 1,
+        "aic_model_path": AIC_PARITY_MODEL,
+    }
+    if backend_name == "sglang":
+        payload["engine_type"] = "sglang"
+        payload["sglang"] = {
+            "page_size": 512,
+            "max_prefill_tokens": 65536,
+            "chunked_prefill_size": 65536,
+        }
+    return MockEngineArgs.from_json(json.dumps(payload))
+
+
+def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
     aiconfigurator = pytest.importorskip("aiconfigurator")
 
     database = aiconfigurator.sdk.perf_database.get_database(
-        system="h200_sxm",
-        backend="vllm",
-        version="0.12.0",
+        system=AIC_PARITY_SYSTEM,
+        backend=backend_name,
+        version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aiconfigurator.sdk.backends.factory.get_backend("vllm")
+    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
     model = aiconfigurator.sdk.models.get_model(
-        model_path="Qwen/Qwen3-32B",
+        model_path=AIC_PARITY_MODEL,
         model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
-        backend_name="vllm",
+        backend_name=backend_name,
     )
     session = aiconfigurator.sdk.inference_session.InferenceSession(
         model, database, backend
@@ -613,19 +626,27 @@ def test_run_synthetic_concurrency_replay_counts_match(
     )
 
 
+@pytest.mark.parametrize("backend_name", ["vllm", "sglang"])
 @pytest.mark.parametrize("isl", [256, 512, 1024, 2048, 4096])
-def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(isl):
+def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
+    backend_name, isl
+):
     report = run_synthetic_trace_replay(
         isl,
         128,
         8,
-        extra_engine_args=_aic_replay_args(),
+        extra_engine_args=_aic_replay_args(backend_name),
         num_workers=1,
         replay_mode="offline",
         replay_concurrency=8,
         arrival_interval_ms=0.0,
     )
-    aic = _run_aic_static_point(isl=isl, osl=128, batch_size=8)
+    aic = _run_aic_static_point(
+        backend_name=backend_name,
+        isl=isl,
+        osl=128,
+        batch_size=8,
+    )
     expected_ttft_ms = aic["context_latency"] + aic["tpot"]
 
     assert report["mean_ttft_ms"] == pytest.approx(expected_ttft_ms, rel=0.05)
