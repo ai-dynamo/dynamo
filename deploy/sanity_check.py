@@ -801,6 +801,7 @@ class GPUInfo(NodeInfo):
     def __init__(self, thorough_check: bool = False):
         self.thorough_check = thorough_check
 
+        # Find nvidia-smi executable (check multiple paths)
         nvidia_smi = self._find_executable(
             "nvidia-smi",
             [
@@ -813,6 +814,7 @@ class GPUInfo(NodeInfo):
             self._init_nvidia_gpu_info(nvidia_smi)
             return
 
+        # Fall back to Intel XPU reporting on systems without nvidia-smi.
         xpu_smi = self._find_executable(
             "xpu-smi",
             [
@@ -872,11 +874,14 @@ class GPUInfo(NodeInfo):
     def _init_nvidia_gpu_info(self, nvidia_smi: str):
         """Populate the node using NVIDIA-specific tooling."""
         try:
+            # Get GPU list
             result = self._run_command([nvidia_smi, "-L"])
 
             if result.returncode != 0:
+                # Extract and process error message from stderr or stdout
                 error_msg = "nvidia-smi failed"
 
+                # Try stderr first, then stdout
                 for output in [result.stderr, result.stdout]:
                     if output and output.strip():
                         error_lines = output.strip().splitlines()
@@ -884,8 +889,10 @@ class GPUInfo(NodeInfo):
                             error_msg = error_lines[0].strip()
                             break
 
+                # Handle NVML-specific errors.
                 if "Failed to initialize NVML" in error_msg:
                     error_msg = "No NVIDIA GPU detected (NVML initialization failed)"
+                    # Add docker restart suggestion specifically for NVML failures in containers
                     if self._is_inside_container():
                         error_msg += " - maybe try a docker restart?"
 
@@ -894,14 +901,18 @@ class GPUInfo(NodeInfo):
                 )
                 return
 
+            # Parse GPU names
             gpu_names = []
             lines = result.stdout.strip().splitlines()
             for line in lines:
+                # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
                 if ":" in line:
                     gpu_name = line.split(":", 1)[1].split("(")[0].strip()
                     gpu_names.append(gpu_name)
 
+            # Check for zero GPUs.
             if not gpu_names:
+                # Get driver and CUDA even for zero GPUs
                 driver, cuda = self._get_driver_cuda_versions(nvidia_smi)
                 driver_cuda_str = ""
                 if driver or cuda:
@@ -918,14 +929,19 @@ class GPUInfo(NodeInfo):
                 )
                 return
 
+            # Get driver and CUDA versions
             driver, cuda = self._get_driver_cuda_versions(nvidia_smi)
 
+            # Handle single vs multiple GPUs
             if len(gpu_names) == 1:
+                # Single GPU - just show GPU name in main label
                 super().__init__(
                     label="NVIDIA GPU", desc=gpu_names[0], status=NodeStatus.OK
                 )
+                # Add power and memory metadata for single GPU
                 self._add_power_memory_info(nvidia_smi, 0)
             else:
+                # Multiple GPUs - show count in main label
                 super().__init__(
                     label="NVIDIA GPU",
                     desc=f"{len(gpu_names)} GPUs",
@@ -1040,6 +1056,8 @@ class GPUInfo(NodeInfo):
 
     def _get_xpu_devices(self, xpu_smi: str) -> Optional[List[Dict[str, Any]]]:
         """Return summarized Intel XPU device info or None on discovery failure."""
+        # Start from JSON discovery for reliable inventory, then enrich each
+        # device with metrics pulled from the text subcommands below.
         data = self._run_json_command([xpu_smi, "discovery", "-j"])
         if not isinstance(data, dict):
             return None
@@ -1057,6 +1075,8 @@ class GPUInfo(NodeInfo):
             if device_id is None:
                 continue
 
+            # xpu-smi splits identity, stats, and config across different
+            # subcommands, so collect all three and merge them here.
             detail_text = self._get_xpu_device_text(xpu_smi, device_id, "discovery")
             stats_text = self._get_xpu_device_text(xpu_smi, device_id, "stats")
             config_text = self._get_xpu_device_text(xpu_smi, device_id, "config")
@@ -1072,7 +1092,9 @@ class GPUInfo(NodeInfo):
                         self._extract_xpu_field(detail_text, "Memory Physical Size")
                     ),
                     "memory_used_mib": self._parse_xpu_int_value(
-                        self._extract_table_value(stats_text, "GPU Memory Used \\(MiB\\)")
+                        self._extract_table_value(
+                            stats_text, "GPU Memory Used \\(MiB\\)"
+                        )
                     ),
                     "power_draw_w": self._parse_xpu_float_value(
                         self._extract_table_value(stats_text, "GPU Power \\(W\\)")
@@ -1085,7 +1107,9 @@ class GPUInfo(NodeInfo):
 
         return devices
 
-    def _get_xpu_device_text(self, xpu_smi: str, device_id: Any, subcommand: str) -> str:
+    def _get_xpu_device_text(
+        self, xpu_smi: str, device_id: Any, subcommand: str
+    ) -> str:
         """Run a textual xpu-smi device query and return stdout."""
         result = self._run_command([xpu_smi, subcommand, "-d", str(device_id)])
         if result.returncode == 0:
@@ -1376,6 +1400,7 @@ class GPUInfo(NodeInfo):
         Returns:
             NodeInfo with collected CUDA/NVIDIA information (INFO status, no validation)
         """
+
         def sh(cmd: str) -> str:
             """Run command and return stdout only."""
             try:
@@ -2827,7 +2852,8 @@ class PythonInfo(NodeInfo):
             torch = __import__("torch")
             version = getattr(torch, "__version__", "installed")
 
-            # Check accelerator backend availability
+            # Report backend availability explicitly so the summary shows whether
+            # this environment is wired for CUDA, XPU, both, or neither.
             cuda_status = None
             if hasattr(torch, "cuda"):
                 try:
@@ -2852,9 +2878,10 @@ class PythonInfo(NodeInfo):
                 except Exception:
                     pass
 
-            backend_status = ", ".join(
-                status for status in [cuda_status, xpu_status] if status
-            ) or None
+            backend_status = (
+                ", ".join(status for status in [cuda_status, xpu_status] if status)
+                or None
+            )
 
             # Get installation path
             install_path = None

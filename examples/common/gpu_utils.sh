@@ -484,10 +484,10 @@ gpu_gb_to_total_fraction() {
 #   so 0.21 * 18 ≈ 3.8 GiB — far less than the 10 GiB intended.
 #
 # This function queries CURRENT free memory from the available GPU SMI
-# backend (nvidia-smi or xpu-smi) and computes gib / free_mib. The result 
-# is a best-effort estimate: TensorRT-LLM will see less free memory than 
-# we measure here (model weights haven't loaded yet), so the actual KV 
-# cache allocation will be smaller than <gib>. 
+# backend (nvidia-smi or xpu-smi) and computes gib / free_mib. The result
+# is a best-effort estimate: TensorRT-LLM will see less free memory than
+# we measure here (model weights haven't loaded yet), so the actual KV
+# cache allocation will be smaller than <gib>.
 # For rough sizing this is fine; for precise control use the YAML config
 # with a known model size.
 #
