@@ -168,6 +168,16 @@ struct QueryRequest {
     sequence_hashes: Vec<u64>,
 }
 
+#[derive(Debug, Serialize)]
+struct OfferRequest {
+    blocks: Vec<G4PutBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfferResponse {
+    accepted: Vec<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct QueryHit {
     worker_id: u64,
@@ -177,8 +187,29 @@ struct QueryHit {
     _checksum: Option<[u8; 32]>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TransferBlock {
+    meta: G4PutBlock,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct PutPayloadRequest {
+    blocks: Vec<TransferBlock>,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchRequest {
+    sequence_hashes: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchResponse {
+    blocks: Vec<TransferBlock>,
+}
+
 async fn build_local_worker(args: &Args) -> Result<(KvbmLeader, KvbmWorker, u64)> {
-    let shape = vec![2, args.num_device_blocks, args.page_size * 128];
+    let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
     let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
         shape,
         args.device_id,
@@ -251,10 +282,41 @@ async fn main() -> Result<()> {
             checksum: None,
         })
         .collect();
+    let transfer_blocks: Vec<TransferBlock> = blocks
+        .iter()
+        .enumerate()
+        .map(|(offset, meta)| TransferBlock {
+            meta: meta.clone(),
+            payload: (0..meta.size_bytes)
+                .map(|i| ((i + offset) % 251) as u8)
+                .collect(),
+        })
+        .collect();
+
+    let offer: OfferResponse = client
+        .post(format!("{}/offer", args.backend_url))
+        .json(&OfferRequest {
+            blocks: blocks.clone(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    println!("offer accepted hashes: {:?}", offer.accepted);
+
+    let accepted_blocks: Vec<TransferBlock> = transfer_blocks
+        .iter()
+        .filter(|block| offer.accepted.contains(&block.meta.sequence_hash))
+        .cloned()
+        .collect();
 
     client
-        .post(format!("{}/put", args.backend_url))
-        .json(&blocks)
+        .post(format!("{}/put_payload", args.backend_url))
+        .json(&PutPayloadRequest {
+            blocks: accepted_blocks.clone(),
+        })
         .send()
         .await?
         .error_for_status()?;
@@ -273,6 +335,32 @@ async fn main() -> Result<()> {
         .json()
         .await?;
 
+    let fetched: FetchResponse = client
+        .post(format!("{}/fetch", args.backend_url))
+        .json(&FetchRequest {
+            sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    for expected in &transfer_blocks {
+        let actual = fetched
+            .blocks
+            .iter()
+            .find(|block| block.meta.sequence_hash == expected.meta.sequence_hash)
+            .with_context(|| format!("missing fetched block {}", expected.meta.sequence_hash))?;
+        anyhow::ensure!(
+            actual.payload == expected.payload,
+            "payload mismatch for sequence hash {}",
+            expected.meta.sequence_hash
+        );
+    }
+
+    let transferred_bytes: usize = fetched.blocks.iter().map(|block| block.payload.len()).sum();
+
     println!("queried hashes: {:?}", query_hashes);
     println!("remote hits:");
     for hit in hits {
@@ -281,7 +369,12 @@ async fn main() -> Result<()> {
             hit.worker_id, hit.sequence_hash, hit.disk_block_idx, hit.size_bytes
         );
     }
-    println!("note: this smoke tool validates worker bring-up plus remote G4 put/query only; remote fetch/onboard is not wired through a network path yet.");
+    println!(
+        "transferred {} blocks / {} bytes via the smoke HTTP transfer backend",
+        fetched.blocks.len(),
+        transferred_bytes
+    );
+    println!("note: this validates actual byte transfer in the smoke backend; real KVBM remote data-plane integration is still a separate step.");
 
     Ok(())
 }

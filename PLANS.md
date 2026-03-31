@@ -226,6 +226,14 @@ Current in-progress run (2026-03-31 02:20:50 UTC):
   - when that data-plane work starts, treat a NIXL-backed transport as a strong
     candidate for the first real backend, while leaving room for other remote
     transfer backends if they fit the runtime and deployment constraints better
+  - scope the real NIXL-backed G4 transfer protocol as a staged flow:
+    `query/offer (metadata only) -> remote disk-to-pinned-host staging on the
+    storage side -> remote blockset/descriptor export -> local import of remote
+    descriptors -> NIXL transfer into local host/device targets -> onboard`
+  - the current smoke binaries may validate a minimal HTTP `offer -> put(bytes)
+    -> query -> fetch(bytes)` protocol, but that should remain clearly labeled
+    as a bring-up path and not be mistaken for the real KVBM remote transfer
+    backend
   - add broader integration coverage once that runtime seam exists so the system
     exercises real `query -> fetch -> onboard` across distinct owners
 - Exact next file or command to touch:

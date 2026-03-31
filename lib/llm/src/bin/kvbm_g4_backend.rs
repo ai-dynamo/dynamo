@@ -3,6 +3,7 @@
 
 use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -164,9 +165,41 @@ struct QueryRequest {
     sequence_hashes: Vec<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OfferRequest {
+    blocks: Vec<G4PutBlock>,
+}
+
+#[derive(Debug, Serialize)]
+struct OfferResponse {
+    accepted: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TransferBlock {
+    meta: G4PutBlock,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutPayloadRequest {
+    blocks: Vec<TransferBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchRequest {
+    sequence_hashes: Vec<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchResponse {
+    blocks: Vec<TransferBlock>,
+}
+
 #[derive(Clone)]
 struct AppState {
     agent: Arc<G4StorageAgent>,
+    payloads: Arc<tokio::sync::RwLock<HashMap<u64, TransferBlock>>>,
     listen: SocketAddr,
     _leader: Arc<KvbmLeader>,
     _worker: Arc<tokio::sync::Mutex<KvbmWorker>>,
@@ -194,8 +227,69 @@ async fn query_blocks(
     Json(state.agent.query_blocks(&request.sequence_hashes).await)
 }
 
-async fn build_backend(args: &Args) -> Result<(Arc<KvbmLeader>, Arc<tokio::sync::Mutex<KvbmWorker>>, Arc<G4StorageAgent>)> {
-    let shape = vec![2, args.num_device_blocks, args.page_size * 128];
+async fn offer_blocks(
+    State(state): State<AppState>,
+    Json(request): Json<OfferRequest>,
+) -> Json<OfferResponse> {
+    let accepted = request
+        .blocks
+        .into_iter()
+        .filter_map(|block| {
+            state
+                .agent
+                .block_index()
+                .block(block.sequence_hash)
+                .is_none()
+                .then_some(block.sequence_hash)
+        })
+        .collect();
+
+    Json(OfferResponse { accepted })
+}
+
+async fn put_payload_blocks(
+    State(state): State<AppState>,
+    Json(request): Json<PutPayloadRequest>,
+) -> Result<StatusCode, StatusCode> {
+    {
+        let mut payloads = state.payloads.write().await;
+        for block in &request.blocks {
+            if block.payload.len() != block.meta.size_bytes {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            payloads.insert(block.meta.sequence_hash, block.clone());
+        }
+    }
+
+    let metadata: Vec<G4PutBlock> = request.blocks.into_iter().map(|block| block.meta).collect();
+    state.agent.put_blocks(metadata).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn fetch_blocks(
+    State(state): State<AppState>,
+    Json(request): Json<FetchRequest>,
+) -> Result<Json<FetchResponse>, StatusCode> {
+    let payloads = state.payloads.read().await;
+    let mut blocks = Vec::with_capacity(request.sequence_hashes.len());
+
+    for sequence_hash in request.sequence_hashes {
+        let Some(block) = payloads.get(&sequence_hash) else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        blocks.push(block.clone());
+    }
+
+    Ok(Json(FetchResponse { blocks }))
+}
+
+async fn build_backend(args: &Args) -> Result<(
+    Arc<KvbmLeader>,
+    Arc<tokio::sync::Mutex<KvbmWorker>>,
+    Arc<G4StorageAgent>,
+    Arc<tokio::sync::RwLock<HashMap<u64, TransferBlock>>>,
+)> {
+    let shape = vec![args.num_device_blocks, 1, 2, args.page_size, 128];
     let tensors: Vec<Arc<dyn TorchTensor>> = vec![Arc::new(MockTensor::new(
         shape,
         args.device_id,
@@ -236,17 +330,24 @@ async fn build_backend(args: &Args) -> Result<(Arc<KvbmLeader>, Arc<tokio::sync:
         endpoint: format!("http://{}", args.listen),
     };
     let agent = Arc::new(worker.into_g4_storage_agent(storage_worker, block_index).await?);
+    let payloads = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
-    Ok((leader, Arc::new(tokio::sync::Mutex::new(worker)), agent))
+    Ok((
+        leader,
+        Arc::new(tokio::sync::Mutex::new(worker)),
+        agent,
+        payloads,
+    ))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse()?;
-    let (leader, worker, agent) = build_backend(&args).await?;
+    let (leader, worker, agent, payloads) = build_backend(&args).await?;
 
     let state = AppState {
         agent,
+        payloads,
         listen: args.listen,
         _leader: leader,
         _worker: worker,
@@ -254,8 +355,11 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/offer", post(offer_blocks))
         .route("/put", post(put_blocks))
+        .route("/put_payload", post(put_payload_blocks))
         .route("/query", post(query_blocks))
+        .route("/fetch", post(fetch_blocks))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
