@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-gaie-fp8
+  namespace: dynamo-system
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: deepseek-v31-model-rwx
+  containers:
+  - name: perf
+    image: nvcr.io/nvidia/tritonserver:25.03-py3-sdk
+    command: ["sleep", "infinity"]
+    volumeMounts:
+    - name: model-cache
+      mountPath: /opt/model-cache
+    resources:
+      requests:
+        cpu: "4"
+        memory: "16Gi"
+      limits:
+        cpu: "8"
+        memory: "32Gi"

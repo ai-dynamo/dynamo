@@ -1,0 +1,37 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: sglang-dsv31-health-check
+  namespace: dynamo-system
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /health
+    logConfig:
+      enabled: true
+  targetRef:
+    group: ""
+    kind: Service
+    name: sglang-dsv31-aggregated-gaie-pool-ips-4e170b3d
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: sglang-dsv31-disagg-health-check
+  namespace: dynamo-system
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /health
+    logConfig:
+      enabled: true
+  targetRef:
+    group: ""
+    kind: Service
+    name: sglang-dsv31-disagg-gaie-pool-ips-25cadd13

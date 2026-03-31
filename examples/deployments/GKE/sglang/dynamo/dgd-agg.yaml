@@ -1,0 +1,170 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-dsv31-aggregated
+  namespace: dynamo-system
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: sglang
+  envs:
+  - name: HF_HOME
+    value: /opt/model-cache
+  - name: NCCL_DEBUG
+    value: INFO
+  - name: NCCL_DEBUG_SUBSYS
+    value: INIT,ENV
+  # RDMA-enabled cluster - don't disable IB/P2P
+  - name: NCCL_SHIMNET_GUEST_CONFIG_CHECKER_DISABLE
+    value: "1"
+  # GPU-side collectives / memory (single-node TP on Blackwell)
+  - name: NCCL_CUMEM_ENABLE
+    value: "0"
+  - name: NCCL_NVLS_ENABLE
+    value: "0"
+  - name: NCCL_MNNVL_ENABLE
+    value: "1"
+  - name: MC_FORCE_MNNVL
+    value: "1"
+  # SGLang / Dynamo tuning
+  - name: DYN_SKIP_SGLANG_LOG_FORMATTING
+    value: "1"
+  - name: SGLANG_ENABLE_SPEC_V2
+    value: "1"
+  - name: SGLANG_ENABLE_JIT_DEEPGEMM
+    value: "true"
+  - name: SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK
+    value: "1"
+  pvcs:
+  - create: false
+    name: deepseek-v31-model-rwx
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+      # KV-aware router for intelligent request routing based on KV cache locality
+      - name: DYN_ROUTER_MODE
+        value: kv
+      extraPodSpec:
+        initContainers:
+        - name: fix-permissions
+          image: busybox
+          command:
+          - sh
+          - -c
+          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: deepseek-v31-model-rwx
+            mountPath: /opt/model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+      replicas: 1
+      volumeMounts:
+      - name: deepseek-v31-model-rwx
+        mountPoint: /opt/model-cache
+    # Aggregated worker - handles both prefill and decode internally
+    worker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        labels:
+          nvidia-nsight-profile: "enabled"
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        initContainers:
+        - name: fix-permissions
+          image: busybox
+          command:
+          - sh
+          - -c
+          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: deepseek-v31-model-rwx
+            mountPath: /opt/model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.1
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            sleep $((RANDOM % 30))
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig 2>/dev/null || true
+            nvidia-smi
+            exec python3 -m dynamo.sglang \
+              --model-path deepseek-ai/DeepSeek-V3.1 \
+              --served-model-name deepseek-ai/DeepSeek-V3.1 \
+              --tp 8 \
+              --ep-size 8 \
+              --trust-remote-code \
+              --host 0.0.0.0 \
+              --mem-fraction-static 0.85 \
+              --max-running-requests 24
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 300  # ~50 min for large model loading
+          # RDMA network resources
+          resources:
+            limits:
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              networking.gke.io.networks/rdma-4: "1"
+              networking.gke.io.networks/rdma-5: "1"
+              networking.gke.io.networks/rdma-6: "1"
+              networking.gke.io.networks/rdma-7: "1"
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      sharedMemory:
+        size: 80Gi
+      volumeMounts:
+      - name: deepseek-v31-model-rwx
+        mountPoint: /opt/model-cache
