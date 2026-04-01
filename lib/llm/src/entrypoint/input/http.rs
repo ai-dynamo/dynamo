@@ -103,10 +103,6 @@ pub async fn run(
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
-            manager.save_model_card(
-                &format!("__local_model_card_{}", model.display_name()),
-                model.card().clone(),
-            )?;
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
             manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
@@ -124,10 +120,6 @@ pub async fn run(
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
-            manager.save_model_card(
-                &format!("__local_model_card_{}", model.display_name()),
-                model.card().clone(),
-            )?;
 
             let tokenizer = model.card().tokenizer()?;
             let chat_pipeline = common::build_pipeline::<

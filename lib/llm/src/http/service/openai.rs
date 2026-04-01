@@ -2865,6 +2865,18 @@ mod tests {
         make_tokenize_state_with_path(model_name, TOKENIZE_MODEL_PATH)
     }
 
+    fn make_tokenize_state_without_card(model_name: &str) -> Arc<service_v2::State> {
+        let manager = Arc::new(ModelManager::new());
+        manager.add_prefill_model(model_name, "missing-card").unwrap();
+
+        let discovery = Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
+        Arc::new(service_v2::State::new(
+            manager,
+            discovery,
+            CancellationToken::new(),
+        ))
+    }
+
     async fn response_json<T: serde::de::DeserializeOwned>(response: Response) -> T {
         let body = response.into_body();
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -4056,6 +4068,50 @@ mod tests {
         .unwrap();
         let body: DetokenizeResponse = response_json(response).await;
         assert_eq!(body.prompt, prompt);
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_route_rejects_models_without_card_metadata() {
+        let state = make_tokenize_state_without_card("test-model");
+        let error = tokenize(
+            State(state),
+            Json(TokenizeRequest::Completion(TokenizeCompletionRequest {
+                model: Some("test-model".to_string()),
+                prompt: "hello".to_string(),
+                add_special_tokens: true,
+                return_token_strs: false,
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let response = error.into_response();
+        let body: ErrorMessage = response_json(response).await;
+        assert!(
+            body.message
+                .contains("Tokenizer metadata is not available for model 'test-model'")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detokenize_route_rejects_models_without_card_metadata() {
+        let state = make_tokenize_state_without_card("test-model");
+        let error = detokenize(
+            State(state),
+            Json(DetokenizeRequest {
+                model: Some("test-model".to_string()),
+                tokens: vec![1, 2, 3],
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        let response = error.into_response();
+        let body: ErrorMessage = response_json(response).await;
+        assert!(
+            body.message
+                .contains("Tokenizer metadata is not available for model 'test-model'")
+        );
     }
 
     #[tokio::test]
