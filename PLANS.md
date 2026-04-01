@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:35:55 UTC
+Last updated: 2026-04-01 11:43:52 UTC
 
 ## Active state
 
@@ -10,13 +10,13 @@ Last updated: 2026-04-01 11:35:55 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD` revalidated again in this run: `73ebbfbce17e`
+  - live detached `HEAD` revalidated again in this run: `7fcc6753792d`
   - prior docs-only handoff commit before the current validation refresh:
-    `462db0873bd7`
+    `73ebbfbce17e`
   - the newer detached `HEAD` commits since `1eb7021d1281` are still
     docs-only handoff compactions
-  - prior run landed the latest signed docs-only handoff commit:
-    `73ebbfbce17e` (`docs: finalize g3pb handoff`)
+  - this run is refreshing the signed docs-only handoff commit:
+    `7fcc6753792d` (`docs: refresh g3pb handoff`)
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -34,7 +34,7 @@ Last updated: 2026-04-01 11:35:55 UTC
     the live detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 11:35:55 UTC)
+## Current run (2026-04-01 11:43:52 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -42,7 +42,7 @@ Last updated: 2026-04-01 11:35:55 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `73ebbfbce17e`
+- Re-audited the live repo state from detached `HEAD` `7fcc6753792d`
 - Re-confirmed the live tree still contains the seams required by the handoff
   and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -59,13 +59,16 @@ Last updated: 2026-04-01 11:35:55 UTC
   validation results from this run
 - Confirmed again that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
-- Reconfirmed from the live tree that the latest detached `HEAD` remains the
-  prior docs-only handoff commit `73ebbfbce17e`; no new non-doc changes
-  surfaced before this `PLANS.md` refresh
+- Reconfirmed from the live tree that detached `HEAD` `7fcc6753792d` still
+  contains only the previously validated non-docs `G3PB` implementation plus
+  docs-only handoff compactions
+- Capturing this run as a fresh on-disk handoff refresh in `PLANS.md`
+- Preparing a post-edit `g3pb::` spot check and a new signed docs-only handoff
+  commit after this refresh
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `73ebbfbce17e`
+- the detached `HEAD` validated in this run is `7fcc6753792d`
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -74,7 +77,8 @@ Last updated: 2026-04-01 11:35:55 UTC
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- the latest signed docs-only handoff commit remains `73ebbfbce17e`
+- the latest signed docs-only handoff commit before this refresh is still
+  `7fcc6753792d`
 - no further non-docs work surfaced for the active `G3PB` slice
 - no remaining execution work is open for the active `G3PB` slice
 
@@ -89,7 +93,7 @@ Last updated: 2026-04-01 11:35:55 UTC
 - `sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`
   - pass
 - `git rev-parse --short=12 HEAD`
-  - pass (`73ebbfbce17e`)
+  - pass (`7fcc6753792d`)
 - `git log --oneline -8`
   - pass
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
@@ -117,7 +121,7 @@ Last updated: 2026-04-01 11:35:55 UTC
 - `git status --short --branch`
   - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 11:35:55 UTC`)
+  - pass (`2026-04-01 11:43:52 UTC`)
 
 ### Decisions confirmed in this run
 
@@ -148,8 +152,7 @@ Last updated: 2026-04-01 11:35:55 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run revalidated the active slice from detached `HEAD`
-  `73ebbfbce17e`; the latest signed docs-only handoff commit still remains
-  `73ebbfbce17e`
+  `7fcc6753792d`
 - the active `G3PB` slice still has no pending code changes
 - if work resumes later, start by rerunning the same focused audit and
   validation stack from the live detached `HEAD` before assuming this
