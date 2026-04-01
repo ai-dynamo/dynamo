@@ -1055,8 +1055,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Refreshed `PLANS.md` with this completion audit so the next run does not
   have to rediscover that the remaining items are follow-on backlog, not
   missing work in the current slice
-- ✅ Recorded the audit as a signed small commit:
-  - `d8cd551c5 docs: refresh g3pb completion audit`
+- ✅ Recorded the audit/handoff refresh as signed small docs commits in this
+  run
 
 ### Current findings before final handoff
 
@@ -1110,8 +1110,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 ### Handoff for next run
 
 - no additional implementation work remains in the active `G3PB` plan
-- this completion-audit run is committed:
-  - `d8cd551c5 docs: refresh g3pb completion audit`
+- this completion-audit run is already committed in signed docs-only commits
 - the next run should resume only from the existing non-blocking follow-on
   backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
