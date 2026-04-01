@@ -284,11 +284,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
     rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
 
-# Copy tests, deploy, and the trtllm/mocker component subtrees for CI.
+# Copy tests, deploy, and the trtllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/

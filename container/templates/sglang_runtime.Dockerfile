@@ -165,11 +165,12 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # Switch back to dynamo user after package installations
 USER dynamo
 
-# Copy tests, deploy, and the sglang/mocker component subtrees for CI.
+# Copy tests, deploy, and the sglang/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/

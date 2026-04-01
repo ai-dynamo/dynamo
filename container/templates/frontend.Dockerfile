@@ -47,12 +47,15 @@ WORKDIR /
 COPY --chown=dynamo: --from=epp /epp /epp
 
 COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
-# Copy tests, benchmarks, deploy, and the frontend/mocker component subtrees for CI.
+# Copy tests, benchmarks, deploy, and the frontend/common/router/mocker component
+# subtrees for CI.
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chown=dynamo: components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
+COPY --chown=dynamo: components/src/dynamo/router /workspace/components/src/dynamo/router
 COPY --chown=dynamo: components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chown=dynamo: recipes/ /workspace/recipes/
 # Copy attribution files with correct ownership
