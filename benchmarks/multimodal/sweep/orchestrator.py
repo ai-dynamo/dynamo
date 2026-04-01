@@ -28,7 +28,7 @@ def run_sweep(
     config: SweepConfig,
     repo_root: Optional[Path] = None,
 ) -> None:
-    """Execute the full benchmark sweep: for each input file x benchmark config."""
+    """Execute the full benchmark sweep: for each config x input file x sweep value."""
     if repo_root is None:
         repo_root = resolve_repo_root()
 
@@ -47,7 +47,9 @@ def run_sweep(
     print(f"  Sweep values:  {sweep_values}")
     print(f"  OSL:           {config.osl}")
     print(f"  Requests:      {config.request_count} per {sweep_mode}")
-    print(f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}")
+    print(
+        f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}"
+    )
     print(f"  Output:        {output_base}")
     print(flush=True)
 
@@ -55,25 +57,24 @@ def run_sweep(
     env_overrides = dict(config.env) if config.env else {}
 
     try:
-        for input_file in config.input_files:
-            file_tag = input_file_tag(input_file)
-            file_output_dir = output_base / file_tag
+        for bench_cfg in config.configs:
+            workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
 
-            _print_banner(f"Input: {Path(input_file).name}  ({file_tag})", char="#")
+            _print_banner(f"Config: {bench_cfg.label}", char="#")
 
-            for bench_cfg in config.configs:
-                workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
-                sweep_dir = file_output_dir / bench_cfg.label
+            if not config.restart_server_every_benchmark:
+                server.start(
+                    workflow_script=workflow_abs,
+                    model=config.model,
+                    extra_args=bench_cfg.extra_args,
+                    env_overrides=env_overrides,
+                )
 
-                if not config.restart_server_every_benchmark:
-                    server.start(
-                        workflow_script=workflow_abs,
-                        model=config.model,
-                        extra_args=bench_cfg.extra_args,
-                        env_overrides=env_overrides,
-                    )
+            try:
+                for input_file in config.input_files:
+                    file_tag = input_file_tag(input_file)
+                    sweep_dir = output_base / file_tag / bench_cfg.label
 
-                try:
                     for value in sorted(sweep_values):
                         artifact_dir = sweep_dir / f"{sweep_mode}{value}"
 
@@ -114,13 +115,15 @@ def run_sweep(
                         finally:
                             if config.restart_server_every_benchmark:
                                 server.stop()
-                finally:
-                    if not config.restart_server_every_benchmark:
-                        server.stop()
+            finally:
+                if not config.restart_server_every_benchmark:
+                    server.stop()
 
-            if not config.skip_plots:
+        if not config.skip_plots:
+            for input_file in config.input_files:
+                file_tag = input_file_tag(input_file)
                 _generate_plots_for_file(
-                    file_output_dir,
+                    output_base / file_tag,
                     [c.label for c in config.configs],
                 )
     finally:
