@@ -98,14 +98,8 @@ impl TransferCapabilities {
 
     fn test_gds_transfer(&self) -> anyhow::Result<()> {
         let agent = NixlAgent::require_backends("agent", &["GDS_MT"])?;
-        let device_backend = DeviceBackend::auto_detect().unwrap_or({
-            #[cfg(feature = "cuda")]
-            { DeviceBackend::Cuda }
-            #[cfg(all(not(feature = "cuda"), feature = "hpu"))]
-            { DeviceBackend::Hpu }
-            #[cfg(all(not(feature = "cuda"), not(feature = "hpu"), feature = "xpu"))]
-            { DeviceBackend::Ze }
-        });
+        let device_backend = DeviceBackend::auto_detect()
+            .expect("No device backend available for test");
         let device_id = 0;
 
         // Try a little test transfer and see if it works.

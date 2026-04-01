@@ -127,24 +127,47 @@ fn get_bandwidth_gbs(latencies: Vec<Duration>, args: &Args) -> f64 {
 }
 
 async fn benchmark(args: &Args) -> Result<()> {
-    // Parse device backend
+    // Parse device backend with runtime availability checks
     let device_backend = match args.backend.to_lowercase().as_str() {
-        #[cfg(feature = "cuda")]
-        "cuda" => DeviceBackend::Cuda,
-        #[cfg(feature = "hpu")]
-        "hpu" => DeviceBackend::Hpu,
-        #[cfg(feature = "xpu")]
-        "ze" => DeviceBackend::Ze,
+        "cuda" => {
+            if DeviceBackend::Cuda.is_available() {
+                DeviceBackend::Cuda
+            } else {
+                anyhow::bail!("CUDA backend not available on this system")
+            }
+        }
+        "hpu" => {
+            if DeviceBackend::Hpu.is_available() {
+                DeviceBackend::Hpu
+            } else {
+                anyhow::bail!("HPU (Synapse) backend not available on this system")
+            }
+        }
+        "ze" | "xpu" => {
+            if DeviceBackend::Ze.is_available() {
+                DeviceBackend::Ze
+            } else {
+                anyhow::bail!("XPU (Level-Zero) backend not available on this system")
+            }
+        }
         _ => {
-            let available = vec![
-                #[cfg(feature = "cuda")]
-                "cuda",
-                #[cfg(feature = "hpu")]
-                "hpu",
-                #[cfg(feature = "xpu")]
-                "ze",
-            ];
-            anyhow::bail!("Invalid backend: {}. Available: {}", args.backend, available.join(", "))
+            let available_backends = DeviceBackend::list_available();
+            let available_names: Vec<_> = available_backends
+                .iter()
+                .map(|b| b.name())
+                .collect();
+            if available_names.is_empty() {
+                anyhow::bail!(
+                    "Invalid backend: '{}'. No device backends are available on this system.",
+                    args.backend
+                )
+            } else {
+                anyhow::bail!(
+                    "Invalid backend: '{}'. Available backends on this system: {}",
+                    args.backend,
+                    available_names.join(", ")
+                )
+            }
         }
     };
 

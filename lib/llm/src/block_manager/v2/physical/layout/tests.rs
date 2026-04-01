@@ -19,18 +19,9 @@ use std::sync::Arc;
 
 // Helper for tests: auto-detect backend or use CUDA as fallback
 fn get_test_backend() -> (DeviceBackend, u32) {
-    match DeviceBackend::auto_detect() {
-        Ok(backend) => (backend, 0),
-        Err(_) => {
-            // Fallback for tests without hardware
-            #[cfg(feature = "cuda")]
-            return (DeviceBackend::Cuda, 0);
-            #[cfg(all(not(feature = "cuda"), feature = "hpu"))]
-            return (DeviceBackend::Hpu, 0);
-            #[cfg(all(not(feature = "cuda"), not(feature = "hpu"), feature = "xpu"))]
-            return (DeviceBackend::Ze, 0);
-        }
-    }
+    let backend = DeviceBackend::auto_detect()
+        .expect("No device backend available for test");
+    (backend, 0)
 }
 
 // Simple mock implementation for testing

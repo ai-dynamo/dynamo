@@ -8,10 +8,8 @@ pub mod detection;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-
 #[cfg(feature = "xpu")]
 pub mod ze;
-
 #[cfg(feature = "hpu")]
 pub mod hpu;
 
@@ -27,13 +25,8 @@ pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps};
 /// Device backend type selector
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceBackend {
-    #[cfg(feature = "cuda")]
     Cuda,
-
-    #[cfg(feature = "xpu")]
     Ze,
-
-    #[cfg(feature = "hpu")]
     Hpu,
 }
 
@@ -41,11 +34,8 @@ impl DeviceBackend {
     /// Get human-readable name
     pub fn name(&self) -> &'static str {
         match self {
-            #[cfg(feature = "cuda")]
             Self::Cuda => "CUDA",
-            #[cfg(feature = "xpu")]
             Self::Ze => "Level-Zero (XPU)",
-            #[cfg(feature = "hpu")]
             Self::Hpu => "Synapse (HPU)",
         }
     }
@@ -53,12 +43,24 @@ impl DeviceBackend {
     /// Check if backend is available on current system
     pub fn is_available(&self) -> bool {
         match self {
-            #[cfg(feature = "cuda")]
-            Self::Cuda => cuda::is_available(),
-            #[cfg(feature = "xpu")]
-            Self::Ze => ze::is_available(),
-            #[cfg(feature = "hpu")]
-            Self::Hpu => hpu::is_available(),
+            Self::Cuda => {
+                #[cfg(feature = "cuda")]
+                { cuda::is_available() }
+                #[cfg(not(feature = "cuda"))]
+                { false }
+            }
+            Self::Ze => {
+                #[cfg(feature = "xpu")]
+                { ze::is_available() }
+                #[cfg(not(feature = "xpu"))]
+                { false }
+            }
+            Self::Hpu => {
+                #[cfg(feature = "hpu")]
+                { hpu::is_available() }
+                #[cfg(not(feature = "hpu"))]
+                { false }
+            }
         }
     }
 }
@@ -68,24 +70,9 @@ impl FromStr for DeviceBackend {
 
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
-            "cuda" | "gpu" | "nvidia" => {
-                #[cfg(feature = "cuda")]
-                return Ok(Self::Cuda);
-                #[cfg(not(feature = "cuda"))]
-                bail!("CUDA support not compiled")
-            }
-            "ze" | "xpu" | "intel" | "level-zero" => {
-                #[cfg(feature = "xpu")]
-                return Ok(Self::Ze);
-                #[cfg(not(feature = "xpu"))]
-                bail!("Level-Zero support not compiled")
-            }
-            "hpu" | "habana" | "gaudi" | "synapse" => {
-                #[cfg(feature = "hpu")]
-                return Ok(Self::Hpu);
-                #[cfg(not(feature = "hpu"))]
-                bail!("Synapse support not compiled")
-            }
+            "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
+            "ze" | "xpu" | "intel" | "level-zero" => Ok(Self::Ze),
+            "hpu" | "habana" | "gaudi" | "synapse" => Ok(Self::Hpu),
             _ => bail!("Unknown device backend: {}", s),
         }
     }
@@ -102,14 +89,24 @@ impl DeviceContext {
     /// Create a new device context for the specified backend and device
     pub fn new(backend: DeviceBackend, device_id: u32) -> Result<Self> {
         let ops: Box<dyn DeviceContextOps> = match backend {
-            #[cfg(feature = "cuda")]
-            DeviceBackend::Cuda => Box::new(cuda::CudaContext::new(device_id)?),
-
-            #[cfg(feature = "xpu")]
-            DeviceBackend::Ze => Box::new(ze::ZeContext::new(device_id)?),
-
-            #[cfg(feature = "hpu")]
-            DeviceBackend::Hpu => Box::new(hpu::HpuContext::new(device_id)?),
+            DeviceBackend::Cuda => {
+                #[cfg(feature = "cuda")]
+                { Box::new(cuda::CudaContext::new(device_id)?) }
+                #[cfg(not(feature = "cuda"))]
+                { bail!("CUDA backend not compiled (enable 'cuda' feature)") }
+            }
+            DeviceBackend::Ze => {
+                #[cfg(feature = "xpu")]
+                { Box::new(ze::ZeContext::new(device_id)?) }
+                #[cfg(not(feature = "xpu"))]
+                { bail!("Level-Zero backend not compiled (enable 'xpu' feature)") }
+            }
+            DeviceBackend::Hpu => {
+                #[cfg(feature = "hpu")]
+                { Box::new(hpu::HpuContext::new(device_id)?) }
+                #[cfg(not(feature = "hpu"))]
+                { bail!("Synapse backend not compiled (enable 'hpu' feature)") }
+            }
         };
 
         Ok(Self {

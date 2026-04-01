@@ -538,17 +538,9 @@ mod tests {
     }
 
     fn get_test_backend() -> (DeviceBackend, u32) {
-        match DeviceBackend::auto_detect() {
-            Ok(backend) => (backend, 0),
-            Err(_) => {
-                #[cfg(feature = "cuda")]
-                return (DeviceBackend::Cuda, 0);
-                #[cfg(all(not(feature = "cuda"), feature = "hpu"))]
-                return (DeviceBackend::Hpu, 0);
-                #[cfg(all(not(feature = "cuda"), not(feature = "hpu"), feature = "xpu"))]
-                return (DeviceBackend::Ze, 0);
-            }
-        }
+        let backend = DeviceBackend::auto_detect()
+            .expect("No device backend available for test");
+        (backend, 0)
     }
 
     fn make_test_layout(agent: &NixlAgent) -> PhysicalLayout {
