@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 12:38:04 UTC
+Last updated: 2026-04-01 12:42:43 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 12:38:04 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD`: `78c762331d90`
+  - live detached `HEAD`: `82427798f5af`
 - Current implementation direction:
   - `G3PB` remains the peer-cache replacement for the unlanded `G4`
     disk-identity surface
@@ -26,7 +26,7 @@ Last updated: 2026-04-01 12:38:04 UTC
   - no open implementation work remains for the active first-pass `G3PB` slice
   - this run is a live-head validation and handoff compaction refresh only
 
-## Current run (2026-04-01 12:38:04 UTC)
+## Current run (2026-04-01 12:42:43 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -34,7 +34,7 @@ Last updated: 2026-04-01 12:38:04 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `78c762331d90`
+- Re-audited the live repo state from detached `HEAD` `82427798f5af`
 - Re-confirmed the live tree still contains the seams required by the handoff
   and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -50,39 +50,32 @@ Last updated: 2026-04-01 12:38:04 UTC
 - Confirmed again that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
 - Refreshed the on-disk handoff for this validation pass
-- Re-read `PLANS.md` after the edit and re-ran the post-edit `g3pb::` spot
-  check; both passed
 
 ### Current findings in this run
 
 - the active `G3PB` implementation slice still appears complete on detached
-  `HEAD` `78c762331d90`
+  `HEAD` `82427798f5af`
 - no new `G3PB` implementation gap was identified by the audit or validation
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- this run has refreshed the on-disk handoff and completed its post-edit
-  validation; the only remaining question is whether to land another signed
-  docs-only handoff commit
+- this run has refreshed the on-disk handoff and completed the live-head
+  validation sweep
 
 ### Validation completed in this run
 
-- `git status --short`
-  - pass (`M PLANS.md` at start of run)
+- `git status --short --branch`
+  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `sed -n '1,220p' Agents.md`
   - pass
 - `sed -n '1,260p' PLANS.md`
   - pass before refresh
 - `sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`
   - pass
-- `git status --short --branch`
-  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `git rev-parse --short=12 HEAD`
-  - pass (`f54c6d1aed1d`)
+  - pass (`82427798f5af`)
 - `git log --oneline -8`
   - pass
-- `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 12:35:58 UTC`)
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
@@ -105,14 +98,8 @@ Last updated: 2026-04-01 12:38:04 UTC
   - pass as an end-to-end test inventory search
   - result: no standalone runnable `G3PB` e2e test target surfaced beyond the
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
-- `git status --short --branch`
-  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 12:36:52 UTC`)
-- `sed -n '1,260p' PLANS.md`
-  - pass as the post-edit reread
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
+  - pass (`2026-04-01 12:42:43 UTC`)
 
 ### Decisions confirmed in this run
 
@@ -126,15 +113,14 @@ Last updated: 2026-04-01 12:38:04 UTC
 
 ### Remaining work in this run
 
-- land a signed docs-only handoff commit from the still green tree
-- re-read repo state from the new detached `HEAD`
-- re-run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` as the
-  final post-commit spot check
-- re-read `PLANS.md` one more time before stopping
+- re-read `PLANS.md` after this edit
+- re-run a post-edit `g3pb::` spot check
+- if the worktree is otherwise clean and the post-edit check passes, land a
+  signed docs-only handoff commit
 
 ### Exact next step
 
-- run `git commit --signoff -m "docs: refresh g3pb handoff"`
+- `sed -n '1,260p' PLANS.md`
 
 ### Handoff for next run
 
@@ -145,14 +131,14 @@ Last updated: 2026-04-01 12:38:04 UTC
 - validate from the live detached `HEAD` rather than assuming this docs-only
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
-- this run has validated the active slice from detached `HEAD`
-  `78c762331d90` and completed the post-edit reread plus post-edit `g3pb::`
-  spot check; the remaining work is a final optional docs-only commit and
-  post-commit verification
+- detached `HEAD` `82427798f5af` has green focused `G3PB` validation:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
 - the active `G3PB` slice still has no pending code changes
-- `PLANS.md` is intentionally left dirty only with this in-progress handoff
-  refresh; complete the post-edit validation before deciding whether another
-  docs-only commit is useful
+- if `PLANS.md` is the only dirty file after the post-edit spot check, another
+  signed docs-only handoff commit is acceptable
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
