@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:01:39 UTC
+Last updated: 2026-04-01 10:07:19 UTC
 
 ## Active state
 
@@ -11,7 +11,7 @@ Last updated: 2026-04-01 10:01:39 UTC
 - Current branch shape:
   - detached `HEAD`
   - current live tip before this run's docs-only handoff refresh:
-    `47ec042f009c`
+    `526d8548a164`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 10:01:39 UTC
   - this run is a fresh validation plus handoff compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:01:39 UTC)
+## Current run (2026-04-01 10:07:19 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -36,7 +36,7 @@ Last updated: 2026-04-01 10:01:39 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `47ec042f009c`
+- Re-audited the live repo state from detached `HEAD` `526d8548a164`
 - Confirmed the active tree still contains the seams the handoff and design
   doc require:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -50,13 +50,13 @@ Last updated: 2026-04-01 10:01:39 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` again so this file reflects the fresh validation state
-  from `47ec042f009c`
+  from `526d8548a164`
 
 ### Current findings in this run
 
-- the detached `HEAD` validated at the start of this run was `47ec042f009c`
-- no non-docs tree delta was needed in this run; only the handoff document was
-  refreshed
+- the detached `HEAD` validated at the start of this run was `526d8548a164`
+- no non-docs tree delta was needed in this run; only the handoff document is
+  being refreshed
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -69,7 +69,7 @@ Last updated: 2026-04-01 10:01:39 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`47ec042f009c`)
+  - pass (`526d8548a164`)
 - `git log --oneline -8`
   - pass
 - `sed -n '1,220p' Agents.md`
@@ -101,11 +101,8 @@ Last updated: 2026-04-01 10:01:39 UTC
   - result: no new active `G3PB` implementation gap surfaced; existing
     repo-wide `TODO` and `FIXME` markers remain outside this closed slice
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as a post-edit spot check with only `PLANS.md` dirty in
-    the worktree
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the final pre-commit spot check after correcting the
-    validation list
+  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
+    in the worktree
 
 ### Decisions confirmed in this run
 
@@ -140,7 +137,7 @@ Last updated: 2026-04-01 10:01:39 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `47ec042f009c`; only a docs-only handoff refresh should differ from that tip
+  `526d8548a164`; only a docs-only handoff refresh should differ from that tip
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
