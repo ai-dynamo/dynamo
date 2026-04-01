@@ -20,7 +20,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- Currently, these setups are only tested with the kGateways Inference Gateway.
+- Currently, these setups are only tested with the kGateway Inference Gateway.
 
 ## Prerequisites
 
