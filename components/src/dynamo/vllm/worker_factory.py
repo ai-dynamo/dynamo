@@ -23,7 +23,7 @@ from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .multimodal_handlers import (
     EncodeWorkerHandler,
@@ -43,13 +43,14 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     base_path = Path(bench_cfg["output_path"])
     timeout = int(bench_cfg.get("timeout", 300))
 
-    dp_start, dp_size = 0, 1
     try:
-        from .main import get_dp_range_for_worker
-
         dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     except Exception:
-        pass
+        logger.warning(
+            "Could not determine DP range, assuming single rank",
+            exc_info=True,
+        )
+        dp_start, dp_size = 0, 1
 
     rank_paths = []
     for dp_rank in range(dp_start, dp_start + dp_size):
