@@ -82,6 +82,8 @@ $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/cuda/lib:\
+/usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
