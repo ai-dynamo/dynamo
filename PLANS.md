@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 09:02:32 UTC
+Last updated: 2026-04-01 09:07:21 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 09:02:32 UTC
   - this run is a validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 09:02:32 UTC)
+## Current run (2026-04-01 09:07:21 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -53,9 +53,9 @@ Last updated: 2026-04-01 09:02:32 UTC
 
 ### Current findings in this run
 
-- the previous handoff tip recorded in `PLANS.md` (`8ce32a0a7feb`) was stale;
+- the previous handoff tip recorded in `PLANS.md` (`a4fbdf66c137`) was stale;
   validation in this run started from live detached `HEAD`
-  `a4fbdf66c137`
+  `2427306c033f`
 - the current `HEAD` is still a docs-only handoff refresh above the same
   validated non-docs `G3PB` implementation baseline
 - the active `G3PB` implementation slice still appears complete on the live
@@ -66,10 +66,11 @@ Last updated: 2026-04-01 09:02:32 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`a4fbdf66c137`)
+  - pass (`2427306c033f`)
 - `git log --oneline -8`
   - pass
   - current recent history:
+    - `2427306c0 docs: refresh g3pb handoff state`
     - `a4fbdf66c docs: stabilize g3pb handoff instructions`
     - `b482da9e9 docs: refresh g3pb handoff state`
     - `8ce32a0a7 docs: compact g3pb handoff state`
@@ -77,7 +78,6 @@ Last updated: 2026-04-01 09:02:32 UTC
     - `6b49b21a5 docs: refresh g3pb handoff state`
     - `6ba8c459d docs: refresh g3pb handoff state`
     - `7cd18e2ad docs: refresh g3pb handoff state`
-    - `2f091c248 docs: normalize g3pb handoff tip`
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
