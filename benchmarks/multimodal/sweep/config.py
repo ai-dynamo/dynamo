@@ -135,9 +135,7 @@ def load_config(
         configs=configs,
         output_dir=raw.get("output_dir", "benchmarks/results/multimodal_default"),
         skip_plots=raw.get("skip_plots", False),
-        restart_server_every_benchmark=raw.get(
-            "restart_server_every_benchmark", True
-        ),
+        restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
     )
 
@@ -149,9 +147,15 @@ def load_config(
                 setattr(cfg, key, value)
 
         # CLI sweep mode override clears the other (mutually exclusive) field.
-        if "request_rates" in cli_overrides and cli_overrides["request_rates"] is not None:
+        if (
+            "request_rates" in cli_overrides
+            and cli_overrides["request_rates"] is not None
+        ):
             cfg.concurrencies = None
-        elif "concurrencies" in cli_overrides and cli_overrides["concurrencies"] is not None:
+        elif (
+            "concurrencies" in cli_overrides
+            and cli_overrides["concurrencies"] is not None
+        ):
             cfg.request_rates = None
 
     return cfg
