@@ -49,13 +49,6 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
-
-    /// Return the effective cache control for this request.
-    /// Default: delegates to `nvext.cache_control`. Implementations may override
-    /// to also check a top-level `cache_control` field (see `NvCreateChatCompletionRequest`).
-    fn effective_cache_control(&self) -> Option<&CacheControl> {
-        self.nvext().and_then(|ext| ext.cache_control.as_ref())
-    }
 }
 
 /// Worker ID information for disaggregated serving
@@ -169,12 +162,6 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
 
-    /// Cache control hint (Anthropic-style). When present, the router pins
-    /// the prefix on the selected worker with the given TTL.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-
     /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,7 +252,7 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.cache_control, None);
+        assert_eq!(nv_ext.request_timestamp_ms, None);
     }
 
     // Test CacheControl serde roundtrip and TTL parsing
@@ -327,12 +314,6 @@ mod tests {
         let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
         let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
         assert_eq!(from_api.ttl_seconds(), 3600);
-
-        // NvExt with cache_control
-        let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;
-        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
-        assert!(nvext.cache_control.is_some());
-        assert_eq!(nvext.cache_control.unwrap().ttl_seconds(), 300);
     }
 
     // Test valid builder configurations
