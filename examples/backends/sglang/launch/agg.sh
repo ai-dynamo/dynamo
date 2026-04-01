@@ -13,8 +13,9 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="zai-org/GLM-4.7-Flash"
 ENABLE_OTEL=false
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-131072}"
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -55,7 +56,7 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
+GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --max-model-len "$CONTEXT_LENGTH")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
@@ -63,7 +64,8 @@ print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend &
+python3 -m dynamo.frontend --router-mode kv --enable-cache-control &
+
 
 # run worker with metrics enabled
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
@@ -71,11 +73,11 @@ python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
-  --tp 1 \
-  --trust-remote-code \
+  --tp 2 --ep 2 --enable-dp-attention --dp 2 --disable-piecewise-cuda-graph \
+  --dyn-tool-call-parser glm47  --dyn-reasoning-parser glm45 --enable-streaming-session \
+  --trust-remote-code --moe-dense-tp-size 1 \
   --skip-tokenizer-init \
   --enable-metrics \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 

@@ -603,9 +603,10 @@ async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysF
     (service, counter, failure, port)
 }
 
-
-
-
+// NOTE: BYOT (Bring Your Own Type) client tests were removed during the
+// upstream async-openai migration. They depended on the forked
+// dynamo_protocols::config and http::client modules which no longer exist.
+// TODO: Rewrite these tests using the upstream async-openai client.
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
     let port = get_random_port().await;
