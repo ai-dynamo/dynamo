@@ -6,6 +6,7 @@
 import json
 import re
 import socket
+import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -558,3 +559,40 @@ class TestEnsureSideChannelHost:
         ):
             with pytest.raises(RuntimeError, match="Unable to determine"):
                 ensure_side_channel_host()
+
+
+# --- vllm_omni optional dependency tests ---
+
+
+class TestVllmOmniOptionalDependency:
+    def test_dynamo_vllm_main_importable_without_vllm_omni(self):
+        """dynamo.vllm.main must import cleanly even when vllm_omni is absent.
+
+        Setting sys.modules["vllm_omni"] = None blocks ALL imports from the
+        vllm_omni package — Python always resolves the top-level package first,
+        so a None sentinel at the root raises ImportError for any submodule import.
+        """
+        # Save and evict any already-cached vllm_omni and dynamo.vllm.omni modules
+        saved = {
+            k: sys.modules.pop(k)
+            for k in list(sys.modules)
+            if k == "vllm_omni"
+            or k.startswith("vllm_omni.")
+            or k == "dynamo.vllm.main"
+            or k.startswith("dynamo.vllm.omni")
+        }
+        # Explicitly block the top-level vllm_omni package regardless of prior imports
+        sys.modules["vllm_omni"] = None  # type: ignore[assignment]
+
+        try:
+            import dynamo.vllm.main  # noqa: F401
+        except ImportError as e:
+            pytest.fail(f"dynamo.vllm.main has a hard dependency on vllm_omni: {e}")
+        finally:
+            sys.modules.pop("vllm_omni", None)
+            # Remove any modules imported during this test
+            for mod in list(sys.modules):
+                if mod == "dynamo.vllm.main" or mod.startswith("dynamo.vllm.omni"):
+                    sys.modules.pop(mod, None)
+            # Restore original state
+            sys.modules.update(saved)

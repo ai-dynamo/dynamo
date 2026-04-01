@@ -19,20 +19,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kubernetes import client
 
-from dynamo.planner.kube import KubernetesAPI
-from dynamo.planner.utils.exceptions import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 
 
 @pytest.fixture
 def mock_config():
-    with patch("dynamo.planner.kube.config") as mock:
+    with patch("dynamo.planner.connectors.kubernetes_api.config") as mock:
         mock.load_incluster_config = MagicMock()
         yield mock
 
 
 @pytest.fixture
 def mock_custom_api():
-    with patch("dynamo.planner.kube.client.CustomObjectsApi") as mock:
+    with patch(
+        "dynamo.planner.connectors.kubernetes_api.client.CustomObjectsApi"
+    ) as mock:
         yield mock.return_value
 
 

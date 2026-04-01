@@ -46,6 +46,7 @@ use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
+    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -992,7 +993,7 @@ fn streaming_tool_dispatch_events(
     };
 
     let mut events = vec![];
-    for choice in &data.choices {
+    for choice in &data.inner.choices {
         let Some(tool_calls) = &choice.delta.tool_calls else {
             continue;
         };
@@ -1035,7 +1036,7 @@ fn accumulate_reasoning_dispatch(
     };
 
     let mut events = vec![];
-    for choice in &data.choices {
+    for choice in &data.inner.choices {
         let buffer = buffers.entry(choice.index).or_default();
         let has_reasoning = choice
             .delta
@@ -2210,6 +2211,113 @@ pub fn videos_router(
     (vec![doc, stream_doc], router)
 }
 
+async fn audio_speech(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateAudioSpeechRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let response_format = request.response_format.clone();
+    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    let streaming = false;
+
+    // model is optional in the request; fall back to the first registered model
+    let model = request.model.clone().unwrap_or_else(|| {
+        state
+            .manager()
+            .model_display_names()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    });
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_audios_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Audios, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    let response = NvAudioSpeechResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold audio stream")
+        })?;
+
+    // Check for failure before marking success
+    if response.status == "failed" {
+        return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
+    }
+
+    inflight.mark_ok();
+
+    // If response contains b64_json audio data, decode and return as binary
+    // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
+    if let Some(first) = response.data.first()
+        && let Some(b64) = &first.b64_json
+        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
+    {
+        let content_type = match response_format.as_deref().unwrap_or("wav") {
+            "mp3" => "audio/mpeg",
+            "flac" => "audio/flac",
+            "pcm" => "audio/pcm",
+            "aac" => "audio/aac",
+            "opus" => "audio/ogg; codecs=opus",
+            _ => "audio/wav",
+        };
+        return Ok(Response::builder()
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(audio_bytes))
+            .unwrap());
+    }
+
+    // Fallback: return JSON (url format responses)
+    Ok(Json(response).into_response())
+}
+
+/// Create an Axum [`Router`] for the Audio Speech endpoint
+/// Default path is `/v1/audio/speech`
+pub fn audios_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/audio/speech".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(audio_speech))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2901,15 +3009,17 @@ mod tests {
 
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: Some(CreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![],
-                created: 0,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                service_tier: None,
-                usage: None,
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    service_tier: None,
+                    usage: None,
+                },
                 nvext: None,
             }),
             id: Some("msg-1".to_string()),
@@ -3171,15 +3281,17 @@ mod tests {
     fn make_stream_response(
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-        let response = CreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices,
-            created: 0,
-            model: "test-model".to_string(),
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+        let response = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 0,
+                model: "test-model".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
         Annotated {

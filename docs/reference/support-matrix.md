@@ -29,7 +29,7 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc8` | `0.18.0` | `0.10.1` |
+| **main (ToT)** | `0.5.9` | `1.3.0rc9` | `0.18.0` | `0.10.1` |
 | **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
 | **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |

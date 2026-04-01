@@ -79,6 +79,10 @@ inputs:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
     required: false
     default: ''
+  fresh_builder:
+    description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
+    required: false
+    default: 'false'
 outputs:
   target_tag_plain:
     description: 'Target tag (without registry prefix)'
@@ -127,6 +131,7 @@ runs:
         flavor: ${{ inputs.framework }}
         arch: ${{ inputs.platform }}
         cuda_version: ${{ inputs.cuda_version }}
+        fresh_builder: ${{ inputs.fresh_builder }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
