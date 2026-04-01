@@ -30,7 +30,6 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -66,7 +65,6 @@ var defaultCheckpointJobName = snapshotprotocol.CheckpointJobName(testHash, snap
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(s)
-	_ = appsv1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
@@ -82,41 +80,7 @@ func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 	}
 }
 
-func checkpointTestSnapshotAgentDaemonSet() *appsv1.DaemonSet {
-	return &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "checkpoints",
-							MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: "checkpoints",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: "snapshot-pvc",
-							},
-						},
-					}},
-				},
-			},
-		},
-	}
-}
-
 func makeCheckpointReconciler(s *runtime.Scheme, objs ...client.Object) *CheckpointReconciler {
-	objs = append(objs, checkpointTestSnapshotAgentDaemonSet())
 	return &CheckpointReconciler{
 		Client:   fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).Build(),
 		Config:   checkpointTestConfig(),
@@ -421,8 +385,8 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 		assert.Equal(t, "checkpoint-job-"+testHash+"-2", updated.Status.JobName)
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/2", updated.Status.Location)
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), updated.Status.StorageType)
+		assert.Empty(t, updated.Status.Location)
+		assert.Empty(t, updated.Status.StorageType)
 	})
 
 	t.Run("duplicate identity hash is rejected even with a readable name", func(t *testing.T) {
@@ -486,8 +450,8 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+snapshotprotocol.DefaultCheckpointArtifactVersion, updated.Status.Location)
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), updated.Status.StorageType)
+		assert.Empty(t, updated.Status.Location)
+		assert.Empty(t, updated.Status.StorageType)
 		assert.NotNil(t, updated.Status.CreatedAt)
 	})
 

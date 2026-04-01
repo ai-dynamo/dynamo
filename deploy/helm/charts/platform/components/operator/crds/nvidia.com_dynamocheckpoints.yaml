@@ -8173,7 +8173,6 @@ spec:
                         - message: sharedMemory.size must not be set when sharedMemory.disabled is true
                           rule: '!(has(self.disabled) && self.disabled && has(self.size))'
                     ttlSecondsAfterFinished:
-                      default: 300
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
                         300 second TTL.
@@ -8260,8 +8259,8 @@ spec:
                   type: string
                 location:
                   description: |-
-                    Deprecated: Location is retained for compatibility with older clients.
-                    It is derived from the current checkpoint storage path when available.
+                    Deprecated: Location is ignored and no longer populated. It is retained
+                    only so older objects continue to validate.
                   type: string
                 message:
                   description: Message provides additional information about the current state
@@ -8276,8 +8275,8 @@ spec:
                   type: string
                 storageType:
                   description: |-
-                    Deprecated: StorageType is retained for compatibility with older clients.
-                    The current checkpoint flow only publishes pvc artifacts.
+                    Deprecated: StorageType is ignored and no longer populated. It is retained
+                    only so older objects continue to validate.
                   enum:
                     - pvc
                     - s3

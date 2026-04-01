@@ -256,7 +256,6 @@ type CheckpointConfiguration struct {
 // ignored by the current snapshot flow.
 type CheckpointStorageConfiguration struct {
 	// Type is the legacy storage backend type: pvc, s3, or oci.
-	// +kubebuilder:default="pvc"
 	Type string `json:"type"`
 	// PVC configuration for legacy pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
@@ -270,10 +269,8 @@ type CheckpointStorageConfiguration struct {
 // the current snapshot flow.
 type CheckpointPVCConfig struct {
 	// PVCName is the legacy PVC name.
-	// +kubebuilder:default="snapshot-pvc"
 	PVCName string `json:"pvcName"`
 	// BasePath is the legacy base directory within the PVC.
-	// +kubebuilder:default="/checkpoints"
 	BasePath string `json:"basePath"`
 }
 

@@ -115,7 +115,6 @@ type DynamoCheckpointJobConfig struct {
 	// 300 second TTL.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=300
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
@@ -151,13 +150,13 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
-	// Deprecated: Location is retained for compatibility with older clients.
-	// It is derived from the current checkpoint storage path when available.
+	// Deprecated: Location is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// Deprecated: StorageType is retained for compatibility with older clients.
-	// The current checkpoint flow only publishes pvc artifacts.
+	// Deprecated: StorageType is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
