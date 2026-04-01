@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# We need a custom dockerfile here for transformers==5.3 and flashinfer==0.6.7.
+# The recipe will be updated when these fully land in sglang.
 FROM lmsysorg/sglang:v0.5.10rc0-cu130
 ARG ARCH=arm64
 
