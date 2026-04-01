@@ -347,18 +347,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.vllm.txt \
         --requirement /tmp/requirements.benchmark.txt
 
-# Copy tests, deploy and components for CI with correct ownership
+# Copy tests, deploy, lib, and the mocker component subtree for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
-RUN rm -rf \
-    /workspace/components/src/dynamo/planner \
-    /workspace/components/src/dynamo/profiler \
-    /workspace/components/src/dynamo/global_planner
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
