@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:10:06 UTC
+Last updated: 2026-04-01 08:11:10 UTC
 
 ## Active state
 
@@ -21,8 +21,8 @@ Last updated: 2026-04-01 08:10:06 UTC
 - Current follow-on execution focus for this run:
   - current detached `HEAD` is a docs-only handoff chain above the latest
     validated non-docs `G3PB` code commit
-  - current handoff tip at pickup is `c3222c211636`
-    (`docs: stabilize g3pb handoff metadata`)
+  - current handoff tip is `97cbefa84266`
+    (`docs: correct g3pb handoff state`)
   - the latest validated non-docs `G3PB` code commit remains
     `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - the previously listed `nixl-sys` invalidation patch and backend-side
@@ -71,6 +71,8 @@ Last updated: 2026-04-01 08:10:06 UTC
   active `G3PB` slice
 - ✅ Refreshed `PLANS.md` again so the verified current tip and the corrected
   follow-on state are written to disk as the next handoff
+- ✅ Created a signed docs-only handoff commit for the corrected handoff state:
+  - `97cbefa84 docs: correct g3pb handoff state`
 
 ### Current findings in this run
 
@@ -82,6 +84,7 @@ Last updated: 2026-04-01 08:10:06 UTC
 - the focused validation rerun is fully green on the current handoff tip:
   `c3222c211636`
 - no new `G3PB` implementation gap has been identified by this audit
+- the resulting detached `HEAD` for the next run is now `97cbefa84266`
 
 ### Remaining work in this run
 
@@ -89,9 +92,8 @@ Last updated: 2026-04-01 08:10:06 UTC
 
 ### Exact next step
 
-- create a signed docs-only handoff commit for this `PLANS.md` refresh, then
-  leave the active `G3PB` slice closed unless a new regression or explicitly
-  new scope appears
+- if another run starts from the resulting detached `HEAD`, leave the active
+  `G3PB` slice closed unless a new regression or explicitly new scope appears
 
 ### Validation completed in this run so far
 
@@ -100,11 +102,11 @@ Last updated: 2026-04-01 08:10:06 UTC
 - `git log --oneline -5`
   - pass
   - current recent history:
+    - `97cbefa84 docs: correct g3pb handoff state`
     - `c3222c211 docs: stabilize g3pb handoff metadata`
     - `abbaaaf61 docs: correct g3pb handoff head state`
     - `637551b01 docs: refresh g3pb validation handoff`
     - `abfc85ffd llm: stabilize g3pb cache storage test`
-    - `988246eef docs: finalize g3pb completion handoff`
 - `rg -n "G3PB|g3pb|TODO|FIXME|follow-on|remaining work|Exact next step|Handoff for next run" PLANS.md docs/design-docs/kvbm-g3pb-plan.md lib/llm/src lib/bindings/kvbm/src`
   - pass as an audit search
   - result: the only active mismatch was stale handoff text at the top of
@@ -118,6 +120,12 @@ Last updated: 2026-04-01 08:10:06 UTC
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
+- post-commit repo-state check:
+  - `git rev-parse --short=12 HEAD`
+    - pass (`97cbefa84266`)
+  - `git status --short --branch`
+    - pass
+    - clean detached `HEAD`
 
 ### Decisions confirmed in this run so far
 
@@ -137,6 +145,8 @@ Last updated: 2026-04-01 08:10:06 UTC
   the actual landed tree on current detached `HEAD`
 - this run revalidated the focused `G3PB` / bindings stack from
   `c3222c211636` and it remains green
+- this run is committed on detached `HEAD` as:
+  - `97cbefa84 docs: correct g3pb handoff state`
 - there is still no remaining in-scope implementation work for the active
   `G3PB` slice
 - if another run continues from the resulting `HEAD`, do not reopen the active
