@@ -385,7 +385,7 @@ export DYN_KVBM_DISK_ALLOCATOR_TYPE=ibm-scale
 ```
 
 Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
-- `fcntl` (default): Apply `O_DIRECT` via `fcntl` after file creation. Works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
+- `default`: Apply `O_DIRECT` via `fcntl` after file creation. Works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
 - `ibm-scale`: Pass `O_DIRECT` to `mkostemp` at file open time. Required for IBM Storage Scale (GPFS), which ignores `fcntl(F_SETFL, O_DIRECT)`.
 
 3. If you encounter "write all error" or EINVAL (errno 22), or need to debug without `O_DIRECT`:

@@ -52,11 +52,11 @@ pub trait DiskOpenStrategy: Send + Sync + std::fmt::Debug {
 ///
 /// This works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
 #[derive(Debug, Default)]
-pub struct FcntlDirectIo;
+pub struct DefaultDirectIo;
 
-impl DiskOpenStrategy for FcntlDirectIo {
+impl DiskOpenStrategy for DefaultDirectIo {
     fn name(&self) -> &str {
-        "fcntl"
+        "default"
     }
 
     fn open_temp_file(
@@ -200,20 +200,20 @@ impl DiskOpenStrategy for MkostempDirectIo {
 /// Create a `DiskOpenStrategy` from the `DYN_KVBM_DISK_ALLOCATOR_TYPE` env var.
 ///
 /// Supported values:
-/// - `"fcntl"` (default): Apply O_DIRECT via fcntl after file creation.
+/// - `"default"` (default): Apply O_DIRECT via fcntl after file creation.
 /// - `"ibm-scale"`: Pass O_DIRECT to mkostemp at file open time (required for GPFS).
 fn disk_open_strategy_from_env() -> Result<Box<dyn DiskOpenStrategy>, StorageError> {
     match std::env::var(DISK_ALLOCATOR_TYPE_KEY).as_deref() {
-        Ok("fcntl") | Err(_) => {
+        Ok("default") | Err(_) => {
             tracing::info!("Using default fcntl disk open strategy");
-            Ok(Box::new(FcntlDirectIo))
+            Ok(Box::new(DefaultDirectIo))
         }
         Ok("ibm-scale") => {
             tracing::info!("Using IBM Storage Scale disk open strategy (O_DIRECT via mkostemp)");
             Ok(Box::new(MkostempDirectIo))
         }
         Ok(unknown) => Err(StorageError::AllocationFailed(format!(
-            "Unknown {}={:?}. Supported values: \"fcntl\" (default), \"ibm-scale\"",
+            "Unknown {}={:?}. Supported values: \"default\", \"ibm-scale\"",
             DISK_ALLOCATOR_TYPE_KEY, unknown
         ))),
     }
@@ -765,7 +765,7 @@ mod tests {
         for (name, size) in test_cases {
             eprintln!("Testing: {} ({} bytes)", name, size);
 
-            let strategy = FcntlDirectIo;
+            let strategy = DefaultDirectIo;
             let storage = DiskStorage::new(size, &strategy).unwrap_or_else(|e| {
                 panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e)
             });
@@ -805,7 +805,7 @@ mod tests {
         }
 
         let size = 1024 * 1024;
-        let strategy = FcntlDirectIo;
+        let strategy = DefaultDirectIo;
         let storage =
             DiskStorage::new(size, &strategy).expect("Failed to allocate with O_DIRECT disabled");
 
@@ -817,24 +817,24 @@ mod tests {
         }
     }
 
-    /// Test that disk_open_strategy_from_env returns FcntlDirectIo by default.
+    /// Test that disk_open_strategy_from_env returns DefaultDirectIo by default.
     #[test]
     fn test_strategy_from_env_default() {
         unsafe {
             std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
         }
         let strategy = disk_open_strategy_from_env().expect("default strategy should succeed");
-        assert_eq!(strategy.name(), "fcntl");
+        assert_eq!(strategy.name(), "default");
     }
 
-    /// Test that disk_open_strategy_from_env returns FcntlDirectIo for explicit "fcntl".
+    /// Test that disk_open_strategy_from_env returns DefaultDirectIo for explicit "default".
     #[test]
     fn test_strategy_from_env_fcntl() {
         unsafe {
-            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "fcntl");
+            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "default");
         }
         let strategy = disk_open_strategy_from_env().expect("fcntl strategy should succeed");
-        assert_eq!(strategy.name(), "fcntl");
+        assert_eq!(strategy.name(), "default");
         unsafe {
             std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
         }
