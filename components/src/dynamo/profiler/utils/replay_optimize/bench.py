@@ -11,8 +11,9 @@ from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 from dynamo.llm import MockEngineArgs
 
-from .models import SyntheticReplayWorkload
-from .search import optimize_dense_disagg_with_replay
+from .models import SyntheticReplayWorkload, TraceReplayWorkload
+from .scoring import _pick_best_record
+from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
 
 
 def compare_aic_and_replay_disagg(
@@ -113,4 +114,75 @@ def compare_aic_and_replay_disagg(
         "aic_best": aic_best,
         "replay_result": replay_result,
         "replay_best": replay_best,
+    }
+
+
+def compare_agg_and_disagg_with_replay(
+    *,
+    model: str,
+    backend: str,
+    system: str,
+    workload: SyntheticReplayWorkload | TraceReplayWorkload,
+    base_engine_args: MockEngineArgs,
+    base_prefill_engine_args: MockEngineArgs,
+    base_decode_engine_args: MockEngineArgs,
+    max_total_gpus: int,
+    constraints: Mapping[str, float] | None = None,
+    router_mode: str = "kv_router",
+    overlap_score_weights: tuple[float, ...] | list[float] | None = None,
+    max_parallel_evals: int = 1,
+) -> dict[str, Any]:
+    agg_result = optimize_dense_agg_with_replay(
+        model=model,
+        backend=backend,
+        system=system,
+        workload=workload,
+        base_engine_args=base_engine_args,
+        max_total_gpus=max_total_gpus,
+        constraints=constraints,
+        router_mode=router_mode,
+        overlap_score_weights=overlap_score_weights,
+        max_parallel_evals=max_parallel_evals,
+    )
+    disagg_result = optimize_dense_disagg_with_replay(
+        model=model,
+        backend=backend,
+        system=system,
+        workload=workload,
+        base_prefill_engine_args=base_prefill_engine_args,
+        base_decode_engine_args=base_decode_engine_args,
+        max_total_gpus=max_total_gpus,
+        constraints=constraints,
+        router_mode=router_mode,
+        overlap_score_weights=overlap_score_weights,
+        max_parallel_evals=max_parallel_evals,
+    )
+
+    agg_best = agg_result.best_feasible
+    disagg_best = disagg_result.best_feasible
+    if agg_best is None and disagg_best is None:
+        candidates = [
+            result.best_infeasible
+            for result in (agg_result, disagg_result)
+            if result.best_infeasible is not None
+        ]
+        chosen_best = None if not candidates else _pick_best_record(candidates)
+    elif agg_best is None:
+        chosen_best = disagg_best
+    elif disagg_best is None:
+        chosen_best = agg_best
+    else:
+        chosen_best = _pick_best_record([agg_best, disagg_best])
+
+    chosen_mode = None
+    if chosen_best is not None:
+        chosen_mode = (
+            "agg" if "tp" in chosen_best and "workers" in chosen_best else "disagg"
+        )
+
+    return {
+        "agg_result": agg_result,
+        "disagg_result": disagg_result,
+        "chosen_mode": chosen_mode,
+        "chosen_best": chosen_best,
     }

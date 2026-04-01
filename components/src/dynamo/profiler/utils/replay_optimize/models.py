@@ -36,6 +36,7 @@ class DenseReplayState:
     prefill_workers: int
     decode_workers: int
     overlap_score_weight: float
+    router_mode: str = "kv_router"
 
     @property
     def total_gpus_used(self) -> int:
@@ -43,6 +44,18 @@ class DenseReplayState:
             self.prefill_tp * self.prefill_workers
             + self.decode_tp * self.decode_workers
         )
+
+
+@dataclass(frozen=True)
+class DenseAggReplayState:
+    tp: int
+    workers: int
+    router_mode: str
+    overlap_score_weight: float
+
+    @property
+    def total_gpus_used(self) -> int:
+        return self.tp * self.workers
 
 
 @dataclass(frozen=True)

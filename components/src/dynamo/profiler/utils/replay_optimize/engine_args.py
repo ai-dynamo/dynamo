@@ -14,7 +14,7 @@ def _build_candidate_engine_args(
     *,
     base_args: MockEngineArgs,
     tp_size: int,
-    worker_type: Literal["prefill", "decode"],
+    worker_type: Literal["prefill", "decode", "aggregated"],
     backend: str,
     system: str,
     model: str,
@@ -36,6 +36,24 @@ def _build_candidate_engine_args(
     args.aic_tp_size = tp_size
     args.aic_model_path = model
     return args
+
+
+def _build_agg_candidate_engine_args(
+    *,
+    base_args: MockEngineArgs,
+    tp_size: int,
+    backend: str,
+    system: str,
+    model: str,
+) -> MockEngineArgs:
+    return _build_candidate_engine_args(
+        base_args=base_args,
+        tp_size=tp_size,
+        worker_type="aggregated",
+        backend=backend,
+        system=system,
+        model=model,
+    )
 
 
 def _build_router_config(

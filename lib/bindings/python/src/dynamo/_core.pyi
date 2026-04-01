@@ -1307,6 +1307,9 @@ class MockEngineArgs:
     @property
     def num_gpu_blocks(self) -> int: ...
 
+    @num_gpu_blocks.setter
+    def num_gpu_blocks(self, value: int) -> None: ...
+
     @property
     def max_num_seqs(self) -> Optional[int]: ...
 
@@ -1363,9 +1366,6 @@ class MockEngineArgs:
 
     @worker_type.setter
     def worker_type(self, value: str) -> None: ...
-
-    @num_gpu_blocks.setter
-    def num_gpu_blocks(self, value: int) -> None: ...
 
     def is_prefill(self) -> bool: ...
 

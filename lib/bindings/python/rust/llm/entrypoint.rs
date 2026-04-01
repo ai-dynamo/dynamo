@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
@@ -131,17 +131,28 @@ impl KvRouterConfig {
     }
 
     #[setter]
-    fn set_overlap_score_weight(&mut self, value: f64) {
+    fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err(
+                "overlap_score_weight must be non-negative",
+            ));
+        }
         self.inner.overlap_score_weight = value;
+        Ok(())
     }
 
     #[pyo3(signature = (overlap_score_weight=None))]
-    fn with_overrides(&self, overlap_score_weight: Option<f64>) -> Self {
+    fn with_overrides(&self, overlap_score_weight: Option<f64>) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(weight) = overlap_score_weight {
+            if weight < 0.0 {
+                return Err(PyValueError::new_err(
+                    "overlap_score_weight must be non-negative",
+                ));
+            }
             inner.overlap_score_weight = weight;
         }
-        Self { inner }
+        Ok(Self { inner })
     }
 }
 
