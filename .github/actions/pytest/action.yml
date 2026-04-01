@@ -5,6 +5,10 @@ inputs:
     description: 'Pytest marks'
     required: true
     default: 'e2e and vllm and gpu_1 and not slow'
+  pytest_paths:
+    description: 'Optional pytest file or directory arguments appended after marker selection'
+    required: false
+    default: ''
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
@@ -118,10 +122,8 @@ runs:
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -131,6 +133,17 @@ runs:
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
+        fi
+
+        PYTEST_PATHS="${{ inputs.pytest_paths }}"
+        if [[ -n "${PYTEST_PATHS}" ]]; then
+          PYTEST_PATHS=" ${PYTEST_PATHS}"
+        fi
+
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\"${PYTEST_PATHS}"
+        else
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 -m \"${{ inputs.pytest_marks }}\"${PYTEST_PATHS}"
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -193,7 +206,6 @@ runs:
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Detect GPU availability and conditionally add GPU flags
@@ -224,7 +236,19 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        PYTEST_PATHS="${{ inputs.pytest_paths }}"
+        if [[ -n "${PYTEST_PATHS}" ]]; then
+          PYTEST_PATHS=" ${PYTEST_PATHS}"
+        fi
+
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\"${PYTEST_PATHS}"
+        else
+          # Construct final command with xdist parallelization (-n) and other options
+          # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\"${PYTEST_PATHS}"
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions

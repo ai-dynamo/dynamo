@@ -2,30 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import importlib.util
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs
-
-MODULE_PATH = (
-    Path(__file__).resolve().parents[2] / "components/src/dynamo/mocker/config.py"
-)
-SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
-assert SPEC is not None
-assert SPEC.loader is not None
-CONFIG = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(CONFIG)
+from dynamo.mocker import config as CONFIG
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.unit,
+    pytest.mark.mocker,
 ]
 
 
@@ -218,10 +209,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
             "end_thinking_token_id": 12,
             "thinking_ratio": 0.25,
         },
-        "zmq_kv_events_port": None,
-        "zmq_replay_port": None,
-        "preemption_mode": "fifo",
-        "router_queue_policy": None,
         "sglang": {
             "schedule_policy": "lpm",
             "page_size": 128,
@@ -230,5 +217,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
             "clip_max_new_tokens": 1024,
             "schedule_conservativeness": 0.8,
         },
-        "has_perf_model": True,
+        "preemption_mode": "fifo",
+        "zmq_kv_events_port": None,
+        "zmq_replay_port": None,
     }

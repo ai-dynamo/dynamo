@@ -120,16 +120,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 {% endif %}
 
-# Install runtime dependencies (common + planner + benchmarks) as root.
+# Install runtime dependencies (common + benchmarks) as root.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
-    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/deps/requirements.planner.txt \
     --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         --requirement /tmp/deps/requirements.common.txt \
-        --requirement /tmp/deps/requirements.planner.txt \
         --requirement /tmp/deps/requirements.benchmark.txt \
         sglang==${SGLANG_VERSION} && \
     #TODO: Temporary change until upstream sglang runtime image is updated
@@ -174,6 +172,13 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+RUN rm -rf \
+    /workspace/components/src/dynamo/mocker \
+    /workspace/examples/backends/mocker \
+    /workspace/examples/global_planner/global-planner-mocker-test.yaml \
+    /workspace/tests/router/test_router_e2e_with_mockers.py \
+    /workspace/tests/frontend/test_completion_mocker_engine.py \
+    /workspace/tests/frontend/grpc/test_tensor_mocker_engine.py
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1

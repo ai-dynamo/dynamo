@@ -266,11 +266,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
         if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
     fi
 
-# Install runtime dependencies (common + planner + benchmarks).
+# Install runtime dependencies (common + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
@@ -278,7 +277,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         cupy-cuda13x && \
     # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
@@ -293,6 +291,13 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+RUN rm -rf \
+    /workspace/components/src/dynamo/mocker \
+    /workspace/examples/backends/mocker \
+    /workspace/examples/global_planner/global-planner-mocker-test.yaml \
+    /workspace/tests/router/test_router_e2e_with_mockers.py \
+    /workspace/tests/frontend/test_completion_mocker_engine.py \
+    /workspace/tests/frontend/grpc/test_tensor_mocker_engine.py
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \

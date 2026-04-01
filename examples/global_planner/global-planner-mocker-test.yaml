@@ -13,6 +13,8 @@
 #   DGD gp-decode-1:  LocalRouter + MockerDecode  + Planner
 #
 # Usage:
+#   export DYNAMO_FRONTEND_IMAGE=...
+#   export DYNAMO_PLANNER_IMAGE=...
 #   envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 #   envsubst < global-planner-mocker-test.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
 apiVersion: v1
@@ -57,7 +59,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -82,7 +84,7 @@ spec:
             configMap:
               name: gp-global-router-config
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -107,7 +109,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           command:
             - python3
             - -m
@@ -128,7 +130,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -150,7 +152,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -174,7 +176,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           command:
             - python3
             - -m
@@ -196,7 +198,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -218,7 +220,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -242,7 +244,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           command:
             - python3
             - -m
@@ -264,7 +266,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -287,7 +289,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -310,7 +312,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           command:
             - python3
             - -m
@@ -332,7 +334,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_FRONTEND_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -355,7 +357,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -378,7 +380,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: ${DYNAMO_IMAGE}
+          image: ${DYNAMO_PLANNER_IMAGE}
           command:
             - python3
             - -m

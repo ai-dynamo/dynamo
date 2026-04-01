@@ -39,6 +39,8 @@ on:
         required: true
       SCCACHE_S3_BUCKET:
         required: true
+      HF_TOKEN:
+        required: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
@@ -192,6 +194,47 @@ jobs:
           echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
 
+  test-frontend-mocker-router:
+    name: Test Frontend Mocker Router
+    needs: [build-frontend-image, changed-files]
+    if: needs.build-frontend-image.result == 'success'
+    runs-on: prod-tester-amd-gpu-v1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build frontend test image
+        uses: ./.github/actions/docker-test-image-build
+        with:
+          image_tag: dynamo:frontend-mocker-router-test
+          base_image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build-frontend-image.outputs.target_tag }}
+          framework: dynamo
+          platform: amd64
+          cuda_version: "12.9"
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          no_load: 'false'
+      - name: Run frontend mocker router tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: dynamo:frontend-mocker-router-test
+          pytest_marks: 'pre_merge and gpu_0'
+          pytest_paths: 'tests/router/test_router_e2e_with_mockers.py'
+          framework: dynamo
+          test_type: 'frontend_mocker_router'
+          platform_arch: amd64
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          start_minio: 'false'
+          hf_token: ${{ secrets.HF_TOKEN }}
+
   # ============================================================================
   # COMPLIANCE — Generate attribution CSVs for dpkg and Python packages
   # ============================================================================
@@ -226,7 +269,7 @@ jobs:
 
   frontend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, build-frontend-image]
+    needs: [changed-files, build-frontend-image, test-frontend-mocker-router]
     if: always()
     steps:
       - name: "Check all dependent jobs"

@@ -6,6 +6,10 @@ title: Mocker
 
 The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
 
+For containerized workflows, `dynamo-planner` is the intended image for launching
+`python -m dynamo.mocker`. Frontend images may still carry mocker for internal CI
+support, but they are not the documented runtime contract for mocker users.
+
 ## Overview
 
 The mocker simulates:

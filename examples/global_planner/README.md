@@ -93,7 +93,8 @@ envsubst < global-planner-vllm-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f 
 
 ```bash
 export K8S_NAMESPACE=my-ns
-export DYNAMO_IMAGE=<dynamo-image>
+export DYNAMO_FRONTEND_IMAGE=<dynamo-frontend-image>
+export DYNAMO_PLANNER_IMAGE=<dynamo-planner-image>
 
 envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```

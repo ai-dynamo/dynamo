@@ -74,6 +74,9 @@ core:
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
+  - '!tests/router/test_router_e2e_with_mockers.py'
+  - '!tests/frontend/conftest.py'
+  - '!tests/frontend/test_completion_mocker_engine.py'
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
@@ -88,7 +91,6 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
-  - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
@@ -118,6 +120,7 @@ deploy:
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
@@ -161,6 +164,9 @@ frontend:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'tests/router/test_router_e2e_with_mockers.py'
+  - 'tests/frontend/conftest.py'
+  - 'tests/frontend/test_completion_mocker_engine.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
 

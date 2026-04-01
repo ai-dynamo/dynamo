@@ -90,6 +90,7 @@ dynamo/
 | End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
 | KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
 | Router            | Router E2E with backends                 | `tests/router/`                              |
+| Mocker            | Mocker unit + integration tests          | `components/src/dynamo/mocker/tests/`        |
 | Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
 | Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
 | Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |

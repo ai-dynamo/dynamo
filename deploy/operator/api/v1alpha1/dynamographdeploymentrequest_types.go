@@ -157,7 +157,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
 	// a real backend deployment. When true, the deployment uses simulated engines that
 	// don't require GPUs, using the profiling data to simulate realistic timing behavior.
-	// Mocker is available in all backend images and useful for large-scale experiments.
+	// Mocker is intended to run from the dynamo-planner image for large-scale experiments.
 	// Profiling still runs against the real backend (specified above) to collect performance data.
 	// +kubebuilder:default=false
 	UseMocker bool `json:"useMocker,omitempty"`

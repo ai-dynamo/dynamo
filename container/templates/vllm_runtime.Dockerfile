@@ -335,18 +335,16 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
     fi
 {% endif %}
 
-# Install runtime dependencies (common + vllm-specific + planner + benchmarks).
+# Install runtime dependencies (common + vllm-specific + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
-    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
-        --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt
 
 # Copy tests, deploy and components for CI with correct ownership
@@ -357,6 +355,13 @@ COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
 COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
+RUN rm -rf \
+    /workspace/components/src/dynamo/mocker \
+    /workspace/examples/backends/mocker \
+    /workspace/examples/global_planner/global-planner-mocker-test.yaml \
+    /workspace/tests/router/test_router_e2e_with_mockers.py \
+    /workspace/tests/frontend/test_completion_mocker_engine.py \
+    /workspace/tests/frontend/grpc/test_tensor_mocker_engine.py
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \

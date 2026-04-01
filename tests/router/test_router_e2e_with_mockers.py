@@ -51,6 +51,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
+    pytest.mark.router,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -695,6 +696,9 @@ def test_mocker_router(
     logger.info(
         f"Starting mocker router test: router_mode={router_mode}, request_plane={request_plane}"
     )
+
+    if mocker_args_override.get("aic_perf_model") is True:
+        pytest.importorskip("aiconfigurator", reason="aiconfigurator is not installed")
 
     # Create mocker args dictionary - use local indexer (NATS Core mode)
     mocker_args = {
