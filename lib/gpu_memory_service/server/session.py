@@ -51,7 +51,6 @@ class OperationNotAllowed(Exception):
 class Transition:
     from_states: frozenset[ServerState]
     event: StateEvent
-    to_state: Optional[ServerState]
     condition: Optional[str] = None
 
 
@@ -59,33 +58,27 @@ TRANSITIONS: list[Transition] = [
     Transition(
         from_states=frozenset({ServerState.EMPTY, ServerState.COMMITTED}),
         event=StateEvent.RW_CONNECT,
-        to_state=ServerState.RW,
     ),
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_COMMIT,
-        to_state=ServerState.COMMITTED,
     ),
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
-        to_state=ServerState.EMPTY,
     ),
     Transition(
         from_states=frozenset({ServerState.COMMITTED, ServerState.RO}),
         event=StateEvent.RO_CONNECT,
-        to_state=ServerState.RO,
     ),
     Transition(
         from_states=frozenset({ServerState.RO}),
         event=StateEvent.RO_DISCONNECT,
-        to_state=ServerState.RO,
         condition="has_remaining_readers",
     ),
     Transition(
         from_states=frozenset({ServerState.RO}),
         event=StateEvent.RO_DISCONNECT,
-        to_state=ServerState.COMMITTED,
         condition="is_last_reader",
     ),
 ]

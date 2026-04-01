@@ -107,17 +107,6 @@ class LocalMapping:
             self.layout_slot,
         )
 
-    def with_allocation_id(self, allocation_id: str) -> "LocalMapping":
-        return LocalMapping(
-            allocation_id,
-            self.va,
-            self.size,
-            self.aligned_size,
-            self.handle,
-            self.tag,
-            self.layout_slot,
-        )
-
     def with_server_identity(
         self,
         allocation_id: str,
