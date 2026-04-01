@@ -422,74 +422,105 @@ impl G3pbPeerRuntime {
 }
 
 #[derive(Clone)]
-struct AppState {
+struct G3pbBackendService {
+    endpoint_id: String,
     agent: Arc<G3pbStorageAgent>,
     runtime: Arc<G3pbPeerRuntime>,
-    endpoint_id: String,
 }
 
 #[derive(Clone)]
 struct G3pbEndpointHandler {
-    state: AppState,
+    service: Arc<G3pbBackendService>,
 }
 
-impl G3pbEndpointHandler {
-    fn new(state: AppState) -> Arc<Self> {
-        Arc::new(Self { state })
+impl G3pbBackendService {
+    async fn new(args: &Args) -> Result<Self> {
+        let mut config = G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
+        config.g2_capacity_bytes = args.g2_bytes;
+        config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
+        config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
+        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
+        let agent = Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage));
+        let runtime = Arc::new(G3pbPeerRuntime::new(args).await?);
+
+        Ok(Self {
+            endpoint_id: format!("{G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}"),
+            agent,
+            runtime,
+        })
     }
 
-    async fn handle(&self, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
+    fn worker_id(&self) -> u64 {
+        self.agent.worker_id()
+    }
+
+    async fn handle_rpc(&self, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
         match request {
             G3pbRpcRequest::Health => Ok(G3pbRpcResponse::Health(G3pbHealthResponse {
-                worker_id: self.state.agent.worker_id(),
-                listen: self.state.endpoint_id.clone(),
+                worker_id: self.agent.worker_id(),
+                listen: self.endpoint_id.clone(),
             })),
             G3pbRpcRequest::PutBlocks(blocks) => {
-                self.state.agent.put_blocks(blocks).await;
+                self.agent.put_blocks(blocks).await;
                 Ok(G3pbRpcResponse::Ack)
             }
             G3pbRpcRequest::Offer(request) => {
                 let accepted = self
-                    .state
                     .runtime
-                    .offer_blocks(&self.state.agent, &request.blocks)
+                    .offer_blocks(&self.agent, &request.blocks)
                     .await;
                 Ok(G3pbRpcResponse::Offer(
                     dynamo_llm::block_manager::distributed::G3pbOfferResponse { accepted },
                 ))
             }
             G3pbRpcRequest::PutPayload(request) => Ok(G3pbRpcResponse::PutPayload(
-                self.state
-                    .agent
+                self.agent
                     .offer_and_put_payload_blocks(request.blocks)
                     .await?,
             )),
             G3pbRpcRequest::Query(request) => Ok(G3pbRpcResponse::Query(
-                self.state
-                    .runtime
-                    .query_blocks(&self.state.agent, &request.sequence_hashes)
+                self.runtime
+                    .query_blocks(&self.agent, &request.sequence_hashes)
                     .await,
             )),
             G3pbRpcRequest::Fetch(request) => Ok(G3pbRpcResponse::Fetch(
-                self.state
-                    .runtime
-                    .fetch_descriptors(&request.sequence_hashes)?,
+                self.runtime.fetch_descriptors(&request.sequence_hashes)?,
             )),
             G3pbRpcRequest::StagePut(request) => Ok(G3pbRpcResponse::StagePut(
-                self.state.runtime.stage_put_blocks(request.blocks).await?,
+                self.runtime.stage_put_blocks(request.blocks).await?,
             )),
             G3pbRpcRequest::CommitPut(request) => {
-                self.state
-                    .runtime
-                    .commit_staged_blocks(&self.state.agent, &request.sequence_hashes)
+                self.runtime
+                    .commit_staged_blocks(&self.agent, &request.sequence_hashes)
                     .await?;
                 Ok(G3pbRpcResponse::Ack)
             }
             G3pbRpcRequest::LoadRemote(request) => {
-                self.state.runtime.load_remote_blockset(request.blockset)?;
+                self.runtime.load_remote_blockset(request.blockset)?;
                 Ok(G3pbRpcResponse::Ack)
             }
         }
+    }
+
+    async fn serve(self: Arc<Self>, distributed: &DistributedRuntime) -> Result<()> {
+        let ingress = Ingress::for_engine(G3pbEndpointHandler::new(self.clone()))?;
+        let component = distributed
+            .namespace(G3PB_NAMESPACE)?
+            .component(G3PB_COMPONENT_NAME)?;
+
+        component
+            .endpoint(G3PB_ENDPOINT_NAME)
+            .endpoint_builder()
+            .handler(ingress)
+            .graceful_shutdown(true)
+            .start()
+            .await
+    }
+}
+
+impl G3pbEndpointHandler {
+    fn new(service: Arc<G3pbBackendService>) -> Arc<Self> {
+        Arc::new(Self { service })
     }
 }
 
@@ -502,7 +533,7 @@ impl AsyncEngine<SingleIn<G3pbRpcRequest>, ManyOut<Annotated<G3pbRpcResponse>>, 
         input: SingleIn<G3pbRpcRequest>,
     ) -> anyhow::Result<ManyOut<Annotated<G3pbRpcResponse>>> {
         let (request, ctx) = input.into_parts();
-        let response = match self.handle(request).await {
+        let response = match self.service.handle_rpc(request).await {
             Ok(response) => Annotated::from_data(response),
             Err(err) => Annotated::from_error(err.to_string()),
         };
@@ -522,44 +553,16 @@ fn build_agent(worker_id: u64) -> Result<NixlAgent> {
     Ok(agent)
 }
 
-async fn build_backend(args: &Args) -> Result<AppState> {
-    let mut config = G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
-    config.g2_capacity_bytes = args.g2_bytes;
-    config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
-    config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
-    let storage = Arc::new(G3pbCacheStorage::new(config).await?);
-    let agent = Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage));
-
-    let runtime = Arc::new(G3pbPeerRuntime::new(args).await?);
-
-    Ok(AppState {
-        agent,
-        runtime,
-        endpoint_id: format!("{G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}"),
-    })
-}
-
 async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-    let state = build_backend(&args).await?;
-    let handler = G3pbEndpointHandler::new(state);
-    let ingress = Ingress::for_engine(handler)?;
-    let component = distributed
-        .namespace(G3PB_NAMESPACE)?
-        .component(G3PB_COMPONENT_NAME)?;
+    let service = Arc::new(G3pbBackendService::new(&args).await?);
 
     println!(
         "kvbm_g3pb_backend registering worker_id={} on {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}",
-        args.worker_id
+        service.worker_id()
     );
-    component
-        .endpoint(G3PB_ENDPOINT_NAME)
-        .endpoint_builder()
-        .handler(ingress)
-        .graceful_shutdown(true)
-        .start()
-        .await
+    service.serve(&distributed).await
 }
 
 fn main() -> Result<()> {

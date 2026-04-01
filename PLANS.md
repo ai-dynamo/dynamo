@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:17:44 UTC
+Last updated: 2026-04-01 02:28:36 UTC
 
 ## Active state
 
@@ -501,6 +501,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - `G3pbPeerInstance`
   - `kvbm_g3pb_worker_smoke` now reuses that shared seam instead of carrying
     its own ad hoc discovery bookkeeping
+- ✅ Refactored the standalone backend around a cleaner service boundary
+  - `kvbm_g3pb_backend` now keeps runtime/storage/RPC behavior on
+    `G3pbBackendService`
+  - endpoint transport wiring is a thin wrapper over that service instead of
+    being interleaved with request handling state
+  - no protocol or storage behavior changes in this slice
 
 ### Current findings before edits
 
@@ -540,6 +546,23 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the next structural cleanup slice is also now proven low-risk:
   peer discovery and instance resolution can live in the shared G3PB client
   surface without changing request-plane timings or transfer behavior
+- backend cleanup can also stay structural:
+  the standalone backend’s request handling, runtime policy, and endpoint
+  startup can be separated without changing the request-plane contract
+- concrete config-surface findings from this run:
+  - KVBM/core policy candidates:
+    - offload admission policy
+    - CPU-buffer retention/eviction thresholds
+    - promotion/demotion thresholds between CPU buffer and `foyer`
+  - backend-runtime candidates:
+    - worker identity
+    - pinned host staging capacity
+    - backend device id for pinned registration
+    - `foyer` directory and capacity settings
+  - smoke-only validation controls:
+    - demo block counts
+    - sequence seed/range
+    - synthetic local device/host block counts used only by validation binaries
 
 ### Validation completed in this run so far
 
@@ -645,6 +668,15 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - pass (`6 passed`)
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
     - pass
+- post-backend-boundary validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
 
 ### Decisions confirmed in this run so far
 
@@ -683,6 +715,14 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - keep the worker smoke timing buckets stable while refactoring:
   move discovery bookkeeping into shared helpers, but leave timing ownership in
   the smoke binary so measurements stay comparable across runs
+- keep the backend cleanup structural:
+  factor request handling behind a service object first, and defer any protocol
+  or storage-policy changes until a later run with separate validation
+- config-surface design outcome from this run:
+  - do not hide long-lived G3PB behavior only in binary-local CLI/env wiring
+  - keep synthetic workload knobs local to smoke binaries
+  - treat backend transport/storage knobs separately from core KVBM tier-policy
+    knobs so the long-term surface is easier to reason about
 
 ### Remaining work in this run
 
@@ -695,6 +735,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - shared discovery/client seam complete
   - refactor `kvbm_g3pb_backend` around a cleaner backend/service boundary so
     transport wiring, storage policy, and endpoint handling are less entangled
+    - backend service boundary cleanup complete
   - the client refactor should be broader than the smoke binary wrapper:
     capture the Dynamo-facing component/client layer and client-side placement
     behavior such as ring-hash logic in a reusable G3PB client seam
@@ -732,12 +773,13 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Exact next step
 
-- continue this run with the backend/service boundary cleanup:
-  - separate backend request handling from endpoint wiring in
-    `kvbm_g3pb_backend`
-  - keep runtime/storage behavior unchanged in that slice
+- if another run continues from here, the next concrete slice should be the
+  native config follow-up:
+  - decide which of the current G3PB knobs move into shared KVBM config types
+  - keep backend-runtime-only and smoke-only knobs out of that first core
+    config change
   - rerun the focused `g3pb` / `g3pb_filter` tests plus backend/worker build
-    after the backend cleanup before considering config-surface follow-up
+    after the first config-surface slice
 
 ### Handoff for next run
 
