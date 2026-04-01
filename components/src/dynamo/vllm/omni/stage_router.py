@@ -143,7 +143,6 @@ class OmniStageRouter:
 
         self.stage_clients: Dict[str, Any] = {}
 
-        # Output formatter for all modalities (text, image, video, audio)
         from dynamo.common.storage import get_fs
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
@@ -192,10 +191,17 @@ class OmniStageRouter:
                     return
 
                 if i == 0:
-                    stage_request = {**engine_inputs, "request_id": request_id}
+                    # Send only prompt; stages use their own YAML-configured sampling params.
+                    stage_request = {
+                        "engine_inputs": engine_inputs["engine_inputs"],
+                        "request_id": request_id,
+                    }
                 else:
                     # Run processor if defined
-                    proxies[i - 1].engine_outputs = stage_result
+                    # Wrap in list — processors expect engine_outputs to be
+                    # a list of OmniRequestOutput (matching the monolithic
+                    # orchestrator's stage_list[i].engine_outputs format).
+                    proxies[i - 1].engine_outputs = [stage_result]
                     engine_input_source = getattr(
                         stage_cfg, "engine_input_source", [i - 1]
                     )
@@ -204,13 +210,44 @@ class OmniStageRouter:
                         next_inputs = self.processors[i](
                             proxies, engine_input_source, [request], requires_mm
                         )
+                        logger.debug(
+                            "Router: processor for stage %d returned type=%s, "
+                            "is_list=%s, len=%s",
+                            i,
+                            type(next_inputs).__name__,
+                            isinstance(next_inputs, list),
+                            len(next_inputs)
+                            if isinstance(next_inputs, list)
+                            else "N/A",
+                        )
+                        # Unwrap single-element list to match monolithic orchestrator convention.
+                        if isinstance(next_inputs, list) and len(next_inputs) == 1:
+                            next_inputs = next_inputs[0]
+                        logger.debug(
+                            "Router: unwrapped next_inputs type=%s, keys=%s",
+                            type(next_inputs).__name__,
+                            list(next_inputs.keys())
+                            if isinstance(next_inputs, dict)
+                            else "N/A",
+                        )
                     else:
                         next_inputs = stage_result
 
-                    # Transfer via connector
+                    # try_recv_via_connector expects {"engine_inputs": ...} as payload.
                     connector: StageConnector | None = self.connectors.get((str(i - 1), str(i)))  # type: ignore[assignment]
                     if connector is not None:
-                        ok, _, _ = connector.put(str(i - 1), str(i), request_id, next_inputs)  # type: ignore[arg-type]
+                        connector_payload = {"engine_inputs": next_inputs}
+                        logger.debug(
+                            "Router: transferring stage %d→%d via connector for %s "
+                            "(payload keys: %s)",
+                            i - 1,
+                            i,
+                            request_id,
+                            list(next_inputs.keys())
+                            if isinstance(next_inputs, dict)
+                            else type(next_inputs).__name__,
+                        )
+                        ok, _, _ = connector.put(str(i - 1), str(i), request_id, connector_payload)  # type: ignore[arg-type]
                         if not ok:
                             yield {"error": "connector.put() failed", "finished": True}
                             return

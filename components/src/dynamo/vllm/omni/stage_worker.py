@@ -40,30 +40,61 @@ class OmniStageWorker:
         self.connectors = connectors
         self.final_output: bool = getattr(stage_config, "final_output", False)
         self.final_output_type: str = getattr(stage_config, "final_output_type", "text")
+        self._default_sp = _build_default_sampling_params(stage_config)
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
         request_id = request.get("request_id") or context.id()
 
-        # Reconstruct typed objects — AsyncOmni rejects raw dicts
+        # Fall back to YAML defaults if request has no sampling params.
         raw_sp = request.get("sampling_params_list")
         if raw_sp and isinstance(raw_sp[0], dict):
             from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
             sampling_params_list = [OmniDiffusionSamplingParams(**sp) for sp in raw_sp]
         else:
-            sampling_params_list = raw_sp
+            sampling_params_list = raw_sp or self._default_sp
 
         if request.get("from_connector"):
             from vllm_omni.distributed.omni_connectors.adapter import (
                 try_recv_via_connector,
             )
 
-            prompt, _ = try_recv_via_connector(request, self.connectors, self.stage_id)
+            prompt, rx_metrics = try_recv_via_connector(
+                request, self.connectors, self.stage_id
+            )
+            logger.debug(
+                "Stage %d: received from connector for %s — prompt type=%s, "
+                "is_none=%s, rx_metrics=%s",
+                self.stage_id,
+                request_id,
+                type(prompt).__name__ if prompt is not None else "None",
+                prompt is None,
+                rx_metrics,
+            )
+            if prompt is None:
+                logger.error(
+                    "Stage %d: connector returned None for %s — "
+                    "connector keys=%s, request=%s",
+                    self.stage_id,
+                    request_id,
+                    list(self.connectors.keys()),
+                    request,
+                )
+                yield {"error": "connector returned None prompt", "finished": True}
+                return
         elif "engine_inputs" in request:
             prompt = request["engine_inputs"]
         else:
             # Direct frontend → stage (single-stage, no router)
             prompt = request
+
+        logger.debug(
+            "Stage %d: calling engine.generate for %s — prompt type=%s, sp type=%s",
+            self.stage_id,
+            request_id,
+            type(prompt).__name__,
+            type(sampling_params_list[0]).__name__ if sampling_params_list else "None",
+        )
 
         from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 
@@ -74,7 +105,13 @@ class OmniStageWorker:
             ):
                 last_result = chunk
         except Exception as e:
-            logger.error("Stage %d engine error: %s", self.stage_id, e)
+            logger.error(
+                "Stage %d engine error for %s: %s",
+                self.stage_id,
+                request_id,
+                e,
+                exc_info=True,
+            )
             yield {"error": str(e), "finished": True}
             return
 
@@ -173,6 +210,34 @@ async def init_omni_stage(
             raise
 
 
+def _build_default_sampling_params(stage_config: Any) -> list | None:
+    """Construct typed sampling params from YAML default_sampling_params.
+
+    Returns a single-element list (what AsyncOmni expects for num_stages=1),
+    or None if no defaults are configured.
+    """
+    defaults = getattr(stage_config, "default_sampling_params", None)
+    if not defaults:
+        return None
+
+    from omegaconf import OmegaConf
+
+    if OmegaConf.is_config(defaults):
+        params = OmegaConf.to_container(defaults, resolve=True)
+    else:
+        params = dict(defaults)
+
+    stage_type = getattr(stage_config, "stage_type", "llm")
+    if stage_type == "diffusion":
+        from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+        return [OmniDiffusionSamplingParams(**params)]
+
+    from vllm.sampling_params import SamplingParams
+
+    return [SamplingParams(**params)]
+
+
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
     from vllm_omni.entrypoints.async_omni import AsyncOmni
@@ -193,23 +258,47 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
 
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
+    """Convert a parsed stage config to a single-stage YAML dict.
+
+    Preserves all fields that AsyncOmni reads during engine init
+    (default_sampling_params, is_comprehension, runtime, etc.).
+    """
     from omegaconf import OmegaConf
 
-    engine_args = stage_config.engine_args
-    if OmegaConf.is_config(engine_args):
-        engine_args_dict = OmegaConf.to_container(engine_args, resolve=True)
-    elif hasattr(engine_args, "__dict__"):
-        engine_args_dict = dict(vars(engine_args))
-    else:
-        engine_args_dict = dict(engine_args)
+    def _to_plain(obj: Any) -> Any:
+        if OmegaConf.is_config(obj):
+            return OmegaConf.to_container(obj, resolve=True)
+        if hasattr(obj, "__dict__"):
+            return dict(vars(obj))
+        return obj
 
-    return {
+    result: dict = {
         "stage_id": 0,
         "stage_type": stage_type,
-        "engine_args": engine_args_dict,
+        "engine_args": _to_plain(stage_config.engine_args),
         "final_output": True,
         "final_output_type": getattr(stage_config, "final_output_type", "text"),
     }
+
+    for key in ("default_sampling_params", "is_comprehension"):
+        val = getattr(stage_config, key, None)
+        if val is not None:
+            result[key] = _to_plain(val)
+
+    # Runtime: copy but override devices to "0". The original YAML devices
+    # field (e.g. "1") is for the monolithic orchestrator. In disaggregated
+    # mode, CUDA_VISIBLE_DEVICES already isolates the GPU — the worker
+    # always sees its GPU as device 0.
+    # TODO: Remove hardcoded devices="0" once stage configs support
+    # per-worker device assignment. Currently CUDA_VISIBLE_DEVICES
+    # isolates the GPU, so the worker always sees device 0.
+    runtime = getattr(stage_config, "runtime", None)
+    if runtime is not None:
+        rt = _to_plain(runtime)
+        rt["devices"] = "0"
+        result["runtime"] = rt
+
+    return result
 
 
 def _resolve_model_type(final_output_type: str) -> ModelType:
