@@ -259,9 +259,7 @@ class HandlerBase(BaseGenerativeHandler):
                     f"Request ID {context.id()} cancelled, waiting for KV "
                     "transfer to complete before abort (disagg decode guard)"
                 )
-                kv_wait_task = asyncio.create_task(
-                    kv_transfer_complete_event.wait()
-                )
+                kv_wait_task = asyncio.create_task(kv_transfer_complete_event.wait())
                 try:
                     guard_waiters: list[asyncio.Task] = [kv_wait_task]
                     if shutdown_task is not None:
@@ -272,9 +270,7 @@ class HandlerBase(BaseGenerativeHandler):
                     )
                     if shutdown_task in guard_done:
                         generation_result.abort()
-                        raise EngineShutdown(
-                            "Engine was shut down during generation."
-                        )
+                        raise EngineShutdown("Engine was shut down during generation.")
                 finally:
                     if not kv_wait_task.done():
                         kv_wait_task.cancel()
