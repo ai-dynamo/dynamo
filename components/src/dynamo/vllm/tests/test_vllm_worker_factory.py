@@ -122,7 +122,7 @@ class TestCreate:
             snapshot_engine=snapshot_engine,
         )
 
-        factory._create_multimodal_worker.assert_called_once_with(  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_called_once_with(  # type: ignore[union-attr]
             runtime,
             config,
             shutdown_event,
