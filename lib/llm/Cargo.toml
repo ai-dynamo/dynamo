@@ -20,6 +20,7 @@ default = ["block-manager"]
 testing-full = ["testing-cuda", "testing-nixl"]
 testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
 testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
+testing-remote-storage = []  # Requires NIXL OBJ/POSIX backends; used for remote transfer integration tests
 testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
@@ -71,6 +72,7 @@ hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
+once_cell = { version = "1" }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }

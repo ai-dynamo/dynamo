@@ -3,6 +3,7 @@
 
 use super::events::EventManager;
 use super::*;
+use crate::block_manager::block::transfer::TransferContext;
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
@@ -302,4 +303,436 @@ pub fn should_bypass_cpu_cache() -> bool {
     let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;
 
     disk_cache_set && !cpu_cache_set
+}
+
+/// Bit flags for RemoteDiskStorage (G4) transfer backend selection.
+///
+/// Bit 0: use GDS_MT for offload (write)
+/// Bit 1: use GDS_MT for onboard (read); falls back to POSIX if GDS_MT unavailable
+///
+/// Common combinations:
+///   `DISK_FLAGS_GDS_BOTH`       (0b11) — GDS for both directions (default)
+///   `DISK_FLAGS_GDS_READS_ONLY` (0b10) — POSIX write + GDS read (hybrid, works on any FS)
+///   `DISK_FLAGS_POSIX_BOTH`     (0b00) — POSIX for both directions
+pub type DiskTransferFlags = u8;
+pub const DISK_FLAG_GDS_WRITE: DiskTransferFlags = 0b01;
+pub const DISK_FLAG_GDS_READ: DiskTransferFlags = 0b10;
+pub const DISK_FLAGS_GDS_BOTH: DiskTransferFlags = DISK_FLAG_GDS_WRITE | DISK_FLAG_GDS_READ;
+pub const DISK_FLAGS_POSIX_BOTH: DiskTransferFlags = 0b00;
+pub const DISK_FLAGS_GDS_READS_ONLY: DiskTransferFlags = DISK_FLAG_GDS_READ;
+
+#[derive(Clone, Debug)]
+pub enum RemoteStorageConfig {
+    /// Object storage (S3-compatible).
+    ///
+    /// `bucket_template` may contain `{worker_id}` which is resolved per-TP-rank
+    /// at transfer / registry time.  It must NOT be resolved early so that
+    /// `register_tp` can derive the correct bucket for every worker.
+    Object {
+        bucket_template: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key: Option<String>,
+        secret_key: Option<String>,
+        session_token: Option<String>,
+        scheme: Option<String>,
+        use_virtual_addressing: Option<bool>,
+        req_checksum: Option<String>,
+        ca_bundle: Option<String>,
+    },
+    Disk {
+        base_path: String,
+        transfer_flags: DiskTransferFlags,
+    },
+}
+
+impl RemoteStorageConfig {
+    pub fn object(bucket: impl Into<String>) -> Self {
+        Self::Object {
+            bucket_template: Some(bucket.into()),
+            endpoint: None,
+            region: None,
+            access_key: None,
+            secret_key: None,
+            session_token: None,
+            scheme: None,
+            use_virtual_addressing: None,
+            req_checksum: None,
+            ca_bundle: None,
+        }
+    }
+
+    pub fn object_with_options(
+        bucket: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+    ) -> Self {
+        Self::Object {
+            bucket_template: bucket,
+            endpoint,
+            region,
+            access_key: None,
+            secret_key: None,
+            session_token: None,
+            scheme: None,
+            use_virtual_addressing: None,
+            req_checksum: None,
+            ca_bundle: None,
+        }
+    }
+
+    /// Resolve `{worker_id}` in the bucket template for a specific TP rank.
+    pub fn resolve_bucket(&self, worker_id: usize) -> Option<String> {
+        match self {
+            Self::Object {
+                bucket_template, ..
+            } => bucket_template
+                .as_deref()
+                .map(|t| t.replace("{worker_id}", &worker_id.to_string())),
+            _ => None,
+        }
+    }
+
+    pub fn disk(base_path: impl Into<String>, transfer_flags: DiskTransferFlags) -> Self {
+        Self::Disk {
+            base_path: base_path.into(),
+            transfer_flags,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteTransferContext {
+    base: Arc<TransferContext>,
+    config: RemoteStorageConfig,
+    worker_id: u64,
+    world_size: usize,
+}
+
+#[derive(Clone)]
+pub struct RemoteContextConfig {
+    pub remote_storage_config: RemoteStorageConfig,
+    pub worker_id: u64,
+}
+
+impl RemoteTransferContext {
+    pub fn for_object(base: Arc<TransferContext>, bucket_template: Option<String>) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::object_with_options(bucket_template, None, None),
+            worker_id: 0,
+            world_size: 1,
+        }
+    }
+
+    pub fn for_object_with_options(
+        base: Arc<TransferContext>,
+        bucket_template: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        worker_id: u64,
+    ) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::object_with_options(bucket_template, endpoint, region),
+            worker_id,
+            world_size: 1,
+        }
+    }
+
+    pub fn for_disk(
+        base: Arc<TransferContext>,
+        base_path: String,
+        transfer_flags: DiskTransferFlags,
+    ) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Disk {
+                base_path,
+                transfer_flags,
+            },
+            worker_id: 0,
+            world_size: 1,
+        }
+    }
+
+    pub fn new(base: Arc<TransferContext>, config: RemoteStorageConfig) -> Self {
+        Self {
+            base,
+            config,
+            worker_id: 0,
+            world_size: 1,
+        }
+    }
+
+    pub fn with_topology(mut self, worker_id: u64, world_size: usize) -> Self {
+        self.worker_id = worker_id;
+        self.world_size = world_size;
+        self
+    }
+
+    pub fn base(&self) -> &Arc<TransferContext> {
+        &self.base
+    }
+
+    pub fn config(&self) -> &RemoteStorageConfig {
+        &self.config
+    }
+
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.base.nixl_agent()
+    }
+
+    pub fn async_rt_handle(&self) -> &tokio::runtime::Handle {
+        self.base.async_rt_handle()
+    }
+
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    pub fn world_size(&self) -> usize {
+        self.world_size
+    }
+
+    pub fn bucket_template(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Object {
+                bucket_template, ..
+            } => bucket_template.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn base_path(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Disk { base_path, .. } => Some(base_path),
+            _ => None,
+        }
+    }
+
+    pub fn disk_transfer_flags(&self) -> DiskTransferFlags {
+        match &self.config {
+            RemoteStorageConfig::Disk { transfer_flags, .. } => *transfer_flags,
+            _ => DISK_FLAGS_GDS_BOTH,
+        }
+    }
+
+}
+
+impl std::fmt::Debug for RemoteTransferContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTransferContext")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod remote_storage_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_object_with_bucket() {
+            let config = RemoteStorageConfig::object("my-bucket");
+            match config {
+                RemoteStorageConfig::Object {
+                    bucket_template,
+                    endpoint,
+                    region,
+                    ..
+                } => {
+                    assert_eq!(bucket_template, Some("my-bucket".to_string()));
+                    assert!(endpoint.is_none());
+                    assert!(region.is_none());
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_object_with_options() {
+            let config = RemoteStorageConfig::object_with_options(
+                Some("test-bucket".to_string()),
+                Some("http://localhost:9000".to_string()),
+                Some("us-west-2".to_string()),
+            );
+            match config {
+                RemoteStorageConfig::Object {
+                    bucket_template,
+                    endpoint,
+                    region,
+                    ..
+                } => {
+                    assert_eq!(bucket_template, Some("test-bucket".to_string()));
+                    assert_eq!(endpoint, Some("http://localhost:9000".to_string()));
+                    assert_eq!(region, Some("us-west-2".to_string()));
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_object_with_no_bucket() {
+            let config = RemoteStorageConfig::object_with_options(None, None, None);
+            match config {
+                RemoteStorageConfig::Object {
+                    bucket_template,
+                    endpoint,
+                    region,
+                    ..
+                } => {
+                    assert!(bucket_template.is_none());
+                    assert!(endpoint.is_none());
+                    assert!(region.is_none());
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_resolve_bucket_with_worker_id() {
+            let config = RemoteStorageConfig::object("kvcache-{worker_id}");
+            assert_eq!(config.resolve_bucket(0), Some("kvcache-0".to_string()));
+            assert_eq!(config.resolve_bucket(3), Some("kvcache-3".to_string()));
+        }
+
+        #[test]
+        fn test_resolve_bucket_without_template() {
+            let config = RemoteStorageConfig::object("flat-bucket");
+            assert_eq!(config.resolve_bucket(0), Some("flat-bucket".to_string()));
+            assert_eq!(config.resolve_bucket(5), Some("flat-bucket".to_string()));
+        }
+
+        #[test]
+        fn test_disk_config_posix() {
+            let config = RemoteStorageConfig::disk("/mnt/kv-cache", DISK_FLAGS_POSIX_BOTH);
+            match config {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
+                    assert_eq!(base_path, "/mnt/kv-cache");
+                    assert_eq!(transfer_flags, DISK_FLAGS_POSIX_BOTH);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_disk_config_gds() {
+            let config = RemoteStorageConfig::disk("/mnt/nvme", DISK_FLAGS_GDS_BOTH);
+            match config {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
+                    assert_eq!(base_path, "/mnt/nvme");
+                    assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_disk_config_gds_reads_only() {
+            let config = RemoteStorageConfig::disk("/mnt/nfs", DISK_FLAGS_GDS_READS_ONLY);
+            match config {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
+                    assert_eq!(base_path, "/mnt/nfs");
+                    assert_eq!(transfer_flags & DISK_FLAG_GDS_READ, DISK_FLAG_GDS_READ);
+                    assert_eq!(transfer_flags & DISK_FLAG_GDS_WRITE, 0);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_config_clone() {
+            let config = RemoteStorageConfig::object("bucket");
+            let cloned = config.clone();
+            match (config, cloned) {
+                (
+                    RemoteStorageConfig::Object {
+                        bucket_template: b1,
+                        ..
+                    },
+                    RemoteStorageConfig::Object {
+                        bucket_template: b2,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(b1, b2);
+                }
+                _ => panic!("Clone should preserve variant"),
+            }
+        }
+
+        #[test]
+        fn test_config_debug() {
+            let config = RemoteStorageConfig::object("debug-bucket");
+            let debug_str = format!("{:?}", config);
+            assert!(debug_str.contains("Object"));
+            assert!(debug_str.contains("debug-bucket"));
+        }
+    }
+
+    mod remote_context_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_remote_context_config_object() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::object("test-bucket"),
+                worker_id: 42,
+            };
+            assert_eq!(config.worker_id, 42);
+            match config.remote_storage_config {
+                RemoteStorageConfig::Object {
+                    bucket_template, ..
+                } => {
+                    assert_eq!(bucket_template, Some("test-bucket".to_string()));
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_remote_context_config_disk() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::disk(
+                    "/data/cache",
+                    DISK_FLAGS_GDS_BOTH,
+                ),
+                worker_id: 7,
+            };
+            assert_eq!(config.worker_id, 7);
+            match config.remote_storage_config {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
+                    assert_eq!(base_path, "/data/cache");
+                    assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_remote_context_config_clone() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::object("clone-bucket"),
+                worker_id: 123,
+            };
+            let cloned = config.clone();
+            assert_eq!(cloned.worker_id, 123);
+        }
+    }
 }

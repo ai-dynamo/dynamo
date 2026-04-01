@@ -1,11 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod checksum;
 pub mod context;
 mod cuda;
+mod disk_transfer;
 mod memcpy;
 mod nixl;
+mod object_transfer;
+pub mod remote;
 mod strategy;
+
+#[cfg(all(test, feature = "testing-nixl", feature = "testing-remote-storage"))]
+mod remote_tests;
+
+pub use disk_transfer::{clear_remote_disk_fd_cache, take_fd_open_durations};
 
 use super::*;
 
@@ -60,6 +69,9 @@ pub enum TransferError {
 
     #[error("Mismatched {0:?} worker ID: {1} != {2}")]
     MismatchedWorkerID(BlockTarget, usize, usize),
+
+    #[error("Transfer was cancelled")]
+    Cancelled,
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
