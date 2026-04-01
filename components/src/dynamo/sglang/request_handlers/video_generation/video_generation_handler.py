@@ -231,12 +231,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 sampling_params_kwargs=args,
             )
 
-        # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
+        # DiffGenerator.generate() returns dict | list[dict] | None
+        # (when return_frames=False, the default).
         if result is None:
             raise RuntimeError("DiffGenerator returned None")
         if isinstance(result, list):
             result = result[0]
-        frames = result.frames
+        # Support both dict results and object-style results
+        frames = result["frames"] if isinstance(result, dict) else result.frames
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 
