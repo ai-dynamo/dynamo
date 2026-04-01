@@ -347,12 +347,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.vllm.txt \
         --requirement /tmp/requirements.benchmark.txt
 
-# Copy tests, deploy, lib, and the mocker component subtree for CI.
+# Copy tests, deploy, lib, and the vllm/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
 
