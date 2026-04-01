@@ -169,6 +169,13 @@ metadata:
     dgdr.nvidia.com/name: {{.DGDRName}}
     dgdr.nvidia.com/namespace: {{.Namespace}}
     nvidia.com/managed-by: dynamo-operator
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentRequest
+    name: {{.DGDRName}}
+    uid: {{.DGDRuid}}
+    blockOwnerDeletion: true
+    controller: true
 data:
   phase: "$PHASE"
   message: "$MESSAGE"
@@ -265,6 +272,13 @@ metadata:
     dgdr.nvidia.com/name: {{.DGDRName}}
     dgdr.nvidia.com/namespace: {{.Namespace}}
     nvidia.com/managed-by: dynamo-operator
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentRequest
+    name: {{.DGDRName}}
+    uid: {{.DGDRuid}}
+    blockOwnerDeletion: true
+    controller: true
 data:
   phase: "$FINAL_PHASE"
   message: "$FINAL_MESSAGE"
@@ -946,6 +960,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace] = dgdr.Namespace
 		cm.Labels[nvidiacomv1beta1.LabelManagedBy] = nvidiacomv1beta1.LabelValueDynamoOperator
 
+		// Set ownerReference so the ConfigMap is garbage-collected when the DGDR is deleted
+		isController := true
+		blockOwnerDeletion := true
+		cm.OwnerReferences = []metav1.OwnerReference{
+			{
+				APIVersion:         nvidiacomv1beta1.GroupVersion.String(),
+				Kind:               "DynamoGraphDeploymentRequest",
+				Name:               dgdr.Name,
+				UID:                dgdr.UID,
+				Controller:         &isController,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+			},
+		}
+
 		// Create the ConfigMap
 		if err := r.Create(ctx, cm); err != nil {
 			if apierrors.IsAlreadyExists(err) {
@@ -1270,6 +1298,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"ConfigMapName": outputConfigMapName,
 			"Namespace":     dgdr.Namespace,
 			"DGDRName":      dgdr.Name,
+			"DGDRuid":       string(dgdr.UID),
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
