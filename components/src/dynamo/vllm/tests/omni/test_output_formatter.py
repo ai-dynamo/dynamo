@@ -234,3 +234,104 @@ class TestBuildCompletionUsage:
         usage = _build_completion_usage(ro)
         assert usage["prompt_tokens"] is None
         assert usage["total_tokens"] is None
+
+
+# ── AudioFormatter ─────────────────────────────────────────
+
+
+class TestAudioFormatterExtractTensor:
+    def test_extracts_from_audio_key(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.array([0.1, -0.2, 0.3], dtype=np.float32), "sr": 24000}
+        audio_np, sr = f._extract_audio_tensor(mm)
+        assert sr == 24000
+        assert len(audio_np) == 3
+
+    def test_extracts_from_model_outputs_key(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"model_outputs": np.array([0.5, -0.5], dtype=np.float32), "sr": 16000}
+        audio_np, sr = f._extract_audio_tensor(mm)
+        assert sr == 16000
+        assert len(audio_np) == 2
+
+    def test_missing_audio_raises(self):
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        with pytest.raises(ValueError, match="No audio data"):
+            f._extract_audio_tensor({"sr": 24000})
+
+    def test_squeezes_extra_dims(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.array([[0.1, 0.2, 0.3]], dtype=np.float32), "sr": 24000}
+        audio_np, _ = f._extract_audio_tensor(mm)
+        assert audio_np.ndim == 1
+
+
+class TestAudioFormatterEncode:
+    def test_wav_encoding(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        audio_bytes, media_type = f._encode_audio(
+            np.zeros(2400, dtype=np.float32), 24000, "wav"
+        )
+        assert media_type == "audio/wav"
+        assert audio_bytes[:4] == b"RIFF"
+
+    def test_unsupported_format_falls_back_to_wav(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        _, media_type = f._encode_audio(np.zeros(100, dtype=np.float32), 24000, "xyz")
+        assert media_type == "audio/wav"
+
+    def test_default_format_is_wav(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        _, media_type = f._encode_audio(np.zeros(100, dtype=np.float32), 24000)
+        assert media_type == "audio/wav"
+
+
+class TestAudioFormatterFormat:
+    @pytest.mark.asyncio
+    async def test_empty_returns_error(self):
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        result = await f.format({}, "req-1")
+        assert result["status"] == "failed"
+        assert "No audio generated" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_successful_generation(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.random.randn(4800).astype(np.float32), "sr": 24000}
+        result = await f.format(mm, "req-1")
+        assert result["status"] == "completed"
+        assert result["object"] == "audio.speech"
+        assert len(result["data"]) == 1
+        assert result["data"][0]["b64_json"] is not None

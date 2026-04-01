@@ -235,6 +235,169 @@ class DiffusionFormatter:
         return outlist
 
 
+class AudioFormatter:
+    """Formats audio multimodal_output → NvAudioSpeechResponse."""
+
+    def __init__(
+        self, model_name: str, media_fs: Any, media_http_url: Optional[str]
+    ) -> None:
+        self._model_name = model_name
+        self._media_fs = media_fs
+        self._media_http_url = media_http_url
+
+    async def format(
+        self, stage_output: Any, request_id: str, **ctx: Any
+    ) -> Dict[str, Any] | None:
+        mm_output = (
+            stage_output.multimodal_output
+            if hasattr(stage_output, "multimodal_output")
+            else stage_output
+        )
+        if not mm_output:
+            return self._error_response(request_id, "No audio generated")
+
+        response_format = ctx.get("response_format")
+        speed = ctx.get("speed", 1.0)
+
+        try:
+            start_time = time.time()
+            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+
+            encode_fmt = (
+                "wav"
+                if response_format in (None, "url", "b64_json")
+                else response_format
+            )
+            assert encode_fmt is not None
+            audio_bytes, media_type = await asyncio.to_thread(
+                self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+            )
+
+            logger.info(
+                "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
+                request_id,
+                len(audio_np),
+                sample_rate,
+                len(audio_bytes),
+                encode_fmt,
+            )
+
+            if response_format == "url":
+                from dynamo.common.storage import upload_to_fs
+
+                ext = encode_fmt if encode_fmt != "opus" else "ogg"
+                url = await upload_to_fs(
+                    self._media_fs,
+                    f"audios/{request_id}/{uuid.uuid4()}.{ext}",
+                    audio_bytes,
+                    self._media_http_url,
+                )
+                audio_data_obj = AudioData(url=url)
+            else:
+                audio_data_obj = AudioData(
+                    b64_json=base64.b64encode(audio_bytes).decode()
+                )
+
+            from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+
+            return NvAudioSpeechResponse(
+                id=request_id,
+                object="audio.speech",
+                model=self._model_name,
+                status="completed",
+                progress=100,
+                created=int(time.time()),
+                data=[audio_data_obj],
+                inference_time_s=time.time() - start_time,
+            ).model_dump()
+
+        except Exception as e:
+            logger.error("Failed to process audio for request %s: %s", request_id, e)
+            return self._error_response(request_id, str(e))
+
+    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
+        import numpy as np
+        import torch
+
+        audio_key = "audio" if "audio" in mm_output else "model_outputs"
+        audio_val = mm_output.get(audio_key)
+        if audio_val is None:
+            raise ValueError(
+                f"No audio data in multimodal_output. Keys: {list(mm_output.keys())}"
+            )
+
+        if isinstance(audio_val, list):
+            audio_val = torch.cat(audio_val, dim=-1)
+
+        if hasattr(audio_val, "float"):
+            audio_np = audio_val.float().detach().cpu().numpy()
+        elif isinstance(audio_val, np.ndarray):
+            audio_np = audio_val.astype(np.float32)
+        else:
+            audio_np = np.array(audio_val, dtype=np.float32)
+
+        if audio_np.ndim > 1:
+            audio_np = audio_np.squeeze()
+
+        sr_raw = mm_output.get("sr", 24000)
+        if isinstance(sr_raw, list):
+            sr_raw = sr_raw[-1] if sr_raw else 24000
+        sample_rate = sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
+
+        return audio_np, sample_rate
+
+    def _encode_audio(
+        self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
+    ) -> tuple:
+        import soundfile as sf
+
+        if speed != 1.0:
+            try:
+                import librosa
+
+                audio_np = librosa.effects.time_stretch(y=audio_np, rate=speed)
+            except ImportError:
+                logger.warning("librosa not installed, ignoring speed adjustment")
+
+        fmt = (fmt or "wav").lower()
+        format_map = {
+            "wav": ("WAV", "audio/wav", {}),
+            "pcm": ("RAW", "audio/pcm", {"subtype": "PCM_16"}),
+            "flac": ("FLAC", "audio/flac", {}),
+            "mp3": ("MP3", "audio/mpeg", {}),
+            "aac": ("AAC", "audio/aac", {}),
+            "opus": ("OGG", "audio/ogg", {"subtype": "OPUS"}),
+        }
+
+        if fmt not in format_map:
+            logger.warning("Unsupported format '%s', defaulting to wav", fmt)
+            fmt = "wav"
+
+        sf_format, media_type, kwargs = format_map[fmt]
+
+        buf = BytesIO()
+        sf.write(buf, audio_np, sample_rate, format=sf_format, **kwargs)
+        return buf.getvalue(), media_type
+
+    def _error_response(self, request_id: str, error: str) -> Dict[str, Any]:
+        from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+
+        return NvAudioSpeechResponse(
+            id=request_id,
+            model=self._model_name,
+            status="failed",
+            created=int(time.time()),
+            error=error,
+        ).model_dump()
+
+
+# AudioData is needed by AudioFormatter at runtime
+try:
+    from dynamo.common.protocols.audio_protocol import AudioData
+except ImportError:
+    AudioData = None  # type: ignore[assignment,misc]
+
+
 def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:

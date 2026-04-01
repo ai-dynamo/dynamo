@@ -19,7 +19,11 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import DiffusionFormatter, TextFormatter
+from dynamo.vllm.omni.output_formatter import (
+    AudioFormatter,
+    DiffusionFormatter,
+    TextFormatter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,11 @@ class OmniHandler(BaseOmniHandler):
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
+        )
+        self._audio_formatter = AudioFormatter(
+            model_name=model_name,
+            media_fs=media_output_fs,
+            media_http_url=media_output_http_url,
         )
 
         # Audio/TTS handler — composition, not inheritance.
@@ -208,17 +217,15 @@ class OmniHandler(BaseOmniHandler):
                             yield chunk
 
                     elif stage_output.final_output_type == "audio":
-                        mm_output = stage_output.multimodal_output
-                        if mm_output:
-                            chunk = await self.audio.format_output(
-                                mm_output,
-                                request_id,
-                                response_format=inputs.response_format,
-                                request_type=inputs.request_type,
-                                speed=inputs.speed,
-                            )
-                            if chunk:
-                                yield chunk
+                        chunk = await self._audio_formatter.format(
+                            stage_output,
+                            request_id,
+                            response_format=inputs.response_format,
+                            request_type=inputs.request_type,
+                            speed=inputs.speed,
+                        )
+                        if chunk:
+                            yield chunk
 
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
