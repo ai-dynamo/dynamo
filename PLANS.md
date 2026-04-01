@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:51:50 UTC
+Last updated: 2026-04-01 06:55:37 UTC
 
 ## Active state
 
@@ -1158,6 +1158,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   handoff state
 - ✅ Refreshed `PLANS.md` again after validation so the next run can resume
   from the verified current state instead of redoing the same audit loop
+- ✅ Created a signed handoff commit for the validated `PLANS.md` refresh:
+  - `c0c491c49 docs: refresh g3pb audit handoff`
 
 ### Current findings before validation
 
@@ -1199,24 +1201,28 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   focused validation run exposes a concrete new gap
 - keep compacting audit-only context inside `PLANS.md` instead of extending the
   repo with another near-duplicate docs-only audit trail
-- if validation remains green, this run should end with only a small signed
-  `PLANS.md` handoff refresh commit rather than additional code churn
+- when a run only refreshes the verified handoff state, keep it to a small
+  signed `PLANS.md` commit rather than inventing extra code churn
 
 ### Remaining work in this run
 
-- make one signed small handoff commit for this `PLANS.md` refresh
+- none
 
 ### Exact next step
 
-- run `git diff --check`, then create the signed commit for this `PLANS.md`
-  refresh if the worktree is clean apart from the handoff update
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ### Handoff for next run
 
-- if this run is interrupted before the commit, finish `git diff --check` and
-  create the signed commit for this `PLANS.md` refresh
-- if this `PLANS.md` refresh is already committed, resume only from the
-  existing non-blocking follow-on backlog:
+- this run re-audited the active `G3PB` surface, reran the focused validation
+  stack, and committed the resulting handoff refresh on `HEAD`
+- there is still no new concrete `G3PB` implementation gap on current `HEAD`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
