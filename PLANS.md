@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:55:37 UTC
+Last updated: 2026-04-01 07:02:22 UTC
 
 ## Active state
 
@@ -18,6 +18,82 @@ Last updated: 2026-04-01 06:55:37 UTC
   - peer ownership remains rendezvous-hash based
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
+- Current follow-on execution focus for this run:
+  - locally patch the pinned `nixl-sys` `0.10.1` teardown bug so remote
+    metadata invalidation uses null-terminated agent names
+  - add explicit backend-side committed-block reclamation for `G3PB` cache
+    storage so retained committed blocks do not force backend restarts between
+    larger smokes
+
+## Current run (2026-04-01 07:02:22 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely and confirmed the prior implementation slice
+  was already complete; the remaining concrete work is the non-blocking
+  follow-on backlog
+- ✅ Confirmed both backlog items are actionable code slices rather than only
+  design notes:
+  - local `nixl-sys` `0.10.1` invalidation bug is in the dependency callsite,
+    where `invalidate_remote_md` passes `remote_agent.as_ptr()` instead of a
+    null-terminated `CString`
+  - `G3pbCacheStorage` retains committed blocks indefinitely; larger smokes
+    currently require a fresh backend because there is no explicit committed
+    entry reclamation path
+- ✅ Landed a workspace-local patch for the pinned `nixl-sys` `0.10.1`
+  invalidation bug
+  - vendored the crate at `third_party/nixl-sys`
+  - patched all remote invalidation paths to pass null-terminated `CString`
+    values into the C ABI
+  - wired the workspace to the local crate with `[patch.crates-io]`
+  - preserved behavior otherwise
+
+### Current findings before edits
+
+- `nixl-sys` remains pinned at `=0.10.1` from both `lib/memory` and `lib/llm`,
+  so the teardown fix should be landed as a workspace-local patch instead of an
+  ad hoc registry edit
+- the previously diagnosed teardown corruption is real:
+  `/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nixl-sys-0.10.1/src/agent.rs`
+  still passes a non-null-terminated Rust string pointer into
+  `nixl_capi_invalidate_remote_md`
+- backend retention is currently unbounded at the `G3PB` entry level:
+  - `G3pbCacheStorage` can demote/promote entries between pinned `G2` and
+    `foyer`
+  - it can free `G2` offsets
+  - it does not remove committed metadata/payload entries once admitted
+- `foyer` exposes removal APIs, so a real reclamation path is feasible in this
+  slice without changing the peer protocol
+
+### Remaining work in this run
+
+- add explicit backend-side committed-block reclamation to `G3pbCacheStorage`
+  and validate with focused `G3PB` tests plus the backend/worker build
+- refresh `PLANS.md` with the validation results and exact handoff state
+- make signed small commits once each validated milestone is green
+
+### Exact next step
+
+- commit the validated local `nixl-sys` patch milestone, then add explicit
+  backend-side committed-block reclamation to `G3pbCacheStorage`
+
+### Validation completed in this run so far
+
+- post-`nixl-sys`-patch validation:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+    - pass (`4 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - `git diff --check`
+    - pass
 
 ## Current run (2026-03-31 23:09:30 UTC)
 

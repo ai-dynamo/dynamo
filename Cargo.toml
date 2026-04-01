@@ -157,3 +157,6 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+nixl-sys = { path = "third_party/nixl-sys" }
