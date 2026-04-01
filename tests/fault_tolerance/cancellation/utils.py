@@ -12,7 +12,6 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.device import detect_target_device
 from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
@@ -314,38 +313,22 @@ def _parse_frontend_cancellation_metric(
     Returns:
         The metric count, or 0 if not found
     """
-    # Some backends normalize model label casing in metrics (for example lowercasing),
-    # so compare model labels case-insensitively first, then fall back to endpoint/type.
-    normalized_model = model_name.lower()
-    endpoint_type_fallback = 0
-
     for line in metrics_text.splitlines():
         if not line.startswith("dynamo_frontend_model_cancellation_total{"):
             continue
-
         if (
-            f'endpoint="{endpoint}"' not in line
-            or f'request_type="{request_type}"' not in line
+            f'endpoint="{endpoint}"' in line
+            and f'model="{model_name}"' in line
+            and f'request_type="{request_type}"' in line
         ):
-            continue
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(float(parts[1]))
+                except ValueError:
+                    pass
 
-        parts = line.rsplit(None, 1)
-        if len(parts) != 2:
-            continue
-
-        try:
-            value = int(float(parts[1]))
-        except ValueError:
-            continue
-
-        # Fallback: aggregate all matching endpoint/request_type series.
-        endpoint_type_fallback += value
-
-        model_match = re.search(r'model="([^"]+)"', line)
-        if model_match and model_match.group(1).lower() == normalized_model:
-            return value
-
-    return endpoint_type_fallback
+    return 0
 
 
 def _parse_runtime_cancellation_metric(
@@ -385,26 +368,6 @@ def _parse_runtime_cancellation_metric(
                     pass
 
     return 0
-
-
-def _extract_runtime_cancellation_lines(metrics_text: str) -> list[str]:
-    """Collect runtime cancellation metric lines for diagnostics.
-
-    Includes both the historical `dynamo_component_cancellation_total` series and
-    any alternative runtime cancellation series that may be exposed.
-    """
-    lines: list[str] = []
-    for line in metrics_text.splitlines():
-        if line.startswith("dynamo_component_cancellation_total{"):
-            lines.append(line)
-            continue
-        if (
-            "dynamo_component_" in line
-            and "cancellation" in line
-            and not line.startswith("#")
-        ):
-            lines.append(line)
-    return lines
 
 
 def _resolve_cancellation_labels(request_type: str) -> tuple[str, str]:
@@ -461,24 +424,11 @@ def verify_frontend_cancellation_metrics(
         f"request_type={req_type_label}: {count}"
     )
 
-    if count != expected_count:
-        cancellation_lines = [
-            line
-            for line in frontend_text.splitlines()
-            if line.startswith("dynamo_frontend_model_cancellation_total{")
-        ]
-        if not cancellation_lines:
-            logger.warning(
-                "Frontend cancellation metric series is not exposed; skipping strict frontend cancellation assertion"
-            )
-            return
-        preview = "\n".join(cancellation_lines[:20])
-        assert count == expected_count, (
-            f"Frontend: expected {expected_count} cancellations "
-            f"for endpoint={endpoint}, request_type={req_type_label}, "
-            f"but got {count}. "
-            f"Observed cancellation metrics lines:\n{preview}"
-        )
+    assert count == expected_count, (
+        f"Frontend: expected {expected_count} cancellations "
+        f"for endpoint={endpoint}, request_type={req_type_label}, "
+        f"but got {count}"
+    )
 
 
 def verify_runtime_cancellation_metrics(
@@ -503,20 +453,12 @@ def verify_runtime_cancellation_metrics(
 
     worker_text = response.text
     count = _parse_runtime_cancellation_metric(worker_text, component=component)
-    runtime_lines = _extract_runtime_cancellation_lines(worker_text)
 
     logger.info(f"Runtime cancellation metrics (component={component}): {count}")
 
-    assert runtime_lines, (
-        "Runtime cancellation metric series is not exposed. "
-        "Expected at least one runtime cancellation metric line in worker /metrics."
-    )
-
-    preview = "\n".join(runtime_lines[:20])
     assert count == expected_count, (
         f"Runtime (component={component}): expected {expected_count} cancellations, "
-        f"but got {count}. "
-        f"Observed runtime cancellation metrics lines:\n{preview}"
+        f"but got {count}"
     )
 
 
@@ -542,7 +484,7 @@ def poll_for_pattern(
     process: ManagedProcess,
     pattern: str,
     log_offset: int = 0,
-    max_wait_ms: int | None = None,
+    max_wait_ms: int = 500,
     poll_interval_ms: int = 5,
     match_type: str = "endswith",  # "contains" or "endswith"
 ) -> tuple[str, int]:
@@ -562,9 +504,6 @@ def poll_for_pattern(
         - For "contains": everything after the pattern on the same line
         - For "endswith": empty string (since nothing follows)
     """
-    if max_wait_ms is None:
-        max_wait_ms = 5000 if detect_target_device() == "xpu" else 500
-
     max_iterations = max_wait_ms // poll_interval_ms
     iteration = 0
     current_offset = log_offset

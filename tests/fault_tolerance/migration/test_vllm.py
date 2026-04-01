@@ -148,12 +148,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "VLLM_NIXL_SIDE_CHANNEL_PORT"
         ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
 
-        # Set ETCD endpoints for discovery (dynamic ports fixture)
-        runtime_services = request.getfixturevalue("runtime_services_dynamic_ports")
-        if runtime_services and runtime_services[1] is not None:
-            etcd_process = runtime_services[1]
-            env["ETCD_ENDPOINTS"] = f"http://127.0.0.1:{etcd_process.port}"
-
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy

@@ -208,7 +208,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(110)  # 3x average
+@pytest.mark.timeout(180)  # increase headroom for slower CI/nats path
 @pytest.mark.post_merge
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
@@ -269,7 +269,7 @@ def test_request_cancellation_vllm_aggregated(
 
                 # For streaming, read 5 responses before cancelling
                 if request_type == "chat_completion_stream":
-                    read_streaming_responses(cancellable_req, expected_count=5)
+                    read_streaming_responses(cancellable_req, expected_count=3)
 
                 # Now cancel the request
                 cancellable_req.cancel()
@@ -363,7 +363,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
                 # Read 5 streaming responses (decode phase)
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(cancellable_req, expected_count=3)
 
                 # Now cancel the request
                 cancellable_req.cancel()

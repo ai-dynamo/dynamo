@@ -32,15 +32,11 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         self,
         request,
         etcd_endpoints: list[str],
-        nats_server_url: str | None = None,
     ):
         extra_env = {
             "DYN_LOG": "debug",
-            "DYN_REQUEST_PLANE": "tcp",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
         }
-        if nats_server_url:
-            extra_env["NATS_SERVER"] = nats_server_url
         # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
         # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
         # For parallel-safe alternative, use terminate_all_matching_process_names=False.
