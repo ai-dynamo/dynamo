@@ -29,7 +29,9 @@ def _shm_deserialize(shm_meta: dict) -> Any:
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
 
 
-def _parse_engine_inputs(request: dict, request_type: Any, config: "OmniConfig") -> dict:
+def _parse_engine_inputs(
+    request: dict, request_type: Any, config: "OmniConfig"
+) -> dict:
     """Convert a raw frontend request into engine_inputs + sampling_params_list.
 
     Passing the raw request dict as prompt causes the diffusion engine to use
@@ -43,8 +45,9 @@ def _parse_engine_inputs(request: dict, request_type: Any, config: "OmniConfig")
     from dynamo.common.utils.output_modalities import RequestType
 
     if request_type == RequestType.VIDEO_GENERATION:
-        from dynamo.common.utils.video_utils import compute_num_frames, parse_size
         from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+
+        from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
         nvext = request.get("nvext") or {}
         width, height = parse_size(request.get("size", "832x480"))
@@ -53,7 +56,9 @@ def _parse_engine_inputs(request: dict, request_type: Any, config: "OmniConfig")
             fps=nvext.get("fps"),
             default_fps=config.default_video_fps,
         )
-        sp = OmniDiffusionSamplingParams(height=height, width=width, num_frames=num_frames)
+        sp = OmniDiffusionSamplingParams(
+            height=height, width=width, num_frames=num_frames
+        )
         if nvext.get("num_inference_steps") is not None:
             sp.num_inference_steps = nvext["num_inference_steps"]
         if nvext.get("guidance_scale") is not None:
@@ -67,11 +72,14 @@ def _parse_engine_inputs(request: dict, request_type: Any, config: "OmniConfig")
         }
 
     if request_type == RequestType.IMAGE_GENERATION:
-        from dynamo.common.utils.video_utils import parse_size
         from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+        from dynamo.common.utils.video_utils import parse_size
+
         nvext = request.get("nvext") or {}
-        width, height = parse_size(request.get("size", "1024x1024"), default_w=1024, default_h=1024)
+        width, height = parse_size(
+            request.get("size", "1024x1024"), default_w=1024, default_h=1024
+        )
         sp = OmniDiffusionSamplingParams(height=height, width=width)
         if nvext.get("num_inference_steps") is not None:
             sp.num_inference_steps = nvext["num_inference_steps"]
@@ -93,6 +101,7 @@ def _parse_engine_inputs(request: dict, request_type: Any, config: "OmniConfig")
 @dataclass
 class _Proxy:
     """Satisfies stage_list[i].engine_outputs access in processor functions."""
+
     engine_outputs: Any = None
 
 
@@ -111,7 +120,9 @@ class OmniStageRouter:
         config: OmniConfig,
         stage_configs_path: str,
     ) -> None:
-        from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
+        from vllm_omni.distributed.omni_connectors import (
+            initialize_orchestrator_connectors,
+        )
         from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 
         self.config = config
@@ -126,23 +137,34 @@ class OmniStageRouter:
                 self.processors[cfg.stage_id] = getattr(
                     importlib.import_module(module_path), func_name
                 )
-                logger.info("Loaded processor for stage %d: %s", cfg.stage_id, func_path)
+                logger.info(
+                    "Loaded processor for stage %d: %s", cfg.stage_id, func_path
+                )
 
         self.stage_clients: Dict[str, Any] = {}
 
-        # Media output config for response formatting
+        # Output formatter for all modalities (text, image, video, audio)
         from dynamo.common.storage import get_fs
-        self._media_output_fs = (
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        media_fs = (
             get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
         )
-        self._media_output_http_url = config.media_output_http_url
+        self._formatter = OutputFormatter(
+            model_name=config.served_model_name or config.model,
+            media_fs=media_fs,
+            media_http_url=config.media_output_http_url,
+            default_fps=config.default_video_fps,
+        )
 
     def set_stage_client(self, model_stage: str, client: Any) -> None:
         self.stage_clients[model_stage] = client
         logger.info("Registered stage client: %s", model_stage)
 
     async def generate(
-        self, request: dict, context  # noqa: ARG002 — context unused; router generates its own request_id
+        self,
+        request: dict,
+        context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
         from dynamo.common.utils.output_modalities import parse_request_type
 
@@ -163,7 +185,10 @@ class OmniStageRouter:
                 model_stage = getattr(stage_cfg.engine_args, "model_stage", f"stage{i}")
                 client = self.stage_clients.get(model_stage)
                 if client is None:
-                    yield {"error": f"No client for stage '{model_stage}'", "finished": True}
+                    yield {
+                        "error": f"No client for stage '{model_stage}'",
+                        "finished": True,
+                    }
                     return
 
                 if i == 0:
@@ -171,7 +196,9 @@ class OmniStageRouter:
                 else:
                     # Run processor if defined
                     proxies[i - 1].engine_outputs = stage_result
-                    engine_input_source = getattr(stage_cfg, "engine_input_source", [i - 1])
+                    engine_input_source = getattr(
+                        stage_cfg, "engine_input_source", [i - 1]
+                    )
                     requires_mm = getattr(stage_cfg, "requires_multimodal_data", False)
                     if i in self.processors:
                         next_inputs = self.processors[i](
@@ -194,7 +221,10 @@ class OmniStageRouter:
                             "request_id": request_id,
                         }
                     else:
-                        stage_request = {"engine_inputs": next_inputs, "request_id": request_id}
+                        stage_request = {
+                            "engine_inputs": next_inputs,
+                            "request_id": request_id,
+                        }
 
                 raw = {}
                 async for chunk in await client.round_robin(stage_request):
@@ -222,94 +252,39 @@ class OmniStageRouter:
             yield {"error": "No SHM output from final stage", "finished": True}
             return
 
-        async for chunk in self._format_output(raw, request_id, request_type):
+        # Build formatting context from the original request
+        nvext = request.get("nvext") or {}
+        fmt_ctx: Dict[str, Any] = {}
+        if nvext.get("fps") is not None:
+            fmt_ctx["fps"] = nvext["fps"]
+        if request.get("response_format") is not None:
+            fmt_ctx["response_format"] = request["response_format"]
+        if nvext.get("speed") is not None:
+            fmt_ctx["speed"] = nvext["speed"]
+
+        async for chunk in self._format_output(raw, request_id, request_type, fmt_ctx):
             yield chunk
 
     async def _format_output(
-        self, raw: dict, request_id: str, request_type: Any
+        self, raw: dict, request_id: str, request_type: Any, ctx: dict
     ) -> AsyncGenerator[dict, None]:
-        """Read OmniRequestOutput from SHM and format into frontend response."""
-        from dynamo.common.utils.output_modalities import RequestType
-
+        """Read OmniRequestOutput from SHM and format via OutputFormatter."""
         shm_meta = raw.get("shm_meta")
         if not shm_meta:
             logger.warning("Router: no shm_meta in stage output")
             return
 
         result = _shm_deserialize(shm_meta)
-        images = getattr(result, "images", None)
-        request_output = getattr(result, "request_output", None)
-
-        if images and request_type == RequestType.VIDEO_GENERATION:
-            chunk = await self._format_video(images, request_id)
-            if chunk:
-                yield chunk
-        elif images:
-            chunk = await self._format_image(images)
-            if chunk:
-                yield chunk
-        elif request_output and getattr(request_output, "outputs", None):
-            yield {"choices": [{"message": {"content": request_output.outputs[0].text}}]}
+        chunk = await self._formatter.format(
+            result, request_id, request_type=request_type, **ctx
+        )
+        if chunk:
+            yield chunk
         else:
-            logger.warning("Router: unrecognized output, final_output_type=%s",
-                           getattr(result, "final_output_type", "unknown"))
-
-    async def _format_video(self, images: list, request_id: str) -> dict | None:
-        import asyncio
-        import tempfile
-        import time
-
-        from diffusers.utils.export_utils import export_to_video
-        from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
-        from dynamo.common.storage import upload_to_fs
-        from dynamo.common.utils.video_utils import normalize_video_frames
-
-        if not images:
-            return None
-
-        try:
-            frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
-                fps = self.config.default_video_fps
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
-
-            if self._media_output_fs is None:
-                logger.warning("No media_output_fs configured, cannot upload video")
-                return None
-
-            video_url = await upload_to_fs(
-                self._media_output_fs,
-                f"videos/{request_id}.mp4",
-                video_bytes,
-                self._media_output_http_url,
+            logger.warning(
+                "Router: formatter returned None, final_output_type=%s",
+                getattr(result, "final_output_type", "unknown"),
             )
-
-            return NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="completed",
-                progress=100,
-                created=int(time.time()),
-                data=[VideoData(url=video_url)],
-                inference_time_s=0.0,
-            ).model_dump()
-        except Exception as e:
-            logger.error("Video formatting failed for %s: %s", request_id, e)
-            return None
-
-    async def _format_image(self, images: list) -> dict | None:
-        # TODO: use OmniHandler._format_image_chunk once formatting is extracted
-        # to a shared utility. For now, returns base64 PNG of the first image only.
-        import base64
-        import io
-
-        if not images:
-            return None
-        buf = io.BytesIO()
-        images[0].save(buf, format="PNG")
-        return {"data": [{"b64_json": base64.b64encode(buf.getvalue()).decode()}]}
 
 
 async def init_omni_stage_router(
@@ -336,7 +311,9 @@ async def init_omni_stage_router(
 
     # Discover stage endpoints
     for stage_cfg in router.stage_configs:
-        model_stage = getattr(stage_cfg.engine_args, "model_stage", f"stage{stage_cfg.stage_id}")
+        model_stage = getattr(
+            stage_cfg.engine_args, "model_stage", f"stage{stage_cfg.stage_id}"
+        )
         client = await runtime.endpoint(
             f"{config.namespace}.{model_stage}.generate"
         ).client()
@@ -364,8 +341,14 @@ async def init_omni_stage_router(
                 router.generate,
                 graceful_shutdown=True,
                 metrics_labels=[
-                    (prometheus_names.labels.MODEL, config.served_model_name or config.model),
-                    (prometheus_names.labels.MODEL_NAME, config.served_model_name or config.model),
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
                 ],
             )
         except Exception as e:
