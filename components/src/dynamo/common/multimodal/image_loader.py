@@ -36,6 +36,23 @@ logger = logging.getLogger(__name__)
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
+# Allowed image formats (restricted to prevent PSD parsing: GHSA-cfh3-3jmp-rvhc)
+_ALLOWED_FORMATS = ["JPEG", "PNG", "WEBP"]
+
+
+def _open_and_convert_rgb(image_data: BytesIO) -> Image.Image:
+    """Open an image and convert to RGB in one call (for use in a worker thread).
+
+    PIL's ``Image.open`` is lazy — the heavy pixel decode only happens when the
+    image data is actually accessed (e.g. via ``.convert()``).  By combining
+    open + convert in a single function we avoid running the expensive decode on
+    the asyncio event loop.
+    """
+    image = Image.open(image_data, formats=_ALLOWED_FORMATS)
+    if image.format not in ("JPEG", "PNG", "WEBP"):
+        raise ValueError(f"Unsupported image format: {image.format}")
+    return image.convert("RGB")
+
 
 class ImageLoader:
     CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_CACHE_SIZE", "8"))
@@ -86,17 +103,10 @@ class ImageLoader:
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            # PIL is sync, so offload to a thread to avoid blocking the event loop
-            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-            image = await asyncio.to_thread(
-                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-            )
-
-            # Validate image format and convert to RGB
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
-
-            image_converted = image.convert("RGB")
+            # PIL Image.open() is lazy (reads header only); the expensive pixel
+            # decode + color-space conversion happens in .convert("RGB").
+            # Run both in a single worker thread to keep the event loop free.
+            image_converted = await asyncio.to_thread(_open_and_convert_rgb, image_data)
 
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):
