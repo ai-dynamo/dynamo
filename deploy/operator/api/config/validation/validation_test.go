@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -135,26 +136,22 @@ func TestValidateOperatorConfiguration_CheckpointEnabledRequiresNoStorageConfig(
 	}
 }
 
-func TestSetDefaultsOperatorConfiguration_DoesNotDefaultDeprecatedCheckpointStorage(t *testing.T) {
-	cfg := &configv1alpha1.OperatorConfiguration{}
-	configv1alpha1.SetDefaultsOperatorConfiguration(cfg)
-
-	if cfg.Checkpoint.Storage.Type != "" {
-		t.Errorf("expected deprecated checkpoint storage type to remain unset, got %q", cfg.Checkpoint.Storage.Type)
-	}
-	if cfg.Checkpoint.Storage.PVC.PVCName != "" {
-		t.Errorf("expected deprecated checkpoint storage pvcName to remain unset, got %q", cfg.Checkpoint.Storage.PVC.PVCName)
-	}
-	if cfg.Checkpoint.Storage.PVC.BasePath != "" {
-		t.Errorf("expected deprecated checkpoint storage basePath to remain unset, got %q", cfg.Checkpoint.Storage.PVC.BasePath)
-	}
-}
-
 func TestValidateOperatorConfiguration_CheckpointDeprecatedStorageConfigIsAccepted(t *testing.T) {
 	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeS3
-	cfg.Checkpoint.Storage.S3.URI = "s3://legacy-bucket/checkpoints"
+	rawConfig := []byte(`{
+		"checkpoint": {
+			"enabled": true,
+			"storage": {
+				"type": "s3",
+				"s3": {
+					"uri": "s3://legacy-bucket/checkpoints"
+				}
+			}
+		}
+	}`)
+	if err := json.Unmarshal(rawConfig, cfg); err != nil {
+		t.Fatalf("failed to unmarshal compatibility config: %v", err)
+	}
 
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 0 {

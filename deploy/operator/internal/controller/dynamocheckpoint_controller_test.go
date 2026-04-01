@@ -385,8 +385,6 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 		assert.Equal(t, "checkpoint-job-"+testHash+"-2", updated.Status.JobName)
-		assert.Empty(t, updated.Status.Location)
-		assert.Empty(t, updated.Status.StorageType)
 	})
 
 	t.Run("duplicate identity hash is rejected even with a readable name", func(t *testing.T) {
@@ -450,8 +448,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
-		assert.Empty(t, updated.Status.Location)
-		assert.Empty(t, updated.Status.StorageType)
 		assert.NotNil(t, updated.Status.CreatedAt)
 	})
 
