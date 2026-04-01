@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 09:31:08 UTC
+Last updated: 2026-04-01 09:33:05 UTC
 
 ## Active state
 
@@ -48,10 +48,9 @@ Last updated: 2026-04-01 09:31:08 UTC
 - ✅ Compacted `PLANS.md` so the next run starts from the actual live validated
   tip instead of the prior run snapshot
 - ✅ Re-ran the focused `g3pb::` library test after editing `PLANS.md`
-- ✅ Wrote a signed docs-only handoff refresh commit:
-  - `e0f1a8bf4ae2` (`docs: refresh g3pb handoff state`)
-- ✅ Re-ran the focused `g3pb::` library test after that signed docs-only
-  refresh commit
+- ✅ Wrote the signed docs-only handoff refresh commits for this run
+- ✅ Re-ran the focused `g3pb::` library test after the docs-only refresh
+  commits in this run
 - ✅ Re-read and normalized `PLANS.md` so it ends this run in a completed state
   with no pending in-scope work
 
@@ -66,8 +65,6 @@ Last updated: 2026-04-01 09:31:08 UTC
   above the older previously recorded docs-only refreshes
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
-- the most recent docs-only handoff refresh commit in the live tree is now
-  `e0f1a8bf4ae2`
 - the active `G3PB` implementation slice still appears complete on the live
   tree
 - no new `G3PB` implementation gap was identified by the audit or validation
@@ -109,7 +106,7 @@ Last updated: 2026-04-01 09:31:08 UTC
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`) as a post-edit spot check before the docs-only commit
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) on detached `HEAD` `e0f1a8bf4ae2`
+  - pass (`15 passed`) as a post-commit spot check on the docs-only refresh
 
 ### Decisions confirmed in this run
 
@@ -145,10 +142,8 @@ Last updated: 2026-04-01 09:31:08 UTC
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - the most recent full green validation stack in this file was run from
   detached `HEAD` `d34e673fe72b`
-- the most recent docs-only handoff refresh commit written in this run is
-  `e0f1a8bf4ae2`
-- the most recent post-commit spot check in this file passed on detached
-  `HEAD` `e0f1a8bf4ae2`
+- the docs-only handoff refresh commits in this run were followed by a green
+  focused `g3pb::` post-commit spot check
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
