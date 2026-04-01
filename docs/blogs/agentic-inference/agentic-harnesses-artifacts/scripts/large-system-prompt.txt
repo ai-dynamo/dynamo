@@ -2,7 +2,7 @@ You are Claude Code, an interactive CLI tool that helps users with software engi
 
 # Environment
 - Platform: darwin
-- Shell: zsh  
+- Shell: zsh
 - Working directory: /Users/user/work/dynamo
 
 # Instructions
@@ -3942,7 +3942,7 @@ Multi-stage decode is an optimization technique for LLM inference that:
 
 For typical workload distributions, shorter sequences dominate:
 - ~50% of sequences complete under 2K tokens
-- ~90% complete under 8K tokens  
+- ~90% complete under 8K tokens
 - ~10% require full 32K+ context
 
 A single monolithic decode engine must allocate memory for the worst case, limiting batch size. Multi-stage allows:
@@ -4115,19 +4115,19 @@ impl WorkerSelector for StageAwareWorkerSelector {
     fn select_worker(&self, request: &SchedulingRequest, workers: &WorkerMap) -> Result<...> {
         // 1. Group workers by stage
         let stages = self.build_stage_topology(workers);
-        
+
         // 2. Find eligible stages (seq_len <= max_seq_len)
         let eligible = self.eligible_stages(&stages, request.isl_tokens);
-        
+
         // 3. Select stage via policy
         let selected_stage = self.select_stage(&eligible, request)?;
-        
+
         // 4. Filter workers to only those in selected stage
         let stage_workers: WorkerMap = workers
             .iter()
             .filter(|(id, _)| selected_stage.worker_ids.contains(id))
             .collect();
-        
+
         // 5. Delegate to existing KV-aware selection within stage
         self.inner_selector.select_worker(request, &stage_workers)
     }
@@ -4233,7 +4233,7 @@ Stages can be differentiated by more than just max_seq_len:
 pub struct StageConfig {
     pub stage_id: u32,
     pub max_seq_len: u32,
-    
+
     // Future capabilities
     pub storage_tier: Option<StorageTier>,   // HBM, SSD, Hybrid
     pub priority_tier: Option<PriorityTier>, // Premium, Standard, Batch
