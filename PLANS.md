@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:02:51 UTC
+Last updated: 2026-04-01 08:04:35 UTC
 
 ## Active state
 
@@ -19,10 +19,12 @@ Last updated: 2026-04-01 08:02:51 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
-  - current `HEAD` is `abfc85ffd0a4` (`llm: stabilize g3pb cache storage
-    test`)
+  - current `HEAD` is `637551b01afa` (`docs: refresh g3pb validation handoff`)
+  - the latest validated non-docs `G3PB` code commit directly below `HEAD` is
+    `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - no open implementation work remains for the active `G3PB` slice after the
-    landed test-stability fix and the refreshed validation rerun on this `HEAD`
+    landed test-stability fix and the refreshed validation rerun recorded by
+    this handoff
   - keep `PLANS.md` as the compact validation/handoff record until new scope is
     explicitly chosen
 
@@ -40,8 +42,10 @@ Last updated: 2026-04-01 08:02:51 UTC
   state:
   - detached `HEAD`
   - pickup commit: `abfc85ffd0a4`
-  - the current top commit is now the concrete test-stability fix rather than
-    another docs-only handoff refresh:
+  - recorded signed handoff commit after validation:
+    - `637551b01 docs: refresh g3pb validation handoff`
+  - latest validated non-docs implementation commit directly below that
+    handoff:
     - `abfc85ffd llm: stabilize g3pb cache storage test`
 - ✅ Re-ran the focused `G3PB` / bindings validation stack from the current
   landed state
@@ -54,7 +58,8 @@ Last updated: 2026-04-01 08:02:51 UTC
 ### Current findings in this run
 
 - the active `G3PB` implementation slice remains complete on current
-  `HEAD` (`abfc85ffd0a4`)
+  `HEAD` (`637551b01afa`), with the validated non-docs implementation state at
+  `abfc85ffd0a4`
 - the previously recorded cache-storage suite flake is already fixed by the
   landed test-capacity change in `abfc85ffd`
 - the refreshed focused validation rerun is fully green on the current commit
@@ -69,22 +74,22 @@ Last updated: 2026-04-01 08:02:51 UTC
 
 ### Exact next step
 
-- if another run starts from `abfc85ffd0a4`, do not reopen the completed
+- if another run starts from `637551b01afa`, do not reopen the completed
   `G3PB` slice unless a new regression appears or new scope is explicitly
   chosen; resume only from the existing non-blocking follow-on backlog
 
 ### Validation completed in this run so far
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`abfc85ffd0a4`)
+  - pass (`637551b01afa`)
 - `git log --oneline -5`
   - pass
   - current recent history:
+    - `637551b01 docs: refresh g3pb validation handoff`
     - `abfc85ffd llm: stabilize g3pb cache storage test`
     - `988246eef docs: finalize g3pb completion handoff`
     - `f2da43712 docs: finalize g3pb completion handoff`
     - `a19b6f8b4 docs: refresh g3pb completion handoff`
-    - `1e04cf61f docs: stabilize g3pb completion handoff`
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`)
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
@@ -96,7 +101,7 @@ Last updated: 2026-04-01 08:02:51 UTC
 
 ### Decisions confirmed in this run so far
 
-- keep treating the active `G3PB` slice as complete on `abfc85ffd0a4` unless a
+- keep treating the active `G3PB` slice as complete on `637551b01afa` unless a
   new focused validation rerun exposes a concrete regression
 - do not spend another run producing a near-duplicate docs-only audit refresh
   when the active code/test state has not changed
@@ -106,8 +111,9 @@ Last updated: 2026-04-01 08:02:51 UTC
 ### Handoff for next run
 
 - this run confirmed the landed cache-storage test-stability fix is present on
-  `abfc85ffd0a4` and the focused `G3PB` / bindings validation stack is green on
-  that commit
+  `abfc85ffd0a4`, recorded that verified state in signed handoff commit
+  `637551b01afa`, and the focused `G3PB` / bindings validation stack remains
+  green for that code state
 - there is still no remaining in-scope implementation work for the active
   `G3PB` slice
 - if another run continues from here, resume only from the existing
