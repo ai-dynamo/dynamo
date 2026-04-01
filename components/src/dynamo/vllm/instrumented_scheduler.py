@@ -276,6 +276,8 @@ class InstrumentedScheduler(AsyncScheduler):
 
         self._schedule_times: deque[float] = deque()
         self._prompt_len_per_req: dict[str, int] = {}
+        self._bench_active: bool = False
+        self._bench_phase: _BenchPhase = _BenchPhase.IDLE
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
         port = base_port + dp_rank
@@ -635,7 +637,7 @@ class InstrumentedScheduler(AsyncScheduler):
             req._all_token_ids.append(0)
 
             self.requests[req_id] = req
-            self.running.append(req)
+            self.running.append(req)  # type: ignore[has-type]
             self._bench_active_req_ids.add(req_id)
             self._bench_seq += 1
 
@@ -681,8 +683,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 self.kv_cache_manager.free(req)
                 self.finished_req_ids.add(req_id)
                 del self.requests[req_id]
+        running = self.running  # type: ignore[has-type]
         self.running = [
-            r for r in self.running if r.request_id not in self._bench_active_req_ids
+            r for r in running if r.request_id not in self._bench_active_req_ids
         ]
         self._bench_active_req_ids.clear()
         self._schedule_times.clear()
@@ -711,7 +714,7 @@ class InstrumentedScheduler(AsyncScheduler):
             logger.info("Benchmark complete")
         return None
 
-    def _bench_step_warmup(self) -> None:
+    def _bench_step_warmup(self) -> SchedulerOutput | None:
         if not self._bench_active_req_ids:
             if self._bench_warmup_remaining > 0:
                 self._bench_inject_prefill(
@@ -754,7 +757,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._schedule_times.clear()
         return True
 
-    def _bench_step_prefill(self) -> None:
+    def _bench_step_prefill(self) -> SchedulerOutput | None:
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
 
