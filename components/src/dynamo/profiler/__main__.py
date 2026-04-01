@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -55,8 +56,6 @@ def _resolve_output_dir() -> str:
     unparseable.  This is intentionally independent of full argument parsing so
     it can be called even when ``_parse_args()`` itself has failed.
     """
-    import sys
-
     argv = sys.argv[1:]
     for i, arg in enumerate(argv):
         if arg == "--output-dir" and i + 1 < len(argv):
