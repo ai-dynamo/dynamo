@@ -90,18 +90,25 @@ impl Drop for InflightGuard {
 }
 
 /// Wrapper that decrements request-plane inflight gauge when the stream is dropped.
+///
+/// Uses `pin_project` pattern to project through the Pin, allowing it to wrap
+/// `!Unpin` streams (e.g. those produced by `async_stream::stream!`).
 struct InflightDecStream<S> {
+    #[allow(dead_code)]
     inner: S,
 }
 
 impl<S, T> Stream for InflightDecStream<S>
 where
-    S: Stream<Item = T> + Unpin,
+    S: Stream<Item = T>,
 {
     type Item = T;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // SAFETY: We never move `inner` out of the pinned struct.
+        // This is a standard structural pin projection.
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        inner.poll_next(cx)
     }
 }
 
