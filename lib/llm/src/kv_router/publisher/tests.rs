@@ -1203,7 +1203,8 @@ mod test_integration_publisher {
         // Test 1: Publish 10 different metrics with 0.5ms intervals
         // Only the last one should be published after 1ms of stability
         for i in 0..10 {
-            publisher.publish(None, (i * 100) as u64).unwrap();
+            let value = (i * 100) as u64;
+            publisher.publish(None, value, value).unwrap();
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1220,6 +1221,7 @@ mod test_integration_publisher {
         assert_eq!(event.worker_id, worker_id);
         assert_eq!(event.active_decode_blocks, Some(900)); // Last value: 9 * 100
         assert_eq!(event.active_prefill_tokens, None); // Worker doesn't publish prefill tokens
+        assert_eq!(event.kv_used_blocks, Some(900));
 
         // Ensure no more events are waiting
         let no_msg =
@@ -1228,7 +1230,7 @@ mod test_integration_publisher {
 
         // Test 2: Publish 10 more metrics with same active_decode_blocks - should not trigger publish
         for _ in 0..10 {
-            publisher.publish(None, 900).unwrap(); // Keep same as last published
+            publisher.publish(None, 900, 900).unwrap(); // Keep same as last published
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 

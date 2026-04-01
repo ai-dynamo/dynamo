@@ -14,6 +14,7 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 struct WorkerMetrics {
     dp_rank: DpRank,
     active_decode_blocks: u64,
+    kv_used_blocks: u64,
 }
 
 pub struct WorkerMetricsPublisher {
@@ -27,15 +28,22 @@ impl WorkerMetricsPublisher {
         Ok(Self { tx, rx })
     }
 
-    pub fn publish(&self, dp_rank: Option<DpRank>, active_decode_blocks: u64) -> Result<()> {
+    pub fn publish(
+        &self,
+        dp_rank: Option<DpRank>,
+        active_decode_blocks: u64,
+        kv_used_blocks: u64,
+    ) -> Result<()> {
         let metrics = WorkerMetrics {
             dp_rank: dp_rank.unwrap_or(0),
             active_decode_blocks,
+            kv_used_blocks,
         };
         tracing::trace!(
-            "Publish metrics: dp_rank={}, active_decode_blocks={}",
+            "Publish metrics: dp_rank={}, active_decode_blocks={}, kv_used_blocks={}",
             metrics.dp_rank,
-            metrics.active_decode_blocks
+            metrics.active_decode_blocks,
+            metrics.kv_used_blocks
         );
         self.tx
             .send(metrics)
@@ -97,6 +105,7 @@ impl WorkerMetricsPublisher {
                                 dp_rank: metrics.dp_rank,
                                 active_decode_blocks: Some(metrics.active_decode_blocks),
                                 active_prefill_tokens: None,
+                                kv_used_blocks: Some(metrics.kv_used_blocks),
                             };
 
                             if let Err(e) = event_publisher.publish(&active_load).await {
