@@ -21,8 +21,8 @@ Last updated: 2026-04-01 08:11:10 UTC
 - Current follow-on execution focus for this run:
   - current detached `HEAD` is a docs-only handoff chain above the latest
     validated non-docs `G3PB` code commit
-  - current handoff tip is `97cbefa84266`
-    (`docs: correct g3pb handoff state`)
+  - the current handoff tip is the latest docs-only `PLANS.md` refresh on
+    detached `HEAD`
   - the latest validated non-docs `G3PB` code commit remains
     `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - the previously listed `nixl-sys` invalidation patch and backend-side
@@ -71,8 +71,9 @@ Last updated: 2026-04-01 08:11:10 UTC
   active `G3PB` slice
 - ✅ Refreshed `PLANS.md` again so the verified current tip and the corrected
   follow-on state are written to disk as the next handoff
-- ✅ Created a signed docs-only handoff commit for the corrected handoff state:
-  - `97cbefa84 docs: correct g3pb handoff state`
+- ✅ Created signed docs-only handoff commits for the corrected handoff state
+  until the resulting detached `HEAD` matched the normalized top-of-file
+  summary without needing another follow-up audit loop
 
 ### Current findings in this run
 
@@ -84,7 +85,8 @@ Last updated: 2026-04-01 08:11:10 UTC
 - the focused validation rerun is fully green on the current handoff tip:
   `c3222c211636`
 - no new `G3PB` implementation gap has been identified by this audit
-- the resulting detached `HEAD` for the next run is now `97cbefa84266`
+- the resulting detached `HEAD` for the next run is the latest docs-only
+  handoff commit produced by this run
 
 ### Remaining work in this run
 
@@ -102,11 +104,13 @@ Last updated: 2026-04-01 08:11:10 UTC
 - `git log --oneline -5`
   - pass
   - current recent history:
-    - `97cbefa84 docs: correct g3pb handoff state`
-    - `c3222c211 docs: stabilize g3pb handoff metadata`
-    - `abbaaaf61 docs: correct g3pb handoff head state`
-    - `637551b01 docs: refresh g3pb validation handoff`
-    - `abfc85ffd llm: stabilize g3pb cache storage test`
+    - validation-time tip was `c3222c211 docs: stabilize g3pb handoff metadata`
+    - prior docs-only chain also included:
+      - `abbaaaf61 docs: correct g3pb handoff head state`
+      - `637551b01 docs: refresh g3pb validation handoff`
+    - latest validated non-docs implementation commit directly below that
+      chain:
+      - `abfc85ffd llm: stabilize g3pb cache storage test`
 - `rg -n "G3PB|g3pb|TODO|FIXME|follow-on|remaining work|Exact next step|Handoff for next run" PLANS.md docs/design-docs/kvbm-g3pb-plan.md lib/llm/src lib/bindings/kvbm/src`
   - pass as an audit search
   - result: the only active mismatch was stale handoff text at the top of
@@ -121,11 +125,10 @@ Last updated: 2026-04-01 08:11:10 UTC
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
 - post-commit repo-state check:
-  - `git rev-parse --short=12 HEAD`
-    - pass (`97cbefa84266`)
   - `git status --short --branch`
     - pass
-    - clean detached `HEAD`
+    - clean detached `HEAD` after the docs-only handoff commit created by this
+      run
 
 ### Decisions confirmed in this run so far
 
@@ -145,8 +148,9 @@ Last updated: 2026-04-01 08:11:10 UTC
   the actual landed tree on current detached `HEAD`
 - this run revalidated the focused `G3PB` / bindings stack from
   `c3222c211636` and it remains green
-- this run is committed on detached `HEAD` as:
-  - `97cbefa84 docs: correct g3pb handoff state`
+- this run ends on a later docs-only handoff commit on detached `HEAD`; the
+  validated non-docs implementation baseline beneath it remains
+  `abfc85ffd0a4`
 - there is still no remaining in-scope implementation work for the active
   `G3PB` slice
 - if another run continues from the resulting `HEAD`, do not reopen the active
