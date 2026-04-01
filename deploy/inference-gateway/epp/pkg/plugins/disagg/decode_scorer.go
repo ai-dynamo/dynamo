@@ -40,8 +40,8 @@ const (
 
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
-	DpRankHeader          = "x-dynamo-dp-rank"
-	PrefillDpRankHeader   = "x-dynamo-prefill-dp-rank"
+	DpRankHeader          = "x-dp-rank"
+	PrefillDpRankHeader   = "x-prefill-dp-rank"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
 	// decodeStateKey is the key used to store routing state in PluginState

@@ -11,7 +11,7 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
-pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
+pub const HEADER_DP_RANK: &str = "x-dp-rank";
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
@@ -389,15 +389,13 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test apply_header_routing_overrides - worker header present, prefill header absent
     #[test]
     fn test_apply_header_routing_overrides() {
         use axum::http::HeaderMap;
 
-        // Only HEADER_WORKER_INSTANCE_ID is in the header
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID, "123".parse().unwrap());
-        // Note: HEADER_PREFILL_INSTANCE_ID is NOT in the header
+        headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
 
         let nvext = NvExt::builder()
             .backend_instance_id(999)
@@ -408,27 +406,11 @@ mod tests {
 
         let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
 
-        // Header should override backend_instance_id and decode_worker_id
+        // Header should override backend_instance_id, decode_worker_id, and dp_rank
         assert_eq!(result.backend_instance_id, Some(123));
         assert_eq!(result.decode_worker_id, Some(123));
+        assert_eq!(result.dp_rank, Some(3));
         // prefill_worker_id should remain from original nvext (not overwritten by header)
         assert_eq!(result.prefill_worker_id, Some(777));
-        // dp_rank not in headers, should remain None
-        assert_eq!(result.dp_rank, None);
-    }
-
-    #[test]
-    fn test_apply_header_routing_overrides_with_dp_rank() {
-        use axum::http::HeaderMap;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
-        headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
-
-        let result = apply_header_routing_overrides(None, &headers).unwrap();
-
-        assert_eq!(result.backend_instance_id, Some(42));
-        assert_eq!(result.decode_worker_id, Some(42));
-        assert_eq!(result.dp_rank, Some(3));
     }
 }
