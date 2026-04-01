@@ -120,7 +120,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             nvext: {
-                // Collect per-block cache_control: use the last one found
+                // Lossy: collapse all per-block cache_control into a single
+                // last-one-wins value. Sufficient for backends with a single
+                // prefix cache boundary. Full per-block breakpoints are
+                // preserved in AnthropicContext::cache_breakpoints via UnifiedRequest.
                 let mut last_block_cc: Option<CacheControl> = None;
                 for msg in &req.messages {
                     if let AnthropicMessageContent::Blocks { content } = &msg.content {
@@ -472,7 +475,9 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
+    api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
+    let _ = api_context; // Available for future enrichment (service_tier, etc.)
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
@@ -853,7 +858,7 @@ mod tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
         assert!(response.id.starts_with("msg_"));
         assert_eq!(response.object_type, "message");
         assert_eq!(response.role, "assistant");
