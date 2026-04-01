@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:14:03 UTC
+Last updated: 2026-04-01 10:17:53 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 10:14:03 UTC
   - this run is a fresh validation plus handoff compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:14:03 UTC)
+## Current run (2026-04-01 10:17:53 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -36,7 +36,7 @@ Last updated: 2026-04-01 10:14:03 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `32dad895f6a0`
+- Re-audited the live repo state from detached `HEAD` `5067ecb148ea`
 - Confirmed the active tree still contains the seams the handoff and design
   doc require:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -50,17 +50,13 @@ Last updated: 2026-04-01 10:14:03 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
-  `32dad895f6a0`
-- Landed signed docs-only handoff refresh commits after validating
-  `32dad895f6a0`
+  `5067ecb148ea`
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run was `32dad895f6a0`
-- the current detached `HEAD` after validation is newer only by docs-only
-  handoff refresh commits
+- the detached `HEAD` validated in this run is `5067ecb148ea`
 - `PLANS.md` was stale at the start of the run because it still named older
-  docs-only tip `526d8548a164`
+  validated detached `HEAD` `32dad895f6a0`
 - no non-docs tree delta was needed in this run; only the handoff document is
   being refreshed
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
@@ -75,7 +71,7 @@ Last updated: 2026-04-01 10:14:03 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`32dad895f6a0`)
+  - pass (`5067ecb148ea`)
 - `git log --oneline -8`
   - pass
 - `sed -n '1,220p' Agents.md`
@@ -118,14 +114,13 @@ Last updated: 2026-04-01 10:14:03 UTC
 
 ### Remaining work in this run
 
-- none
+- land the signed docs-only handoff refresh commit
 
 ### Exact next step
 
-- run `git rev-parse --short=12 HEAD`, `sed -n '1,220p' Agents.md`,
-  `sed -n '1,260p' PLANS.md`, and `sed -n '1,260p'
-  docs/design-docs/kvbm-g3pb-plan.md`, then leave the active `G3PB` slice
-  closed unless a fresh regression or explicitly new scope appears
+- commit the refreshed `PLANS.md` with `git commit --signoff`, then leave the
+  active `G3PB` slice closed unless a fresh regression or explicitly new scope
+  appears
 
 ### Handoff for next run
 
@@ -139,7 +134,7 @@ Last updated: 2026-04-01 10:14:03 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `32dad895f6a0`, then landed docs-only handoff refresh commits on top
+  `5067ecb148ea`
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
