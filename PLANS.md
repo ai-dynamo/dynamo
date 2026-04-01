@@ -50,8 +50,8 @@ Last updated: 2026-04-01 07:51:37 UTC
   state
 - ✅ Re-read `PLANS.md` after validation and confirmed there is still no
   remaining in-scope implementation work for the active slice
-- ✅ Recorded the refreshed audit as a signed docs-only handoff commit:
-  - `a19b6f8b4 docs: refresh g3pb completion handoff`
+- ✅ Recorded the refreshed audit as signed docs-only handoff commits on the
+  current detached `HEAD`
 
 ### Current findings in this run
 
@@ -99,8 +99,6 @@ Last updated: 2026-04-01 07:51:37 UTC
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
 - post-commit repo-state check:
-  - `git rev-parse --short=12 HEAD`
-    - pass (`a19b6f8b4182`)
   - `git status --short --branch`
     - pass
     - clean detached `HEAD`
@@ -118,8 +116,8 @@ Last updated: 2026-04-01 07:51:37 UTC
 
 - this run re-audited the active `G3PB` surface, reran the focused validation
   stack, and found no new in-scope work on current `HEAD`
-- this run is committed on `HEAD` as:
-  - `a19b6f8b4 docs: refresh g3pb completion handoff`
+- this run is committed on the current detached `HEAD` as the latest signed
+  docs-only handoff refresh for the active slice
 - do not repeat another docs-only audit loop unless the repo state has changed
   or a fresh regression appears
 - if another run continues from here, resume only from the existing
