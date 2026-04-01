@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:21:08 UTC
+Last updated: 2026-04-01 10:24:59 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 10:21:08 UTC
   - this run is a fresh validation plus handoff compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:21:08 UTC)
+## Current run (2026-04-01 10:24:59 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -36,7 +36,7 @@ Last updated: 2026-04-01 10:21:08 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `5067ecb148ea`
+- Re-audited the live repo state from detached `HEAD` `e63d88168be9`
 - Confirmed the active tree still contains the seams the handoff and design
   doc require:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -50,17 +50,15 @@ Last updated: 2026-04-01 10:21:08 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
-  `5067ecb148ea`
-- Landed signed docs-only handoff refresh commits after the post-edit
-  validation passed
+  `e63d88168be9`
+- A post-edit validation rerun and signed docs-only handoff refresh commit are
+  still pending in this run
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `5067ecb148ea`
-- the current live detached `HEAD` after this run is newer only by docs-only
-  handoff refresh commits
+- the detached `HEAD` validated in this run is `e63d88168be9`
 - `PLANS.md` was stale at the start of the run because it still named older
-  validated detached `HEAD` `32dad895f6a0`
+  validated detached `HEAD` `5067ecb148ea`
 - no non-docs tree delta was needed in this run; only the handoff document is
   being refreshed
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
@@ -75,7 +73,7 @@ Last updated: 2026-04-01 10:21:08 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`5067ecb148ea`)
+  - pass (`e63d88168be9`)
 - `git log --oneline -8`
   - pass
 - `sed -n '1,220p' Agents.md`
@@ -102,14 +100,6 @@ Last updated: 2026-04-01 10:21:08 UTC
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
-    in the worktree
-- `git rev-parse --short=12 HEAD`
-  - pass after the signed docs-only handoff refresh commit
-- `git status --short --branch`
-  - pass (clean detached `HEAD`) after the signed docs-only handoff refresh
-    commit
 
 ### Decisions confirmed in this run
 
@@ -123,14 +113,18 @@ Last updated: 2026-04-01 10:21:08 UTC
 
 ### Remaining work in this run
 
-- none
+- rerun `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` after the
+  docs edit as the post-edit spot check
+- if that passes, make a signed docs-only commit for this `PLANS.md` refresh
+- after the commit, record the new detached `HEAD` and clean status in this
+  file only if another run picks it up
 
 ### Exact next step
 
-- run `git rev-parse --short=12 HEAD`, `sed -n '1,220p' Agents.md`,
-  `sed -n '1,260p' PLANS.md`, and `sed -n '1,260p'
-  docs/design-docs/kvbm-g3pb-plan.md`, then leave the active `G3PB` slice
-  closed unless a fresh regression or explicitly new scope appears
+- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`, then
+  `git status --short --branch`, then `git add PLANS.md && git commit
+  --signoff -m "docs: refresh g3pb handoff state"` if the tree contains only
+  this docs refresh and the test is still green
 
 ### Handoff for next run
 
@@ -144,7 +138,7 @@ Last updated: 2026-04-01 10:21:08 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `5067ecb148ea`, then landed docs-only handoff refresh commits on top
+  `e63d88168be9` and left only the docs-only handoff refresh commit pending
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
