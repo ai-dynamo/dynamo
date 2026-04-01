@@ -39,7 +39,7 @@ use tracing;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
-use crate::kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
+use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
 use crate::model_card::{MultimodalConfig, MultimodalTokenFormula};
 use nvtx::range;
 use crate::protocols::common::preprocessor::{
@@ -1398,7 +1398,7 @@ fn build_mm_routing_info(
     // KV event block count (total_blocks * block_size = actual image tokens used).
     // If routing_blocks != vllm_blocks the block hashes won't match → 0 overlap.
     let routing_blocks = block_mm_infos.len();
-    let mm_blocks = block_mm_infos.iter().filter(|b| b.is_some()).count();
+    let mm_blocks = block_mm_infos.iter().filter(|b: &&Option<_>| b.is_some()).count();
     tracing::debug!(
         n_images = decoded_images.len(),
         base_tokens = base_token_ids.len(),
