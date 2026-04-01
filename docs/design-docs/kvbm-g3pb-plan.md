@@ -120,23 +120,30 @@ Important constraints:
 The current landed slice covers the first honest `G3PB` seam:
 
 - `distributed/g3pb.rs` owns the peer-routing and peer-cache API
-- the first peer backend is in-memory
-- the standalone backend binary exposes HTTP `health`, `offer`, `put`,
-  `put_payload`, `query`, and `fetch`
-- the worker smoke still validates `query -> fetch -> local host register ->
-  device onboard`
+- the first peer backends are in-memory and `foyer`-backed cache storage
+- the standalone backend binary serves a Dynamo request-plane endpoint in
+  `kvbm-g3pb/peer-cache/g3pb`
+- the worker smoke discovers peers through Dynamo discovery and validates
+  `load_remote -> stage_put -> commit_put -> query -> fetch -> local host
+  register -> device onboard`
+- metadata/control traffic uses the Dynamo request plane while bulk block
+  movement stays on NIXL/UCX descriptor transfers
 - `disk_block_idx` and `G4BlockIndex` are no longer part of the remote API
   identity or core block-manager state
+- KVBM now has a native `KvBlockManagerConfig.g3pb_admission` policy surface,
+  and real callers can opt into it without relying only on the legacy
+  `G3PB_OFFLOAD_ALL` environment variable
 
 ## Next milestones
 
-1. Keep the in-memory backend as the contract reference.
-2. Add a `foyer`-backed peer-local storage implementation behind the same trait.
-3. Reconnect the transport path to real NIXL/UCX `device <-> CPU` transfers.
-4. Revalidate in layers:
-   - host-only peer-cache smoke
-   - `kvbm_nixl_transfer_smoke`
-   - full worker/peer smoke with remote fetch and local onboard
+1. Adopt `KvBlockManagerConfig.g3pb_admission` in real non-smoke callers as
+   they opt into `G3PB`.
+2. Decide the next shared KVBM config layer for CPU-buffer retention /
+   `foyer` retention separately from admission policy.
+3. Investigate or upstream the non-blocking `nixl-sys` remote metadata teardown
+   warning if it becomes operationally relevant.
+4. Decide whether long-lived backend-side eviction / reclamation is needed for
+   retained committed blocks beyond the current smoke coverage.
 
 ## Non-goals
 

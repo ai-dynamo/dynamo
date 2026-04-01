@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 03:34:54 UTC
+Last updated: 2026-04-01 01:51:53 UTC
 
 ## Active state
 
@@ -836,3 +836,110 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
      null-terminated `CString` values
   2. decide whether backend-side eviction/reclamation is needed for long-lived
      retained committed blocks beyond the current smoke coverage
+
+## Current run (2026-04-01 01:51:53 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before editing:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Confirmed the remaining concrete slice from the prior handoff:
+  `KvBlockManagerConfig.g3pb_admission` existed in core KVBM state wiring, but
+  no real non-smoke caller was setting it yet
+- ✅ Adopted the native `g3pb_admission` config surface in the first real KVBM
+  caller path:
+  - `lib/bindings/kvbm/src/block_manager.rs`
+  - both Python `BlockManager::new` and `BlockManagerBuilder::build()` now read
+    `DYN_KVBM_G3PB_ADMISSION_POLICY` and, when set, pass
+    `KvBlockManagerConfig.g3pb_admission`
+  - supported values:
+    - `after_first_reuse`
+    - `eager`
+    - `disabled`
+- ✅ Added focused parser coverage for the bindings adoption path
+  - default/unset behavior
+  - `after_first_reuse`
+  - `eager`
+  - invalid-value rejection
+- ✅ Fixed the bindings parser test race
+  - the first test run exposed process-wide env mutation leakage across
+    parallel tests
+  - resolved by serializing the env-mutating parser tests with a local mutex
+- ✅ Updated repo-local docs to match the landed request-plane architecture and
+  the new real-caller config adoption:
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+  - `lib/bindings/kvbm/README.md`
+  - `lib/runtime/src/config/environment_names.rs`
+
+### Current findings before final handoff
+
+- the prior “next concrete slice” is now implemented:
+  real KVBM callers can opt into native `G3PB` admission policy without using
+  only the legacy `G3PB_OFFLOAD_ALL` fallback
+- the smallest production-facing adoption point is the bindings layer, because:
+  - the connector leaders already flow through `BlockManagerBuilder`
+  - that path already consumes other KVBM env-driven runtime policy
+  - the underlying core config surface remained unchanged in this slice
+- the adoption stays backward-compatible:
+  - unset `DYN_KVBM_G3PB_ADMISSION_POLICY` preserves existing behavior
+  - explicit disk offload filters remain stronger than `g3pb_admission`
+    because the core state wiring only installs the `G3PB` host filter when
+    no explicit host offload filter is already present
+- the design doc was stale before this run:
+  it still described the old HTTP backend/request path even though the landed
+  implementation already uses Dynamo request-plane + discovery
+- the only bug uncovered during this slice was test-only:
+  the new bindings parser tests needed serialization because they mutate a
+  shared process environment variable
+
+### Validation completed in this run so far
+
+- `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - pass
+- `cargo fmt --manifest-path lib/bindings/kvbm/Cargo.toml --all`
+  - pass
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - first run failed because the new env-mutating tests raced each other under
+    parallel execution
+  - pass after serializing env mutation (`4 passed`)
+- `git diff --check`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- treat the bindings layer as the first real KVBM caller for native
+  `g3pb_admission` adoption
+- keep the adoption path explicit and backward-compatible:
+  do not force-enable `G3PB` policy for all callers, and do not broaden the
+  core config surface beyond admission policy in this slice
+- repair stale docs in the same slice because the design doc and bindings README
+  are part of the active handoff surface for future runs
+
+### Remaining work in this run
+
+- make a signed small commit for the config-adoption/docs slice
+
+### Exact next step
+
+- create the signed commit for:
+  - bindings-side native `g3pb_admission` adoption
+  - env-name/docs updates
+  - `PLANS.md` handoff refresh
+
+### Handoff for next run
+
+- this run already landed the concrete “config adoption” slice from the prior
+  handoff in the real KVBM bindings caller path
+- after the commit is cut, the remaining work should return to follow-on items
+  rather than more admission config plumbing:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice

@@ -187,6 +187,14 @@ pub mod kvbm {
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
 
+    /// Native G3PB admission policy selection for real KVBM callers.
+    ///
+    /// Supported values:
+    /// - `after_first_reuse`
+    /// - `eager`
+    /// - `disabled`
+    pub const DYN_KVBM_G3PB_ADMISSION_POLICY: &str = "DYN_KVBM_G3PB_ADMISSION_POLICY";
+
     /// CPU cache configuration
     pub mod cpu_cache {
         /// CPU cache size in GB
