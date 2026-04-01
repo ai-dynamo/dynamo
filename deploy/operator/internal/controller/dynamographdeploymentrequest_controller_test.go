@@ -542,14 +542,20 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
 			// Create output ConfigMap
+			// The profiler emits a static name in the YAML, but the operator must override
+			// it with a DGDR-scoped unique name to prevent collisions across DGDRs.
 			dgdYAML := `apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test-dgd-auto
+  name: vllm-agg
 spec:
   services:
     Frontend:
       replicas: 1`
+
+			// expectedDGDName is the name the operator should assign: DGDR name + "-dgd",
+			// not the static "vllm-agg" that the profiler emitted.
+			expectedDGDName := dgdrName + "-dgd"
 
 			outputConfigMapName := getOutputConfigMapName(dgdr)
 			cm := &corev1.ConfigMap{
@@ -581,16 +587,16 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify DGD was created
+			// Verify DGD was created with the DGDR-scoped name (not the profiler's "vllm-agg")
 			dgd := &dgdv1alpha1.DynamoGraphDeployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 
 			// Get final DGDR status
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Status.DGDName).Should(Equal("test-dgd-auto"))
+			Expect(updated.Status.DGDName).Should(Equal(expectedDGDName))
 
 			// Clean up DGD
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 			_ = k8sClient.Delete(ctx, dgd)
 		})
 	})
