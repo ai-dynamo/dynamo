@@ -19,7 +19,7 @@ inputs:
     required: false
     default: ''
   cpu_only:
-    description: 'Build and tag this image as CPU-only. The shared render/build path may still use a default CUDA-backed wheel builder internally.'
+    description: 'Build and tag this image as CPU-only. The shared container render/build path still requires a default CUDA version internally.'
     required: false
     default: 'false'
   builder_name:

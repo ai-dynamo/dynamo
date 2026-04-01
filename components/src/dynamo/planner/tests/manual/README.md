@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../../../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.common.txt -r container/deps/requirements.planner.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../../../../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.common.txt -r container/deps/requirements.planner.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -23,7 +23,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
 
 ## Interpolator Testing
 
@@ -67,7 +67,7 @@ Interpolating decode performance ...
 
 ## Generating Load Dataset
 
-We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../../../../benchmarks/sin_load_generator/README.md).
+We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../../../../../benchmarks/sin_load_generator/README.md).
 
 From previous interpolator testing, ISL 3000 and OSL 300 can handle ~15 request/s/gpu for both prefill and decode.
 To test planner's performance for different request rates, we can generate a load dataset with request rate varying between 12 to 36 request/s.
@@ -146,8 +146,8 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 **Prerequisites:**
 
-- **[kube-prometheus-stack](../../../../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
-- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../../../../docs/components/planner/planner-guide.md#prerequisites) for details).
+- **[kube-prometheus-stack](../../../../../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../../../../../docs/components/planner/planner-guide.md#prerequisites) for details).
 
 **Test Scenario**
 
