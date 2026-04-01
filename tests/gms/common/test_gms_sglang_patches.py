@@ -7,12 +7,12 @@ import sys
 import types
 
 import pytest
-
 from gpu_memory_service.integrations.sglang import patches as sglang_patches
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
 ]
 
 
