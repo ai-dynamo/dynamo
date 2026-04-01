@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:21:53 UTC
+Last updated: 2026-04-01 08:26:47 UTC
 
 ## Active state
 
@@ -24,10 +24,10 @@ Last updated: 2026-04-01 08:21:53 UTC
   - the current handoff tip should be treated as the latest signed docs-only
     `PLANS.md` refresh on detached `HEAD`, not as a hard-coded commit hash
   - the validation-time docs-only handoff history for the current run was:
+    - `95eb86204 docs: refresh g3pb handoff state`
     - `c034fd5a8 docs: normalize g3pb handoff tip`
     - `9e42d96a4 docs: refresh g3pb handoff state`
     - `89ee44c0d docs: stabilize g3pb handoff metadata`
-    - `c1e01d4c2 docs: finalize g3pb handoff state`
   - the latest validated non-docs `G3PB` code commit remains
     `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - the previously listed `nixl-sys` invalidation patch and backend-side
@@ -39,7 +39,7 @@ Last updated: 2026-04-01 08:21:53 UTC
   - keep `PLANS.md` as the compact validation/handoff record until genuinely
     new scope is chosen
 
-## Current run (2026-04-01 08:21:53 UTC)
+## Current run (2026-04-01 08:26:47 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -49,17 +49,17 @@ Last updated: 2026-04-01 08:21:53 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - ✅ Re-read `PLANS.md` completely and found fresh handoff drift again:
   the active summary and latest run section still referenced
-  `89ee44c0d550`, but detached `HEAD` had already advanced through later
-  docs-only handoff commits to `c034fd5a8b0e`
+  `c034fd5a8b0e`, but detached `HEAD` had already advanced through a later
+  docs-only handoff commit to `95eb86204bfb`
 - ✅ Re-audited the live `G3PB` handoff/code surface against the current repo
   state:
   - detached `HEAD`
-  - pickup commit: `c034fd5a8b0e`
+  - pickup commit: `95eb86204bfb`
   - recent docs-only handoff tip chain:
+    - `95eb86204 docs: refresh g3pb handoff state`
     - `c034fd5a8 docs: normalize g3pb handoff tip`
     - `9e42d96a4 docs: refresh g3pb handoff state`
     - `89ee44c0d docs: stabilize g3pb handoff metadata`
-    - `c1e01d4c2 docs: finalize g3pb handoff state`
   - latest validated non-docs implementation commit remains:
     - `abfc85ffd llm: stabilize g3pb cache storage test`
   - already-landed follow-on implementation commits remain present below that:
@@ -83,7 +83,7 @@ Last updated: 2026-04-01 08:21:53 UTC
   `PLANS.md` lagged behind the later docs-only handoff commits already present
   on detached `HEAD`
 - the focused validation rerun is fully green on the current handoff tip:
-  `c034fd5a8b0e`
+  `95eb86204bfb`
 - no new `G3PB` implementation gap has been identified by this audit
 - the only run-scope issue identified here was handoff drift, not missing
   implementation or validation coverage
@@ -100,16 +100,16 @@ Last updated: 2026-04-01 08:21:53 UTC
 ### Validation completed in this run so far
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`c034fd5a8b0e`)
+  - pass (`95eb86204bfb`)
 - `git log --oneline -6`
   - pass
   - current recent history:
+    - `95eb86204 docs: refresh g3pb handoff state`
     - `c034fd5a8 docs: normalize g3pb handoff tip`
     - `9e42d96a4 docs: refresh g3pb handoff state`
     - `89ee44c0d docs: stabilize g3pb handoff metadata`
     - `c1e01d4c2 docs: finalize g3pb handoff state`
     - `97cbefa84 docs: correct g3pb handoff state`
-    - `c3222c211 docs: stabilize g3pb handoff metadata`
 - `rg -n "G3PB|g3pb|TODO|FIXME|follow-on|remaining work|Exact next step|Handoff for next run" PLANS.md docs/design-docs/kvbm-g3pb-plan.md lib/llm/src lib/bindings/kvbm/src`
   - pass as an audit search
   - result: no new active `G3PB` implementation gap surfaced in code or the
@@ -142,7 +142,7 @@ Last updated: 2026-04-01 08:21:53 UTC
 
 - this run refreshed `PLANS.md` to match the actual later docs-only handoff
   chain already present on detached `HEAD`, then revalidated the focused stack
-  from validation tip `c034fd5a8b0e`
+  from validation tip `95eb86204bfb`
 - the signed docs-only handoff commit for this run should be the commit that
   contains this `PLANS.md` refresh; treat that resulting commit as the latest
   handoff tip without reopening the active slice just because the top summary
