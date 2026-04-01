@@ -369,7 +369,7 @@ spec:
     allocationMode: Single
     resourceClaimTemplate:
       name: glm5-compute-domain-channel
-  numNodes: 4
+  numNodes: 5
 ---
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
