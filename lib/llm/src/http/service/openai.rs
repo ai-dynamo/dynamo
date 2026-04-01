@@ -290,37 +290,46 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
     }
 }
 
-/// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
-// TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
-pub(super) fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
-    // Try to get request id from trace context
+/// Validate the `x-dynamo-request-id` header and return the request ID.
+///
+/// Returns `Err(message)` if the header is present but invalid (not UTF-8 or not a UUID).
+/// The caller is responsible for converting the error message into the appropriate HTTP
+/// error format (OpenAI vs Anthropic).
+///
+/// The request ID comes from the trace context — `make_request_span()` guarantees it by
+/// generating a UUID when the client doesn't provide one.
+pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> Result<String, String> {
+    // Validate and extract x-dynamo-request-id header if present.
+    // Returns error for non-UTF-8 or non-UUID values.
+    let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+        match raw.to_str() {
+            Err(_) => {
+                return Err(format!(
+                    "{} header must be a valid UTF-8 string",
+                    DYNAMO_REQUEST_ID_HEADER
+                ));
+            }
+            Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
+                return Err(format!(
+                    "{} header must be a valid UUID, got: {}",
+                    DYNAMO_REQUEST_ID_HEADER, s
+                ));
+            }
+            Ok(s) => Some(s.to_string()),
+        }
+    } else {
+        None
+    };
+
+    // Prefer trace context (set by make_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
     {
-        return x_dynamo_request_id;
+        return Ok(x_dynamo_request_id);
     }
 
-    // Try to get the request ID from the primary source
-    if let Some(primary) = primary
-        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
-    {
-        return uuid.to_string();
-    }
-
-    // Try to get the request ID header as a string slice
-    let request_id_opt = headers
-        .get(DYNAMO_REQUEST_ID_HEADER)
-        .and_then(|h| h.to_str().ok());
-
-    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-    let uuid = match request_id_opt {
-        Some(request_id) => {
-            uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
-        }
-        None => uuid::Uuid::new_v4(),
-    };
-
-    uuid.to_string()
+    // Fallback: use validated header value, or generate new UUID
+    Ok(validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
 }
 
 /// OpenAI Completions Request Handler
@@ -342,7 +351,12 @@ async fn handler_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -722,7 +736,12 @@ async fn embeddings(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -800,7 +819,12 @@ async fn handler_chat_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -1409,7 +1433,12 @@ async fn handler_responses(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(None, &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone().unwrap_or_default(),
@@ -1893,7 +1922,12 @@ async fn images(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -1986,7 +2020,12 @@ async fn videos(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -2057,7 +2096,12 @@ async fn video_stream(
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let request = Context::with_id(request, request_id);
     let model = request.model.clone();
 
@@ -2211,7 +2255,12 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let response_format = request.response_format.clone();
-    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: msg,
+        })
+    })?;
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
