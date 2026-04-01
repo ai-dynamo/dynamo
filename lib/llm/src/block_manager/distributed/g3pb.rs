@@ -189,6 +189,7 @@ pub trait G3pbPeerStorage: Send + Sync {
     async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>);
     async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash>;
     async fn put_payload_blocks(&self, blocks: Vec<G3pbTransferBlock>) -> Result<(), G3pbError>;
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError>;
     async fn query_blocks(
         &self,
         worker_id: WorkerID,
@@ -256,6 +257,14 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
             );
         }
 
+        Ok(())
+    }
+
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
+        let mut guard = self.blocks.write().expect("g3pb peer storage poisoned");
+        for sequence_hash in sequence_hashes {
+            guard.remove(sequence_hash);
+        }
         Ok(())
     }
 
@@ -439,6 +448,11 @@ impl ShardedMetadata {
         Ok(())
     }
 
+    fn remove(&self, sequence_hash: SequenceHash) -> Result<Option<G3pbCacheMetadata>> {
+        let mut guard = self.write_shard(sequence_hash)?;
+        Ok(guard.remove(&sequence_hash))
+    }
+
     fn snapshot(&self) -> Result<Vec<(SequenceHash, G3pbCacheMetadata)>> {
         let mut items = Vec::new();
         for shard in &self.shards {
@@ -529,6 +543,10 @@ impl G3pbCacheStorage {
             .get(&sequence_hash)
             .await?
             .map(|entry| entry.value().clone()))
+    }
+
+    fn foyer_remove(&self, sequence_hash: SequenceHash) {
+        self.foyer_shards[self.foyer_shard_index(sequence_hash)].remove(&sequence_hash);
     }
 
     async fn allocate_in_g2(
@@ -896,6 +914,23 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         Ok(())
     }
 
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
+        for sequence_hash in sequence_hashes {
+            if let Some(metadata) = self
+                .metadata
+                .remove(*sequence_hash)
+                .expect("metadata lock poisoned")
+            {
+                if let G3pbCacheLocation::G2 { offset } = metadata.location {
+                    self.free_in_g2(offset, metadata.size_bytes).await;
+                }
+                self.foyer_remove(*sequence_hash);
+            }
+        }
+
+        Ok(())
+    }
+
     async fn query_blocks(
         &self,
         worker_id: WorkerID,
@@ -1229,6 +1264,10 @@ impl G3pbStorageAgent {
         self.storage
             .fetch_blocks(self.worker_id, sequence_hashes)
             .await
+    }
+
+    pub async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
+        self.storage.delete_blocks(sequence_hashes).await
     }
 }
 
@@ -2253,6 +2292,16 @@ mod tests {
             .await;
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0], 2001);
+
+        agent.delete_blocks(&[1001]).await?;
+        assert!(agent.query_blocks(&[1001]).await.is_empty());
+        assert!(matches!(
+            agent.fetch_blocks(&[1001]).await,
+            Err(G3pbError::NotFound {
+                worker_id: 77,
+                sequence_hashes,
+            }) if sequence_hashes == vec![1001]
+        ));
 
         Ok(())
     }

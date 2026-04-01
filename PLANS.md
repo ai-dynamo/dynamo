@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 07:02:22 UTC
+Last updated: 2026-04-01 07:28:29 UTC
 
 ## Active state
 
@@ -19,11 +19,10 @@ Last updated: 2026-04-01 07:02:22 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
-  - locally patch the pinned `nixl-sys` `0.10.1` teardown bug so remote
-    metadata invalidation uses null-terminated agent names
-  - add explicit backend-side committed-block reclamation for `G3PB` cache
-    storage so retained committed blocks do not force backend restarts between
-    larger smokes
+  - complete the pinned `nixl-sys` teardown fix and backend reclaim follow-on
+    backlog
+  - finish with a compact, validated handoff that reflects the new complete
+    `G3PB` state
 
 ## Current run (2026-04-01 07:02:22 UTC)
 
@@ -51,6 +50,18 @@ Last updated: 2026-04-01 07:02:22 UTC
     values into the C ABI
   - wired the workspace to the local crate with `[patch.crates-io]`
   - preserved behavior otherwise
+- ✅ Landed explicit backend-side committed-block reclamation for the `G3PB`
+  host staging runtime
+  - added `delete_blocks` to the `G3pbPeerStorage` / `G3pbStorageAgent` seam
+  - `G3pbCacheStorage` and the in-memory peer backend now delete metadata and
+    payloads for evicted hashes
+  - `kvbm_g3pb_backend` now evicts least-recently-used committed staging blocks
+    before `stage_put` allocations when host capacity is short
+  - evicted committed blocks are dropped back through the pool’s normal return
+    path and the backend waits until host availability actually reflects the
+    reclaimed blocks before proceeding
+  - committed runtime hits now refresh their access tick on both `query` and
+    `fetch`
 
 ### Current findings before edits
 
@@ -69,17 +80,35 @@ Last updated: 2026-04-01 07:02:22 UTC
 - `foyer` exposes removal APIs, so a real reclamation path is feasible in this
   slice without changing the peer protocol
 
+### Current findings after validation
+
+- the local `nixl-sys` patch compiles cleanly across the active `G3PB` stack and
+  the worker/backend smoke no longer emitted the earlier
+  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning during the validated
+  sequential reclaim run
+- the real retention bottleneck was the backend runtime’s committed host staging
+  pool, not `G3pbCacheStorage` alone
+- reclaiming committed entries required two coupled behaviors:
+  - removing the evicted hashes from peer storage so they become honest cache
+    misses instead of stale metadata hits
+  - waiting for the block pool’s asynchronous return path to make reclaimed host
+    blocks visible before attempting the next `stage_put`
+- the first reclaim attempt exposed two important diagnostics now captured in
+  code and on disk:
+  - overlapping worker smokes are not a valid reclaim test because the second
+    run can race before the first run’s blocks reach committed state
+  - directly forcing `try_return_block()` was not sufficient for this path;
+    dropping the evicted `MutableBlock`s and waiting for pool availability was
+    the working reclaim mechanism
+
 ### Remaining work in this run
 
-- add explicit backend-side committed-block reclamation to `G3pbCacheStorage`
-  and validate with focused `G3PB` tests plus the backend/worker build
-- refresh `PLANS.md` with the validation results and exact handoff state
-- make signed small commits once each validated milestone is green
+- none after the signed reclamation commit is created
 
 ### Exact next step
 
-- commit the validated local `nixl-sys` patch milestone, then add explicit
-  backend-side committed-block reclamation to `G3pbCacheStorage`
+- re-read `PLANS.md` once more after the signed reclamation commit to confirm
+  the active `G3PB` follow-on backlog is fully burned down for this slice
 
 ### Validation completed in this run so far
 
@@ -94,6 +123,86 @@ Last updated: 2026-04-01 07:02:22 UTC
     - pass
   - `git diff --check`
     - pass
+- post-reclamation validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - same-backend sequential reclaim smoke with fresh discovery + foyer dirs:
+    - backend:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.reclaim3.10HSLM target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 48 --foyer-dir /tmp/g3pb-foyer.reclaim3.yRZxd8`
+      - pass
+    - first worker smoke:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.reclaim3.10HSLM target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --num-device-blocks 64 --host-blocks 40 --count 24`
+      - pass
+      - transferred `24` blocks / `196608` bytes
+    - second worker smoke against the same backend, no restart:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.reclaim3.10HSLM target/debug/kvbm_g3pb_worker_smoke --worker-id 22 --num-device-blocks 96 --host-blocks 56 --count 40 --sequence-start 5000`
+      - pass
+      - transferred `40` blocks / `327680` bytes
+      - this is the reclaim proof that previously required a fresh backend
+    - validated request-plane timings for the successful `40`-block same-backend run:
+      - `health`: `1` op in `0.005067s` (`197.35 ops/s`)
+      - `load_remote`: `1` op in `0.005170s` (`193.41 ops/s`)
+      - `offer`: `1` op in `0.002272s` (`440.15 ops/s`)
+      - `stage_put`: `1` op in `0.010159s` (`98.44 ops/s`)
+      - `commit_put`: `1` op in `0.002202s` (`454.18 ops/s`)
+      - `query`: `1` op in `0.001762s` (`567.45 ops/s`)
+      - `fetch`: `1` op in `0.002434s` (`410.83 ops/s`)
+      - total metadata RPCs: `7` ops in `0.029066s` (`240.83 ops/s`)
+  - final focused hygiene rerun after the working reclaim implementation:
+    - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+      - pass (`15 passed`)
+    - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+      - pass (`6 passed`)
+    - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+      - pass
+    - `git diff --check`
+      - pass
+
+### Decisions confirmed in this run
+
+- the previously “non-blocking” follow-on backlog was concrete enough to land in
+  this run rather than stay open:
+  - local `nixl-sys` patch instead of waiting for an upstream release
+  - real backend reclaim behavior instead of leaving larger smokes dependent on
+    backend restarts
+- keep the `nixl-sys` fix as a workspace-local patch until an upstream release
+  incorporates the same null-terminated invalidation behavior
+- backend reclaim policy is intentionally narrow:
+  - evict least-recently-used committed staging blocks only when host capacity
+    is short for a new `stage_put`
+  - delete the corresponding peer-cache entries so eviction degrades to cache
+    miss/recompute rather than serving stale metadata
+  - do not broaden this slice into a larger cache-policy redesign
+
+### Handoff for next run
+
+- this run closed the two remaining concrete `G3PB` follow-on items from the
+  prior handoff:
+  1. local `nixl-sys` teardown fix
+  2. backend-side committed-block reclamation
+- validated outcomes now on disk:
+  - focused `g3pb` tests pass
+  - focused `g3pb_filter` tests pass
+  - backend/worker binaries build
+  - same-backend `24`-block then `40`-block sequential smoke passes without a
+    backend restart
+  - the validated smoke output no longer showed the prior
+    `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning
+- after the final signed commit for this run, treat the active `G3PB` slice as
+  complete again unless a future audit or repo change exposes a new concrete
+  regression
+- any future follow-on work should now be new scope, not leftover scope from
+  this plan:
+  1. upstream the local `nixl-sys` patch when practical
+  2. decide whether to keep or tune the current reclaim heuristic
+  3. design any future CPU-buffer / `foyer` retention policy knobs as a
+     separate slice
 
 ## Current run (2026-03-31 23:09:30 UTC)
 

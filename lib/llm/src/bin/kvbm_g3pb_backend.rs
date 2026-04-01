@@ -198,11 +198,17 @@ struct StagedBlock {
     block: MutableBlock<PinnedStorage, Local, BasicMetadata>,
 }
 
+struct CommittedBlock {
+    staged: StagedBlock,
+    last_access_tick: u64,
+}
+
 #[derive(Default)]
 struct G3pbPeerRuntimeState {
     reserved: HashSet<u64>,
     staged: HashMap<u64, StagedBlock>,
-    committed: HashMap<u64, StagedBlock>,
+    committed: HashMap<u64, CommittedBlock>,
+    access_clock: u64,
 }
 
 struct G3pbPeerRuntime {
@@ -213,6 +219,12 @@ struct G3pbPeerRuntime {
 }
 
 impl G3pbPeerRuntime {
+    fn next_access_tick(state: &mut G3pbPeerRuntimeState) -> u64 {
+        let tick = state.access_clock;
+        state.access_clock += 1;
+        tick
+    }
+
     async fn new(args: &Args) -> Result<Self> {
         let agent = build_agent(args.worker_id)?;
         let cancel_token = CancellationToken::new();
@@ -269,7 +281,25 @@ impl G3pbPeerRuntime {
         agent.offer_blocks(&offerable).await
     }
 
-    async fn stage_put_blocks(&self, blocks: Vec<G3pbPutBlock>) -> Result<G3pbStageBlocksResponse> {
+    async fn stage_put_blocks(
+        &self,
+        agent: &G3pbStorageAgent,
+        blocks: Vec<G3pbPutBlock>,
+    ) -> Result<G3pbStageBlocksResponse> {
+        {
+            let state = self.state.read().expect("g3pb runtime state poisoned");
+            for meta in &blocks {
+                anyhow::ensure!(
+                    !state.reserved.contains(&meta.sequence_hash)
+                        && !state.staged.contains_key(&meta.sequence_hash)
+                        && !state.committed.contains_key(&meta.sequence_hash),
+                    "sequence hash {} is already staged or committed",
+                    meta.sequence_hash
+                );
+            }
+        }
+
+        self.ensure_staging_capacity(agent, blocks.len()).await?;
         let host_pool = self
             .block_manager
             .host()
@@ -285,16 +315,6 @@ impl G3pbPeerRuntime {
             .collect::<Vec<_>>();
 
         let mut state = self.state.write().expect("g3pb runtime state poisoned");
-        for meta in &blocks {
-            anyhow::ensure!(
-                !state.reserved.contains(&meta.sequence_hash)
-                    && !state.staged.contains_key(&meta.sequence_hash)
-                    && !state.committed.contains_key(&meta.sequence_hash),
-                "sequence hash {} is already staged or committed",
-                meta.sequence_hash
-            );
-        }
-
         for (meta, block) in blocks.into_iter().zip(mutable_blocks.into_iter()) {
             state.reserved.insert(meta.sequence_hash);
             state.staged.insert(
@@ -335,7 +355,14 @@ impl G3pbPeerRuntime {
                     .with_context(|| format!("sequence hash {sequence_hash} is not staged"))?;
                 state.reserved.remove(sequence_hash);
                 committed_meta.push(staged.meta.clone());
-                state.committed.insert(*sequence_hash, staged);
+                let tick = Self::next_access_tick(&mut state);
+                state.committed.insert(
+                    *sequence_hash,
+                    CommittedBlock {
+                        staged,
+                        last_access_tick: tick,
+                    },
+                );
             }
         }
 
@@ -351,14 +378,16 @@ impl G3pbPeerRuntime {
         let mut hits = Vec::new();
         let mut missing = Vec::new();
         {
-            let state = self.state.read().expect("g3pb runtime state poisoned");
+            let mut state = self.state.write().expect("g3pb runtime state poisoned");
             for sequence_hash in sequence_hashes {
-                if let Some(block) = state.committed.get(sequence_hash) {
+                let tick = Self::next_access_tick(&mut state);
+                if let Some(block) = state.committed.get_mut(sequence_hash) {
+                    block.last_access_tick = tick;
                     hits.push(G3pbQueryHit {
                         worker_id: self.worker_id,
                         sequence_hash: *sequence_hash,
-                        size_bytes: block.meta.size_bytes,
-                        checksum: block.meta.checksum,
+                        size_bytes: block.staged.meta.size_bytes,
+                        checksum: block.staged.meta.checksum,
                     });
                 } else {
                     missing.push(*sequence_hash);
@@ -384,20 +413,22 @@ impl G3pbPeerRuntime {
         &self,
         sequence_hashes: &[u64],
     ) -> Result<G3pbFetchBlocksResponse, G3pbError> {
-        let state = self.state.read().expect("g3pb runtime state poisoned");
+        let mut state = self.state.write().expect("g3pb runtime state poisoned");
         let mut block_ids = Vec::with_capacity(sequence_hashes.len());
         let mut block_set_idx = None;
 
         for sequence_hash in sequence_hashes {
-            let Some(block) = state.committed.get(sequence_hash) else {
+            let tick = Self::next_access_tick(&mut state);
+            let Some(block) = state.committed.get_mut(sequence_hash) else {
                 return Err(G3pbError::NotFound {
                     worker_id: self.worker_id,
                     sequence_hashes: vec![*sequence_hash],
                 });
             };
 
-            block_ids.push(block.block_id);
-            block_set_idx.get_or_insert(block.block.block_data().block_set_id());
+            block.last_access_tick = tick;
+            block_ids.push(block.staged.block_id);
+            block_set_idx.get_or_insert(block.staged.block.block_data().block_set_id());
         }
 
         let block_set_idx = block_set_idx.ok_or(G3pbError::NotFound {
@@ -418,6 +449,86 @@ impl G3pbPeerRuntime {
                 sequence_hashes: sequence_hashes.to_vec(),
             })?,
         })
+    }
+
+    async fn ensure_staging_capacity(
+        &self,
+        agent: &G3pbStorageAgent,
+        required_blocks: usize,
+    ) -> Result<()> {
+        let host_pool = self
+            .block_manager
+            .host()
+            .context("backend runtime has no host staging pool")?;
+        let available_blocks = host_pool.available_blocks() as usize;
+        if available_blocks >= required_blocks {
+            return Ok(());
+        }
+
+        let blocks_to_reclaim = required_blocks - available_blocks;
+        self.evict_committed_blocks(agent, blocks_to_reclaim)
+            .await?;
+        Ok(())
+    }
+
+    async fn evict_committed_blocks(&self, agent: &G3pbStorageAgent, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (evicted_hashes, evicted_blocks) = {
+            let mut state = self.state.write().expect("g3pb runtime state poisoned");
+            let mut candidates: Vec<_> = state
+                .committed
+                .iter()
+                .map(|(sequence_hash, block)| (*sequence_hash, block.last_access_tick))
+                .collect();
+            candidates.sort_by_key(|(_, last_access_tick)| *last_access_tick);
+
+            let mut evicted_hashes = Vec::new();
+            let mut evicted_blocks = Vec::new();
+
+            for (sequence_hash, _) in candidates.into_iter().take(count) {
+                if let Some(block) = state.committed.remove(&sequence_hash) {
+                    evicted_hashes.push(sequence_hash);
+                    evicted_blocks.push(block);
+                }
+            }
+
+            (evicted_hashes, evicted_blocks)
+        };
+
+        if evicted_hashes.len() < count {
+            anyhow::bail!(
+                "unable to reclaim enough committed blocks, requested {}, reclaimed {}",
+                count,
+                evicted_hashes.len()
+            );
+        }
+
+        let host_pool = self
+            .block_manager
+            .host()
+            .context("backend runtime has no host staging pool")?;
+        let target_available_blocks = host_pool.available_blocks() as usize + evicted_hashes.len();
+        drop(evicted_blocks);
+
+        for _ in 0..100 {
+            if host_pool.available_blocks() as usize >= target_available_blocks {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        anyhow::ensure!(
+            host_pool.available_blocks() as usize >= target_available_blocks,
+            "committed-block reclamation did not free enough host blocks: target {}, actual {}",
+            target_available_blocks,
+            host_pool.available_blocks()
+        );
+
+        agent.delete_blocks(&evicted_hashes).await?;
+        Ok(())
     }
 }
 
@@ -487,7 +598,9 @@ impl G3pbBackendService {
                 self.runtime.fetch_descriptors(&request.sequence_hashes)?,
             )),
             G3pbRpcRequest::StagePut(request) => Ok(G3pbRpcResponse::StagePut(
-                self.runtime.stage_put_blocks(request.blocks).await?,
+                self.runtime
+                    .stage_put_blocks(&self.agent, request.blocks)
+                    .await?,
             )),
             G3pbRpcRequest::CommitPut(request) => {
                 self.runtime
