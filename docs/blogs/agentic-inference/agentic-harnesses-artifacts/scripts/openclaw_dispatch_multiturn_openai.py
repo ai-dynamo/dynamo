@@ -273,7 +273,6 @@ def run_dispatch_turn(
                 }
             )
 
-
     for etype, data in parse_openai_sse(resp):
         if etype == "done":
             break
