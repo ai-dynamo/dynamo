@@ -1,6 +1,0 @@
-{"first_token_ms": 38.9, "dispatch_ms": 1423.5, "tool_delta_ms": 1423.5, "first_tool_info_ms": 1423.5, "finish_reason_ms": 1434.0, "turn": 1, "city": "Tokyo", "info_before_done_ms": 10.5, "label": "ON"}
-{"first_token_ms": 107.7, "dispatch_ms": 654.0, "tool_delta_ms": 654.0, "first_tool_info_ms": 654.0, "finish_reason_ms": 664.6, "turn": 2, "city": "Paris", "info_before_done_ms": 10.7, "label": "ON"}
-{"first_token_ms": 110.0, "dispatch_ms": 770.4, "tool_delta_ms": 770.4, "first_tool_info_ms": 770.4, "finish_reason_ms": 770.4, "turn": 3, "city": "Cairo", "info_before_done_ms": 0.0, "label": "ON"}
-{"first_token_ms": 112.1, "dispatch_ms": 641.8, "tool_delta_ms": 641.8, "first_tool_info_ms": 641.8, "finish_reason_ms": 652.7, "turn": 4, "city": "Mumbai", "info_before_done_ms": 10.9, "label": "ON"}
-{"first_token_ms": 111.2, "dispatch_ms": 644.4, "tool_delta_ms": 644.5, "first_tool_info_ms": 644.4, "finish_reason_ms": 655.3, "turn": 5, "city": "S\u00e3o Paulo", "info_before_done_ms": 10.9, "label": "ON"}
-{"first_token_ms": 110.2, "dispatch_ms": 649.0, "tool_delta_ms": 649.0, "first_tool_info_ms": 649.0, "finish_reason_ms": 659.6, "turn": 6, "city": "Istanbul", "info_before_done_ms": 10.6, "label": "ON"}
