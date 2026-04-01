@@ -389,7 +389,7 @@ async fn replay_worker_trace(
         .rescale_ready_span(trace_simulation_duration_ms)?
         .into_trace_driver()?;
     let collector = EventCollector::new();
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
     let scheduler = Scheduler::new(
         sched_args,
         0,
@@ -429,32 +429,40 @@ async fn replay_worker_trace(
                 let deadline = start + Duration::from_secs_f64((next_ready_ms.max(0.0)) / 1000.0);
                 tokio::select! {
                     maybe_signal = output_rx.recv() => {
-                        let Some(signal) = maybe_signal else {
+                        let Some(output_batch) = maybe_signal else {
                             anyhow::bail!("scheduler ended before workload replay drained");
                         };
-                        output_signals.push(TimedOutputSignal {
-                            signal: signal.clone(),
-                            timestamp_us: start.elapsed().as_micros() as u64,
-                        });
-                        if signal.completed {
-                            completed_turns += 1;
-                            driver.on_complete(signal.uuid, start.elapsed().as_secs_f64() * 1000.0)?;
+                        let timestamp_us = start.elapsed().as_micros() as u64;
+                        let completion_ms = start.elapsed().as_secs_f64() * 1000.0;
+                        for signal in output_batch {
+                            output_signals.push(TimedOutputSignal {
+                                signal: signal.clone(),
+                                timestamp_us,
+                            });
+                            if signal.completed {
+                                completed_turns += 1;
+                                driver.on_complete(signal.uuid, completion_ms)?;
+                            }
                         }
                     }
                     _ = tokio::time::sleep_until(deadline) => {}
                 }
             }
             None => {
-                let Some(signal) = output_rx.recv().await else {
+                let Some(output_batch) = output_rx.recv().await else {
                     anyhow::bail!("scheduler ended before workload replay drained");
                 };
-                output_signals.push(TimedOutputSignal {
-                    signal: signal.clone(),
-                    timestamp_us: start.elapsed().as_micros() as u64,
-                });
-                if signal.completed {
-                    completed_turns += 1;
-                    driver.on_complete(signal.uuid, start.elapsed().as_secs_f64() * 1000.0)?;
+                let timestamp_us = start.elapsed().as_micros() as u64;
+                let completion_ms = start.elapsed().as_secs_f64() * 1000.0;
+                for signal in output_batch {
+                    output_signals.push(TimedOutputSignal {
+                        signal: signal.clone(),
+                        timestamp_us,
+                    });
+                    if signal.completed {
+                        completed_turns += 1;
+                        driver.on_complete(signal.uuid, completion_ms)?;
+                    }
                 }
             }
         }

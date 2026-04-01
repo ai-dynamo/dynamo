@@ -35,6 +35,7 @@ from dynamo.common.utils.video_utils import (
     normalize_video_frames,
     parse_size,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ class OmniHandler(BaseOmniHandler):
                         if chunk:
                             yield chunk
 
-            except GeneratorExit:
+            except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
