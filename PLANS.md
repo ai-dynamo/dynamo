@@ -1055,6 +1055,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Refreshed `PLANS.md` with this completion audit so the next run does not
   have to rediscover that the remaining items are follow-on backlog, not
   missing work in the current slice
+- ✅ Recorded the audit as a signed small commit:
+  - `d8cd551c5 docs: refresh g3pb completion audit`
 
 ### Current findings before final handoff
 
@@ -1067,6 +1069,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - this run is therefore an execution audit, not a new product/runtime change
 - `PLANS.md` itself was the only file that needed updating in this run so the
   handoff remains precise for the next execution
+- the completion-audit refresh is now committed; no uncommitted implementation
+  or handoff work remains after this run
 
 ### Validation completed in this run so far
 
@@ -1093,16 +1097,21 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- make a signed small commit for the audit/handoff refresh
+- none
 
 ### Exact next step
 
-- create the signed commit for this `PLANS.md` completion audit refresh
+- if another run continues from here, resume only from the existing non-blocking
+  follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ### Handoff for next run
 
-- if this run completes cleanly, no additional implementation work remains in
-  the active `G3PB` plan
+- no additional implementation work remains in the active `G3PB` plan
+- this completion-audit run is committed:
+  - `d8cd551c5 docs: refresh g3pb completion audit`
 - the next run should resume only from the existing non-blocking follow-on
   backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
