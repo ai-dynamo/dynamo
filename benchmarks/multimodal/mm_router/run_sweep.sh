@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Concurrency sweep for MM Router vs RR Baseline vs No-MM-Worker vs Rust Frontend benchmarks.
+# Concurrency sweep for MM Router vs RR Baseline vs vLLM Processor vs Rust Frontend benchmarks.
 #
 # Runs aiperf for all combinations of:
-#   - router: mm (MM Router), rr (RR Baseline), no-mm (no mm_router_worker, frontend KV routing),
-#             rust (Rust frontend mm routing, no mm_router_worker, no --dyn-chat-processor vllm)
+#   - router: mm (MM Router Worker), rr (RR Baseline),
+#             vllm-processor (vLLM chat processor, --dyn-chat-processor vllm, frontend KV routing),
+#             rust (Rust frontend mm routing, --frontend-decoding, no mm_router_worker)
 #   - transport: http, datauri
 #   - concurrency: 1, 4, 8, 16, 32, 64
 #   - pool: 10pool (~90% reuse), 60pool (~50% reuse), Npool (0% reuse)
@@ -14,17 +15,17 @@
 # Request count = concurrency * 100.
 #
 # Output naming:
-#   mm    : {N}w_{n}req_1img_{pool}pool_{mode}_conc{c}
-#   rr    : rr_{N}w_{n}req_...
-#   no-mm : no_mm_{N}w_{n}req_...
-#   rust  : rust_{N}w_{n}req_...
+#   mm             : mm_{N}w_{n}req_1img_{pool}pool_{mode}_conc{c}
+#   rr             : rr_{N}w_{n}req_...
+#   vllm-processor : vllm_processor_{N}w_{n}req_...
+#   rust           : rust_{N}w_{n}req_...
 #
 # Usage:
-#   bash run_sweep.sh --router mm     --dataset-dir ./datasets --log-dir ./logs
-#   bash run_sweep.sh --router rr     --dataset-dir ./datasets --log-dir ./logs
-#   bash run_sweep.sh --router no-mm  --dataset-dir ./datasets --log-dir ./logs
-#   bash run_sweep.sh --router rust   --dataset-dir ./datasets --log-dir ./logs
-#   bash run_sweep.sh --router all    --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router mm             --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router rr             --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router vllm-processor --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router rust           --dataset-dir ./datasets --log-dir ./logs
+#   bash run_sweep.sh --router all            --dataset-dir ./datasets --log-dir ./logs
 #
 
 set -euo pipefail
@@ -34,7 +35,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
 URL="${AIPERF_URL:-http://127.0.0.1:8000}"
-ROUTER="${ROUTER:-all}"         # mm | rr | no-mm | rust | all
+ROUTER="${ROUTER:-all}"         # mm | rr | vllm-processor | rust | all
 DATASET_DIR="${DATASET_DIR:-$(dirname "$0")/datasets}"
 LOG_DIR="${LOG_DIR:-$(dirname "$0")/logs}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-5}"
@@ -131,10 +132,10 @@ _run_pools() {
 # ---------------------------------------------------------------------------
 # Per-router sweeps
 # ---------------------------------------------------------------------------
-run_mm()    { _run_pools "mm"; }
-run_rr()    { _run_pools "rr"; }
-run_no_mm() { _run_pools "no_mm"; }
-run_rust()  { _run_pools "rust"; }
+run_mm()             { _run_pools "mm"; }
+run_rr()             { _run_pools "rr"; }
+run_vllm_processor() { _run_pools "vllm_processor"; }
+run_rust()           { _run_pools "rust"; }
 
 # ---------------------------------------------------------------------------
 # Main
@@ -142,12 +143,12 @@ run_rust()  { _run_pools "rust"; }
 run_warmup
 
 case "${ROUTER}" in
-    mm)    run_mm ;;
-    rr)    run_rr ;;
-    no-mm) run_no_mm ;;
-    rust)  run_rust ;;
-    all)   run_mm; run_rr; run_no_mm; run_rust ;;
-    *)     echo "Unknown --router value: ${ROUTER} (use mm | rr | no-mm | rust | all)"; exit 1 ;;
+    mm)             run_mm ;;
+    rr)             run_rr ;;
+    vllm-processor) run_vllm_processor ;;
+    rust)           run_rust ;;
+    all)            run_mm; run_rr; run_vllm_processor; run_rust ;;
+    *)     echo "Unknown --router value: ${ROUTER} (use mm | rr | vllm-processor | rust | all)"; exit 1 ;;
 esac
 
 echo "=== Sweep complete. Logs in ${LOG_DIR} ==="

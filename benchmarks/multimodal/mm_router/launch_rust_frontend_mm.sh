@@ -41,6 +41,9 @@ BLOCK_SIZE="${BLOCK_SIZE:-16}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
+# Set SINGLE_GPU=1 to pin all workers to GPU 0 (single-GPU benchmarking).
+# Default (0): each worker gets its own GPU (worker i -> GPU i-1).
+SINGLE_GPU="${SINGLE_GPU:-0}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-100426}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512}"
@@ -66,6 +69,7 @@ echo "HTTP_PORT=${HTTP_PORT}"
 echo "BLOCK_SIZE=${BLOCK_SIZE}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
+echo "SINGLE_GPU=${SINGLE_GPU}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "MAX_NUM_SEQS=${MAX_NUM_SEQS}"
 echo "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}"
@@ -148,13 +152,16 @@ COMMON_ENV=(
 #      from preprocessor_config.json at MDC build time
 # ---------------------------------------------------------------------------
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    gpu_id=$((i - 1))
+    if [[ "${SINGLE_GPU}" == "1" ]]; then
+        gpu_id=0
+    else
+        gpu_id=$((i - 1))
+    fi
     sys_var="VLLM${i}_SYSTEM_PORT"; sp="${!sys_var:-}"; system_port="${sp:-$((18079 + i * 2))}"
     kv_var="KV_EVENT_PORT_${i}";   kp="${!kv_var:-}"; kv_port="${kp:-$((20079 + i))}"
 
     echo "=== Starting vLLM backend worker #${i} (GPU ${gpu_id}, port ${system_port}) ==="
-    # CUDA_VISIBLE_DEVICES="${gpu_id}" \
-    CUDA_VISIBLE_DEVICES="0" \
+    CUDA_VISIBLE_DEVICES="${gpu_id}" \
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${system_port}" \
         "DYN_VLLM_KV_EVENT_PORT=${kv_port}" \
