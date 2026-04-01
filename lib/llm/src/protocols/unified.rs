@@ -466,9 +466,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         Some(self.inner.inner.messages.as_slice())
     }
 
