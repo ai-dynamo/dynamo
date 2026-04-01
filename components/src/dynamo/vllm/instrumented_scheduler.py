@@ -59,15 +59,14 @@ How metrics are measured
   passes the correct output for the batch being processed, even in
   async mode where multiple batches are in flight).
 * **queued_requests**: computed from ``self.waiting`` at emit time.
-* **wall_time**: approximates the schedule-to-update_from_output
-  latency described in ``ForwardPassMetrics``.  Measured as the time
-  between consecutive ``update_from_output()`` calls.  This works
-  because the EngineCore always blocks on ``future.result()`` (the
-  GPU forward pass) right before calling ``update_from_output``, so
-  the interval is dominated by GPU compute.  Assumption: CPU overhead
-  (scheduling + output processing) between consecutive calls is small
-  relative to GPU forward pass time.  ``wall_time`` is ``0.0`` for
-  the first message after engine idle and for heartbeats.
+* **wall_time**: measures the schedule-to-update_from_output latency
+  for each batch.  A timestamp is recorded at the end of ``schedule()``
+  and matched with the corresponding ``update_from_output()`` call via
+  a FIFO queue (correct for both sync and async scheduling modes).
+  The interval is dominated by GPU forward pass time; CPU overhead
+  (scheduling + output processing) is typically negligible.
+  ``wall_time`` is ``0.0`` only for heartbeats or when the timestamp
+  queue is empty (should not happen under normal operation).
 
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
@@ -275,7 +274,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
         self._fpm_dp_rank = dp_rank
 
-        self._last_update_time: float = 0.0
+        self._schedule_times: deque[float] = deque()
         self._prompt_len_per_req: dict[str, int] = {}
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
@@ -314,11 +313,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_cleanup_requests()
                 self._bench_active = False
                 self._bench_phase = _BenchPhase.IDLE
-                return super().schedule()
+                return self._schedule_and_record_time()
             if output is not None:
                 self.kv_cache_manager.new_step_starts()
                 self._update_after_schedule(output)
-                self._bench_schedule_times.append(time.monotonic())
+                self._schedule_times.append(time.monotonic())
                 return output
 
             if (
@@ -341,9 +340,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._update_after_schedule(empty)
                 return empty
 
+        return self._schedule_and_record_time()
+
+    def _schedule_and_record_time(self) -> SchedulerOutput:
         output = super().schedule()
-        if self._bench_active and output.total_num_scheduled_tokens > 0:
-            self._bench_schedule_times.append(time.monotonic())
+        if output.total_num_scheduled_tokens > 0:
+            self._schedule_times.append(time.monotonic())
         return output
 
     def shutdown(self) -> None:
@@ -362,30 +364,23 @@ class InstrumentedScheduler(AsyncScheduler):
         model_runner_output: "ModelRunnerOutput",
     ):
         result = super().update_from_output(scheduler_output, model_runner_output)
-        now = time.monotonic()
 
         if scheduler_output.total_num_scheduled_tokens > 0:
-            wall_time = (
-                now - self._last_update_time if self._last_update_time > 0 else 0.0
-            )
-            self._last_update_time = now
+            now = time.monotonic()
+            if self._schedule_times:
+                wall_time = now - self._schedule_times.popleft()
+            else:
+                wall_time = 0.0
 
             metrics = self._extract_metrics(
                 scheduler_output, self._compute_queued(), wall_time
             )
             self._publisher.publish(metrics)
 
-            if self._bench_active and self._bench_schedule_times:
-                t_sched = self._bench_schedule_times.popleft()
-                bench_wall_time = now - t_sched
-                bench_metrics = self._extract_metrics(
-                    scheduler_output, self._compute_queued(), bench_wall_time
-                )
+            if self._bench_active:
                 self._bench_current_fpms.append(
-                    json.loads(msgspec.json.encode(bench_metrics))
+                    json.loads(msgspec.json.encode(metrics))
                 )
-        else:
-            self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
         return result
@@ -517,7 +512,6 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_seq = 0
         self._bench_warmup_remaining = self._bench_config.warmup_iterations
         self._bench_grid_built = False
-        self._bench_schedule_times: deque[float] = deque()
         self._bench_drain_pending = False
 
         # Build block_hasher so benchmark requests work with prefix caching.
@@ -691,7 +685,7 @@ class InstrumentedScheduler(AsyncScheduler):
             r for r in self.running if r.request_id not in self._bench_active_req_ids
         ]
         self._bench_active_req_ids.clear()
-        self._bench_schedule_times.clear()
+        self._schedule_times.clear()
 
     # -- State machine --------------------------------------------------
 
@@ -757,7 +751,7 @@ class InstrumentedScheduler(AsyncScheduler):
             return False
         self._bench_drain_pending = False
         self._bench_current_fpms.clear()
-        self._bench_schedule_times.clear()
+        self._schedule_times.clear()
         return True
 
     def _bench_step_prefill(self) -> None:
