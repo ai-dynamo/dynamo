@@ -373,6 +373,9 @@ pub struct ResponseMetricCollector {
     last_response_time: Option<Duration>,
     osl: usize,
     isl: usize,
+    ttft_ms: Option<f64>,
+    itl_sum_secs: f64,
+    itl_count: u64,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
     // we track if tokenize latency has been observed to ensure we only increment once per request
@@ -1169,6 +1172,9 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             isl: 0,
+            ttft_ms: None,
+            itl_sum_secs: 0.0,
+            itl_count: 0,
             cached_tokens_observed: false,
             tokenize_latency_observed: false,
             detokenize_latency_total: Duration::ZERO,
@@ -1269,6 +1275,9 @@ impl ResponseMetricCollector {
             return;
         }
 
+        // Store ISL for span recording on drop
+        self.isl = isl;
+
         // Increment the real-time output tokens counter
         self.metrics
             .output_tokens_counter
@@ -1280,8 +1289,9 @@ impl ResponseMetricCollector {
             // we use the full response time as TTFT and ignore the ITL
             self.is_first_token = false;
 
-            // Publish TTFT
+            // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
+            self.ttft_ms = Some(ttft * 1000.0);
             self.metrics
                 .time_to_first_token
                 .with_label_values(&[&self.model])
@@ -1322,6 +1332,8 @@ impl ResponseMetricCollector {
         if let Some(last_response_time) = self.last_response_time {
             let response_duration = current_duration - last_response_time;
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            self.itl_sum_secs += itl * num_tokens as f64;
+            self.itl_count += num_tokens as u64;
             for _ in 0..num_tokens {
                 self.metrics
                     .inter_token_latency
@@ -1367,6 +1379,29 @@ impl Drop for ResponseMetricCollector {
             .output_sequence_length
             .with_label_values(&[&self.model])
             .observe(self.osl as f64);
+
+        // Record request summary on the enclosing span.
+        // InflightGuard::Drop and on_response logs will inherit these.
+        let span = tracing::Span::current();
+        if self.isl > 0 {
+            span.record("input_tokens", self.isl as u32);
+        }
+        if self.osl > 0 {
+            span.record("output_tokens", self.osl as u32);
+        }
+        if let Some(ttft_ms) = self.ttft_ms {
+            span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+        }
+        if self.itl_count > 0 {
+            let avg_ms = (self.itl_sum_secs / self.itl_count as f64) * 1000.0;
+            span.record("avg_itl_ms", format!("{:.2}", avg_ms).as_str());
+        }
+        if let Some(worker_id) = self.prefill_worker_id {
+            span.record("prefill_worker_id", worker_id);
+        }
+        if let Some(worker_id) = self.decode_worker_id {
+            span.record("decode_worker_id", worker_id);
+        }
     }
 }
 
