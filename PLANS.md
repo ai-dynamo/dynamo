@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:52:59 UTC
+Last updated: 2026-04-01 05:58:14 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 05:52:59 UTC)
+## Current run (2026-04-01 05:58:14 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1470,11 +1470,11 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Re-audited the active `G3PB` surface against the current repo state:
   - detached `HEAD`
   - clean worktree at pickup
-  - current tip at pickup: `0a13ef251fd1`
+  - current tip at pickup: `a8059aa58d0b`
   - recent audit-only commits still match the last recorded handoff:
+    - `a8059aa58 docs: refresh g3pb audit handoff`
     - `0a13ef251 docs: finalize g3pb audit handoff`
     - `0be6dd83d docs: refresh g3pb audit handoff`
-    - `3d33f05a4 docs: finalize g3pb audit handoff`
 - ✅ Re-searched the active handoff/code surface for remaining concrete work:
   - searched `PLANS.md`, `docs/design-docs/kvbm-g3pb-plan.md`,
     `lib/llm/src`, and `lib/bindings/kvbm/src`
@@ -1488,7 +1488,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 ### Current findings before final handoff
 
 - the active `G3PB` implementation slice still appears complete on current
-  `HEAD` (`0a13ef251fd1` at pickup)
+  `HEAD` (`a8059aa58d0b` at pickup)
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1512,6 +1512,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
+- `git diff --check`
+  - pass after the `PLANS.md` audit refresh
 
 ### Decisions confirmed in this run so far
 
@@ -1521,6 +1523,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   more near-duplicate “still complete” entries without new information
 - keep repo-wide unrelated TODO markers out of this plan unless a targeted
   `G3PB` audit ties one back to the active slice
+- keep replacing the latest audit block with current verified state instead of
+  extending the docs-only commit chain with stale pickup SHAs
 
 ### Remaining work in this run
 
