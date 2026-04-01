@@ -17,7 +17,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Final, List
+from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
 import numpy as np
@@ -119,11 +119,27 @@ class VideoLoader:
             logger.error("Error loading video from %s: %s", video_url, exc)
             raise ValueError(f"Failed to load video from {video_url}: {exc}") from exc
 
+    async def _load_decoded_video(
+        self, decoded_metadata: Dict[str, Any]
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
+        if self._nixl_connector is None:
+            raise RuntimeError("NIXL connector is not initialized")
+
+        frames, metadata = await read_decoded_media_via_nixl(
+            self._nixl_connector,
+            decoded_metadata,
+            return_metadata=True,
+        )
+        if metadata is None:
+            raise ValueError("Decoded video metadata is required")
+
+        return np.ascontiguousarray(frames), metadata
+
     async def load_video_batch(
         self,
         video_mm_items: List[Dict[str, Any]],
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
-        video_futures = []
+        video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
         for item in video_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
@@ -133,11 +149,7 @@ class VideoLoader:
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
-                    if self._nixl_connector is None:
-                        raise RuntimeError("NIXL connector is not initialized")
-                    video_futures.append(
-                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
-                    )
+                    video_futures.append(self._load_decoded_video(metadata))
                 else:
                     raise ValueError(
                         "Received decoded video data but enable_frontend_decoding=False. "
@@ -146,12 +158,14 @@ class VideoLoader:
 
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
-        collective_exceptions = ""
+        collective_exceptions: list[str] = []
         for media_item, result in zip(video_mm_items, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
                 logger.error("Failed to load video from %s...: %s", source[:80], result)
-                collective_exceptions += (
+                collective_exceptions.append(
                     f"Failed to load video from {source[:80]}...: {result}\n"
                 )
                 continue
@@ -159,6 +173,6 @@ class VideoLoader:
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
 
         if collective_exceptions:
-            raise Exception(collective_exceptions)
+            raise Exception("".join(collective_exceptions))
 
         return loaded_videos

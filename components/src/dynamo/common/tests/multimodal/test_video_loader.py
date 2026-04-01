@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
+import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [
@@ -80,3 +81,30 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
     with pytest.raises(ValueError, match="enable_frontend_decoding=False"):
         await loader.load_video_batch([{"Decoded": {"shape": [1, 2, 2, 3]}}])
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch):
+    loader = VideoLoader(enable_frontend_decoding=False)
+    loader._enable_frontend_decoding = True
+    loader._nixl_connector = object()
+
+    decoded_item = {
+        "shape": [1, 2, 2, 3],
+        "metadata": {"fps": 3.0, "frames_indices": [0], "total_num_frames": 1},
+    }
+    frames = np.arange(12, dtype=np.uint8).reshape(1, 2, 2, 3)
+    read_decoded = AsyncMock(return_value=(frames, decoded_item["metadata"]))
+    monkeypatch.setattr(
+        video_loader_module, "read_decoded_media_via_nixl", read_decoded
+    )
+
+    videos = await loader.load_video_batch([{"Decoded": decoded_item}])
+
+    np.testing.assert_array_equal(videos[0][0], np.ascontiguousarray(frames))
+    assert videos[0][1] == decoded_item["metadata"]
+    read_decoded.assert_awaited_once_with(
+        loader._nixl_connector,
+        decoded_item,
+        return_metadata=True,
+    )
