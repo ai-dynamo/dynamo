@@ -680,8 +680,29 @@ mod tests {
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
+        error::DynamoError,
         pipeline::{ResponseStream, context::Controller},
     };
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestResponse {
+        error: Option<DynamoError>,
+    }
+
+    impl MaybeError for TestResponse {
+        fn from_err(err: impl std::error::Error + 'static) -> Self {
+            Self {
+                error: Some(DynamoError::from(
+                    Box::new(err) as Box<dyn std::error::Error + 'static>
+                )),
+            }
+        }
+
+        fn err(&self) -> Option<DynamoError> {
+            self.error.clone()
+        }
+    }
 
     #[test]
     fn p2c_selects_lower_load_worker() {
@@ -829,7 +850,7 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
-        let router = PushRouter::<u64, u64>::from_client(client, RouterMode::LeastLoaded)
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
 
