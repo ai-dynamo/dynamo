@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 13:00:52 UTC
+Last updated: 2026-04-01 13:08:58 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 13:00:52 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD`: `ab4b4a298a36`
+  - live detached `HEAD`: `098d32a42d7b`
 - Current implementation direction:
   - `G3PB` remains the peer-cache replacement for the unlanded `G4`
     disk-identity surface
@@ -26,7 +26,7 @@ Last updated: 2026-04-01 13:00:52 UTC
   - no open implementation work remains for the active first-pass `G3PB` slice
   - this run is a live-head validation and handoff compaction refresh only
 
-## Current run (2026-04-01 13:00:52 UTC)
+## Current run (2026-04-01 13:08:58 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -34,7 +34,7 @@ Last updated: 2026-04-01 13:00:52 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Revalidated the live detached `HEAD` `ab4b4a298a36` instead of assuming the
+- Revalidated the live detached `HEAD` `098d32a42d7b` instead of assuming the
   prior docs-only handoff remained sufficient evidence
 - Reconfirmed the live tree still contains the seams required by the handoff
   and design doc:
@@ -43,28 +43,29 @@ Last updated: 2026-04-01 13:00:52 UTC
   - native bindings-side `DYN_KVBM_G3PB_ADMISSION_POLICY` adoption
   - `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` binaries
 - Re-ran the focused `G3PB` audit and validation stack from live detached
-  `HEAD` `ab4b4a298a36`, and it is green
+  `HEAD` `098d32a42d7b`, and it is green
 - Reconfirmed that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
-- Refreshed the on-disk handoff so the next run can start from the current
-  detached `HEAD` and exact validation evidence
+- Refreshed the on-disk handoff so this run records the exact validation
+  evidence and next-step guidance from detached `HEAD` `098d32a42d7b`
 
 ### Current findings in this run
 
 - the active `G3PB` implementation slice still appears complete on detached
-  `HEAD` `ab4b4a298a36`
+  `HEAD` `098d32a42d7b`
 - no new `G3PB` implementation gap was identified by the audit or validation
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- `PLANS.md` is the only intentional dirty file after this handoff refresh
+- this run revalidated the current docs-only handoff tip and refreshed the
+  on-disk handoff for the next run
 
 ### Validation completed in this run
 
 - `git status --short --branch`
   - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `git rev-parse --short=12 HEAD`
-  - pass (`ab4b4a298a36`)
+  - pass (`098d32a42d7b`)
 - `git log --oneline -8`
   - pass
 - `sed -n '1,220p' Agents.md`
@@ -95,8 +96,14 @@ Last updated: 2026-04-01 13:00:52 UTC
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
+- `sed -n '1,260p' PLANS.md`
+  - pass as the post-edit reread
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
+- `git status --short --branch`
+  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 13:00:52 UTC`)
+  - pass (`2026-04-01 13:08:58 UTC`)
 
 ### Decisions confirmed in this run
 
@@ -110,17 +117,14 @@ Last updated: 2026-04-01 13:00:52 UTC
 
 ### Remaining work in this run
 
-- re-read this refreshed `PLANS.md`
-- run a post-edit `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  spot check
-- if both are clean, decide whether another signed docs-only handoff commit is
-  useful for the next run
+- stage `PLANS.md` and land a signed docs-only handoff commit now that the
+  post-edit spot check is green
 
 ### Exact next step
 
-- re-read `PLANS.md`, run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`,
-  and commit this docs-only handoff refresh with `--signoff` if the worktree
-  is otherwise clean enough to make that useful
+- leave the active `G3PB` slice closed unless a fresh regression or explicitly
+  new scope appears; the immediate action is a signed docs-only handoff commit
+  for this refreshed validation state
 
 ### Handoff for next run
 
@@ -131,14 +135,16 @@ Last updated: 2026-04-01 13:00:52 UTC
 - validate from the live detached `HEAD` rather than assuming this docs-only
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
-- detached `HEAD` `ab4b4a298a36` has green focused `G3PB` validation:
+- this run validated detached `HEAD` `098d32a42d7b`
+- detached `HEAD` `098d32a42d7b` has green focused `G3PB` validation:
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
   - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
 - the active `G3PB` slice still has no pending code changes
-- `PLANS.md` is intentionally left dirty only with this final on-disk handoff
-  refresh until the post-edit reread, spot check, and commit decision complete
+- `PLANS.md` is intentionally left dirty only with this refreshed on-disk
+  handoff; this run already re-read it and passed the post-edit `g3pb::` spot
+  check, so the next action is to land the signed docs-only handoff commit
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
