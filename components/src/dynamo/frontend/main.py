@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct, least-loaded).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -236,9 +237,6 @@ async def async_main():
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
-
-    if router_mode == RouterMode.LeastLoaded and config.enforce_disagg:
-        raise ValueError("least-loaded routing is not supported in disaggregated mode.")
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(

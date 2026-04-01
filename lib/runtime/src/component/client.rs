@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -23,58 +26,55 @@ use crate::{
     transports::etcd::Client as EtcdClient,
 };
 
-/// Shared state for least-loaded routing
+/// Shared occupancy state for routing modes that track per-worker in-flight requests.
 #[derive(Debug, Default)]
-pub(crate) struct LeastLoadedState {
-    /// Active connection count per instance: instance_id -> count
-    connections: DashMap<u64, AtomicU64>,
-    lock: std::sync::Mutex<()>,
+pub(crate) struct RoutingOccupancyState {
+    counts: DashMap<u64, AtomicU64>,
+    exact_selection_lock: tokio::sync::Mutex<()>,
 }
 
-impl LeastLoadedState {
-    /// Acquire the selection lock, pick the least-loaded instance, and increment its count.
-    /// Returns the selected instance ID, or None if no instances are available.
-    pub(crate) fn select_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
-        let _guard = self.lock.lock().unwrap();
-        let id = *instance_ids
-            .iter()
-            .min_by_key(|&&id| self.connection_count(id))?;
-        self.increment(id);
-        Some(id)
-    }
-
-    fn increment(&self, instance_id: u64) {
-        self.connections
+impl RoutingOccupancyState {
+    pub(crate) fn increment(&self, instance_id: u64) {
+        self.counts
             .entry(instance_id)
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
+        let _guard = self.exact_selection_lock.lock().await;
+        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+        self.increment(id);
+        Some(id)
+    }
+
     pub(crate) fn decrement(&self, instance_id: u64) {
-        if let Some(count) = self.connections.get(&instance_id) {
+        if let Some(count) = self.counts.get(&instance_id) {
             let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_sub(1))
             });
         }
     }
 
-    pub(crate) fn connection_count(&self, instance_id: u64) -> u64 {
-        self.connections
+    pub(crate) fn load(&self, instance_id: u64) -> u64 {
+        self.counts
             .get(&instance_id)
             .map(|c| c.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
-    /// Remove counters for instances that no longer exist.
     pub(crate) fn retain(&self, instance_ids: &[u64]) {
-        self.connections.retain(|id, _| instance_ids.contains(id));
+        let live: HashSet<u64> = instance_ids.iter().copied().collect();
+        self.counts.retain(|id, _| live.contains(id));
     }
 }
 
-/// Get or create the shared least-loaded state for an endpoint.
-pub(crate) async fn get_or_create_least_loaded_state(endpoint: &Endpoint) -> Arc<LeastLoadedState> {
+/// Get or create the shared routing occupancy state for an endpoint.
+pub(crate) async fn get_or_create_routing_occupancy_state(
+    endpoint: &Endpoint,
+) -> Arc<RoutingOccupancyState> {
     let drt = endpoint.drt();
-    let registry = drt.least_loaded_states();
+    let registry = drt.routing_occupancy_states();
     let mut registry = registry.lock().await;
 
     if let Some(weak) = registry.get(endpoint) {
@@ -85,7 +85,7 @@ pub(crate) async fn get_or_create_least_loaded_state(endpoint: &Endpoint) -> Arc
         }
     }
 
-    let state = Arc::new(LeastLoadedState::default());
+    let state = Arc::new(RoutingOccupancyState::default());
     registry.insert(endpoint.clone(), Arc::downgrade(&state));
     state
 }
@@ -250,8 +250,8 @@ impl Client {
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
 
-                // Clean up stale connection counters for instances that no longer exist.
-                let registry = client.endpoint.drt().least_loaded_states();
+                // Clean up stale occupancy counters for instances that no longer exist.
+                let registry = client.endpoint.drt().routing_occupancy_states();
                 if let Ok(registry) = registry.try_lock()
                     && let Some(weak) = registry.get(&client.endpoint)
                     && let Some(state) = weak.upgrade()
@@ -478,7 +478,7 @@ mod tests {
     /// Test that concurrent select_and_increment distributes load correctly.
     #[tokio::test]
     async fn test_concurrent_select_and_increment() {
-        let state = Arc::new(LeastLoadedState::default());
+        let state = Arc::new(RoutingOccupancyState::default());
         let instance_ids: Vec<u64> = vec![100, 200, 300];
         let num_requests = 90;
 
@@ -486,18 +486,18 @@ mod tests {
         for _ in 0..num_requests {
             let state = state.clone();
             let ids = instance_ids.clone();
-            handles.push(tokio::spawn(
-                async move { state.select_and_increment(&ids) },
-            ));
+            handles.push(tokio::spawn(async move {
+                state.select_exact_min_and_increment(&ids).await
+            }));
         }
 
         for handle in handles {
             handle.await.unwrap();
         }
 
-        assert_eq!(state.connection_count(100), 30);
-        assert_eq!(state.connection_count(200), 30);
-        assert_eq!(state.connection_count(300), 30);
+        assert_eq!(state.load(100), 30);
+        assert_eq!(state.load(200), 30);
+        assert_eq!(state.load(300), 30);
     }
 
     #[tokio::test]
@@ -510,47 +510,87 @@ mod tests {
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
 
-        let state1 = get_or_create_least_loaded_state(&endpoint).await;
-        let state2 = get_or_create_least_loaded_state(&endpoint).await;
+        let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
+        let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
 
-        let picked1 = state1.select_and_increment(&[10, 20, 30]).unwrap();
-        assert_eq!(state1.connection_count(picked1), 1);
+        let picked1 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
+        assert_eq!(state1.load(picked1), 1);
 
-        let picked2 = state1.select_and_increment(&[10, 20, 30]).unwrap();
+        let picked2 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
         assert_ne!(picked1, picked2);
 
         // state2 should see the same counts (same underlying Arc)
-        assert_eq!(state2.connection_count(10), state1.connection_count(10));
-        assert_eq!(state2.connection_count(20), state1.connection_count(20));
-        assert_eq!(state2.connection_count(30), state1.connection_count(30));
+        assert_eq!(state2.load(10), state1.load(10));
+        assert_eq!(state2.load(20), state1.load(20));
+        assert_eq!(state2.load(30), state1.load(30));
 
         state2.decrement(picked1);
-        assert_eq!(
-            state1.connection_count(picked1),
-            if picked1 == picked2 { 1 } else { 0 }
-        );
+        assert_eq!(state1.load(picked1), if picked1 == picked2 { 1 } else { 0 });
 
         rt.shutdown();
     }
 
     #[tokio::test]
     async fn test_least_loaded_state_retain() {
-        let state = LeastLoadedState::default();
+        let state = RoutingOccupancyState::default();
 
         // Add some connections
-        state.select_and_increment(&[1, 2, 3]);
-        state.select_and_increment(&[1, 2, 3]);
-        state.select_and_increment(&[1, 2, 3]);
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
         // Each instance should have 1 connection
-        assert_eq!(state.connection_count(1), 1);
-        assert_eq!(state.connection_count(2), 1);
-        assert_eq!(state.connection_count(3), 1);
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 1);
+        assert_eq!(state.load(3), 1);
 
         // Retain only instances 1 and 3 (instance 2 was removed)
         state.retain(&[1, 3]);
 
-        assert_eq!(state.connection_count(1), 1);
-        assert_eq!(state.connection_count(2), 0); // cleaned up
-        assert_eq!(state.connection_count(3), 1);
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 0);
+        assert_eq!(state.load(3), 1);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_instance_source_cleans_up_removed_worker_counts() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_occupancy_cleanup".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let worker_id = client.instance_ids_avail()[0];
+        let state = get_or_create_routing_occupancy_state(&endpoint).await;
+        state.increment(worker_id);
+        assert_eq!(state.load(worker_id), 1);
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+
+        for _ in 0..10 {
+            if state.load(worker_id) == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(state.load(worker_id), 0);
+
+        rt.shutdown();
     }
 }
