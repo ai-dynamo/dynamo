@@ -54,7 +54,8 @@ Last updated: 2026-04-01 08:26:47 UTC
 - ✅ Re-audited the live `G3PB` handoff/code surface against the current repo
   state:
   - detached `HEAD`
-  - pickup commit: `95eb86204bfb`
+  - validation-time pickup commit before this docs refresh:
+    `95eb86204bfb`
   - recent docs-only handoff tip chain:
     - `95eb86204 docs: refresh g3pb handoff state`
     - `c034fd5a8 docs: normalize g3pb handoff tip`
@@ -83,7 +84,7 @@ Last updated: 2026-04-01 08:26:47 UTC
   `PLANS.md` lagged behind the later docs-only handoff commits already present
   on detached `HEAD`
 - the focused validation rerun is fully green on the current handoff tip:
-  `95eb86204bfb`
+  validation-time tip `95eb86204bfb`
 - no new `G3PB` implementation gap has been identified by this audit
 - the only run-scope issue identified here was handoff drift, not missing
   implementation or validation coverage
@@ -100,7 +101,7 @@ Last updated: 2026-04-01 08:26:47 UTC
 ### Validation completed in this run so far
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`95eb86204bfb`)
+  - pass at validation time (`95eb86204bfb`)
 - `git log --oneline -6`
   - pass
   - current recent history:
@@ -143,10 +144,10 @@ Last updated: 2026-04-01 08:26:47 UTC
 - this run refreshed `PLANS.md` to match the actual later docs-only handoff
   chain already present on detached `HEAD`, then revalidated the focused stack
   from validation tip `95eb86204bfb`
-- the signed docs-only handoff commit for this run should be the commit that
-  contains this `PLANS.md` refresh; treat that resulting commit as the latest
-  handoff tip without reopening the active slice just because the top summary
-  no longer hard-codes the previous tip hash
+- the signed docs-only handoff commit for this run is the commit that contains
+  this `PLANS.md` refresh; treat that resulting commit as the latest handoff
+  tip without reopening the active slice just because the validation-time tip
+  above is older than the final docs-only commit
 - the validated non-docs implementation baseline beneath the docs-only handoff
   chain remains `abfc85ffd0a4`
 - there is still no remaining in-scope implementation work for the active
