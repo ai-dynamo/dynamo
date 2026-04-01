@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:02:41 UTC
+Last updated: 2026-04-01 05:09:21 UTC
 
 ## Active state
 
@@ -1113,6 +1113,86 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - this completion-audit run is already committed in signed docs-only commits
 - the next run should resume only from the existing non-blocking follow-on
   backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+## Current run (2026-04-01 05:09:21 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely before making changes to verify whether
+  anything in the active plan had become stale or incomplete
+- ✅ Audited the repo state against the latest handoff:
+  - detached `HEAD`
+  - clean worktree at pickup
+  - latest handoff commits on `HEAD`:
+    - `f2ac59dec docs: stabilize g3pb audit handoff`
+    - `f1219b704 docs: finalize g3pb audit handoff`
+    - `d8cd551c5 docs: refresh g3pb completion audit`
+    - `21c45d28f docs: finalize g3pb handoff state`
+    - `701d74a95 tests: serialize g3pb filter env cases`
+- ✅ Revalidated the focused `G3PB` stack from the current tip instead of
+  relying on prior run logs
+- ✅ Refreshed `PLANS.md` again so the latest completion audit, repo state, and
+  exact follow-on backlog are all recorded on disk for the next run
+
+### Current findings before final handoff
+
+- the repo still matches the active handoff: there is no unimplemented code
+  slice remaining in `PLANS.md`
+- the only remaining items are the same non-blocking follow-on backlog already
+  captured in prior runs:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+- broad `TODO` markers still exist elsewhere in the repo, but the audit found
+  no new `G3PB`-specific gap that belongs in the active execution slice
+- this run remains an execution audit and handoff refresh, not a new
+  product/runtime change
+- `PLANS.md` is the only file that needs to change in this run unless the final
+  re-read finds a missing handoff detail
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- `git diff --check`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- continue treating the current `G3PB` plan as complete unless a fresh audit
+  exposes a concrete regression or missing validation
+- keep rerunning the focused validation stack during audit-only runs so
+  `PLANS.md` reflects verified current state, not stale assumptions
+- keep the next-run handoff narrow: resume only from the known follow-on
+  backlog rather than inventing new scope inside the completed slice
+
+### Remaining work in this run
+
+- none
+
+### Exact next step
+
+- commit this audit refresh with `--signoff`
+
+### Handoff for next run
+
+- the active `G3PB` implementation slice remains complete after a fresh audit
+- this run revalidated the focused test/build stack from the current `HEAD`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
