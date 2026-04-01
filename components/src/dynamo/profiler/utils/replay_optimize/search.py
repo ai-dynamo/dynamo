@@ -158,20 +158,6 @@ def _select_initial_state(
     )
 
 
-def _sort_feasible_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    return df.sort_values(
-        by=[
-            "score",
-            "output_throughput_tok_s",
-            "mean_e2e_latency_ms",
-            "total_gpus_used",
-        ],
-        ascending=[False, False, True, True],
-    ).reset_index(drop=True)
-
-
 def _record_to_state(record: Mapping[str, float | int]) -> DenseReplayState:
     return DenseReplayState(
         prefill_tp=int(record["prefill_tp"]),
@@ -314,11 +300,21 @@ def optimize_dense_disagg_with_replay(
             executor.shutdown()
 
     evaluated_df = pd.DataFrame.from_records(list(cache.values()))
-    feasible_df = _sort_feasible_df(
+    feasible_df = (
         evaluated_df[evaluated_df["feasible"]]
         if not evaluated_df.empty
         else evaluated_df
     )
+    if not feasible_df.empty:
+        feasible_df = feasible_df.sort_values(
+            by=[
+                "score",
+                "output_throughput_tok_s",
+                "mean_e2e_latency_ms",
+                "total_gpus_used",
+            ],
+            ascending=[False, False, True, True],
+        ).reset_index(drop=True)
     best_feasible = feasible_df.iloc[0].to_dict() if not feasible_df.empty else None
     best_infeasible = None
     if not evaluated_df.empty:

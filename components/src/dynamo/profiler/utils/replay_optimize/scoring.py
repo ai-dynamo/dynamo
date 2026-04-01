@@ -31,14 +31,6 @@ def _violation_penalty(
     return penalty
 
 
-def _is_feasible(
-    report: Mapping[str, Any],
-    constraints: Mapping[str, float],
-    total_gpus_used: int,
-) -> bool:
-    return _violation_penalty(report, constraints, total_gpus_used) == 0.0
-
-
 def _rank_record(record: Mapping[str, Any]) -> tuple[float, float, float]:
     return (
         float(record["score"]),

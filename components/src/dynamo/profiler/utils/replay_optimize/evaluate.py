@@ -14,7 +14,7 @@ from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import _build_candidate_engine_args, _build_router_config
 from .models import DenseReplayState, SyntheticReplayWorkload, TraceReplayWorkload
-from .scoring import _is_feasible, _violation_penalty
+from .scoring import _violation_penalty
 
 
 def _run_replay_for_state(
@@ -110,8 +110,8 @@ def _evaluate_state(
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
     score = throughput / float(total_gpus_used)
-    feasible = _is_feasible(report, constraints, total_gpus_used)
     penalty = _violation_penalty(report, constraints, total_gpus_used)
+    feasible = penalty == 0.0
     record = {
         **asdict(state),
         "total_gpus_used": total_gpus_used,
