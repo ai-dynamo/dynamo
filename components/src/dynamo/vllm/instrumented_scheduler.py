@@ -504,6 +504,11 @@ class InstrumentedScheduler(AsyncScheduler):
             base, ext = os.path.splitext(self._bench_config.output_path)
             self._bench_config.output_path = f"{base}_dp{dp_rank}{ext}"
 
+        try:
+            os.unlink(self._bench_config.output_path)
+        except FileNotFoundError:
+            pass
+
         self._bench_active = True
         self._bench_phase = _BenchPhase.WARMUP
         self._bench_grid: deque[BenchmarkPoint] = deque()

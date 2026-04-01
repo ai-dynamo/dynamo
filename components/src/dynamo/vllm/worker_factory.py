@@ -59,9 +59,6 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
             stem, ext = os.path.splitext(str(base_path))
             rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
 
-    for p in rank_paths:
-        p.unlink(missing_ok=True)
-
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
         rank_paths,
