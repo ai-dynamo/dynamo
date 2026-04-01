@@ -28,7 +28,7 @@ def get_external_weight_writer_command(backend: str) -> list[str]:
     return [
         "python",
         "-m",
-        "tests.gpu_memory_service.harness.external_weight_writer",
+        "tests.gms.harness.external_weight_writer",
         "--backend",
         backend,
     ]

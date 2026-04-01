@@ -38,10 +38,12 @@ from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.epochs import GMSEpochManager
 from gpu_memory_service.server.rpc import GMSRPCServer
 
-from tests.gpu_memory_service.harness.gms import ServerThread
+from tests.gms.harness.gms import ServerThread
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
 ]
 
 

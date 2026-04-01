@@ -23,6 +23,8 @@ from ..harness.runtime import (
 from ..harness.sglang import SGLangWithGMSProcess
 from ..harness.vllm import VLLMWithGMSProcess
 
+pytestmark = [pytest.mark.nightly]
+
 # Event flow under test:
 # 1. Weights are published once as a committed epoch.
 # 2. KV cache starts as a live RW epoch.

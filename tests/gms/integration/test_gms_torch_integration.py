@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -15,9 +14,12 @@ from gpu_memory_service.client.torch.module import (
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.types import RequestedLockType
 
-from tests.gpu_memory_service.harness.gms import GMSServerProcess
+from tests.gms.harness.gms import GMSServerProcess
+
+torch = pytest.importorskip("torch", reason="torch is required")
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_1,
 ]

@@ -6,12 +6,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pytest
-import torch
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 
+torch = pytest.importorskip("torch", reason="torch is required")
+
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
     pytest.mark.sglang,
 ]
 

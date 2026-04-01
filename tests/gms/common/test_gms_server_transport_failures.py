@@ -14,7 +14,6 @@ import time
 from dataclasses import dataclass
 
 import pytest
-from cuda.bindings import driver as cuda
 from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
@@ -40,7 +39,12 @@ from gpu_memory_service.server.session import (
     OperationNotAllowed,
 )
 
+# Skip entire module if cuda.bindings is not installed
+pytest.importorskip("cuda.bindings", reason="cuda.bindings is required")
+from cuda.bindings import driver as cuda  # noqa: E402
+
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_0,
 ]

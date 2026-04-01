@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
     pytest.mark.vllm,
 ]
 
@@ -26,7 +28,7 @@ class _FakeManager:
     def abort(self) -> None:
         self.calls.append("abort")
 
-    def connect(self, lock_type) -> None:
+    def connect(self, lock_type, timeout_ms=None) -> None:
         self.calls.append(("connect", lock_type.value))
         self.is_unmapped = False
 
@@ -135,7 +137,8 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
     worker = object.__new__(GMSWorker)
     worker.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
     worker.model_runner = SimpleNamespace(
-        init_fp8_kv_scales=lambda: fp8_calls.append("fp8")
+        kv_caches={"layer_0": True},
+        init_fp8_kv_scales=lambda: fp8_calls.append("fp8"),
     )
 
     worker.wake_up(["weights", "kv_cache"])

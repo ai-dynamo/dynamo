@@ -26,6 +26,8 @@ from ..harness.runtime import (
 from ..harness.sglang import SGLangWithGMSProcess
 from ..harness.vllm import VLLMWithGMSProcess
 
+pytestmark = [pytest.mark.nightly]
+
 # Event flow under test:
 # 1. Shadow A starts with committed weights and a live RW KV epoch, then sleeps.
 # 2. Shadow B starts from the same committed weights epoch, then sleeps as well.

@@ -8,7 +8,9 @@ from gpu_memory_service.client.torch import allocator as allocator_module
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
 ]
 
 

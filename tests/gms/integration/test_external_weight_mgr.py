@@ -15,11 +15,16 @@ from gpu_memory_service.common.types import RequestedLockType, ServerState
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
-from ..harness.external_weight_writer import run_external_weight_writer
 from ..harness.gms import GMSServerProcess
 from ..harness.runtime import send_completion
 from ..harness.sglang import SGLangWithGMSProcess
 from ..harness.vllm import VLLMWithGMSProcess
+
+# guard: external_weight_writer imports torch at module level
+pytest.importorskip("torch", reason="torch is required")
+from ..harness.external_weight_writer import run_external_weight_writer  # noqa: E402
+
+pytestmark = [pytest.mark.nightly]
 
 # Event flow under test:
 # 1. The engine starts in read-only mode and waits for a committed weights epoch.
