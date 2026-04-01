@@ -1,0 +1,396 @@
+# GLM-5 (NVFP4) disaggregated prefill/decode on GB200 NVL4 via SGLang + Dynamo
+#
+# Prerequisites:
+#   - dynamo-platform HelmRelease applied (etcd + nats)
+#   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
+#   - Container built from recipes/glm-5-nvfp4/Dockerfile
+#   - ComputeDomain and ResourceClaimTemplate created (see below)
+#   - HF_TOKEN secret created: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# Topology: 5 nodes total
+#   decode:  4 nodes x 4 GPUs = TP16 / DP16 / EP16 (EAGLE speculative decode)
+#   prefill: 1 node  x 4 GPUs = TP4
+#
+# To deploy:
+#   1. Create ComputeDomain:    kubectl apply -f deploy.yaml
+#   2. Get ComputeDomain UID:   kubectl get computedomain glm5-compute-domain -n <ns> -o jsonpath='{.metadata.uid}'
+#   3. Update domainID below to match the UID, then re-apply.
+#
+# IMPORTANT: After creating the ComputeDomain, update the `domainID` field in the
+# ResourceClaimTemplate below to match the ComputeDomain's metadata.uid.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm5-sglang
+  namespace: <your-namespace>
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: HF_TOKEN
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.<your-namespace>.svc.cluster.local:4222
+
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --no-decode-fallback
+            - --discovery-backend
+            - kubernetes
+            - --request-plane
+            - nats
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+          image: <your-registry>/sglang-dynamo-glm5:latest
+          name: ""
+          resources: {}
+          volumeMounts:
+            - mountPath: /models
+              name: model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
+          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: <your-model-pvc>
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 4
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+        claims:
+          - name: compute-domain-channel
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path /models/nvidia-GLM-5-NVFP4
+              --served-model-name nvidia/GLM-5-NVFP4
+              --trust-remote-code
+              --quantization modelopt_fp4
+              --kv-cache-dtype fp8_e4m3
+              --tensor-parallel-size 16
+              --data-parallel-size 16
+              --expert-parallel-size 16
+              --enable-dp-attention
+              --enable-dp-lm-head
+              --max-running-requests 2048
+              --cuda-graph-max-bs 128
+              --mem-fraction-static 0.72
+              --chunked-prefill-size 32768
+              --max-prefill-tokens 32768
+              --enable-flashinfer-allreduce-fusion
+              --attention-backend nsa
+              --nsa-decode-backend trtllm
+              --nsa-prefill-backend trtllm
+              --moe-runner-backend flashinfer_trtllm
+              --speculative-algorithm EAGLE
+              --speculative-num-steps 2
+              --speculative-eagle-topk 1
+              --speculative-num-draft-tokens 3
+              --stream-interval 50
+              --incremental-streaming-output
+              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
+              --request-plane nats
+              --discovery-backend kubernetes
+              --host 0.0.0.0
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --prefill-round-robin-balance
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+            - name: SGLANG_ENABLE_JIT_DEEPGEMM
+              value: "1"
+            - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
+            - name: SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE
+              value: "1"
+            - name: SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+              value: "1024"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_GRAPH_MIXING_SUPPORT
+              value: "0"
+            - name: UCX_TLS
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: UCX_LOG_LEVEL
+              value: error
+            - name: NIXL_LOG_LEVEL
+              value: ERROR
+          image: <your-registry>/sglang-dynamo-glm5:latest
+          name: ""
+          resources: {}
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /models
+              name: model-cache
+          workingDir: /workspace/
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: glm5-compute-domain-channel
+        tolerations:
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
+          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: <your-model-pvc>
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path /models/nvidia-GLM-5-NVFP4
+              --served-model-name nvidia/GLM-5-NVFP4
+              --trust-remote-code
+              --quantization modelopt_fp4
+              --kv-cache-dtype fp8_e4m3
+              --tensor-parallel-size 4
+              --data-parallel-size 1
+              --expert-parallel-size 1
+              --enable-dp-lm-head
+              --max-running-requests 2048
+              --cuda-graph-max-bs 128
+              --mem-fraction-static 0.72
+              --chunked-prefill-size 32768
+              --max-prefill-tokens 32768
+              --enable-flashinfer-allreduce-fusion
+              --attention-backend nsa
+              --nsa-decode-backend trtllm
+              --nsa-prefill-backend trtllm
+              --moe-runner-backend flashinfer_trtllm
+              --stream-interval 50
+              --incremental-streaming-output
+              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
+              --request-plane nats
+              --discovery-backend kubernetes
+              --host 0.0.0.0
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --load-balance-method round_robin
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+            - name: SGLANG_ENABLE_JIT_DEEPGEMM
+              value: "1"
+            - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
+            - name: SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE
+              value: "1"
+            - name: SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+              value: "1024"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: UCX_TLS
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: UCX_LOG_LEVEL
+              value: error
+            - name: NIXL_LOG_LEVEL
+              value: ERROR
+          image: <your-registry>/sglang-dynamo-glm5:latest
+          name: ""
+          resources: {}
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /models
+              name: model-cache
+          workingDir: /workspace/
+        tolerations:
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
+          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
+          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: <your-model-pvc>
+---
+# ComputeDomain enables MNNVL scheduling for the 4-node decode group.
+# After applying, retrieve the UID and update the domainID in the
+# ResourceClaimTemplate below:
+#   kubectl get computedomain glm5-compute-domain -n <ns> -o jsonpath='{.metadata.uid}'
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: glm5-compute-domain
+  namespace: <your-namespace>
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: glm5-compute-domain-channel
+  numNodes: 5
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: glm5-compute-domain-channel
+  namespace: <your-namespace>
+spec:
+  metadata: {}
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: compute-domain.nvidia.com
+          parameters:
+            allocationMode: Single
+            apiVersion: resource.nvidia.com/v1beta1
+            domainID: <compute-domain-uid>  # Replace with ComputeDomain metadata.uid
+            kind: ComputeDomainChannelConfig
+        requests:
+        - channel
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: compute-domain-default-channel.nvidia.com
+        name: channel

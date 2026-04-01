@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm5-nvfp4-download
+  namespace: <your-namespace>
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
+        - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
+      containers:
+      - name: download
+        image: python:3.12-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          pip install -q huggingface_hub
+          huggingface-cli download nvidia/GLM-5-NVFP4 \
+            --local-dir /models/nvidia-GLM-5-NVFP4 \
+            --token "$HF_TOKEN"
+          echo "Download complete."
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: HF_TOKEN
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: <your-model-pvc>
