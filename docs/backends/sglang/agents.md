@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: SGLang for Agentic Workloads
-subtitle: Priority scheduling, KV cache retention, and session control for multi-turn agentic serving
+subtitle: Priority scheduling and session control for multi-turn agentic serving
 ---
 
 # SGLang for Agentic Workloads
 
-This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to use cache retention and session control to manage KV cache for multi-turn agent conversations.
+This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to use session control to manage KV cache for multi-turn agent conversations.
 
 ## Overview
 
@@ -75,7 +75,7 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 
 | Agent Hint | Router Behavior | SGLang Engine Behavior |
 |------------|----------------|----------------------|
-| `priority` | Router queue ordering when `--router-queue-threshold` is set. | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. Cache retention decay when `retention_seconds` is set. |
+| `priority` | Router queue ordering when `--router-queue-threshold` is set. | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
 | `osl` | Output block tracking for routing decisions (requires `--router-track-output-blocks`) | No direct engine effect. |
 | `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache. |
 
@@ -109,88 +109,18 @@ for chunk in response:
         print(chunk.choices[0].delta.content, end="")
 ```
 
-## Cache Retention via `cache_control`
-
-When a request includes `nvext.cache_control`, the router injects `retention_seconds` into the generate request. Combined with `nvext.agent_hints.priority`, this gives the SGLang worker priority-based KV eviction with time decay -- high-value conversation prefixes survive longer under memory pressure without a separate RPC.
-
-### How It Works
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Preprocessor
-    participant Router as KV Router
-    participant Worker as SGLang Worker
-    participant Cache as Radix Cache
-
-    Client->>Preprocessor: nvext.cache_control{ttl: "5m"}<br/>nvext.agent_hints{priority: 50}
-    Preprocessor->>Preprocessor: Extract cache_control_ttl=300
-    Preprocessor->>Router: PreprocessedRequest
-
-    Router->>Router: Select best worker
-    Router->>Router: Inject extra_args.retention_seconds=300
-
-    Router->>Worker: async_generate(<br/>  retention_seconds=300,<br/>  priority=50)
-    Worker->>Cache: Insert with priority=50,<br/>retention_duration=300s
-    Worker-->>Client: Stream response
-
-    Note over Cache: Under memory pressure
-    Cache->>Cache: Evict priority=0 nodes first<br/>Priority=50 nodes survive
-
-    Note over Cache: After 5 min idle
-    Cache->>Cache: Effective priority decays to 0<br/>Node now eligible for normal eviction
-```
-
-No separate RPC is needed. The retention and priority values flow inline with the generate request.
-
 ### Enabling
 
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
-  --enable-cache-control \
+  --enable-agent-controller \
   ...
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--enable-cache-control` | Enables agent-aware cache control: session lifecycle RPCs, sticky session routing, and retention_seconds injection. Requires `--router-mode=kv`. |
-
-**SGLang worker** must use priority-based eviction:
-
-```bash
-python -m dynamo.sglang \
-  --model-path <model> \
-  --radix-eviction-policy priority \
-  ...
-```
-
-### Request Format
-
-```json
-{
-    "model": "Qwen/Qwen3-14B-FP8",
-    "messages": [
-        {"role": "system", "content": "You are a Roger Federer superfan. Every answer must highlight his elegance, grace, and superiority."},
-        {"role": "user", "content": "Explain why Federer's 2017 comeback is the greatest story in sports history."}
-    ],
-    "nvext": {
-        "cache_control": {
-            "type": "ephemeral",
-            "ttl": "1h"
-        },
-        "agent_hints": {
-            "priority": 50
-        }
-    }
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `cache_control.type` | `string` | Currently only `"ephemeral"` is supported. |
-| `cache_control.ttl` | `string` | Retention duration: integer seconds (`"600"`) or shorthand (`"5m"`, `"1h"`). Clamped to [300, 3600] seconds. |
-| `agent_hints.priority` | `integer` | Eviction priority (higher = survives longer). Default 0 = LRU eviction. |
+| `--enable-agent-controller` | Enables the agent controller: session lifecycle RPCs and sticky session routing. Requires `--router-mode=kv`. |
 
 ## Session Control for Subagent KV Isolation (Experimental)
 
@@ -270,11 +200,11 @@ python -m dynamo.sglang \
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
-  --enable-cache-control \
+  --enable-agent-controller \
   ...
 ```
 
-The `--enable-cache-control` flag enables the `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (router-side session affinity).
+The `--enable-agent-controller` flag enables the `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (router-side session affinity).
 
 ### Request Format
 
@@ -400,22 +330,17 @@ resp3 = client.chat.completions.create(
 )
 ```
 
-### Combining with Cache Retention
+### Interaction with Priority Eviction
 
-Session control and cache retention are complementary:
-
-- **Cache retention** (`nvext.cache_control` + `nvext.agent_hints.priority`): Protects the lead agent's long-lived conversation prefix in the radix tree via priority-based eviction with time decay.
-- **Session control** (`nvext.session_control`): Isolates short-lived subagent KV outside the radix tree entirely.
-
-Use both together: set high priority + retention on the lead agent's prefix so it survives memory pressure, and open sessions for subagents so their ephemeral KV doesn't compete with the lead agent.
+Session control isolates short-lived subagent KV outside the radix tree entirely. The worker's radix cache eviction policy still matters for non-session traffic, including the lead agent's normal turns.
 
 #### Full launch example
 
 ```bash
-# Frontend with cache control enabled
+# Frontend with session control enabled
 python -m dynamo.frontend \
   --router-mode kv \
-  --enable-cache-control
+  --enable-agent-controller
 
 # Worker with priority eviction + streaming sessions
 python -m dynamo.sglang \

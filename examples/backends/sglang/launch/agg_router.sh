@@ -66,7 +66,7 @@ print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-FRONTEND_ARGS=(--router-mode kv --enable-cache-control --router-reset-states)
+FRONTEND_ARGS=(--router-mode kv --enable-agent-controller --router-reset-states)
 if [ "$APPROX_MODE" = true ]; then
     FRONTEND_ARGS+=(--no-kv-events)
 fi

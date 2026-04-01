@@ -185,15 +185,11 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             self._engine_supports_priority = (
                 "priority" in inspect.signature(engine.async_generate).parameters
             )
-            self._engine_supports_retention = (
-                "retention_seconds" in inspect.signature(engine.async_generate).parameters
-            )
         else:
             # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-            self._engine_supports_retention = False
         self._quiesce_controller = (
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
@@ -207,11 +203,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             ):
                 normalized = -normalized
             return {"priority": normalized}
-        return {}
-
-    def _retention_kwargs(self, retention_seconds: Any) -> Dict[str, Any]:
-        if retention_seconds is not None and self._engine_supports_retention:
-            return {"retention_seconds": retention_seconds}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:

@@ -34,7 +34,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
-    "router_enable_cache_control",
+    "router_enable_agent_controller",
     "router_queue_policy",
     "remote_indexer_component",
 )
@@ -59,7 +59,7 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
-    router_enable_cache_control: bool
+    router_enable_agent_controller: bool
     router_queue_policy: str
     remote_indexer_component: Optional[str]
 
@@ -262,14 +262,13 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-cache-control",
-            env_var="DYN_ENABLE_CACHE_CONTROL",
+            flag_name="--enable-agent-controller",
+            env_var="DYN_ENABLE_AGENT_CONTROLLER",
             default=False,
-            dest="router_enable_cache_control",
+            dest="router_enable_agent_controller",
             help=(
-                "KV Router: Enable agent-aware cache control. Activates session lifecycle "
-                "RPCs (open/close for subagent KV isolation), sticky session routing, and "
-                "retention_seconds injection for priority-based KV eviction with time decay."
+                "KV Router: Enable the agent controller. Activates session lifecycle "
+                "RPCs (open/close for subagent KV isolation) and sticky session routing."
             ),
         )
         add_argument(

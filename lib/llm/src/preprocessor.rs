@@ -335,7 +335,8 @@ impl OpenAIPreprocessor {
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA.
+            // Ensure routing hints exist when we have LoRA,
+            // even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
                 ..Default::default()

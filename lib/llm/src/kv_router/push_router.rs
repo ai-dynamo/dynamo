@@ -172,11 +172,6 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
 
-        // Fire deferred close if finish() didn't run (e.g., stream dropped early).
-        if let Some(close) = self.deferred_close.take() {
-            close.execute(&self.context_id);
-        }
-
         if !self.freed {
             let chooser = self.chooser.clone();
             let context_id = self.context_id.clone();
@@ -203,7 +198,7 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        let enable_event_plane = chooser.kv_router_config().router_enable_cache_control;
+        let enable_event_plane = chooser.kv_router_config().router_enable_agent_controller;
 
         // Agent controller manages session lifecycle RPCs (open/close).
         let agent_controller = if enable_event_plane {
@@ -525,16 +520,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
             None => None,
         };
-
-        // Inject retention_seconds from cache_control TTL into extra_args.
-        // This replaces the old pin_prefix RPC -- the backend uses retention_seconds
-        // for priority-based KV cache eviction with time decay.
-        if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
-            let extra = request.extra_args.get_or_insert_with(|| json!({}));
-            if let serde_json::Value::Object(map) = extra {
-                map.insert("retention_seconds".to_string(), json!(ttl));
-            }
-        }
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);

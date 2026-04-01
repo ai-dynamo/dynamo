@@ -255,7 +255,7 @@ impl CacheControl {
 }
 
 fn default_session_timeout() -> u64 {
-    30
+    300
 }
 
 /// Session control for subagent KV isolation and sticky routing.
@@ -271,7 +271,7 @@ pub struct SessionControl {
     /// Lifecycle action: `"open"` or `"close"`. Omit on intermediate turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<SessionAction>,
-    /// Inactivity timeout in seconds (default 30, only used with `action: "open"`).
+    /// Inactivity timeout in seconds (default 300, only used with `action: "open"`).
     #[serde(default = "default_session_timeout")]
     pub timeout: u64,
 }
@@ -442,11 +442,11 @@ mod tests {
         assert_eq!(sc.session_id, "sub-1");
         assert_eq!(sc.timeout, 60);
 
-        // Close action (timeout defaults to 30)
+        // Close action (timeout defaults to 300)
         let sc_close = r#"{"session_id": "sub-1", "action": "close"}"#;
         let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
         assert_eq!(sc.action, Some(SessionAction::Close));
-        assert_eq!(sc.timeout, 30);
+        assert_eq!(sc.timeout, 300);
 
         // Continue (no action, just session_id for sticky routing)
         let sc_continue = r#"{"session_id": "sub-1"}"#;
@@ -456,7 +456,7 @@ mod tests {
 
         // NvExt with session_control
         let nvext_json =
-            r#"{"session_control": {"session_id": "sub-2", "action": "open", "timeout": 30}}"#;
+            r#"{"session_control": {"session_id": "sub-2", "action": "open", "timeout": 300}}"#;
         let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
         assert!(nvext.session_control.is_some());
         let sc = nvext.session_control.unwrap();
