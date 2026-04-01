@@ -1382,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_cache_control_passthrough() {
-        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+        use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),

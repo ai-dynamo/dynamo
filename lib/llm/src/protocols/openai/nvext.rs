@@ -201,10 +201,6 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-// Re-export CacheControl types from dynamo-async-openai where they are canonically defined
-// alongside the Anthropic protocol types they originate from.
-pub use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
-
 impl Default for NvExt {
     fn default() -> Self {
         NvExt::builder().build().unwrap()
@@ -253,67 +249,6 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
-    }
-
-    // Test CacheControl serde roundtrip and TTL parsing
-    #[test]
-    fn test_cache_control_serde_and_ttl() {
-        // Default (ephemeral, no TTL)
-        let cc = CacheControl::default();
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl, None);
-        assert_eq!(cc.ttl_seconds(), 300);
-
-        // Shorthand values
-        let cc_5m = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("5m".to_string()),
-        };
-        assert_eq!(cc_5m.ttl_seconds(), 300);
-
-        let cc_1h = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("1h".to_string()),
-        };
-        assert_eq!(cc_1h.ttl_seconds(), 3600);
-
-        // Integer seconds -- within range
-        let cc_600 = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("600".to_string()),
-        };
-        assert_eq!(cc_600.ttl_seconds(), 600);
-
-        // Integer seconds -- clamped to min (300)
-        let cc_low = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("10".to_string()),
-        };
-        assert_eq!(cc_low.ttl_seconds(), 300);
-
-        // Integer seconds -- clamped to max (3600)
-        let cc_high = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("7200".to_string()),
-        };
-        assert_eq!(cc_high.ttl_seconds(), 3600);
-
-        // Unrecognized string defaults to 300
-        let cc_bad = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("forever".to_string()),
-        };
-        assert_eq!(cc_bad.ttl_seconds(), 300);
-
-        // Serde roundtrip
-        let json = serde_json::to_string(&cc_5m).unwrap();
-        let deser: CacheControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, cc_5m);
-
-        // Deserialize from API-style JSON
-        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
-        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
-        assert_eq!(from_api.ttl_seconds(), 3600);
     }
 
     // Test valid builder configurations
