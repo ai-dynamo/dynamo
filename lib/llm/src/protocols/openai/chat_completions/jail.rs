@@ -232,17 +232,22 @@ impl ChoiceJailState {
 
                         // Handle trailing content if any
                         if !trailing_part.is_empty() {
-                            #[allow(deprecated)]
-                            let trailing_choice = create_choice_stream(
-                                choice.index,
-                                choice.delta.role,
-                                trailing_part,
-                                None,
-                                choice.finish_reason,
-                                None,
-                                choice.logprobs.clone(),
-                            );
-                            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            if jail_stream.should_start_jail(trailing_part) {
+                                self.is_jailed = true;
+                                self.accumulated_content = trailing_part.to_string();
+                            } else {
+                                #[allow(deprecated)]
+                                let trailing_choice = create_choice_stream(
+                                    choice.index,
+                                    choice.delta.role,
+                                    trailing_part,
+                                    None,
+                                    choice.finish_reason,
+                                    None,
+                                    choice.logprobs.clone(),
+                                );
+                                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            }
                         }
                     } else {
                         // Start jailing with the marker and suffix
@@ -347,23 +352,29 @@ impl ChoiceJailState {
                     emissions.push(ChoiceEmission::Content(unjailed_choice));
                 }
 
-                // Handle trailing content if any
-                if !trailing_part.is_empty() {
-                    #[allow(deprecated)]
-                    let trailing_choice = create_choice_stream(
-                        choice.index,
-                        choice.delta.role,
-                        trailing_part,
-                        None,
-                        choice.finish_reason,
-                        None,
-                        choice.logprobs.clone(),
-                    );
-                    emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                }
-
-                // End jailing
+                // End jailing before processing trailing content
+                let trailing_owned = trailing_part.to_string();
                 self.end_jail();
+
+                // Handle trailing content if any
+                if !trailing_owned.is_empty() {
+                    if jail_stream.should_start_jail(&trailing_owned) {
+                        self.is_jailed = true;
+                        self.accumulated_content = trailing_owned;
+                    } else {
+                        #[allow(deprecated)]
+                        let trailing_choice = create_choice_stream(
+                            choice.index,
+                            choice.delta.role,
+                            &trailing_owned,
+                            None,
+                            choice.finish_reason,
+                            None,
+                            choice.logprobs.clone(),
+                        );
+                        emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                    }
+                }
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
@@ -678,13 +689,13 @@ impl JailedStream {
                 let dummy_response = NvCreateChatCompletionStreamResponse {
                     inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
                         id: last_stream_id,
-                        object: "chat.completion.chunk".to_string(),
+                    object: "chat.completion.chunk".to_string(),
                         created: last_stream_created,
                         model: last_stream_model,
-                        choices: Vec::new(),
-                        usage: None,
-                        service_tier: None,
-                        system_fingerprint: None,
+                    choices: Vec::new(),
+                    usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
                     },
                     nvext: None,
                 };
