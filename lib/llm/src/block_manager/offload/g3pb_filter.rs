@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
+use crate::block_manager::config::{G3pbAdmissionConfig, G3pbAdmissionPolicy};
 use crate::tokens::SequenceHash;
 
 use super::OffloadFilter;
@@ -32,14 +33,14 @@ impl G3pbAdmissionFilter {
     /// Set the `G3PB_OFFLOAD_ALL` environment variable to "1" or "true" to
     /// eagerly admit every block.
     pub fn new() -> Self {
-        let offload_all = match std::env::var("G3PB_OFFLOAD_ALL") {
-            Ok(val) => val == "1" || val.to_lowercase() == "true",
-            Err(_) => false,
-        };
+        let config = G3pbAdmissionConfig::from_legacy_env().unwrap_or_default();
+        Self::from_config(config)
+    }
 
+    pub fn from_config(config: G3pbAdmissionConfig) -> Self {
         Self {
             reuse_map: Arc::new(Mutex::new(HashMap::new())),
-            offload_all,
+            offload_all: matches!(config.policy, G3pbAdmissionPolicy::Eager),
         }
     }
 
@@ -84,11 +85,7 @@ mod tests {
 
     #[test]
     fn test_default_admission_requires_reuse() {
-        // Clear the environment variable to ensure default behavior
-        unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
-        }
-        let filter = G3pbAdmissionFilter::new();
+        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::after_first_reuse());
 
         // First access should not be admitted
         assert!(!filter.should_offload(hash(1)));
@@ -102,23 +99,16 @@ mod tests {
 
     #[test]
     fn test_offload_all_admits_immediately() {
-        unsafe {
-            std::env::set_var("G3PB_OFFLOAD_ALL", "1");
-        }
-        let filter = G3pbAdmissionFilter::new();
+        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::eager());
 
         // First access should be admitted when G3PB_OFFLOAD_ALL is set
         assert!(filter.should_offload(hash(1)));
         assert!(filter.should_offload(hash(2)));
         assert!(filter.should_offload(hash(3)));
-
-        unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
-        }
     }
 
     #[test]
-    fn test_offload_all_true_string() {
+    fn test_legacy_env_true_string() {
         unsafe {
             std::env::set_var("G3PB_OFFLOAD_ALL", "true");
         }
@@ -133,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_offload_all_false_string() {
+    fn test_legacy_env_false_string() {
         unsafe {
             std::env::set_var("G3PB_OFFLOAD_ALL", "false");
         }
@@ -149,10 +139,7 @@ mod tests {
 
     #[test]
     fn test_multiple_hashes_tracked_separately() {
-        unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
-        }
-        let filter = G3pbAdmissionFilter::new();
+        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::after_first_reuse());
 
         // First access to each hash should not be admitted
         assert!(!filter.should_offload(hash(1)));
@@ -171,7 +158,6 @@ mod tests {
 
     #[test]
     fn test_default_trait() {
-        // Clear the environment variable to ensure default behavior
         unsafe {
             std::env::remove_var("G3PB_OFFLOAD_ALL");
         }

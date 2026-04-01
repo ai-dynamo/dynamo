@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:32:01 UTC
+Last updated: 2026-04-01 03:34:54 UTC
 
 ## Active state
 
@@ -507,6 +507,17 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - endpoint transport wiring is a thin wrapper over that service instead of
     being interleaved with request handling state
   - no protocol or storage behavior changes in this slice
+- ✅ Landed the first native KVBM config surface for G3PB admission policy
+  - added shared `G3pbAdmissionPolicy` / `G3pbAdmissionConfig` to
+    `lib/llm/src/block_manager/config.rs`
+  - `KvBlockManagerConfig` now carries optional `g3pb_admission`
+  - local/logical KVBM state construction now installs the `G3PB` host
+    offload filter automatically when `g3pb_admission` is set and the host
+    layout did not already provide an explicit offload filter
+  - `G3pbAdmissionFilter` now builds from the shared config type and treats the
+    legacy `G3PB_OFFLOAD_ALL` env var only as a compatibility fallback
+  - added unit coverage for the config-to-host-filter wiring in
+    `lib/llm/src/block_manager/state.rs`
 
 ### Current findings before edits
 
@@ -563,6 +574,20 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - demo block counts
     - sequence seed/range
     - synthetic local device/host block counts used only by validation binaries
+  - the first concrete shared KVBM knob is now implemented:
+    `KvBlockManagerConfig::g3pb_admission`
+  - ownership split after this slice is clearer:
+    - core KVBM config:
+      `g3pb_admission`
+    - backend-runtime config:
+      worker identity, pinned host staging block count, device id, `foyer`
+      directories, G2 bytes, `foyer` memory bytes, `foyer` disk bytes
+    - smoke-only validation CLI:
+      synthetic device block counts, local host block counts, sequence seed,
+      demo block count, per-run workload shaping
+  - compatibility note:
+    `G3PB_OFFLOAD_ALL` still works, but now only as a legacy fallback for the
+    new native config surface rather than being the only policy entry point
 
 ### Validation completed in this run so far
 
@@ -677,6 +702,20 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - pass (`6 passed`)
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
     - pass
+- post-native-config validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - first pass failed in `test_default_trait` because an earlier env-mutating
+      test left `G3PB_OFFLOAD_ALL` set; fixed by clearing the env var inside the
+      test
+    - final pass (`6 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - `git diff --check`
+    - pass
 
 ### Decisions confirmed in this run so far
 
@@ -723,77 +762,57 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - keep synthetic workload knobs local to smoke binaries
   - treat backend transport/storage knobs separately from core KVBM tier-policy
     knobs so the long-term surface is easier to reason about
+- native-config decision landed in code:
+  - keep the first shared KVBM surface narrow and policy-focused
+  - model the current admission behavior explicitly as
+    `G3pbAdmissionPolicy::{AfterFirstReuse,Eager}`
+  - inject the filter during state construction only when
+    `KvBlockManagerConfig.g3pb_admission` is set
+  - preserve explicit host `offload_filter` wiring as the stronger override
+  - retain `G3PB_OFFLOAD_ALL` only as backward-compatibility fallback for the
+    new shared config path
 
 ### Remaining work in this run
 
-- the validation tail is complete; this run is now executing the structural
-  cleanup TODOs directly:
-  - refactor `kvbm_g3pb_worker_smoke` / shared client-side request-plane logic
-    into a cleaner G3PB client seam that is easier to reuse outside the smoke
-    binary
-    - naming cleanup complete
-    - shared discovery/client seam complete
-  - refactor `kvbm_g3pb_backend` around a cleaner backend/service boundary so
-    transport wiring, storage policy, and endpoint handling are less entangled
-    - backend service boundary cleanup complete
-  - the client refactor should be broader than the smoke binary wrapper:
-    capture the Dynamo-facing component/client layer and client-side placement
-    behavior such as ring-hash logic in a reusable G3PB client seam
-  - treat the backend refactor as a true server cleanup:
-    separate endpoint handling, transport wiring, and storage/lifecycle policy
-  - remove or rename ugly transitional identifiers before they spread further;
-    specifically avoid future names in the style of `g2g2g3*` and prefer
-    stable, intent-revealing KVBM / peer-cache / G3PB terminology
-  - simplify the `foyer` to-disk policy: prefer write-all, last-touched/LRU
-    eviction, and no complex recovery path when entries drop out
-  - if a block drops out of `foyer`, nothing special needs to happen:
-    it was either promoted back into the G2 CPU buffer on the G3PB worker or it
-    can simply be dropped; losing an event here is acceptable
-  - metadata layout for `foyer` can be sharded or serialized with the payload;
-    choose the simpler implementation unless a clear scaling reason appears
-  - think about offload policy primarily as a block transition problem from GPU
-    memory into offload tiers
-  - keep the existing default admission when a block has been reused at least
-    once, and keep the env-driven eager path for mostly-prefill workers
-  - treat G2 in the G3PB worker as the CPU buffer tier, with LRU-style eviction
-  - produce a concrete long-term plan for exposing this configuration natively
-    in KVBM rather than only through binary-local flags/env wiring
-    - expected output from that design pass:
-      - identify which knobs are truly KVBM policy/configuration versus smoke-
-        only validation options
-      - decide the owning config layer for each knob:
-        block-manager config, backend runtime config, or standalone smoke-only
-        CLI
-      - define names that are backend-agnostic enough to survive beyond the
-        current G3PB slice
-      - prefer config that is visible from core KVBM types/state so the feature
-        is discoverable and not hidden in one-off binaries
-      - make the long-term surface describe tier transitions, CPU-buffer
-        retention, and simple `foyer` retention directly
+- no additional code slice is required to satisfy the current handoff
+- the remaining follow-up is later integration work, not missing work in this
+  run:
+  - adopt `KvBlockManagerConfig.g3pb_admission` from real non-smoke KVBM
+    construction paths once those callers are ready to opt into `G3PB`
+    admission policy
+  - design the next shared config layer for CPU-buffer retention / `foyer`
+    retention separately from this admission-policy slice
+  - remove the legacy `G3PB_OFFLOAD_ALL` env path only after relevant callers
+    have moved onto the native config surface
 
 ### Exact next step
 
-- if another run continues from here, the next concrete slice should be the
-  native config follow-up:
-  - decide which of the current G3PB knobs move into shared KVBM config types
-  - keep backend-runtime-only and smoke-only knobs out of that first core
-    config change
+- if another run continues from here, the next concrete slice should be config
+  adoption rather than config invention:
+  - wire `KvBlockManagerConfig.g3pb_admission` into the first real KVBM caller
+    that should opt into `G3PB` admission policy
+  - keep backend-runtime-only and smoke-only knobs out of that adoption change
+  - keep CPU-buffer retention / `foyer` retention as a separate follow-up after
+    an actual caller for those knobs is identified
   - rerun the focused `g3pb` / `g3pb_filter` tests plus backend/worker build
-    after the first config-surface slice
+    after that adoption slice
 
 ### Handoff for next run
 
-- the validation tail and the first structural cleanup pass are complete
-- landed cleanup in this run:
+- the validation tail, structural cleanup pass, and first native-config slice
+  are complete
+- landed cleanup/config work in this run:
   - stable storage/config naming
   - shared peer discovery/client seam
   - cleaner backend service boundary
-- next run should focus on the native config follow-up rather than more
-  transport or endpoint restructuring
+  - native `KvBlockManagerConfig.g3pb_admission`
+- next run should focus on config adoption rather than more transport or
+  endpoint restructuring
 - concrete next slice:
-  1. introduce the first KVBM-visible config surface for long-lived G3PB policy
-  2. keep backend-runtime-only knobs and smoke-only knobs out of that first
-     shared config change
+  1. wire `KvBlockManagerConfig.g3pb_admission` into the first real KVBM caller
+     that should opt into `G3PB`
+  2. keep backend-runtime-only knobs and smoke-only knobs out of that adoption
+     change
   3. rerun:
      - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
      - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
