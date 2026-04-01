@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:00:50 UTC
+Last updated: 2026-04-01 02:01:49 UTC
 
 ## Active state
 
@@ -971,6 +971,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   the `g3pb_filter` env-test race
 - no additional product/runtime behavior changes are required for the current
   `G3PB` slice once that test reliability fix is in
+- the audit-run reliability fix is now committed and signed:
+  - `701d74a95 tests: serialize g3pb filter env cases`
 
 ### Validation completed in this run so far
 
@@ -1005,21 +1007,28 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- make a signed small commit for:
-  - the `g3pb_filter` test-race fix
-  - the `PLANS.md` refresh for this audit run
+- none
 
 ### Exact next step
 
-- create the signed commit for the test-race fix and refreshed handoff
+- if another run continues from here, resume with the follow-on backlog rather
+  than more validation cleanup:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ### Handoff for next run
 
 - the config-adoption/docs slice is already committed
 - this audit run found and fixed the last currently known focused-validation
   gap: the `g3pb_filter` env-test race
-- after the commit is cut, the remaining follow-on work returns to the same
-  non-blocking backlog already captured in the prior run:
+- this audit run is also committed:
+  - `701d74a95 tests: serialize g3pb filter env cases`
+- repo state at handoff:
+  - clean worktree
+  - detached `HEAD`
+- the remaining follow-on work returns to the same non-blocking backlog already
+  captured in the prior run:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
