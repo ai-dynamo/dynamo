@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from contextlib import contextmanager
 from typing import Optional
@@ -146,9 +147,10 @@ def patch_torch_memory_saver() -> None:
 def patch_model_runner() -> None:
     """Patch SGLang's ModelRunner to fix memory accounting with pre-loaded weights.
 
-    When weights are pre-loaded via GMS (import-only mode), SGLang's min_per_gpu_memory
-    captured before loading is lower than device total. This causes under-reservation
-    of overhead memory in KV cache calculation.
+    SGLang 0.5.9 passes a startup free-memory snapshot as total_gpu_memory into
+    init_memory_pool(). In GMS read mode, imported weights can already occupy GPU
+    memory, so that snapshot is lower than physical device capacity and the KV cache
+    overhead term is under-reserved.
     """
     global _model_runner_patched
 
@@ -165,33 +167,57 @@ def patch_model_runner() -> None:
         return
 
     original_init_memory_pool = ModelRunner.init_memory_pool
+    memory_arg_name = next(
+        (
+            name
+            for name in inspect.signature(original_init_memory_pool).parameters
+            if name != "self"
+        ),
+        None,
+    )
 
     def patched_init_memory_pool(self, *args, **kwargs):
-        """Patch init_memory_pool to use device total for overhead calculation.
+        """Patch init_memory_pool for SGLang versions that use total_gpu_memory.
 
         SGLang's KV cache formula uses total_gpu_memory as the baseline:
         rest_memory = available - total*(1-mem_fraction).
-        When weights are pre-loaded by GMS, total_gpu_memory was captured before
-        model load and reflects a partially-occupied device, making the overhead
-        term too small and over-allocating KV cache. Fix: replace total_gpu_memory
-        with the physical device capacity so the overhead term is correctly sized.
+        Replace that baseline with physical device capacity when GMS imported
+        weights are already resident. Newer SGLang versions changed this API, so
+        only rewrite the old total_gpu_memory parameter shape.
         """
         from gpu_memory_service.integrations.sglang.memory_saver import (
             get_gms_memory_saver_impl,
         )
 
         impl = get_gms_memory_saver_impl()
-        if impl is not None and impl.get_imported_weights_bytes() > 0 and args:
+        if impl is not None and impl.get_imported_weights_bytes() > 0:
             total_memory_gib = torch.cuda.get_device_properties(
                 torch.cuda.current_device()
             ).total_memory / (1 << 30)
-            old_value = args[0]
-            args = (total_memory_gib,) + args[1:]
-            logger.info(
-                "[GMS] Adjusted total_gpu_memory: %.2f GiB -> %.2f GiB",
-                old_value,
-                total_memory_gib,
-            )
+            if memory_arg_name == "total_gpu_memory":
+                if args:
+                    old_value = args[0]
+                    args = (total_memory_gib,) + args[1:]
+                elif memory_arg_name in kwargs:
+                    old_value = kwargs[memory_arg_name]
+                    kwargs = dict(kwargs)
+                    kwargs[memory_arg_name] = total_memory_gib
+                else:
+                    old_value = None
+                logger.info(
+                    "[GMS] Adjusted total_gpu_memory: %s -> %.2f GiB",
+                    (
+                        f"{old_value:.2f} GiB"
+                        if isinstance(old_value, (int, float))
+                        else "<missing>"
+                    ),
+                    total_memory_gib,
+                )
+            elif memory_arg_name is not None:
+                logger.info(
+                    "[GMS] Leaving %s unchanged in patched init_memory_pool",
+                    memory_arg_name,
+                )
 
         return original_init_memory_pool(self, *args, **kwargs)
 
