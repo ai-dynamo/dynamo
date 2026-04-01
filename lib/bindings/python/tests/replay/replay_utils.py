@@ -353,7 +353,7 @@ def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int
 def _sample_profile_data_dir_path() -> Path:
     return (
         Path(__file__).resolve().parents[5]
-        / "components/src/dynamo/mocker/tests/data/profiling_results/H200_TP1P_TP1D"
+        / "components/src/dynamo/mocker/tests/data/profile_samples/H200_TP1P_TP1D"
     )
 
 

@@ -126,8 +126,6 @@ worklogs/
 # Benchmarks
 benchmarks/results
 profiling_results*
-!components/src/dynamo/mocker/tests/data/profiling_results/
-!components/src/dynamo/mocker/tests/data/profiling_results/**
 
 # Direnv
 .envrc
