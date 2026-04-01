@@ -33,7 +33,7 @@ pub struct TokenizeCompletionRequest {
 pub struct TokenizeChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage>,
+    pub messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage>,
     #[serde(default = "default_true")]
     pub add_generation_prompt: bool,
     #[serde(default = "default_false")]
@@ -55,7 +55,7 @@ pub struct TokenizeChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>>,
+    pub tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>>,
 }
 
 impl TokenizeChatRequest {
