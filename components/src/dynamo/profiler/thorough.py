@@ -400,6 +400,37 @@ async def run_thorough(
             len(decode_candidates),
         )
 
+    # Propagate device_type (e.g. "xpu") into all candidate DGD configs so
+    # that workers are deployed with the correct VLLM_TARGET_DEVICE env var.
+    device_type = getattr(ops, "device_type", "cuda")
+    if device_type != "cuda":
+        _modifier_cls = CONFIG_MODIFIERS.get(backend)
+        if _modifier_cls and hasattr(_modifier_cls, "set_device_type"):
+            for candidate in prefill_candidates:
+                try:
+                    candidate.dgd_config = _modifier_cls.set_device_type(
+                        candidate.dgd_config, device_type
+                    )
+                except Exception as _e:
+                    logger.warning(
+                        "Could not inject device_type into prefill candidate: %s", _e
+                    )
+            for candidate in decode_candidates:
+                try:
+                    candidate.dgd_config = _modifier_cls.set_device_type(
+                        candidate.dgd_config, device_type
+                    )
+                except Exception as _e:
+                    logger.warning(
+                        "Could not inject device_type into decode candidate: %s", _e
+                    )
+            logger.info(
+                "Injected device_type='%s' into %d prefill + %d decode candidates.",
+                device_type,
+                len(prefill_candidates),
+                len(decode_candidates),
+            )
+
     config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 2: Benchmarking ---

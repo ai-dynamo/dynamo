@@ -259,9 +259,21 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
     else:
         with open(output_file, "w") as f:
             if isinstance(final_config, list):
-                yaml.safe_dump_all(final_config, f, sort_keys=False)
+                # Extract any _xpu_resource_claim_template embedded in DGD docs
+                docs: list = []
+                for doc in final_config:
+                    if isinstance(doc, dict) and "_xpu_resource_claim_template" in doc:
+                        docs.append(doc.pop("_xpu_resource_claim_template"))
+                    docs.append(doc)
+                yaml.safe_dump_all(docs, f, sort_keys=False)
             else:
-                yaml.safe_dump(final_config, f, sort_keys=False)
+                xpu_rct = None
+                if isinstance(final_config, dict):
+                    xpu_rct = final_config.pop("_xpu_resource_claim_template", None)
+                if xpu_rct:
+                    yaml.safe_dump_all([xpu_rct, final_config], f, sort_keys=False)
+                else:
+                    yaml.safe_dump(final_config, f, sort_keys=False)
         logger.info("Final DGD config saved to %s", output_file)
 
     write_profiler_status(
@@ -317,7 +329,28 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-        if backend == "auto":
+
+        # Propagate device_type from DGDR spec into ops so downstream consumers
+        # (webui labels, config modifiers) can detect the device family.
+        ops.device_type = (
+            dgdr.hardware.deviceType
+            if dgdr.hardware and dgdr.hardware.deviceType
+            else "cuda"
+        )
+        is_xpu = ops.device_type.lower() == "xpu"
+
+        if is_xpu:
+            # AI Configurator has no performance database for Intel XPU hardware.
+            # Mark AIC as unsupported and silently upgrade rapid -> thorough so
+            # that real on-hardware measurement is always used.
+            aic_supported = False
+            if search_strategy == SearchStrategy.RAPID:
+                logger.warning(
+                    "XPU device detected: AI Configurator does not support Intel XPU. "
+                    "Upgrading search strategy from RAPID to THOROUGH for real measurement."
+                )
+                search_strategy = SearchStrategy.THOROUGH
+        elif backend == "auto":
             aic_supported = _check_auto_backend_support(model, system)
         else:
             aic_supported = check_model_hardware_support(model, system, backend)
@@ -358,6 +391,21 @@ async def run_profile(
 
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
+
+        # Inject device-specific env vars (e.g. VLLM_TARGET_DEVICE=xpu) into
+        # the final picked DGD config so the generated deployment YAML is
+        # immediately usable on the target hardware.
+        if dgd_config and ops.device_type != "cuda":
+            from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+            _modifier = CONFIG_MODIFIERS.get(resolved_backend)
+            if _modifier and hasattr(_modifier, "set_device_type"):
+                try:
+                    dgd_config = _modifier.set_device_type(dgd_config, ops.device_type)
+                    logger.info(
+                        "Injected device_type='%s' into final DGD config.", ops.device_type
+                    )
+                except Exception as _e:
+                    logger.warning("Could not inject device_type into DGD config: %s", _e)
 
         if dgd_config and dgdr.overrides and dgdr.overrides.dgd:
             dgd_config = apply_dgd_overrides(dgd_config, dgdr.overrides.dgd)
