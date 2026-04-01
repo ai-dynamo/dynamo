@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:56:36 UTC
+Last updated: 2026-04-01 10:58:10 UTC
 
 ## Active state
 
@@ -10,8 +10,9 @@ Last updated: 2026-04-01 10:56:36 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current live detached `HEAD`: `f7e06962f9cf`
-  - validated pre-commit detached `HEAD` in this run: `2dcc761286cc`
+  - the live detached `HEAD` is newer than the validated implementation tip in
+    this run only by docs-only handoff commits
+  - validated implementation tip in this run: `2dcc761286cc`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -29,7 +30,7 @@ Last updated: 2026-04-01 10:56:36 UTC
     detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:56:36 UTC)
+## Current run (2026-04-01 10:58:10 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -54,13 +55,14 @@ Last updated: 2026-04-01 10:56:36 UTC
   `2dcc761286cc`
 - Re-ran post-edit `g3pb::` spot checks after compacting the handoff, and they
   passed
-- Landed a signed docs-only handoff refresh commit after the post-edit
-  validation passed
+- Landed signed docs-only handoff commits after the post-edit validation
+  passed
 
 ### Current findings in this run
 
 - the detached `HEAD` validated in this run is `2dcc761286cc`
-- the current live detached `HEAD` after this run is `f7e06962f9cf`
+- the current live detached `HEAD` after this run is newer than the validated
+  implementation tip only by docs-only handoff commits from this run
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -111,7 +113,9 @@ Last updated: 2026-04-01 10:56:36 UTC
 - `git add PLANS.md`
   - pass
 - `git commit --signoff -m "docs: refresh g3pb handoff state"`
-  - pass (`f7e06962f9cf`)
+  - pass
+- `git commit --signoff -m "docs: finalize g3pb handoff state"`
+  - pass
 
 ### Decisions confirmed in this run
 
@@ -144,8 +148,7 @@ Last updated: 2026-04-01 10:56:36 UTC
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `2dcc761286cc`, then landed a docs-only handoff refresh commit on top at
-  `f7e06962f9cf`
+  `2dcc761286cc`, then landed docs-only handoff commits on top
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
