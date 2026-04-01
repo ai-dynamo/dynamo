@@ -278,9 +278,8 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert str(e).endswith(
-            "a python exception was caught while processing the async generator: CancelledError: "
-        )
+        assert "CancelledError" in str(e)
+        assert "BackendCancelled" in str(e)
 
     # Verify server context cancellation status
     # TODO: Server to gracefully stop the stream?
