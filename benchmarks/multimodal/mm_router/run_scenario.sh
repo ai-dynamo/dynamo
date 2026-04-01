@@ -12,8 +12,12 @@
 
 set -euo pipefail
 
-LAUNCH_SCRIPT="${1:?Usage: run_scenario.sh <launch_script> <router_name>}"
-ROUTER="${2:?Usage: run_scenario.sh <launch_script> <router_name>}"
+LAUNCH_SCRIPT="${1:?Usage: run_scenario.sh <launch_script> <router_name> [conc_levels]}"
+ROUTER="${2:?Usage: run_scenario.sh <launch_script> <router_name> [conc_levels]}"
+# Optional 3rd arg: comma-separated concurrency levels, e.g. "1,4,8,16,32,64"
+# Falls back to CONC_LEVELS env var, then default "1,4".
+CONC_ARG="${3:-${CONC_LEVELS:-1,4}}"
+IFS=',' read -ra CONC_LEVELS <<< "${CONC_ARG}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -31,10 +35,11 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 HTTP_PORT="${HTTP_PORT:-8000}"
 
 echo "============================================================"
-echo "  Scenario : ${ROUTER}"
-echo "  Script   : ${LAUNCH_SCRIPT}"
-echo "  Model    : ${MODEL}"
-echo "  Workers  : ${NUM_WORKERS}"
+echo "  Scenario    : ${ROUTER}"
+echo "  Script      : ${LAUNCH_SCRIPT}"
+echo "  Model       : ${MODEL}"
+echo "  Workers     : ${NUM_WORKERS}"
+echo "  Conc levels : ${CONC_LEVELS[*]}"
 echo "============================================================"
 
 start_server() {
@@ -83,15 +88,11 @@ run_sweep() {
 
 mkdir -p "${LOG_DIR}"
 
-# --- conc=1 ---
-start_server
-run_sweep 1
-stop_server
-
-# --- conc=4 ---
-start_server
-run_sweep 4
-stop_server
+for conc in "${CONC_LEVELS[@]}"; do
+    start_server
+    run_sweep "${conc}"
+    stop_server
+done
 
 echo "============================================================"
 echo "  Scenario ${ROUTER} COMPLETE"
