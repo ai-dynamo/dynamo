@@ -2025,20 +2025,23 @@ async fn images(
     Ok(Json(response).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Images endpoint
-/// If not path is provided, the default path is `/v1/images/generations`
+/// Create an Axum [`Router`] for the OpenAI API Images endpoints.
+/// Registers both `/v1/images/generations` (T2I) and `/v1/images/edits` (I2I).
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/images/generations".to_string());
+    let edits_path = path.replace("/generations", "/edits");
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
         .route(&path, post(images))
+        .route(&edits_path, post(images))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc], router)
+    (vec![doc, edits_doc], router)
 }
 
 async fn videos(

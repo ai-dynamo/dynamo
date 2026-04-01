@@ -92,8 +92,18 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         try:
             req = CreateImageRequest(**request)
 
-            # get extra parameters
-            nvext = req.nvext or NvExt()
+            # When nvext is provided, use it; otherwise fall back to top-level params
+            if req.nvext is not None:
+                nvext = req.nvext
+            else:
+                nvext = NvExt(
+                    seed=req.seed,
+                    negative_prompt=req.negative_prompt,
+                    num_inference_steps=req.num_inference_steps,
+                    guidance_scale=req.guidance_scale
+                    if req.guidance_scale is not None
+                    else 7.5,
+                )
             nvext.num_inference_steps = min(
                 nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
             )
@@ -108,6 +118,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 num_inference_steps=nvext.num_inference_steps,
                 guidance_scale=nvext.guidance_scale,
                 seed=nvext.seed,
+                input_reference=req.input_reference,
             )
 
             context_id = context.id()
@@ -145,6 +156,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         guidance_scale: float,
         seed: Optional[int],
         negative_prompt: Optional[str] = None,
+        input_reference: Optional[str] = None,
     ) -> list[bytes]:
         """Generate images using SGLang DiffGenerator"""
         args = {
@@ -157,6 +169,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "guidance_scale": guidance_scale,
             "seed": seed if seed else random.randint(0, 1000000),
         }
+
+        # Add image_path for I2I if provided
+        if input_reference:
+            args["image_path"] = input_reference
+
         result = await asyncio.to_thread(
             self.generator.generate,
             sampling_params_kwargs=args,

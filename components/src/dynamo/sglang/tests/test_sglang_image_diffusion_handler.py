@@ -6,7 +6,7 @@
 import base64
 import io
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image
@@ -347,7 +347,7 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = Mock(return_value=[test_image.tobytes()])
+        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
 
         request = {
             "prompt": "A yellow square",
@@ -382,4 +382,87 @@ class TestImageDiffusionWorkerHandler:
             guidance_scale=7.5,
             seed=42,
             negative_prompt="negative",
+            input_reference=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_passes_image_path(self, handler, mock_context):
+        """Test that input_reference is passed as image_path to the generator."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": "/tmp/test_input.png",
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was passed to the generator
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert sampling_params["image_path"] == "/tmp/test_input.png"
+
+    @pytest.mark.asyncio
+    async def test_generate_t2i_no_image_path(self, handler, mock_context):
+        """Test that image_path is NOT passed when input_reference is absent."""
+        test_image = Image.new("RGB", (256, 256), color="red")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        request = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was NOT passed
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert "image_path" not in sampling_params
+
+    @pytest.mark.asyncio
+    async def test_generate_top_level_params(self, handler, mock_context):
+        """Test SGLang-style request with params at top level (no nvext)."""
+        test_image = Image.new("RGB", (256, 256), color="blue")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        request = {
+            "prompt": "A blue square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "seed": 123,
+            "negative_prompt": "ugly",
+            "num_inference_steps": 20,
+            "guidance_scale": 3.0,
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        call_args = handler.generator.generate.call_args
+        params = call_args[1]["sampling_params_kwargs"]
+        assert params["seed"] == 123
+        assert params["negative_prompt"] == "ugly"
+        assert params["num_inference_steps"] == 20
+        assert params["guidance_scale"] == 3.0
