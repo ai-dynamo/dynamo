@@ -25,14 +25,15 @@ SCENARIOS=(
 )
 
 # All values can be overridden by setting env vars before running this script.
+# DYN_MM_IMAGE_CACHE_SIZE and DYN_MM_MEDIA_CACHE_SIZE are auto-computed per
+# conc level inside run_scenario.sh — no need to set them here.
 BENCH_ENV=(
     "SINGLE_GPU=${SINGLE_GPU:-0}"
     "NUM_WORKERS=${NUM_WORKERS:-8}"
     "MODEL=${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
     "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}"
     "MAX_MODEL_LEN=${MAX_MODEL_LEN:-100426}"
-    "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE:-500}"
-    "DYN_MM_MEDIA_CACHE_SIZE=${DYN_MM_MEDIA_CACHE_SIZE:-500}"
+    "CONC_LEVELS=${CONC_LEVELS:-1,4}"
     "PYTHONHASHSEED=0"
 )
 
