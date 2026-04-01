@@ -2,11 +2,73 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-InstrumentedScheduler -- vLLM Scheduler subclass that emits
-ForwardPassMetrics over ZMQ PUB on every iteration.
+InstrumentedScheduler -- vLLM AsyncScheduler subclass that emits
+ForwardPassMetrics over ZMQ PUB on every forward pass completion.
 
-The scheduler thread does a single-pass accumulation (count, sum,
-sum_of_squares) and produces a final ForwardPassMetrics struct.
+Scheduling modes
+----------------
+vLLM's EngineCore has two execution modes selected at startup:
+
+* **Sync** (``batch_queue`` is None, uses ``EngineCore.step``):
+  ``schedule() -> execute_model() [blocking] -> update_from_output()``
+  One schedule per forward pass, CPU blocks while GPU runs.
+
+* **Async** (``batch_queue_size=2``, uses ``step_with_batch_queue``):
+  The engine overlaps scheduling with GPU execution to hide CPU overhead.
+  ``schedule(N)`` is called and the batch is submitted, then the engine
+  returns early.  On the next loop iteration ``schedule(N+1)`` runs
+  (while the GPU is still processing batch N), then the engine blocks
+  until batch N completes and calls ``update_from_output(N)``.
+  This means ``schedule()`` is called **twice** before the first
+  ``update_from_output()``.
+
+  ``AsyncScheduler`` handles this by adding *output placeholders* in
+  ``_update_after_schedule()``: ``num_output_placeholders += 1`` keeps
+  ``num_new_tokens == 1`` for every running request, so the next
+  ``schedule()`` can schedule all requests again without waiting for
+  the sampled token from ``update_from_output()``.
+
+Why we extend AsyncScheduler (not Scheduler)
+---------------------------------------------
+vLLM's ``--scheduler-cls`` only accepts a single class; it does not
+auto-select between ``Scheduler`` and ``AsyncScheduler`` based on the
+engine mode.  We extend ``AsyncScheduler`` because:
+
+1. If we extended ``Scheduler`` (without placeholders), the second
+   ``schedule()`` call in async mode would see ``num_new_tokens == 0``
+   for all requests already advanced by ``_update_after_schedule``,
+   producing partial batches (e.g. 22/28 split of 50 requests) with
+   incorrect per-batch ``sum_decode_kv_tokens`` and other metrics.
+
+2. ``AsyncScheduler`` is a thin wrapper (adds placeholders in
+   ``_update_after_schedule`` and decrements them in
+   ``_update_request_with_output``).  The placeholder logic is
+   harmless in sync mode: placeholders are added and immediately
+   consumed within the same step (``0 -> 1 -> 0`` per iteration).
+
+3. A single subclass that works correctly in both sync and async
+   engine modes avoids the need for mode detection or two classes.
+
+How metrics are measured
+------------------------
+* **Emission point**: ``update_from_output()``, called once per
+  completed GPU forward pass (after the engine pops the batch result).
+  Empty batches (``total_num_scheduled_tokens == 0``) are skipped.
+* **scheduled_requests**: extracted from the ``SchedulerOutput``
+  parameter passed to ``update_from_output`` (the EngineCore always
+  passes the correct output for the batch being processed, even in
+  async mode where multiple batches are in flight).
+* **queued_requests**: computed from ``self.waiting`` at emit time.
+* **wall_time**: approximates the schedule-to-update_from_output
+  latency described in ``ForwardPassMetrics``.  Measured as the time
+  between consecutive ``update_from_output()`` calls.  This works
+  because the EngineCore always blocks on ``future.result()`` (the
+  GPU forward pass) right before calling ``update_from_output``, so
+  the interval is dominated by GPU compute.  Assumption: CPU overhead
+  (scheduling + output processing) between consecutive calls is small
+  relative to GPU forward pass time.  ``wall_time`` is ``0.0`` for
+  the first message after engine idle and for heartbeats.
+
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
 hot path only pays for accumulation + queue.put().
@@ -25,17 +87,20 @@ import time
 from itertools import count
 from typing import TYPE_CHECKING
 
+import msgspec.structs
 import zmq
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
+    WelfordAccumulator,
     encode,
 )
+from dynamo.runtime.logging import configure_dynamo_logging
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -44,39 +109,11 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.structured_output import StructuredOutputManager
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
-ENV_FPM_PORT = "DYN_VLLM_FORWARDPASS_METRIC_PORT"
-
-
-class _Accum:
-    """Welford's online algorithm for count / sum / population-variance.
-
-    Numerically stable single-pass computation -- avoids catastrophic
-    cancellation that sum-of-squares can suffer with large values.
-    """
-
-    __slots__ = ("n", "s", "_mean", "_m2")
-
-    def __init__(self) -> None:
-        self.n = 0
-        self.s = 0
-        self._mean = 0.0
-        self._m2 = 0.0
-
-    def add(self, v: int) -> None:
-        self.n += 1
-        self.s += v
-        delta = v - self._mean
-        self._mean += delta / self.n
-        delta2 = v - self._mean
-        self._m2 += delta * delta2
-
-    def variance(self) -> float:
-        if self.n == 0:
-            return 0.0
-        return self._m2 / self.n
+ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +193,10 @@ class _FpmPublisherThread:
                     continue
 
             try:
+                seq = next(self._seq)
+                metrics = msgspec.structs.replace(metrics, counter_id=seq)
                 payload = encode(metrics)
-                seq_bytes = next(self._seq).to_bytes(8, "big")
+                seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
                 last_publish = time.monotonic()
             except zmq.Again:
@@ -171,7 +210,7 @@ class _FpmPublisherThread:
 # ---------------------------------------------------------------------------
 
 
-class InstrumentedScheduler(Scheduler):
+class InstrumentedScheduler(AsyncScheduler):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -192,9 +231,7 @@ class InstrumentedScheduler(Scheduler):
         self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
         self._fpm_dp_rank = dp_rank
 
-        self._schedule_time: float = 0.0
-        self._pending_output: SchedulerOutput | None = None
-        self._pending_queued: QueuedRequestMetrics | None = None
+        self._last_update_time: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
@@ -221,42 +258,32 @@ class InstrumentedScheduler(Scheduler):
         self._publisher.shutdown()
         super().shutdown()
 
-    def schedule(self) -> SchedulerOutput:
-        self._schedule_time = time.monotonic()
-
-        output = super().schedule()
-
-        self._pending_output = output
-        self._pending_queued = self._compute_queued()
-
-        return output
-
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
         result = super().update_from_output(scheduler_output, model_runner_output)
+        now = time.monotonic()
 
-        wall_time = time.monotonic() - self._schedule_time
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            wall_time = (
+                now - self._last_update_time if self._last_update_time > 0 else 0.0
+            )
+            self._last_update_time = now
 
-        if self._pending_output is not None:
             metrics = self._extract_metrics(
-                self._pending_output,
-                self._pending_queued,
-                wall_time,
+                scheduler_output, self._compute_queued(), wall_time
             )
             self._publisher.publish(metrics)
-
-        self._pending_output = None
-        self._pending_queued = None
+        else:
+            self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
-
         return result
 
     # ------------------------------------------------------------------
-    # Metric extraction (single-pass with _Accum, no lists)
+    # Metric extraction (single-pass with WelfordAccumulator, no lists)
     # ------------------------------------------------------------------
 
     def _extract_metrics(
@@ -280,9 +307,9 @@ class InstrumentedScheduler(Scheduler):
 
         num_prefill = 0
         sum_prefill_tokens = 0
-        prefill_lengths = _Accum()
+        prefill_lengths = WelfordAccumulator()
         sum_prefill_kv_tokens = 0
-        decode_kv = _Accum()
+        decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
             num_prefill += 1
@@ -313,8 +340,8 @@ class InstrumentedScheduler(Scheduler):
 
     def _compute_queued(self) -> QueuedRequestMetrics:
         """Single-pass aggregation over self.waiting -- no intermediate list."""
-        prefill = _Accum()
-        decode_kv = _Accum()
+        prefill = WelfordAccumulator()
+        decode_kv = WelfordAccumulator()
 
         for request in self.waiting:
             if request.status == RequestStatus.PREEMPTED:

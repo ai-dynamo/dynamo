@@ -5,26 +5,88 @@ import asyncio
 import inspect
 import logging
 import random
-import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional, Tuple
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Dict,
+    Generic,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
-# Keep default tags minimal and safe for general use.
-# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
-DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
+
+class SGLangEngineQuiesceController:
+    def __init__(self, engine: sgl.Engine):
+        self._engine = engine
+        self._quiesced_tags: Optional[list[str]] = None
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
+        if self._is_quiesced:
+            return False
+
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
+        await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
+        await self._engine.tokenizer_manager.release_memory_occupation(
+            ReleaseMemoryOccupationReqInput(tags=tags),
+            None,
+        )
+        self._quiesced_tags = None if tags is None else list(tags)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: Optional[list[str]] = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
+        request_tags = self._quiesced_tags if tags is None else list(tags)
+        await self._engine.tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(tags=request_tags),
+            None,
+        )
+        await self._engine.tokenizer_manager.continue_generation(
+            ContinueGenerationReqInput()
+        )
+        return True
+
+    def mark_resumed(self) -> None:
+        self._quiesced_tags = None
+        self._is_quiesced = False
 
 
-class BaseGenerativeHandler(ABC):
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     """Minimal base class for all generative handlers (LLM, diffusion, etc.).
 
     Provides common infrastructure for:
@@ -45,51 +107,34 @@ class BaseGenerativeHandler(ABC):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
+        self.enable_trace = config.server_args.enable_trace
 
         # Set up metrics and KV publishers
+        self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
+        self.kv_publisher: Optional[KvEventPublisher] = None
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
 
     @abstractmethod
-    async def generate(
-        self, request: Dict[str, Any], context: Context
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
 
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to generation functions.
 
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
-
-
-class BaseWorkerHandler(BaseGenerativeHandler):
+class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -127,9 +172,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
@@ -148,44 +190,42 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._memory_occupation_lock = asyncio.Lock()
-        self._memory_released = False
+        self._quiesce_controller = (
+            SGLangEngineQuiesceController(engine) if engine is not None else None
+        )
+        self._quiesce_lock = asyncio.Lock()
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
-            return {"priority": priority}
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
         """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            body: Unused. Release always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
-        tokenizer_manager = (
-            getattr(self.engine, "tokenizer_manager", None)
-            if self.engine is not None
-            else None
-        )
-        if tokenizer_manager is None:
+        if self._quiesce_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
             }
 
-        async with self._memory_occupation_lock:
-            if self._memory_released:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Memory already released",
@@ -196,16 +236,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
 
-                pause_req = PauseGenerationReqInput()
-                await tokenizer_manager.pause_generation(pause_req)
-
-                release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.release_memory_occupation(release_req, None)
-                self._memory_released = True
+                await self._quiesce_controller.quiesce(tags)
 
                 return {
                     "status": "ok",
-                    "message": f"Memory released for tags: {tags}",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
@@ -215,51 +254,42 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            body: Unused. Resume always targets default tags.
+            body: Optional dict with "tags" to target specific memory regions.
 
         Order of operations:
         1. Resume memory - restore GPU allocations
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
-        tokenizer_manager = (
-            getattr(self.engine, "tokenizer_manager", None)
-            if self.engine is not None
-            else None
-        )
-        if tokenizer_manager is None:
+        if self._quiesce_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
             }
 
-        async with self._memory_occupation_lock:
-            if not self._memory_released:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
                 }
 
             try:
-                resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.resume_memory_occupation(resume_req, None)
-                continue_req = ContinueGenerationReqInput()
-                await tokenizer_manager.continue_generation(continue_req)
+                await self._quiesce_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
-
-                self._memory_released = False
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
-                    "message": f"Memory resumed for tags: {tags}",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
                 }
             except Exception as e:
                 logging.error(f"Failed to resume memory occupation: {e}")
@@ -423,17 +453,17 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         )
 
     @abstractmethod
-    async def generate(self, request: Dict[str, Any], context: Context):
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
@@ -472,40 +502,18 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            bootstrap_host = (
+                NetworkAddress(dist_init.resolved().host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
         else:
-            bootstrap_host = get_local_ip_auto()
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
+            bootstrap_host = (
+                NetworkAddress(get_local_ip_auto(), bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
 
         return bootstrap_host, bootstrap_port
 
@@ -520,7 +528,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             context: Context object for cancellation handling.
 
         Raises:
-            GeneratorExit: If shutdown event was triggered.
+            EngineShutdown: If shutdown event was triggered.
         """
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
@@ -579,9 +587,9 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
                 )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during token generation")
+                raise EngineShutdown("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
@@ -605,7 +613,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID

@@ -6,6 +6,8 @@ title: Global Planner Deployment Guide
 
 This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPlanner` is the centralized scaling execution layer for deployments where multiple DGDs should delegate scaling through one component, whether those DGDs expose separate endpoints or sit behind one shared endpoint.
 
+> **New to Planner?** We recommend starting with a single-DGD deployment using either throughput-based or load-based scaling before adopting GlobalPlanner. See the [Planner overview](README.md) and [Planner Guide](planner-guide.md) to get started.
+
 ## Why Global Planner?
 
 Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly. That is fine for isolated deployments, but it becomes awkward when you want one place to:
@@ -18,8 +20,8 @@ Without `GlobalPlanner`, each DGD's local planner scales only its own deployment
 
 ## Terminology
 
-- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts to maintain SLAs.
-- **Local Planner**: A pool-local instance of a SLA planner inside one DGD.
+- **Planner**: The `dynamo.planner` component that computes desired replica counts to maintain latency SLAs. See the [Planner overview](README.md).
+- **Local Planner**: A pool-local instance of the Planner running inside a single DGD.
 - **Global Planner**: The centralized execution and policy layer that receives scale requests from local planners.
 - **Single-endpoint multi-pool deployment**: One model endpoint backed by multiple DGDs for the same model. This pattern uses both `GlobalRouter` and `GlobalPlanner`.
 
@@ -187,7 +189,7 @@ Deploy one control DGD that contains:
 - `GlobalRouter`: chooses which pool receives each request.
 - `GlobalPlanner`: receives scale requests from pool planners and applies replica changes.
 
-The vLLM example topology is in [examples/global_planner/global-planner-vllm-test.yaml](../../../examples/global_planner/global-planner-vllm-test.yaml).
+The vLLM example topology is in [examples/global_planner/global-planner-vllm-test.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml).
 
 The `GlobalPlanner` section is minimal:
 
@@ -213,7 +215,7 @@ The values passed to `--managed-namespaces` are the pool planners' **Dynamo name
 
 **Management modes**: When `--managed-namespaces` is set (explicit mode), only the listed Dynamo namespaces are authorized to send scale requests, and only their corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
 
-If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](../../../examples/global_planner/global-planner-gpu-budget.yaml).
+If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml).
 
 ## Step 3: Create One DGD Per Pool
 
@@ -237,7 +239,7 @@ The planner inside each pool must be configured for `global-planner` mode so it 
   "ttft": 2000,
   "prefill_engine_num_gpu": 2,
   "model_name": "${MODEL_NAME}",
-  "profile_results_dir": "/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"
+  "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 }
 ```
 
@@ -256,7 +258,7 @@ In the reference vLLM example:
 - `gp-prefill-1` uses a 2-GPU TP2 prefill worker
 - `gp-decode-0` uses a 1-GPU TP1 decode worker
 
-See [global-planner-vllm-test.yaml](../../../examples/global_planner/global-planner-vllm-test.yaml).
+See [global-planner-vllm-test.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml).
 
 ## Step 4: Configure GlobalRouter To Select Pools
 
@@ -315,7 +317,7 @@ Clients can pass request targets through `extra_args`:
 }
 ```
 
-For more details, see [Global Router README](../../../components/src/dynamo/global_router/README.md).
+For more details, see [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md).
 
 ## Step 5: Deploy In Order
 
@@ -389,6 +391,6 @@ This keeps profiling and pool selection simple while still giving you one public
 - [Planner Guide](planner-guide.md) — Planner configuration reference
 - [Planner Examples](planner-examples.md) — DGDR examples for generating per-pool configs
 - [Profiler Guide](../profiler/profiler-guide.md) — Pre-deployment profiling workflow
-- [Global Planner README](../../../components/src/dynamo/global_planner/README.md) — Centralized scale execution
-- [Global Router README](../../../components/src/dynamo/global_router/README.md) — Cross-pool request routing
-- [vLLM global planner example](../../../examples/global_planner/global-planner-vllm-test.yaml) — End-to-end reference manifest
+- [Global Planner README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_planner/README.md) — Centralized scale execution
+- [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md) — Cross-pool request routing
+- [vLLM global planner example](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml) — End-to-end reference manifest

@@ -2,20 +2,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use serde::Deserialize as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
+
+/// Deserializes a JSON `null` or missing field as `T::default()`.
+///
+/// Kubernetes Server-Side Apply with `schema = "disabled"` can write an empty
+/// object `{}` as `null` for nested free-form fields. Without this helper, the
+/// daemon fails to deserialize the `DynamoWorkerMetadata` CR, and the worker is
+/// excluded from the `MetadataSnapshot` (i.e. invisible to service discovery),
+/// causing `KubeDiscoveryClient::list` to return 0 instances and all inference
+/// requests to 404. One concrete example is vLLM elastic EP scaling:
+/// `scale_elastic_ep` reinitializes event plane sockets, which triggers
+/// `unregister_event_channel()`, leaving `event_channels` as an empty map `{}`.
+/// SSA then writes it back as `null`, breaking deserialization until this helper
+/// treats `null` as an empty map. The issue applies to any event plane
+/// implementation, not only a specific transport.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
 /// This struct holds all discovery registrations for this pod instance
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
     /// Registered endpoint instances (key: path string from EndpointInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     endpoints: HashMap<String, DiscoveryInstance>,
     /// Registered model card instances (key: path string from ModelCardInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     model_cards: HashMap<String, DiscoveryInstance>,
     /// Registered event channel instances (key: path string from EventChannelInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     event_channels: HashMap<String, DiscoveryInstance>,
 }
 

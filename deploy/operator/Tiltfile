@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tiltfile for developing the Dynamo Kubernetes Operator.
+#
+# Usage:
+#   cd deploy/operator
+#   # edit tilt-settings.yaml as needed
+#   tilt up
+#
+# What it does:
+#   1. Compiles the Go manager binary locally (fast, native).
+#   2. Builds a minimal Docker image containing only the binary.
+#   3. Renders the production Helm chart (deploy/helm/charts/platform) with
+#      `helm template`, applies CRDs via kubectl, and deploys all rendered
+#      resources via k8s_yaml().
+#   4. On code change Tilt recompiles the binary and live-updates it into the
+#      running container — no full image rebuild needed.
+#
+# Prerequisites (must be in PATH):
+#   - Go >= 1.25        — compiles the manager binary locally
+#   - tilt              — live-reload orchestrator (https://docs.tilt.dev/install.html)
+#   - helm v3           — renders the platform Helm chart
+#   - kubectl >= 1.29   — applies CRDs and creates the namespace
+#   - docker            — builds the live-update container image
+#   - A Kubernetes cluster reachable via your current kubeconfig context
+#
+# Conditional (only when skip_codegen is false, the default):
+#   - yq v4+            — post-processes generated CRD YAML (run `make ensure-yq`)
+#   - python3 + pydantic — generates Pydantic models from Go types
+#
+# The tilt restart_process extension is auto-fetched on first `tilt up`.
+
+load('ext://restart_process', 'docker_build_with_restart')
+
+# ---------------------------------------------------------------------------
+# Settings — defaults are defined here; tilt-settings.yaml overrides them.
+# ---------------------------------------------------------------------------
+settings = {
+    'namespace':            'dynamo-system',
+    'enable_nats':          True,       # required for DGD/DGDR workloads
+    'enable_etcd':          False,      # only if discoveryBackend is "etcd"
+    'enable_kai_scheduler': False,      # GPU-aware scheduling for multi-node
+    'enable_grove':         False,      # PodClique-based multi-node orchestration
+    'skip_codegen':         False,      # skip make generate/manifests for faster iteration
+    'image_pull_secret':    '',         # name of docker-registry Secret for private registries
+    'helm_values':          {},         # extra --set overrides passed to helm template
+}
+if os.path.exists('tilt-settings.yaml'):
+    data = read_yaml('tilt-settings.yaml', default={})
+    if data:
+        settings.update(data)
+
+if 'allowed_contexts' in settings:
+    allow_k8s_contexts(settings['allowed_contexts'])
+
+# Registry — resolved from (highest priority wins):
+#   1. REGISTRY env var          (e.g. REGISTRY=docker.io/myuser tilt up)
+#   2. "registry" in tilt-settings.yaml
+# When set the operator image is pushed as <registry>/controller:tilt-dev.
+REGISTRY = os.getenv('REGISTRY', settings.get('registry', ''))
+if REGISTRY:
+    REGISTRY = REGISTRY.rstrip('/')
+
+NAMESPACE            = settings['namespace']
+HELM_VALUES          = settings['helm_values']
+ENABLE_NATS          = settings['enable_nats']
+ENABLE_ETCD          = settings['enable_etcd']
+ENABLE_KAI_SCHEDULER = settings['enable_kai_scheduler']
+ENABLE_GROVE         = settings['enable_grove']
+IMAGE_PULL_SECRET    = settings['image_pull_secret']
+
+# ---------------------------------------------------------------------------
+# Operator version — passed as --operator-version to the manager binary.
+# The Helm chart uses .Chart.AppVersion; for Tilt dev we read it from the
+# operator subchart's Chart.yaml so it stays in sync automatically.
+# Override via tilt-settings.yaml if needed:
+#
+#   tilt-settings.yaml:
+#     operator_version: "1.2.3"
+# ---------------------------------------------------------------------------
+def _read_chart_app_version():
+    """Read appVersion from the operator subchart's Chart.yaml."""
+    chart_path = os.path.join(
+        os.getcwd(), '..', 'helm', 'charts', 'platform',
+        'components', 'operator', 'Chart.yaml')
+    if os.path.exists(chart_path):
+        chart = read_yaml(chart_path, default={})
+        if chart and 'appVersion' in chart:
+            return str(chart['appVersion'])
+    return '0.0.0-dev'
+
+OPERATOR_VERSION = settings.get('operator_version', _read_chart_app_version())
+
+# ---------------------------------------------------------------------------
+# Paths (relative to this Tiltfile, i.e. deploy/operator/)
+# ---------------------------------------------------------------------------
+OPERATOR_DIR = os.getcwd()                                     # deploy/operator
+HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
+CRD_DIR      = os.path.join(HELM_CHART, 'components', 'operator', 'crds')
+
+IMG_NAME = 'controller'
+IMG_TAG  = 'tilt-dev'
+IMG      = (REGISTRY + '/' + IMG_NAME) if REGISTRY else IMG_NAME
+IMG_REF  = IMG + ':' + IMG_TAG
+
+# ---------------------------------------------------------------------------
+# Compile the manager binary locally (much faster than building in Docker)
+# ---------------------------------------------------------------------------
+def compile_manager():
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tilt_bin/manager ./cmd/main.go'
+
+local_resource(
+    'manager-build',
+    compile_manager(),
+    deps=[
+        'api/',
+        'cmd/',
+        'internal/',
+        'go.mod',
+        'go.sum',
+    ],
+    ignore=['**/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
+# CRDs — regenerate & apply via server-side apply on change
+# ---------------------------------------------------------------------------
+SKIP_CODEGEN = settings['skip_codegen']
+_crd_cmd = 'kubectl apply --server-side --force-conflicts -f ' + CRD_DIR
+if not SKIP_CODEGEN:
+    _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
+
+local_resource(
+    'crds',
+    _crd_cmd,
+    deps=['api/'],
+    ignore=['**/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
+# Helm template → k8s_yaml
+#
+# Renders the production Helm chart (deploy/helm/charts/platform) with the
+# operator and required infrastructure (NATS by default). This gives you a
+# fully working cluster where you can apply DGDR/DGD resources and have them
+# reconcile into real workloads on your GPU nodes — while live-reloading the
+# controller binary on every code change.
+#
+# The chart has no Helm hooks — webhook certificates, CA bundle injection,
+# and MPI SSH key generation are all handled by the operator binary at
+# runtime (auto mode).
+# ---------------------------------------------------------------------------
+def render_helm():
+    """Render the platform Helm chart with only the operator subchart enabled."""
+
+    helm_cmd = [
+        'helm', 'template', 'dynamo', HELM_CHART,
+        '--namespace', NAMESPACE,
+        '--set', 'dynamo-operator.enabled=true',
+        # Subcharts — NATS is on by default (workers need it)
+        '--set', 'nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'dynamo-operator.nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'global.etcd.install=%s' % str(ENABLE_ETCD).lower(),
+        '--set', 'global.kai-scheduler.install=%s' % str(ENABLE_KAI_SCHEDULER).lower(),
+        '--set', 'global.grove.install=%s' % str(ENABLE_GROVE).lower(),
+        # Point image at our Tilt-managed image
+        '--set', 'dynamo-operator.controllerManager.manager.image.repository=' + IMG,
+        '--set', 'dynamo-operator.controllerManager.manager.image.tag=' + IMG_TAG,
+        '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
+        # We apply CRDs ourselves in the local_resource above
+        '--set', 'dynamo-operator.upgradeCRD=false',
+        '--skip-crds',
+    ]
+
+    # Wire in imagePullSecrets when a pull secret is configured
+    if IMAGE_PULL_SECRET:
+        helm_cmd += ['--set', 'dynamo-operator.imagePullSecrets[0].name=' + IMAGE_PULL_SECRET]
+
+    # Append user-provided Helm overrides from tilt-settings
+    for k, v in HELM_VALUES.items():
+        helm_cmd += ['--set', '%s=%s' % (k, v)]
+
+    data = local(helm_cmd, quiet=True)
+
+    # Decode the YAML stream so we can patch individual documents
+    decoded = decode_yaml_stream(data)
+    patched = []
+    for doc in decoded:
+        if doc == None:
+            continue
+
+        # Ensure namespaced resources land in the target namespace.
+        # Cluster-scoped kinds must not have a namespace set.
+        _cluster_scoped_kinds = [
+            'ClusterRole', 'ClusterRoleBinding',
+            'ValidatingWebhookConfiguration', 'MutatingWebhookConfiguration',
+            'CustomResourceDefinition', 'Namespace',
+            'PriorityClass', 'StorageClass', 'IngressClass',
+        ]
+        kind = doc.get('kind', '')
+        if 'metadata' in doc and 'namespace' not in doc['metadata'] and kind not in _cluster_scoped_kinds:
+            doc['metadata']['namespace'] = NAMESPACE
+
+        # Strip securityContext so Tilt's live_update (writing into the
+        # container as root) doesn't get blocked by non-root restrictions.
+        if doc.get('kind') == 'Deployment':
+            spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+            spec.pop('securityContext', None)
+            for c in spec.get('containers', []):
+                c.pop('securityContext', None)
+
+        patched.append(doc)
+
+    return encode_yaml_stream(patched)
+
+# Create the namespace before applying anything else
+local('kubectl create namespace %s || true' % NAMESPACE, quiet=True)
+
+k8s_yaml(render_helm())
+
+# ---------------------------------------------------------------------------
+# Docker image — minimal container with just the compiled binary
+# ---------------------------------------------------------------------------
+DOCKERFILE = '''
+FROM alpine:3.20 AS base
+RUN apk add --no-cache ca-certificates
+FROM base
+WORKDIR /
+COPY ./tilt_bin/manager /manager
+COPY ./tilt_bin/manager /workspace/manager
+ENTRYPOINT ["/manager"]
+'''
+
+docker_build_with_restart(
+    IMG_REF,
+    context='.',
+    dockerfile_contents=DOCKERFILE,
+    entrypoint=['/manager', '--config=/etc/dynamo-operator/config.yaml',
+                '--operator-version=' + OPERATOR_VERSION],
+    only=['./tilt_bin/manager'],
+    live_update=[
+        sync('./tilt_bin/manager', '/manager'),
+    ],
+)
+
+if not REGISTRY:
+    print('WARNING: no registry configured — image will only be available locally.')
+    print('  Set "registry" in tilt-settings.yaml or pass REGISTRY env var.')
+
+# ---------------------------------------------------------------------------
+# Resource grouping — keep the Tilt UI tidy
+# ---------------------------------------------------------------------------
+k8s_resource(
+    workload='dynamo-dynamo-operator-controller-manager',
+    new_name='operator',
+    labels=['operator'],
+    port_forwards=['8081:8081'],  # health endpoint
+    resource_deps=['crds', 'manager-build'],
+)
+
+# Group subchart workloads in the Tilt UI
+if ENABLE_NATS:
+    k8s_resource(
+        workload='dynamo-nats',
+        labels=['infrastructure'],
+    )

@@ -5,7 +5,7 @@
 # Disaggregated prefill/decode on a SINGLE GPU.
 # Per-worker VRAM is estimated from model parameters below. Override individual
 # knobs (CONTEXT_LENGTH, MAX_RUNNING_REQUESTS) via env vars, or set
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE to bypass the calculation entirely.
+# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --context-length 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~5.7 GiB per worker (w=1.1 + kv=0.9 + oh=3.7)
@@ -26,25 +26,13 @@ MODEL="Qwen/Qwen3-0.6B"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$CONTEXT_LENGTH" "$MAX_RUNNING_REQUESTS" sglang
-
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction sglang)
-fi
+GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --max-model-len "$CONTEXT_LENGTH" --max-num-seqs "$MAX_RUNNING_REQUESTS" --workers-per-gpu 2)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Disaggregated on Same GPU" "$MODEL" "$HTTP_PORT" \
-    "Context len: $CONTEXT_LENGTH" \
-    "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
-    "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
+print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
+    "Workers:     2 (prefill + decode, fraction is per worker)"
 
 # run ingress with KV router mode for disaggregated setup
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

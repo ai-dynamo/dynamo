@@ -126,19 +126,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
      rm -rf /var/lib/apt/lists/*) && \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
-# Add NVIDIA devtools repository and install development tools (nsight-systems).
-# Estimated layer size: ~500MB–1.5GB (nsight-systems is a full profiling suite)
+# Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH} /" \
         | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    curl --retry 3 --retry-delay 5 -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
+    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
     rm -rf /var/lib/apt/lists/*
-
-# TODO: Add GitHub CLI (gh) for development. Estimated layer size: ~50MB
 
 # ======================================================================
 # TARGET: dev (root-based development)
@@ -206,6 +207,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
         fi; \
     fi
 
+{% if device == "xpu" %}
+ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
+    NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
+    NIXL_PREFIX=/opt/intel/intel_nixl
+{% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
 # All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
 # For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
@@ -227,6 +233,7 @@ ENV CUDA_HOME=/usr/local/cuda \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     TRITON_CUDART_PATH=/usr/local/cuda/include \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 # Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
@@ -356,11 +363,30 @@ RUN if command -v uv >/dev/null 2>&1; then \
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
-# Setup dev launch banner (displayed on interactive shell entry)
+# Setup dev launch banner (guard prevents double-print when framework runtimes already added it)
 RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+    (grep -q 'launch_screen' /etc/bash.bashrc || echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc)
 
+# Warn on interactive entry if /workspace is not bind-mounted from the host
+RUN printf '%s\n' \
+    'if [ ! -f /workspace/Cargo.toml ]; then' \
+    '    echo ""' \
+    '    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"' \
+    '    echo "  !! WARNING: /workspace is not mounted from your host.         !!"' \
+    '    echo "  !! Use one of:                                                !!"' \
+    '    echo "  !!   ./container/run.sh --mount-workspace --image <img> -it   !!"' \
+    '    echo "  !!   docker run -v /path/to/dynamo:/workspace ...             !!"' \
+    '    echo "  !!   Dev Container (VS Code / Cursor)                         !!"' \
+    '    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"' \
+    '    echo ""' \
+    'fi' >> /etc/bash.bashrc
+
+{% if device == "xpu" %}
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}

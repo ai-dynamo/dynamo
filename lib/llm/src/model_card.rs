@@ -378,12 +378,51 @@ impl ModelDeploymentCard {
 
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
+    ///
+    /// When the `DYN_TOKENIZER=fastokens` env var is set, uses `fastokens` for encoding
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let use_fast = match std::env::var("DYN_TOKENIZER") {
+            Ok(v) if v == "fastokens" => true,
+            Ok(v) if v == "default" || v.is_empty() => false,
+            Ok(v) => {
+                tracing::warn!(
+                    value = %v,
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                );
+                false
+            }
+            Err(_) => false,
+        };
+
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
+
+                // Try fastokens backend if requested
+                if use_fast {
+                    if let Some(path_str) = p.to_str() {
+                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                            Ok(fast) => {
+                                tracing::info!("Using fastokens tokenizer backend");
+                                return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %e,
+                                    "Failed to load fastokens, falling back to HuggingFace"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            path = %p.display(),
+                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                        );
+                    }
+                }
+
                 let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -413,7 +452,12 @@ impl ModelDeploymentCard {
             }
             None => {
                 anyhow::bail!(
-                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                    "ModelDeploymentCard for '{}' does not have a tokenizer. \
+                     Provide a supported tokenizer file (tokenizer.json, tiktoken.model, \
+                     or *.tiktoken), use --use-<framework>-tokenizer to delegate \
+                     tokenization to the backend, or use a non-Rust chat processor \
+                     (e.g. --dyn-chat-processor vllm).",
+                    self.display_name
                 );
             }
         }
@@ -637,7 +681,7 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                Some(TokenizerKind::from_disk(local_path)?),
+                TokenizerKind::from_disk(local_path)?,
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
@@ -968,29 +1012,45 @@ impl PromptFormatterArtifact {
 }
 
 impl TokenizerKind {
-    pub fn from_disk(directory: &Path) -> Result<Self> {
+    /// Try to discover a tokenizer in the given directory.
+    ///
+    /// Returns `Ok(Some(..))` when a supported tokenizer is found,
+    /// `Ok(None)` when no tokenizer files are present (e.g. models that
+    /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
+    /// layouts or filesystem failures that should be treated as hard errors.
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
+        // Helper: probe a single well-known file.  Returns Ok(None) when the
+        // file simply does not exist, Ok(Some(..)) on success, and Err for
+        // anything else (unreadable file, checksum failure, etc.).
+        fn probe(path: std::path::PathBuf) -> Result<Option<CheckedFile>> {
+            if !path.exists() {
+                return Ok(None);
+            }
+            Ok(Some(CheckedFile::from_disk(path)?))
+        }
+
         // 1. Try tokenizer.json (HuggingFace)
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
-            return Ok(Self::HfTokenizerJson(f));
+        if let Some(f) = probe(directory.join("tokenizer.json"))? {
+            return Ok(Some(Self::HfTokenizerJson(f)));
         }
 
         // 2. Try tiktoken.model
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
-            return Ok(Self::TikTokenModel(f));
+        if let Some(f) = probe(directory.join("tiktoken.model"))? {
+            return Ok(Some(Self::TikTokenModel(f)));
         }
 
         // 3. Search for any *.tiktoken file
         let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
+            .with_context(|| format!("Failed to read directory {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("Failed to iterate directory {}", directory.display()))?
             .into_iter()
-            .flatten()
-            .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
             .collect();
 
         if tiktoken_files.len() == 1 {
-            if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
-                return Ok(Self::TikTokenModel(f));
-            }
+            let f = CheckedFile::from_disk(tiktoken_files[0].path())?;
+            return Ok(Some(Self::TikTokenModel(f)));
         } else if tiktoken_files.len() > 1 {
             let names: Vec<_> = tiktoken_files
                 .iter()
@@ -1003,10 +1063,13 @@ impl TokenizerKind {
             );
         }
 
-        anyhow::bail!(
-            "No tokenizer.json or tiktoken model file found in {}",
+        tracing::warn!(
+            "No supported tokenizer found in {} \
+             (expected tokenizer.json or a tiktoken file). \
+             Features that depend on the Rust tokenizer will not be available.",
             directory.display()
-        )
+        );
+        Ok(None)
     }
 }
 

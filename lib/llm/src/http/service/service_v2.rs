@@ -29,6 +29,12 @@ use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::{
+    frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
+    request_plane::ensure_request_plane_metrics_registered_prometheus,
+    tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
+    transport_metrics::ensure_transport_metrics_registered_prometheus,
+};
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +56,7 @@ struct StateFlags {
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
+    audios_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -62,8 +69,7 @@ impl StateFlags {
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
-            // TODO: add audios_endpoints_enabled flag
-            EndpointType::Audios => false,
+            EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -88,8 +94,9 @@ impl StateFlags {
             EndpointType::Videos => self
                 .videos_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
-            // TODO: add audios_endpoints_enabled flag
-            EndpointType::Audios => {}
+            EndpointType::Audios => self
+                .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -116,6 +123,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
+                audios_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
@@ -306,9 +314,14 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             tokio::select! {
                 result = server => {
-                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    cancel_token.cancel();
+                    result?;
                 }
                 _ = observer.cancelled() => {
                     state_cancel.cancel();
@@ -341,6 +354,9 @@ impl HttpService {
                 }
             })?;
 
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
@@ -353,6 +369,7 @@ impl HttpService {
                 })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
+            cancel_token.cancel();
         }
 
         Ok(())
@@ -461,6 +478,19 @@ impl HttpServiceConfigBuilder {
             }
         }
 
+        if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register request-plane metrics: {}", e);
+        }
+        if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register frontend perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_tokio_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register tokio perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register transport metrics: {}", e);
+        }
+
         let mut router = axum::Router::new();
 
         let mut all_docs = Vec::new();
@@ -559,6 +589,7 @@ impl HttpServiceConfigBuilder {
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
+        let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -570,6 +601,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
+        endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {

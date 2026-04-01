@@ -35,48 +35,38 @@
 //! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
 //! implementation of the main block manager.
 use crate::cache::HashCache;
-use crate::common::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
+use crate::common::kv_cache_trace;
+use crate::common::protocols::{KvEventPublishers, MoveBlock, PrefillCost};
 use crate::common::sequence::ActiveSequence;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use dynamo_runtime::config::environment_names::mocker;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use std::collections::HashMap;
-use std::env;
-use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Check the env var to enable KV cache allocation/eviction trace logs.
-static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    env::var(mocker::DYN_MOCKER_KV_CACHE_TRACE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-});
+use rustc_hash::FxHashMap;
 
 pub struct KvManager {
     cache: HashCache,
     block_size: usize,
-    kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+    kv_event_publishers: KvEventPublishers,
     dp_rank: u32,
     next_event_id: u64,
 }
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self::new_with_event_sink(max_capacity, block_size, None, 0)
+        Self::new_with_event_sink(max_capacity, block_size, KvEventPublishers::default(), 0)
     }
 
     pub fn new_with_event_sink(
         max_capacity: usize,
         block_size: usize,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         dp_rank: u32,
     ) -> Self {
         debug_assert!(max_capacity > 0, "max_capacity must be > 0");
-        if kv_event_sink.is_some() {
+        if !kv_event_publishers.is_empty() {
             tracing::info!(
                 "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
             );
@@ -85,7 +75,7 @@ impl KvManager {
         KvManager {
             cache: HashCache::new(max_capacity),
             block_size,
-            kv_event_sink,
+            kv_event_publishers,
             dp_rank,
             next_event_id: 0,
         }
@@ -104,36 +94,18 @@ impl KvManager {
             return;
         }
 
-        if *KV_CACHE_TRACE_ENABLED {
-            let active_len = self.cache.num_active();
-            let inactive_len = self.cache.num_inactive();
-            let free_blocks = self
-                .cache
-                .max_capacity()
-                .saturating_sub(active_len)
-                .saturating_sub(inactive_len);
-            let event = if is_store { "allocation" } else { "eviction" };
-            let timestamp_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            tracing::info!(
-                event,
-                timestamp_ms,
-                block_ids = ?&full_blocks,
-                block_size = self.block_size,
-                free_blocks_after = free_blocks,
-                active_blocks = active_len,
-                inactive_blocks = inactive_len,
-                total_blocks = self.cache.max_capacity(),
-                dp_rank = self.dp_rank,
-                "KV cache trace"
-            );
-        }
+        kv_cache_trace::log_vllm_trace(
+            if is_store { "allocation" } else { "eviction" },
+            self.dp_rank,
+            self.block_size,
+            self.cache.num_active(),
+            self.cache.num_inactive(),
+            self.cache.max_capacity(),
+        );
 
-        let Some(ref sink) = self.kv_event_sink else {
+        if self.kv_event_publishers.is_empty() {
             return;
-        };
+        }
 
         let event_data = if is_store {
             let num_blocks = full_blocks.len();
@@ -172,7 +144,10 @@ impl KvManager {
             dp_rank: self.dp_rank,
         };
 
-        if let Err(e) = sink.publish(event, token_ids.as_deref()) {
+        if let Err(e) = self
+            .kv_event_publishers
+            .publish(event, token_ids.as_deref())
+        {
             tracing::warn!("Failed to publish KV event: {e}");
         }
     }
@@ -186,12 +161,12 @@ impl KvManager {
     /// For other variants, returns the total block count (they always succeed or panic).
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
-            MoveBlock::Use(hashes, local_hashes, token_ids) => {
+            MoveBlock::Use(hashes, local_hashes, token_ids, parent) => {
                 let mut blocks_stored = Vec::<u64>::new();
                 let mut stored_token_ids: Option<Vec<Vec<u32>>> =
                     token_ids.as_ref().map(|_| Vec::new());
 
-                let mut parent_block: Option<&UniqueBlock> = None;
+                let mut parent_block: Option<&UniqueBlock> = parent.as_ref();
                 let mut allocated = 0;
                 for (i, hash) in hashes.iter().enumerate() {
                     // First check if it already exists in active blocks
@@ -213,7 +188,7 @@ impl KvManager {
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if self.cache.is_at_capacity() {
                         let Some(evicted) = self.cache.evict_inactive() else {
-                            return allocated;
+                            break;
                         };
                         tracing::trace!(
                             "Evicting block from inactive pool: {evicted:?}, dp_rank={}",
@@ -376,7 +351,7 @@ impl KvManager {
     }
 
     /// Direct access to active blocks map (for tests).
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+    pub fn active_blocks(&self) -> &FxHashMap<UniqueBlock, usize> {
         self.cache.active_blocks()
     }
 
@@ -403,6 +378,7 @@ impl KvManager {
         PrefillCost {
             new_blocks,
             new_tokens,
+            cached_tokens,
         }
     }
 }
@@ -410,6 +386,9 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::common::protocols::KvCacheEventSink;
 
     #[test]
     fn test_failure_on_max_capacity() {
@@ -420,7 +399,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> usize {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, None))
+            manager.process(&MoveBlock::Use(blocks, hashes, None, None))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -447,7 +426,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, None));
+            manager.process(&MoveBlock::Use(blocks, hashes, None, None));
         }
 
         // Helper function to destroy multiple blocks
@@ -560,5 +539,111 @@ mod tests {
         assert_inactive_blocks(&manager, 1, &[5]);
 
         use_blocks(&mut manager, vec![13]);
+    }
+
+    #[test]
+    fn test_chunked_prefill_parent_hash() {
+        use std::sync::Mutex;
+
+        use crate::common::sequence::ActiveSequence;
+
+        #[derive(Default)]
+        struct CapturingSink {
+            events: Mutex<Vec<KvCacheEvent>>,
+        }
+
+        impl KvCacheEventSink for CapturingSink {
+            fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        let block_size = 64;
+        let tokens: Vec<u32> = (0..512).collect(); // 8 blocks
+        let mut seq = ActiveSequence::new(tokens, 100, Some(block_size), true, false);
+
+        let sink = Arc::new(CapturingSink::default());
+        let mut manager = KvManager::new_with_event_sink(
+            256,
+            block_size,
+            KvEventPublishers::new(Some(sink.clone() as _), None),
+            0,
+        );
+
+        // Chunk 1: allocate blocks 0-3
+        let signal = seq.prepare_allocation(256).unwrap();
+        manager.process(&signal);
+        seq.commit_allocation(256);
+
+        // Chunk 2: allocate blocks 4-7
+        let signal = seq.prepare_allocation(512).unwrap();
+        manager.process(&signal);
+        seq.commit_allocation(512);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "expected two store events");
+
+        // First event: parent_hash should be None (starts from root)
+        let KvCacheEventData::Stored(ref store1) = events[0].data else {
+            panic!("expected store event");
+        };
+        assert!(
+            store1.parent_hash.is_none(),
+            "first chunk should have no parent"
+        );
+
+        // Second event: parent_hash should be the seq_hash of block 3
+        // (the last block from the first chunk)
+        let KvCacheEventData::Stored(ref store2) = events[1].data else {
+            panic!("expected store event");
+        };
+        let expected_parent = seq.unique_blocks()[3].clone();
+        let UniqueBlock::FullBlock(expected_hash) = expected_parent else {
+            panic!("expected full block");
+        };
+        assert_eq!(
+            store2.parent_hash,
+            Some(ExternalSequenceBlockHash(expected_hash)),
+            "second chunk's parent should be block 3's seq_hash"
+        );
+    }
+
+    #[test]
+    fn test_repreempt_after_partial_recompute_only_frees_reallocated_blocks() {
+        let mut seq = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
+        let mut manager = KvManager::new(16, 4);
+
+        let signal = seq.take_creation_signal().unwrap();
+        assert_eq!(manager.process(&signal), 2);
+
+        for _ in 0..3 {
+            let signals = seq.generate();
+            for signal in &signals {
+                manager.process(signal);
+            }
+            if seq.generated_tokens() < seq.max_output_tokens() {
+                seq.commit_allocation(seq.len());
+            }
+        }
+        assert_eq!(manager.num_active_blocks(), 3);
+
+        let first_reset = seq.reset_with_signal();
+        for signal in &first_reset {
+            manager.process(signal);
+        }
+        assert_eq!(manager.num_active_blocks(), 0);
+
+        let prompt_only = seq.prepare_allocation(seq.num_input_tokens()).unwrap();
+        assert_eq!(manager.process(&prompt_only), 2);
+        seq.commit_allocation(seq.num_input_tokens());
+        assert_eq!(manager.num_active_blocks(), 2);
+
+        let second_reset = seq.reset_with_signal();
+        for signal in &second_reset {
+            manager.process(signal);
+        }
+
+        assert_eq!(manager.num_active_blocks(), 0);
     }
 }

@@ -7,7 +7,10 @@ use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
         common::{self, timing::RequestTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        },
     },
     types::TokenIdType,
 };
@@ -172,29 +175,8 @@ impl DeltaGenerator {
                 .zip(tok_lps.iter())
                 .zip(top_logprobs.iter())
                 .map(|(((t, tid), lp), top_lps)| {
-                    let mut found_selected_token = false;
-                    let mut converted_top_lps = top_lps
-                        .iter()
-                        .map(|top_lp| {
-                            let top_t = top_lp.token.clone().unwrap_or_default();
-                            let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == *tid;
-                            dynamo_async_openai::types::TopLogprobs {
-                                token: top_t,
-                                logprob: top_lp.logprob as f32,
-                                bytes: None,
-                            }
-                        })
-                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
-                    if !found_selected_token {
-                        // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
-                            token: t.clone(),
-                            logprob: *lp,
-                            bytes: None,
-                        });
-                    }
-                    serde_json::to_value(converted_top_lps).unwrap()
+                    let converted = convert_backend_top_logprobs(top_lps, t, *tid, *lp);
+                    serde_json::to_value(converted).unwrap()
                 })
                 .collect()
         });
@@ -236,10 +218,9 @@ impl DeltaGenerator {
             } else {
                 None
             },
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -258,10 +239,9 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Check if usage tracking is enabled
@@ -361,7 +341,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                response.inner.nvext = Some(nvext_json);
+                response.nvext = Some(nvext_json);
                 if let Some(ref info) = worker_id_info {
                     tracing::debug!(
                         "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",

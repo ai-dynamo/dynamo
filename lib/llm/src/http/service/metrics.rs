@@ -256,6 +256,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_cancellation_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -303,6 +304,9 @@ pub enum Endpoint {
     /// OAI Videos
     Videos,
 
+    /// OAI Audio Speech
+    Audios,
+
     /// OAI Responses
     Responses,
 
@@ -320,6 +324,13 @@ pub enum RequestType {
 
     /// SingleIn / ManyOut
     Stream,
+}
+
+/// Labels for cancellation metrics
+pub struct CancellationLabels {
+    pub model: String,
+    pub endpoint: String,
+    pub request_type: String,
 }
 
 /// Status
@@ -654,6 +665,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_cancellation_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
+                "Total number of request cancellations",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -674,6 +694,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_cancellation_total,
         }
     }
 
@@ -778,6 +799,7 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_cancellation_total.clone()))?;
 
         Ok(())
     }
@@ -858,6 +880,20 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the cancellation counter
+    pub fn inc_cancellation(&self, labels: &CancellationLabels) {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .inc();
+    }
+
+    /// Get the current cancellation count
+    pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
             .get()
     }
 
@@ -993,6 +1029,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
+            Endpoint::Audios => write!(f, "audios"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
@@ -1008,6 +1045,7 @@ impl Endpoint {
             Endpoint::Embeddings => "embeddings",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
+            Endpoint::Audios => "audios",
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",

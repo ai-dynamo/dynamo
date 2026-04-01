@@ -52,6 +52,8 @@ def register_gms_loader(load_format: str = "gms") -> None:
 
         def __init__(self, load_config):
             super().__init__(load_config)
+            # Strip GMS-specific keys before creating the fallback loader,
+            # otherwise DefaultModelLoader rejects unknown extra config.
             self.default_loader = DefaultModelLoader(
                 strip_gms_model_loader_config(
                     load_config,

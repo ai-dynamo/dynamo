@@ -4,25 +4,86 @@
 """
 ForwardPassMetrics schema for per-iteration scheduler telemetry.
 
-Published over ZMQ PUB by InstrumentedScheduler, consumed by the
-planner or any ZMQ SUB listener.
+Uses msgspec.Struct for zero-copy serialization (same approach as KV cache events).
+We do not use prometheus for forward pass metrics because:
+    1. Metric scrapper for pull based prometheus metrics is async with engine.
+       Metrics can be easily lost/repeated.
+    2. Push based prometheus uses HTTP and might not scale as well as ZMQ.
+    3. Existing KV event infra can be reused for forward pass metrics.
 
-Uses msgspec.Struct for zero-copy serialization (same approach as
-vLLM's KV cache events).
+Data flow (two-layer relay, same architecture as KV events)::
 
-TODO: hook to our rust infra for discovery
-TODO: add metrics for Trtllm/SGLang
+    EngineCore child process:
+        InstrumentedScheduler -> _FpmPublisherThread -> ZMQ PUB (localhost)
+
+    Dynamo parent process:
+        FpmEventRelay (ZMQ SUB) -> EventPublisher -> Event Plane (NATS/ZMQ)
+
+    Consumer (planner, etc.):
+        FpmEventSubscriber (auto-discovered) -> decode() -> ForwardPassMetrics
+
+The raw ZMQ hop is needed because the scheduler runs in a forked child
+process without access to the Dynamo runtime.  The FpmEventRelay bridge
+in the parent process handles event plane transport and discovery
+registration automatically.
+
+See ``dynamo.common.recv_forward_pass_metrics`` for a standalone
+consumer example.
+
+TODO: add metrics for TrtLLM/SGLang
 TODO: planner consuming these metrics instead of frontend/router metrics
 """
 
 from __future__ import annotations
 
+import logging
+
 import msgspec
+
+logger = logging.getLogger(__name__)
+
+FPM_VERSION: int = 1
+
+
+class WelfordAccumulator:
+    """Welford's online algorithm for count / sum / population-variance.
+
+    Numerically stable single-pass computation -- avoids catastrophic
+    cancellation that sum-of-squares can suffer with large values.
+
+    Usage::
+
+        acc = WelfordAccumulator()
+        for v in values:
+            acc.add(v)
+        print(acc.n, acc.s, acc.variance())
+    """
+
+    __slots__ = ("n", "s", "_mean", "_m2")
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.s = 0
+        self._mean = 0.0
+        self._m2 = 0.0
+
+    def add(self, v: int) -> None:
+        self.n += 1
+        self.s += v
+        delta = v - self._mean
+        self._mean += delta / self.n
+        delta2 = v - self._mean
+        self._m2 += delta * delta2
+
+    def variance(self) -> float:
+        if self.n == 0:
+            return 0.0
+        return self._m2 / self.n
 
 
 class ScheduledRequestMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Metrics for requests scheduled in this iteration"""
@@ -60,7 +121,7 @@ class ScheduledRequestMetrics(
 
 class QueuedRequestMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Metrics for requests waiting in the queue (not scheduled this iteration).
@@ -91,7 +152,7 @@ class QueuedRequestMetrics(
 
 class ForwardPassMetrics(
     msgspec.Struct,
-    frozen=True,
+    frozen=True,  # type: ignore[call-arg]
     gc=False,
 ):
     """Per-iteration metrics emitted by InstrumentedScheduler.
@@ -101,11 +162,20 @@ class ForwardPassMetrics(
     engine transitions from active to idle.
     """
 
+    # Schema version. Consumers must check this before interpreting
+    # the remaining fields. Bump when the schema changes incompatibly.
+    version: int = FPM_VERSION
+
     # Unique worker identifier (Dynamo runtime connection_id).
     worker_id: str = ""
 
     # Data parallel rank. Each DP rank has its own scheduler and ZMQ port.
     dp_rank: int = 0
+
+    # Monotonically increasing sequence number per (worker_id, dp_rank).
+    # Set by _FpmPublisherThread before encoding; 0 for messages that
+    # have not been stamped (e.g. unit-test fixtures).
+    counter_id: int = 0
 
     # Wall-clock time of this iteration: from schedule() to update_from_output().
     # Covers scheduling + model forward pass + output processing.
@@ -127,5 +197,27 @@ def encode(metrics: ForwardPassMetrics) -> bytes:
     return _encoder.encode(metrics)
 
 
-def decode(data: bytes) -> ForwardPassMetrics:
-    return _decoder.decode(data)
+class UnsupportedFpmVersionError(Exception):
+    """Raised when a ForwardPassMetrics message has an unrecognised version."""
+
+
+def decode(data: bytes) -> ForwardPassMetrics | None:
+    """Decode a ForwardPassMetrics message, returning None for unknown versions.
+
+    Returns None (and logs a warning) if the message cannot be decoded or
+    carries a version this code does not understand, so callers can simply
+    skip unsupported messages without crashing.
+    """
+    try:
+        metrics = _decoder.decode(data)
+    except Exception:
+        logger.warning("Failed to decode ForwardPassMetrics message, skipping")
+        return None
+    if metrics.version != FPM_VERSION:
+        logger.warning(
+            "Unsupported ForwardPassMetrics version %d (expected %d), skipping",
+            metrics.version,
+            FPM_VERSION,
+        )
+        return None
+    return metrics
