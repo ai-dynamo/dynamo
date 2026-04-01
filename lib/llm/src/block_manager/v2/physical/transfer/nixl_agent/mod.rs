@@ -233,37 +233,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_require_backend() {
-        let agent = match NixlAgent::new_with_backends("test", &["UCX"]) {
-            Ok(agent) => agent,
-            Err(_) => {
-                eprintln!("Skipping test_require_backend: UCX not available");
-                return;
-            }
-        };
+    #[cfg(feature = "testing-cuda")]
+    mod cuda_tests {
+        use super::*;
 
-        // Should succeed for available backend
-        assert!(agent.require_backend("UCX").is_ok());
+        #[test]
+        fn test_require_backend() {
+            let agent = NixlAgent::new_with_backends("test", &["UCX"]).expect("Need UCX for test");
 
-        // Should fail for unavailable backend
-        assert!(agent.require_backend("GDS_MT").is_err());
-    }
+            // Should succeed for available backend
+            assert!(agent.require_backend("UCX").is_ok());
 
-    #[test]
-    fn test_require_backends_strict() {
-        // Should succeed if UCX is available
-        let agent = match NixlAgent::require_backends("test_strict", &["UCX"]) {
-            Ok(agent) => agent,
-            Err(_) => {
-                eprintln!("Skipping test_require_backends_strict: UCX not available");
-                return;
-            }
-        };
-        assert!(agent.has_backend("UCX"));
+            // Should fail for unavailable backend
+            assert!(agent.require_backend("GDS_MT").is_err());
+        }
 
-        // Should fail if any backend is missing (GDS likely not available)
-        let result = NixlAgent::require_backends("test_strict_fail", &["UCX", "DUDE"]);
-        assert!(result.is_err());
+        #[test]
+        fn test_require_backends_strict() {
+            // Should succeed if UCX is available
+            let agent = NixlAgent::require_backends("test_strict", &["UCX"])
+                .expect("Failed to require backends");
+            assert!(agent.has_backend("UCX"));
+
+            // Should fail if any backend is missing (GDS likely not available)
+            let result = NixlAgent::require_backends("test_strict_fail", &["UCX", "DUDE"]);
+            assert!(result.is_err());
+        }
     }
 }
