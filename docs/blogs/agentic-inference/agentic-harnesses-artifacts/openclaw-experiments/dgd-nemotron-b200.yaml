@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Nemotron-3-Super-120B-A12B-NVFP4 on 1x B200 (aggregated)
 # For OpenClaw multi-turn experiments (agentic harnesses blog)
 apiVersion: nvidia.com/v1alpha1

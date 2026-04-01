@@ -1,26 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
-"""OpenClaw streaming dispatch multi-turn experiment.
+"""OpenClaw streaming dispatch multi-turn experiment (OpenAI format).
 
-Simulates OpenClaw's multi-turn tool-using pattern where a user asks questions
-that trigger tool calls across a conversation. Measures:
-
-1. Whether tool_call_dispatch events arrive before finish_reason (streaming dispatch)
-2. Total wall time comparison: buffered vs dispatch-aware harness
-3. Multi-turn accumulation: how dispatch savings compound over N turns
-
-OpenClaw-specific: uses Anthropic Messages API (not OpenAI format), and the
-conversation history grows naturally across turns (like a real chat session).
+Adapted from openclaw_dispatch_multiturn.py to use OpenAI Chat Completions API
+instead of Anthropic Messages API (for use with standalone vLLM).
 
 Two harness variants tested per scenario:
-  A (Buffered):  Wait for message_stop, then parse tool_use blocks, then execute
-  B (Dispatch):  Start tool execution on content_block_stop for tool_use blocks
+  A (Buffered):  Wait for stream end, then parse tool_calls, then execute
+  B (Dispatch):  Start tool execution on each tool_call as soon as complete
 
 Uses simulated tool execution with configurable latency to make overlap visible.
 
 Usage:
-    python3 openclaw_dispatch_multiturn.py \\
+    python3 openclaw_dispatch_multiturn_openai.py \\
         --url http://localhost:8000 \\
         --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \\
         --tool-latency-ms 50 --runs 5 \\
@@ -36,7 +29,7 @@ import time
 import requests
 
 # ---------------------------------------------------------------------------
-# System prompt and tools (Anthropic Messages format)
+# System prompt and tools (OpenAI format)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
@@ -46,36 +39,41 @@ web_search tool. You can use multiple tools in a single response if needed."""
 
 TOOLS = [
     {
-        "name": "calculator",
-        "description": "Evaluate a math expression. Returns the numeric result.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": "Math expression (e.g., '42 * 17 + 3')",
-                }
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "Evaluate a math expression. Returns the numeric result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "Math expression (e.g., '42 * 17 + 3')",
+                    }
+                },
+                "required": ["expression"],
             },
-            "required": ["expression"],
         },
     },
     {
-        "name": "web_search",
-        "description": "Search the web and return top results.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query",
-                }
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and return top results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    }
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
         },
     },
 ]
 
-# Multi-turn conversation where each turn triggers tool use
 CONVERSATION_TURNS = [
     "What is 42 * 17?",
     "Now compute sqrt(714) to 3 decimal places.",
@@ -96,32 +94,28 @@ def simulate_tool(name: str, latency_s: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Anthropic Messages API SSE parsing
+# OpenAI SSE parsing
 # ---------------------------------------------------------------------------
 
 
-def parse_anthropic_sse(resp):
-    """Yield (event_type, parsed_data) from Anthropic SSE stream."""
+def parse_openai_sse(resp):
+    """Yield (event_type, parsed_data) from OpenAI SSE stream."""
     for line in resp.iter_lines(decode_unicode=True):
-        if not line:
+        if not line or not line.startswith("data: "):
             continue
-        if line.startswith("event: "):
-            # Anthropic format: event line followed by data line
-            continue
-        if line.startswith("data: "):
-            raw = line[6:].strip()
-            if raw == "[DONE]":
-                yield ("done", {"done": True})
-            else:
-                try:
-                    data = json.loads(raw)
-                    yield (data.get("type", "unknown"), data)
-                except json.JSONDecodeError:
-                    pass
+        raw = line[6:].strip()
+        if raw == "[DONE]":
+            yield ("done", {"done": True})
+        else:
+            try:
+                data = json.loads(raw)
+                yield ("chunk", data)
+            except json.JSONDecodeError:
+                pass
 
 
 # ---------------------------------------------------------------------------
-# Variant A: Buffered (wait for message_stop)
+# Variant A: Buffered (wait for stream end)
 # ---------------------------------------------------------------------------
 
 
@@ -136,7 +130,7 @@ def run_buffered_turn(
         "model": model,
         "max_tokens": 512,
         "stream": True,
-        "system": SYSTEM_PROMPT,
+        "stream_options": {"include_usage": True},
         "messages": messages,
         "tools": TOOLS,
     }
@@ -144,52 +138,57 @@ def run_buffered_turn(
     t = {"request_sent": time.monotonic()}
 
     resp = requests.post(
-        f"{url}/v1/messages",
+        f"{url}/v1/chat/completions",
         json=body,
-        headers={"Content-Type": "application/json", "x-api-key": "dummy"},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"},
         stream=True,
         timeout=60,
     )
     resp.raise_for_status()
 
     first_delta_seen = False
-    tool_use_blocks = []  # Completed tool_use blocks
-    current_tool = None
+    tool_calls = {}  # index -> {id, name, arguments}
     content_text = ""
 
-    for etype, data in parse_anthropic_sse(resp):
+    for etype, data in parse_openai_sse(resp):
         if etype == "done":
             break
 
         now = time.monotonic()
+        choices = data.get("choices", [])
 
-        if etype == "content_block_start":
-            cb = data.get("content_block", {})
-            if cb.get("type") == "tool_use":
-                current_tool = {
-                    "id": cb.get("id", ""),
-                    "name": cb.get("name", ""),
-                    "input_json": "",
-                }
+        if choices:
+            delta = choices[0].get("delta", {})
+            finish = choices[0].get("finish_reason")
 
-        elif etype == "content_block_delta":
-            if not first_delta_seen:
-                t["first_token"] = now
-                first_delta_seen = True
+            content = delta.get("content", "")
+            if content:
+                if not first_delta_seen:
+                    t["first_token"] = now
+                    first_delta_seen = True
+                content_text += content
 
-            delta = data.get("delta", {})
-            if delta.get("type") == "input_json_delta" and current_tool:
-                current_tool["input_json"] += delta.get("partial_json", "")
-            elif delta.get("type") == "text_delta":
-                content_text += delta.get("text", "")
+            # Tool calls
+            tc_list = delta.get("tool_calls", [])
+            for tc in tc_list:
+                if not first_delta_seen:
+                    t["first_token"] = now
+                    first_delta_seen = True
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {
+                        "id": tc.get("id", ""),
+                        "name": "",
+                        "arguments": "",
+                    }
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls[idx]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    tool_calls[idx]["arguments"] += fn["arguments"]
 
-        elif etype == "content_block_stop":
-            if current_tool:
-                tool_use_blocks.append(current_tool)
-                current_tool = None
-
-        elif etype == "message_stop":
-            t["stream_done"] = now
+            if finish:
+                t["stream_done"] = now
 
     resp.close()
 
@@ -199,12 +198,13 @@ def run_buffered_turn(
     # Execute tools AFTER stream completes (buffered strategy)
     tool_results = []
     t["tools_started"] = time.monotonic()
-    for tool in tool_use_blocks:
-        result = simulate_tool(tool["name"], tool_latency_s)
+    for idx in sorted(tool_calls.keys()):
+        tc = tool_calls[idx]
+        result = simulate_tool(tc["name"], tool_latency_s)
         tool_results.append(
             {
-                "tool_use_id": tool["id"],
-                "name": tool["name"],
+                "tool_call_id": tc["id"],
+                "name": tc["name"],
                 "result": result,
             }
         )
@@ -212,15 +212,15 @@ def run_buffered_turn(
 
     return {
         "timestamps": t,
-        "tool_count": len(tool_use_blocks),
-        "tool_names": [tb["name"] for tb in tool_use_blocks],
+        "tool_count": len(tool_calls),
+        "tool_names": [tool_calls[i]["name"] for i in sorted(tool_calls.keys())],
         "content_preview": content_text[:100],
         "tool_results": tool_results,
     }
 
 
 # ---------------------------------------------------------------------------
-# Variant B: Dispatch-aware (start tool on content_block_stop)
+# Variant B: Dispatch-aware (start tool as soon as arguments complete)
 # ---------------------------------------------------------------------------
 
 
@@ -235,7 +235,7 @@ def run_dispatch_turn(
         "model": model,
         "max_tokens": 512,
         "stream": True,
-        "system": SYSTEM_PROMPT,
+        "stream_options": {"include_usage": True},
         "messages": messages,
         "tools": TOOLS,
     }
@@ -243,21 +243,22 @@ def run_dispatch_turn(
     t = {"request_sent": time.monotonic()}
 
     resp = requests.post(
-        f"{url}/v1/messages",
+        f"{url}/v1/chat/completions",
         json=body,
-        headers={"Content-Type": "application/json", "x-api-key": "dummy"},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"},
         stream=True,
         timeout=60,
     )
     resp.raise_for_status()
 
     first_delta_seen = False
-    current_tool = None
+    tool_calls = {}
     content_text = ""
     tool_threads = []
-    tool_times = {}  # tool_id -> {started, finished}
+    tool_times = {}
     tool_results_lock = threading.Lock()
     tool_results = []
+    dispatched_indices = set()
 
     def _exec_tool(tool_id: str, tool_name: str):
         tool_times[tool_id] = {"started": time.monotonic()}
@@ -266,53 +267,66 @@ def run_dispatch_turn(
         with tool_results_lock:
             tool_results.append(
                 {
-                    "tool_use_id": tool_id,
+                    "tool_call_id": tool_id,
                     "name": tool_name,
                     "result": result,
                 }
             )
 
-    for etype, data in parse_anthropic_sse(resp):
+
+    for etype, data in parse_openai_sse(resp):
         if etype == "done":
             break
 
         now = time.monotonic()
+        choices = data.get("choices", [])
 
-        if etype == "content_block_start":
-            cb = data.get("content_block", {})
-            if cb.get("type") == "tool_use":
-                current_tool = {
-                    "id": cb.get("id", ""),
-                    "name": cb.get("name", ""),
-                    "input_json": "",
-                }
+        if choices:
+            delta = choices[0].get("delta", {})
+            finish = choices[0].get("finish_reason")
 
-        elif etype == "content_block_delta":
-            if not first_delta_seen:
-                t["first_token"] = now
-                first_delta_seen = True
+            content = delta.get("content", "")
+            if content:
+                if not first_delta_seen:
+                    t["first_token"] = now
+                    first_delta_seen = True
+                content_text += content
 
-            delta = data.get("delta", {})
-            if delta.get("type") == "input_json_delta" and current_tool:
-                current_tool["input_json"] += delta.get("partial_json", "")
-            elif delta.get("type") == "text_delta":
-                content_text += delta.get("text", "")
+            tc_list = delta.get("tool_calls", [])
+            for tc in tc_list:
+                if not first_delta_seen:
+                    t["first_token"] = now
+                    first_delta_seen = True
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {
+                        "id": tc.get("id", ""),
+                        "name": "",
+                        "arguments": "",
+                    }
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls[idx]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    tool_calls[idx]["arguments"] += fn["arguments"]
 
-        elif etype == "content_block_stop":
-            if current_tool:
-                # DISPATCH: start tool execution immediately
-                t.setdefault("first_tool_dispatched", now)
-                thread = threading.Thread(
-                    target=_exec_tool,
-                    args=(current_tool["id"], current_tool["name"]),
-                    daemon=True,
-                )
-                tool_threads.append(thread)
-                thread.start()
-                current_tool = None
-
-        elif etype == "message_stop":
-            t["stream_done"] = now
+            # When finish_reason is "tool_calls", dispatch all undispatched tools
+            if finish == "tool_calls":
+                t["stream_done"] = now
+                for idx in sorted(tool_calls.keys()):
+                    if idx not in dispatched_indices:
+                        tc = tool_calls[idx]
+                        t.setdefault("first_tool_dispatched", now)
+                        dispatched_indices.add(idx)
+                        thread = threading.Thread(
+                            target=_exec_tool,
+                            args=(tc["id"], tc["name"]),
+                            daemon=True,
+                        )
+                        tool_threads.append(thread)
+                        thread.start()
+            elif finish:
+                t["stream_done"] = now
 
     resp.close()
 
@@ -325,7 +339,6 @@ def run_dispatch_turn(
 
     t["tools_finished"] = time.monotonic()
 
-    # Compute earliest tool start
     if tool_times:
         earliest = min(v["started"] for v in tool_times.values())
         latest = max(v["finished"] for v in tool_times.values())
@@ -334,8 +347,8 @@ def run_dispatch_turn(
 
     return {
         "timestamps": t,
-        "tool_count": len(tool_threads),
-        "tool_names": [tr["name"] for tr in tool_results],
+        "tool_count": len(tool_calls),
+        "tool_names": [tool_calls[i]["name"] for i in sorted(tool_calls.keys())],
         "content_preview": content_text[:100],
         "tool_results": tool_results,
     }
@@ -346,12 +359,7 @@ def run_dispatch_turn(
 # ---------------------------------------------------------------------------
 
 
-def make_row(
-    run_idx: int,
-    turn_idx: int,
-    variant: str,
-    result: dict,
-) -> dict:
+def make_row(run_idx: int, turn_idx: int, variant: str, result: dict) -> dict:
     t = result["timestamps"]
     t0 = t["request_sent"]
 
@@ -382,7 +390,7 @@ def make_row(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenClaw streaming dispatch multi-turn experiment"
+        description="OpenClaw streaming dispatch multi-turn experiment (OpenAI format)"
     )
     parser.add_argument("--url", default="http://localhost:8000")
     parser.add_argument(
@@ -406,7 +414,7 @@ def main():
 
         for run_idx in range(args.runs):
             print(f"  Run {run_idx+1}/{args.runs}", file=sys.stderr)
-            messages = []
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
             for turn_idx in range(n_turns):
                 user_msg = CONVERSATION_TURNS[turn_idx]
@@ -418,23 +426,39 @@ def main():
                 all_rows.append(row)
 
                 # Add assistant response + tool results to history for next turn
-                assistant_content = result["content_preview"] or "Let me compute that."
-                messages.append({"role": "assistant", "content": assistant_content})
+                if result["tool_count"] > 0:
+                    # Assistant message with tool_calls
+                    tc_msg = {
+                        "role": "assistant",
+                        "content": result["content_preview"] or None,
+                        "tool_calls": [
+                            {
+                                "id": tr["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tr["name"],
+                                    "arguments": json.dumps({"expression": "42 * 17"}),
+                                },
+                            }
+                            for tr in result.get("tool_results", [])
+                        ],
+                    }
+                    messages.append(tc_msg)
 
-                # Add simulated tool results
-                for tr in result.get("tool_results", []):
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": tr["tool_use_id"],
-                                    "content": tr["result"],
-                                }
-                            ],
-                        }
+                    # Tool results
+                    for tr in result.get("tool_results", []):
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tr["tool_call_id"],
+                                "content": tr["result"],
+                            }
+                        )
+                else:
+                    assistant_content = (
+                        result["content_preview"] or "Let me compute that."
                     )
+                    messages.append({"role": "assistant", "content": assistant_content})
 
                 print(
                     f"    Turn {turn_idx+1}: wall={row['total_wall_ms']:>8.2f}ms "
