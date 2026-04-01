@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:15:11 UTC
+Last updated: 2026-04-01 05:16:06 UTC
 
 ## Active state
 
@@ -1265,12 +1265,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- make the signed docs-only handoff refresh commit for this `PLANS.md` update
+- none
 
 ### Exact next step
 
-- create the signed commit for this audit-only `PLANS.md` refresh, then leave
-  the next run pointed only at the existing non-blocking follow-on backlog
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
@@ -1278,8 +1278,9 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   audit
 - this run revalidated the focused llm/bindings test and build stack from the
   current `HEAD`
-- after the commit for this `PLANS.md` refresh, no uncommitted work should
-  remain
+- this run is committed in:
+  - `06e45ae79 docs: refresh g3pb audit handoff`
+- no uncommitted work should remain after this run
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
