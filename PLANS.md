@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 00:40:12 UTC
+Last updated: 2026-04-01 00:48:24 UTC
 
 ## Active state
 
@@ -430,3 +430,123 @@ The `invalidateRemoteMD` warning on teardown is currently treated as a separate 
 
 
 Commit is allowed for this state because the end-to-end `G3PB` validation stack is working.
+
+## Current run (2026-04-01 00:46:42 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before touching code:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Reconfirmed the repo baseline from the current detached `HEAD`
+- ✅ Revalidated the focused `G3PB` unit baseline:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`13 passed`)
+- ✅ Revalidated the `G3PB` admission policy suite:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+- ✅ Rebuilt the active request-plane smoke binaries:
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+- ✅ Completed backend restart/reload validation across `load_remote` + `query` / `fetch`
+  - first attempt exposed a discovery-root setup mistake (`DYN_FILE_KV` must point
+    at a directory root, not a pre-created file)
+  - corrected shared discovery root worked
+  - first smoke run passed against worker `53`
+  - backend was terminated and restarted against the same discovery + foyer dirs
+  - second smoke run also passed against worker `53`
+
+### Current findings before edits
+
+- the remaining work from the prior handoff is still the validation tail, not a
+  known missing implementation slice
+- `kvbm_g3pb_worker_smoke` already exercises the core request-plane flow needed
+  for the pending milestones:
+  - discovery-driven peer enumeration
+  - `load_remote`
+  - staged remote writes
+  - `commit_put`
+  - ownership-aware `query`
+  - descriptor-based `fetch`
+  - local host registration plus device onboard
+- there is currently no explicit timing/throughput output for the metadata-only
+  request-plane RPCs, so that milestone may require a small instrumentation edit
+  unless an external harness is sufficient
+- `DYN_FILE_KV` for the file discovery backend must be a directory root; using a
+  `mktemp` file path fails backend registration with:
+  `Unable to register service for discovery ... Internal filesystem error: Not a directory (os error 20)`
+- restart/reload behavior for the current `G3PB` smoke path is now validated:
+  a restarted backend can accept a fresh `load_remote`, complete staged upload,
+  answer `query`, and serve descriptor-based `fetch` in the same shared
+  discovery namespace
+- the teardown warning still reproduces after each successful worker smoke:
+  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`13 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- backend restart/reload validation with shared file discovery + persistent foyer dir:
+  - incorrect discovery-root attempt:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.restart.XBheCV target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 16 --foyer-dir /tmp/g3pb-foyer.restart.PpnPrN`
+    - fail at startup because `DYN_FILE_KV` pointed to a file instead of a directory
+  - corrected backend start:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.restartdir.rx0f7E target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 16 --foyer-dir /tmp/g3pb-foyer.restart.PpnPrN`
+    - pass
+  - first worker smoke:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.restartdir.rx0f7E target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --host-blocks 8 --count 4`
+    - pass
+  - backend graceful shutdown via `Ctrl+C`
+    - pass
+  - restarted backend with same discovery + foyer dirs:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.restartdir.rx0f7E target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 16 --foyer-dir /tmp/g3pb-foyer.restart.PpnPrN`
+    - pass
+  - second worker smoke after restart:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.restartdir.rx0f7E target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --host-blocks 8 --count 4`
+    - pass
+  - observations:
+    - both worker smokes transferred `4` blocks / `32768` bytes
+    - both runs validated `load_remote`, staged upload, duplicate-offer rejection,
+      `query`, remote `fetch`, local host registration, and device onboard
+    - both runs still emitted the non-blocking teardown warning
+      `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+
+### Decisions confirmed in this run so far
+
+- keep `PLANS.md` as the live execution log and update it before each major
+  milestone
+- execute the remaining work in the exact order already handed off:
+  1. backend restart/reload validation
+  2. larger staged-transfer smoke counts
+  3. request-plane metadata-RPC throughput measurement
+  4. teardown-warning investigation
+- only make commits after the corresponding end-to-end `G3PB` validation stack
+  is green for that milestone, per `Agents.md`
+- treat the file-discovery-root mistake as an operator/setup note only; no code
+  change is needed for it
+- the restart milestone is complete, so the next effort should stay focused on
+  scaling the same smoke path rather than broadening functionality
+
+### Remaining work in this run
+
+- larger staged-transfer smoke counts
+- explicit request-plane metadata-RPC throughput measurement
+- deeper diagnosis of the still-non-blocking teardown warning
+  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+
+### Exact next step
+
+- run the worker smoke with materially larger block counts against the same
+  request-plane/discovery path, record transfer sizes and any capacity limits,
+  and only then decide whether throughput instrumentation needs a code edit
+
+### Handoff for next run
+
+- in progress; do not stop until the remaining validation tail above is either
+  completed or reduced to a precise blocker with commands, outputs, and next
+  steps recorded here
