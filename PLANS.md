@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:10:47 UTC
+Last updated: 2026-04-01 06:11:46 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 06:10:47 UTC)
+## Current run (2026-04-01 06:11:46 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1487,9 +1487,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Reconfirmed that the only remaining work is still the previously recorded
   non-blocking follow-on backlog rather than missing implementation in the
   active slice
-- ✅ Completed the signed docs-only audit refresh commit for this run:
-  - `19f2116f5 docs: refresh g3pb audit handoff`
-- ✅ Re-read the freshly updated handoff after that commit and corrected the
+- ✅ Completed the signed docs-only audit refresh commits for this run
+- ✅ Re-read the freshly updated handoff after those commits and corrected the
   stale “commit next” wording so the on-disk plan matches the committed state
 
 ### Current findings before final handoff
@@ -1497,7 +1496,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the active `G3PB` implementation slice still appears complete on current
   `HEAD`
   - pickup commit: `8348d29de2a3`
-  - current commit after the docs-only refresh: `19f2116f5de5`
+  - current handoff is now recorded in the latest signed docs-only commit on
+    `HEAD`
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1527,6 +1527,10 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass before the `PLANS.md` refresh edit
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
   - post-edit rerun before the first docs-only commit: pass (`6 passed`)
+- `git diff --check`
+  - pass before the final handoff-correction commit
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - final post-edit rerun before the last docs-only commit: pass (`6 passed`)
 
 ### Decisions confirmed in this run so far
 
@@ -1545,25 +1549,22 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- rerun quick post-edit validation for this final handoff refresh
-- make the final signed docs-only handoff commit that records the actual
-  current `HEAD`
+- none
 
 ### Exact next step
 
-- rerun `git diff --check` and the focused `g3pb_filter` test, then commit
-  this final `PLANS.md` handoff correction with `--signoff`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
-- this run has already refreshed the audit block to the current tip, rerun the
-  focused `G3PB` / bindings validation stack, and recorded the first docs-only
-  refresh commit on `HEAD`
-- once this final handoff-correction commit is cut, the active `G3PB`
-  implementation slice should still be treated as complete unless a future
-  audit finds a concrete new gap
-- after the final commit is cut, resume only from the existing non-blocking
-  follow-on backlog:
+- this run refreshed the audit block to the current tip, reran the focused
+  `G3PB` / bindings validation stack, and recorded the handoff in the latest
+  signed docs-only commit(s) on `HEAD`
+- the active `G3PB` implementation slice should still be treated as complete
+  unless a future audit finds a concrete new gap
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
