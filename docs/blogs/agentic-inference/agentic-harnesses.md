@@ -121,7 +121,171 @@ Anthropic is the baseline for how the harness is meant to behave. Dynamo's resul
 
 Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
 
-![Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168-169ms TTFT; a varying prefix jumps to ~912ms.](./agentic-harnesses-cache-effect-clean.png)
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" style="max-width:720px;width:100%;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px">
+<line x1="72" y1="324.0" x2="696" y2="324.0" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="328.0" text-anchor="end" fill="#6b7280" font-size="11">0</text>
+<line x1="72" y1="268.4" x2="696" y2="268.4" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="272.4" text-anchor="end" fill="#6b7280" font-size="11">200</text>
+<line x1="72" y1="212.8" x2="696" y2="212.8" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="216.8" text-anchor="end" fill="#6b7280" font-size="11">400</text>
+<line x1="72" y1="157.1" x2="696" y2="157.1" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="161.1" text-anchor="end" fill="#6b7280" font-size="11">600</text>
+<line x1="72" y1="101.5" x2="696" y2="101.5" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="105.5" text-anchor="end" fill="#6b7280" font-size="11">800</text>
+<line x1="72" y1="45.9" x2="696" y2="45.9" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="49.9" text-anchor="end" fill="#6b7280" font-size="11">1000</text>
+<text x="16" y="178.0" text-anchor="middle" fill="#374151" font-size="12" font-weight="500" transform="rotate(-90,16,178.0)">TTFT (ms)</text>
+<text x="384.0" y="372" text-anchor="middle" fill="#374151" font-size="12" font-weight="500">Request (3 rounds × 15 requests)</text>
+<line x1="72" y1="277.2" x2="696" y2="277.2" stroke="#3b82f6" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
+<line x1="72" y1="70.5" x2="696" y2="70.5" stroke="#ef4444" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
+<line x1="72" y1="277.0" x2="696" y2="277.0" stroke="#22c55e" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
+<text x="698" y="74.5" fill="#ef4444" font-size="10" font-weight="600">911ms</text>
+<text x="698" y="271.2" fill="#3b82f6" font-size="10" font-weight="600">168ms</text>
+<text x="698" y="291.0" fill="#22c55e" font-size="10" font-weight="600">169ms</text>
+<circle cx="78.9" cy="69.0" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="78.9" cy="275.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="78.9" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="92.8" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="92.8" cy="277.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="92.8" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="106.7" cy="68.8" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="106.7" cy="276.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="106.7" cy="278.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="120.5" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="120.5" cy="278.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="120.5" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="134.4" cy="69.1" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="134.4" cy="275.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="134.4" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="148.3" cy="71.1" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="148.3" cy="277.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="148.3" cy="276.3" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="162.1" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="162.1" cy="278.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="162.1" cy="278.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="176.0" cy="71.5" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="176.0" cy="275.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="176.0" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="189.9" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="189.9" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="189.9" cy="275.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="203.7" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="203.7" cy="275.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="203.7" cy="278.7" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="217.6" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="217.6" cy="278.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="217.6" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="231.5" cy="71.8" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="231.5" cy="276.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="231.5" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="245.3" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="245.3" cy="278.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="245.3" cy="278.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="259.2" cy="68.6" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="259.2" cy="275.5" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="259.2" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="273.1" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="273.1" cy="278.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="273.1" cy="278.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="286.9" cy="69.0" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="286.9" cy="278.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="286.9" cy="277.9" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="300.8" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="300.8" cy="278.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="300.8" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="314.7" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="314.7" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="314.7" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="328.5" cy="68.5" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="328.5" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="328.5" cy="276.0" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="342.4" cy="71.9" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="342.4" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="342.4" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="356.3" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="356.3" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="356.3" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="370.1" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="370.1" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="370.1" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="384.0" cy="69.3" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="384.0" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="384.0" cy="275.7" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="397.9" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="397.9" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="397.9" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="411.7" cy="71.6" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="411.7" cy="278.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="411.7" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="425.6" cy="68.1" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="425.6" cy="276.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="425.6" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="439.5" cy="71.3" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="439.5" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="439.5" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="453.3" cy="68.7" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="453.3" cy="276.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="453.3" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="467.2" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="467.2" cy="274.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="467.2" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="481.1" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="481.1" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="481.1" cy="278.3" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="494.9" cy="69.1" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="494.9" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="494.9" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="508.8" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="508.8" cy="276.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="508.8" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="522.7" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="522.7" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="522.7" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="536.5" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="536.5" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="536.5" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="550.4" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="550.4" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="550.4" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="564.3" cy="72.3" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="564.3" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="564.3" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="578.1" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="578.1" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="578.1" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="592.0" cy="71.9" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="592.0" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="592.0" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="605.9" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="605.9" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="605.9" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="619.7" cy="68.3" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="619.7" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="619.7" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="633.6" cy="72.1" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="633.6" cy="275.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="633.6" cy="277.9" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="647.5" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="647.5" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="647.5" cy="276.2" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="661.3" cy="72.4" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="661.3" cy="278.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="661.3" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="675.2" cy="69.6" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="675.2" cy="275.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="675.2" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="689.1" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
+<circle cx="689.1" cy="278.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
+<circle cx="689.1" cy="278.3" r="3.5" fill="#22c55e" opacity="0.7"/>
+<circle cx="80" cy="40" r="5" fill="#3b82f6" opacity="0.8"/>
+<text x="90" y="44" fill="#374151" font-size="12">Stable prefix</text>
+<circle cx="240" cy="40" r="5" fill="#ef4444" opacity="0.8"/>
+<text x="250" y="44" fill="#374151" font-size="12">Varying prefix</text>
+<circle cx="400" cy="40" r="5" fill="#22c55e" opacity="0.8"/>
+<text x="410" y="44" fill="#374151" font-size="12">Stripped prefix</text>
+</svg>
+
+<p style="text-align:center;color:#6b7280;font-size:0.9em;margin-top:0.5em"><em>Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168–169 ms TTFT; a varying prefix jumps to ~911 ms.</em></p>
 
 ## Reasoning Fidelity Is KV Correctness
 
