@@ -1,19 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::{Component, Instance};
+use crate::component::{
+    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+};
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
+use crate::{discovery, system_status_server, transports};
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
 };
-use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
@@ -35,6 +36,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
@@ -64,6 +66,7 @@ pub struct DistributedRuntime {
     component_registry: component::Registry,
 
     instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -185,6 +188,7 @@ impl DistributedRuntime {
             discovery_metadata,
             component_registry,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
@@ -388,6 +392,10 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
+    }
+
+    pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
+        self.routing_occupancy_states.clone()
     }
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for

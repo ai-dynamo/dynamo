@@ -18,6 +18,10 @@ dynamo:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
+  planner_build_image: python
+  planner_build_image_tag: 3.12-slim
+  planner_runtime_image: nvcr.io/nvidia/distroless/python
+  planner_runtime_image_tag: 3.12-v4.0.3
   python_version: "3.12"
 
   nats_version: v2.10.28
