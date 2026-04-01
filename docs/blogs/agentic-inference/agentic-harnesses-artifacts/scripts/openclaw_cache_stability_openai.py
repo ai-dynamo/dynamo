@@ -1,23 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
-"""OpenClaw prompt cache stability experiment.
+"""OpenClaw prompt cache stability experiment (OpenAI format).
 
-OpenClaw multi-turn chat pattern: long-lived conversations where the system
-prompt stays constant across many turns (no per-session billing header like
-Claude Code). This should yield excellent prefix cache reuse on Dynamo.
+Adapted from openclaw_cache_stability.py to use OpenAI Chat Completions API
+instead of Anthropic Messages API (for use with standalone vLLM).
 
 Measures TTFT across N turns of a multi-turn conversation, comparing:
   Condition A (stable):   Same system prompt, growing conversation history
   Condition B (varying):  New random preamble injected each turn (simulates
                           a harness that mutates the system prompt)
-  Condition C (stripped): Billing-style header prepended but Dynamo strips it
-                          (DYN_STRIP_ANTHROPIC_PREAMBLE=1)
-
-Uses the Anthropic Messages API format (what OpenClaw uses to talk to Dynamo).
+  Condition C (stripped): Billing-style header prepended (cache-busting preamble)
 
 Usage:
-    python3 openclaw_cache_stability.py \\
+    python3 openclaw_cache_stability_openai.py \\
         --url http://localhost:8000 \\
         --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \\
         --turns 8 --rounds 3 \\
@@ -69,7 +65,6 @@ When you need to use a tool, emit a tool_use block. Available tools:
 """
 
 # Pad system prompt to ~8K tokens for measurable cache effect
-# (OpenClaw system prompts are shorter than Claude Code's 54K but still significant)
 PADDING = """
 # Additional Context and Knowledge Base
 
@@ -105,13 +100,11 @@ def build_system_prompt(condition: str, base_prompt: str) -> str:
     if condition == "stable":
         return base_prompt
     elif condition == "varying":
-        # Inject a random preamble that changes each turn
         session_id = uuid.uuid4().hex[:16]
         return (
             f"Session context: {session_id}\nTimestamp: {time.time()}\n\n{base_prompt}"
         )
     elif condition == "stripped":
-        # Inject a billing-style header that Dynamo will strip
         session_id = uuid.uuid4().hex[:12]
         return f"x-anthropic-billing-header: cc_version=0.2.93; cch={session_id};\n{base_prompt}"
     else:
@@ -119,7 +112,7 @@ def build_system_prompt(condition: str, base_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Multi-turn conversation prompts (simulating a real OpenClaw session)
+# Multi-turn conversation prompts
 # ---------------------------------------------------------------------------
 
 USER_MESSAGES = [
@@ -136,29 +129,32 @@ USER_MESSAGES = [
 ]
 
 
-def send_anthropic_message(
+def send_openai_message(
     url: str,
     model: str,
     system: str,
     messages: list[dict],
     max_tokens: int = 200,
 ) -> dict:
-    """Send a streaming Anthropic Messages API request and return timing + usage."""
+    """Send a streaming OpenAI Chat Completions request and return timing + usage."""
+    # Build messages list with system prompt first
+    full_messages = [{"role": "system", "content": system}] + messages
+
     body = {
         "model": model,
         "max_tokens": max_tokens,
         "stream": True,
-        "system": system,
-        "messages": messages,
+        "stream_options": {"include_usage": True},
+        "messages": full_messages,
     }
 
     t0 = time.monotonic()
     resp = requests.post(
-        f"{url}/v1/messages",
+        f"{url}/v1/chat/completions",
         json=body,
-        headers={"Content-Type": "application/json", "x-api-key": "dummy"},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"},
         stream=True,
-        timeout=60,
+        timeout=120,
     )
     resp.raise_for_status()
 
@@ -180,28 +176,27 @@ def send_anthropic_message(
         except json.JSONDecodeError:
             continue
 
-        etype = event.get("type", "")
+        choices = event.get("choices", [])
+        usage = event.get("usage")
 
         # First content delta = TTFT
-        if etype == "content_block_delta" and ttft is None:
+        if choices and choices[0].get("delta", {}).get("content") and ttft is None:
             ttft = (time.monotonic() - t0) * 1000
 
-        if etype == "content_block_delta":
-            delta = event.get("delta", {})
-            full_text += delta.get("text", "")
+        if choices:
+            delta = choices[0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                full_text += content
 
-        # Usage from message_delta (final event)
-        if etype == "message_delta":
-            usage = event.get("usage", {})
-            output_tokens = usage.get("output_tokens", 0)
-
-        # Usage from message_start
-        if etype == "message_start":
-            msg = event.get("message", {})
-            usage = msg.get("usage", {})
-            input_tokens = usage.get("input_tokens", 0)
-            cache_read = usage.get("cache_read_input_tokens", 0)
-            cache_creation = usage.get("cache_creation_input_tokens", 0)
+        # Usage from final chunk (stream_options.include_usage)
+        if usage:
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            # vLLM may report cache hit tokens in prompt_tokens_details
+            details = usage.get("prompt_tokens_details", {})
+            if details:
+                cache_read = details.get("cached_tokens", 0)
 
     resp.close()
     total_ms = (time.monotonic() - t0) * 1000
@@ -236,7 +231,7 @@ def run_multiturn_session(
         # Build system prompt (may vary per turn for "varying" condition)
         system = build_system_prompt(condition, system_base)
 
-        metrics = send_anthropic_message(url, model, system, messages, max_tokens=200)
+        metrics = send_openai_message(url, model, system, messages, max_tokens=200)
 
         result = {
             "round": round_idx + 1,
@@ -264,7 +259,7 @@ def run_multiturn_session(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenClaw prompt cache stability experiment"
+        description="OpenClaw prompt cache stability experiment (OpenAI format)"
     )
     parser.add_argument("--url", default="http://localhost:8000")
     parser.add_argument(
@@ -280,7 +275,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Build system prompt
     if args.system_prompt_file:
         with open(args.system_prompt_file) as f:
             system_base = f.read()
@@ -300,13 +294,11 @@ def main():
                 args.url, args.model, condition, system_base, args.turns, r
             )
             all_results.extend(results)
-            # Pause between conditions to let cache settle
             time.sleep(2)
 
     # Write JSONL
     with open(args.jsonl, "w") as f:
         for row in all_results:
-            # Remove response_preview from output (verbose)
             out = {k: v for k, v in row.items() if k != "response_preview"}
             f.write(json.dumps(out) + "\n")
     print(f"\nWrote {len(all_results)} records to {args.jsonl}", file=sys.stderr)
