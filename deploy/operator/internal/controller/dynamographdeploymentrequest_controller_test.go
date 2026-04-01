@@ -1967,15 +1967,19 @@ spec:
 			}}
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
-			// Create output ConfigMap with mocker output file
+			// Create output ConfigMap with profiling output (the profiler itself handles mocker
+			// selection; the controller always reads from ProfilingOutputFile regardless).
 			dgdYAML := `apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test-dgd-mocker
+  name: vllm-agg
 spec:
   services:
     Frontend:
       replicas: 1`
+
+			// expectedDGDName is derived from the DGDR name, not from the profiler's output.
+			expectedDGDName := dgdrName + "-dgd"
 
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1989,16 +1993,17 @@ spec:
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cm) }()
 
-			// Reconcile — should read from mocker output file
+			// Reconcile — controller reads ProfilingOutputFile, then overrides the name to
+			// a DGDR-scoped unique name, and stores the result in the annotation.
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify the generated spec came from the mocker file
+			// Verify the generated spec was stored and contains the DGDR-scoped DGD name.
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).Should(ContainSubstring("test-dgd-mocker"))
+			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).Should(ContainSubstring(expectedDGDName))
 		})
 
 		It("Should populate profilingJobName in status", func() {
