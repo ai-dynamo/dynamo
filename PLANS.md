@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:42:06 UTC
+Last updated: 2026-04-01 05:43:49 UTC
 
 ## Active state
 
@@ -1385,6 +1385,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     backlog already captured below
 - ✅ Refreshed `PLANS.md` again so this audit, the searched scope, and the
   exact next-step handoff are all written to disk for the next run
+- ✅ Completed the required signed docs-only audit commit:
+  - `083cecb42 docs: refresh g3pb audit handoff`
+- ✅ Re-read `PLANS.md` after that commit and found one stale handoff detail:
+  the current-run text still said “commit next”
+- ✅ Corrected that stale handoff detail so the on-disk plan matches the
+  current committed repo state
 
 ### Current findings before final handoff
 
@@ -1430,21 +1436,21 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- make the required signed small docs-only commit once validation is green
-- re-read `PLANS.md` after the commit to ensure no new handoff gap remains
+- none
 
 ### Exact next step
 
-- commit this refreshed audit/handoff entry with `--signoff`, then re-read
-  `PLANS.md` once more before stopping
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
-- if this run completes cleanly, the active `G3PB` implementation slice should
-  still be treated as complete
+- the active `G3PB` implementation slice still should be treated as complete
 - this run specifically rechecked the active handoff/code surface for new
   `G3PB`-specific TODOs, cleanup items, docs gaps, or validation gaps and found
   none beyond the existing backlog
+- this run also corrected the last stale handoff detail after the docs-only
+  audit commit so `PLANS.md` now matches the current committed repo state
 - resume only from the existing non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
