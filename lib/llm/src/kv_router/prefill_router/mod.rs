@@ -146,6 +146,10 @@ impl
                 // KV cache transfers and leaking blocks permanently. The prefill
                 // runs to completion independently; blocks are freed via the normal
                 // completion path (state 21→22).
+                // NOTE: This means prefill runs to completion even if the client
+                // disconnects, wasting prefill compute. This is an accepted
+                // trade-off (wasted compute vs permanent KV block leak). Future
+                // work: add NIXL-level cancellation that properly frees blocks.
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
                 // Pass the phase barrier to the spawned task. It is released after routing
@@ -184,8 +188,9 @@ impl
         // NVBugs 5969206: Do NOT abort decode routing when context is killed.
         // In disaggregated serving, the prefill may have completed and KV transfer
         // is in flight. Blocking decode here orphans the transfer (no receiver)
-        // and leaks KV blocks permanently. The decode handler's first_token_event
-        // guard will clean up after KV is received.
+        // and leaks KV blocks permanently. The decode handler's
+        // kv_transfer_complete_event guard will clean up after KV is received.
+        // Log-only; decode routing must proceed for KV transfer cleanup.
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
             tracing::debug!(
                 "Context {} killed/stopped after prefill, allowing decode routing for KV transfer",

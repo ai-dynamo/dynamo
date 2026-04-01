@@ -200,15 +200,16 @@ class HandlerBase(BaseGenerativeHandler):
         self,
         generation_result: GenerationResult,
         context: Context,
-        first_token_event: Optional[asyncio.Event] = None,
+        kv_transfer_complete_event: Optional[asyncio.Event] = None,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        In disaggregated decode mode, abort is delayed until first token is received
-        (first_token_event), ensuring KV cache transfer from prefill completes before
-        the decode worker stops. See NVBugs 5969206.
+        In disaggregated decode mode, abort is delayed until
+        kv_transfer_complete_event is set (first generation result received),
+        ensuring KV cache transfer from prefill completes before the decode
+        worker stops. See NVBugs 5969206.
 
         Raise EngineShutdown if shutdown event is triggered.
         """
@@ -246,14 +247,41 @@ class HandlerBase(BaseGenerativeHandler):
                     f"Request ID {context.id()} cancelled but abort() skipped "
                     "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
                 )
-            elif first_token_event is not None and not first_token_event.is_set():
-                # Decode waiting for KV — delay abort until first token confirms
-                # KV cache transfer is complete. See NVBugs 5969206.
+            elif (
+                kv_transfer_complete_event is not None
+                and not kv_transfer_complete_event.is_set()
+            ):
+                # Decode waiting for KV — delay abort until first generation
+                # result confirms KV cache transfer is complete. Continue to
+                # observe shutdown_task so EngineShutdown still propagates
+                # if the engine shuts down while we wait. See NVBugs 5969206.
                 logging.debug(
-                    f"Request ID {context.id()} cancelled, waiting for first "
-                    "token before abort (disagg decode KV transfer guard)"
+                    f"Request ID {context.id()} cancelled, waiting for KV "
+                    "transfer to complete before abort (disagg decode guard)"
                 )
-                await first_token_event.wait()
+                kv_wait_task = asyncio.create_task(
+                    kv_transfer_complete_event.wait()
+                )
+                try:
+                    guard_waiters: list[asyncio.Task] = [kv_wait_task]
+                    if shutdown_task is not None:
+                        guard_waiters.append(shutdown_task)
+                    guard_done, _ = await asyncio.wait(
+                        guard_waiters,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if shutdown_task in guard_done:
+                        generation_result.abort()
+                        raise EngineShutdown(
+                            "Engine was shut down during generation."
+                        )
+                finally:
+                    if not kv_wait_task.done():
+                        kv_wait_task.cancel()
+                        try:
+                            await kv_wait_task
+                        except asyncio.CancelledError:
+                            pass
                 generation_result.abort()
                 logging.debug(f"Aborted Request ID: {context.id()}")
             else:
@@ -277,14 +305,15 @@ class HandlerBase(BaseGenerativeHandler):
         self,
         generation_result: GenerationResult,
         context: Context,
-        first_token_event: Optional[asyncio.Event] = None,
+        kv_transfer_complete_event: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        In disaggregated decode mode, first_token_event delays abort until
-        first token is received, ensuring KV cache transfer completes.
+        In disaggregated decode mode, kv_transfer_complete_event delays abort
+        until the first generation result is received, ensuring KV cache
+        transfer completes.
 
         Raise EngineShutdown if shutdown event is triggered.
 
@@ -295,7 +324,7 @@ class HandlerBase(BaseGenerativeHandler):
             self._handle_cancellation(
                 generation_result,
                 context,
-                first_token_event=first_token_event,
+                kv_transfer_complete_event=kv_transfer_complete_event,
             )
         )
 
@@ -859,9 +888,9 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
-            # In disagg decode mode, create first_token_event to delay abort until
-            # KV cache transfer completes. See NVBugs 5969206.
-            first_token_event = (
+            # In disagg decode mode, create kv_transfer_complete_event to delay
+            # abort until KV cache transfer completes. See NVBugs 5969206.
+            kv_transfer_complete_event = (
                 asyncio.Event()
                 if self.disaggregation_mode == DisaggregationMode.DECODE
                 else None
@@ -871,14 +900,14 @@ class HandlerBase(BaseGenerativeHandler):
             async with self._cancellation_monitor(
                 generation_result,
                 context,
-                first_token_event=first_token_event,
+                kv_transfer_complete_event=kv_transfer_complete_event,
             ):
-                _first_result_signaled = False
+                _kv_signaled = False
                 async for res in generation_result:
-                    # Signal first_token_event on first result (decode KV received)
-                    if not _first_result_signaled and first_token_event is not None:
-                        first_token_event.set()
-                        _first_result_signaled = True
+                    # Signal kv_transfer_complete on first result (decode KV received)
+                    if not _kv_signaled and kv_transfer_complete_event is not None:
+                        kv_transfer_complete_event.set()
+                        _kv_signaled = True
 
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.

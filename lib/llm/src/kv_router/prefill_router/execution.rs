@@ -312,6 +312,8 @@ impl PrefillRouter {
 }
 
 // NVBugs 5969206: link_child_context removed — linking prefill as a child of
-// engine_context causes kill propagation that tears down the RPC transport,
+// engine_context caused kill propagation that tears down the RPC transport,
 // interrupting NIXL KV cache transfers and leaking blocks permanently.
 // Prefill context is now created without linking (Context::with_id only).
+// Abort on the decode side is deferred via kv_transfer_complete_event in
+// handler_base.py until the first generation result confirms KV receipt.
