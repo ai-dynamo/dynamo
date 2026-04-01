@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:28:01 UTC
+Last updated: 2026-04-01 06:32:58 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 06:28:01 UTC)
+## Current run (2026-04-01 06:32:58 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1470,11 +1470,11 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Re-audited the active `G3PB` surface against the current repo state:
   - detached `HEAD`
   - clean worktree at pickup
-  - current tip at pickup: `be72764348ea`
+  - current tip at pickup: `a1e8ff3bbc07`
   - recent audit-only commits still match the last recorded handoff:
+    - `a1e8ff3bb docs: refresh g3pb audit handoff`
     - `be7276434 docs: finalize g3pb audit handoff`
     - `cbc426b16 docs: refresh g3pb audit handoff`
-    - `7d83c49c5 docs: finalize g3pb audit handoff`
 - ✅ Re-searched the active handoff/code surface for remaining concrete work:
   - searched `PLANS.md`, `docs/design-docs/kvbm-g3pb-plan.md`,
     `lib/llm/src`, and `lib/bindings/kvbm/src`
@@ -1488,12 +1488,16 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Refreshed `PLANS.md` so this audit, the current `HEAD`, the exact
   validation commands, and the next-run handoff are written to disk without
   adding another duplicate audit block
+- ✅ Kept this audit docs-only:
+  - no product/runtime code changes were required
+  - no new `G3PB`-specific TODO, cleanup item, docs gap, or validation gap was
+    found beyond the existing backlog
 
 ### Current findings before final handoff
 
 - the active `G3PB` implementation slice still appears complete on current
   `HEAD`
-  - pickup commit: `be72764348ea`
+  - pickup commit: `a1e8ff3bbc07`
   - no new implementation gap, cleanup item, docs gap, or validation gap was
     found by this run’s targeted audit
 - `Agents.md`, `PLANS.md`, and
@@ -1537,12 +1541,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- none
+- refresh `git diff --check` after this `PLANS.md` edit
+- make the signed docs-only handoff commit once the worktree is clean
 
 ### Exact next step
 
-- if another run continues from here, resume only from the existing
-  non-blocking follow-on backlog
+- run `git diff --check`, then commit this `PLANS.md` refresh with `--signoff`
 
 ### Handoff for next run
 
@@ -1551,7 +1555,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the active `G3PB` implementation slice should still be treated as complete
   unless a future audit finds a concrete new gap
 - do not spend another run repeating the same audit-only update unless the
-  repo state has actually moved
+  repo state has actually moved; if this run's docs-only commit is already on
+  `HEAD`, resume directly from the existing backlog instead
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
