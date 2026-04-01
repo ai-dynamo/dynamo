@@ -1373,6 +1373,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - this run also rechecked the required design doc and searched for new
   `G3PB`-specific drift; no new active-slice work was found
 - this run is now committed as:
+  - `82658d841 docs: finalize g3pb audit handoff`
   - `10a731513 docs: refresh g3pb audit handoff`
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
