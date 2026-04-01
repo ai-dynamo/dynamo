@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 09:07:21 UTC
+Last updated: 2026-04-01 09:13:19 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 09:07:21 UTC
   - this run is a validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 09:07:21 UTC)
+## Current run (2026-04-01 09:13:19 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -48,14 +48,12 @@ Last updated: 2026-04-01 09:07:21 UTC
 - ✅ Re-read the refreshed handoff state after validation and confirmed there
   is still no remaining in-scope implementation, cleanup, docs, or validation
   work for the active `G3PB` slice
-- ✅ Compacted `PLANS.md` again so the next run starts from the current tip
-  instead of the previously recorded docs-only handoff commit
+- ✅ Compacted `PLANS.md` again so the next run starts from the live validated
+  tip and the current green validation evidence
 
 ### Current findings in this run
 
-- the previous handoff tip recorded in `PLANS.md` (`a4fbdf66c137`) was stale;
-  validation in this run started from live detached `HEAD`
-  `2427306c033f`
+- the current detached `HEAD` at validation start is `969730570296`
 - the current `HEAD` is still a docs-only handoff refresh above the same
   validated non-docs `G3PB` implementation baseline
 - the active `G3PB` implementation slice still appears complete on the live
@@ -66,10 +64,11 @@ Last updated: 2026-04-01 09:07:21 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`2427306c033f`)
+  - pass (`969730570296`)
 - `git log --oneline -8`
   - pass
   - current recent history:
+    - `969730570 docs: refresh g3pb handoff state`
     - `2427306c0 docs: refresh g3pb handoff state`
     - `a4fbdf66c docs: stabilize g3pb handoff instructions`
     - `b482da9e9 docs: refresh g3pb handoff state`
@@ -109,11 +108,14 @@ Last updated: 2026-04-01 09:07:21 UTC
 
 ### Remaining work in this run
 
-- none
+- re-read this file once more after the docs refresh edit, then write the
+  signed docs-only handoff refresh commit if the tree still contains only
+  `PLANS.md`
 
 ### Exact next step
 
-- run `git rev-parse --short=12 HEAD && sed -n '1,220p' Agents.md && sed -n '1,260p' PLANS.md && sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`, then leave the active `G3PB` slice closed unless a new regression or explicitly new scope appears
+- run `sed -n '1,260p' PLANS.md && git status --short --branch`, then commit
+  this docs-only handoff refresh with `git commit --signoff`
 
 ### Handoff for next run
 
@@ -126,6 +128,8 @@ Last updated: 2026-04-01 09:07:21 UTC
 - validate from the live detached `HEAD` rather than assuming the previous
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
+- the most recent green validation stack in this file was run from detached
+  `HEAD` `969730570296`
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
