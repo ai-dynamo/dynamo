@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:03:07 UTC
+Last updated: 2026-04-01 11:03:33 UTC
 
 ## Active state
 
@@ -30,7 +30,7 @@ Last updated: 2026-04-01 11:03:07 UTC
     live detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 11:03:07 UTC)
+## Current run (2026-04-01 11:03:33 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -55,6 +55,8 @@ Last updated: 2026-04-01 11:03:07 UTC
   `0d4b3257c273`
 - Re-ran post-edit `g3pb::` spot checks after compacting the handoff, and they
   passed
+- Landed a signed docs-only handoff commit after the post-edit validation
+  passed
 
 ### Current findings in this run
 
@@ -66,6 +68,8 @@ Last updated: 2026-04-01 11:03:07 UTC
 - no new `G3PB` implementation gap was identified by the audit or validation
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
+- the live detached `HEAD` is now newer than the validated implementation tip
+  only by docs-only handoff commit(s) from this run
 - no code changes are pending for the active `G3PB` slice
 
 ### Validation completed in this run
@@ -106,6 +110,10 @@ Last updated: 2026-04-01 11:03:07 UTC
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
+- `git add PLANS.md`
+  - pass
+- `git commit --signoff -m "docs: compact g3pb handoff"`
+  - pass
 
 ### Decisions confirmed in this run
 
@@ -119,13 +127,14 @@ Last updated: 2026-04-01 11:03:07 UTC
 
 ### Remaining work in this run
 
-- land a signed docs-only handoff commit from this validated docs-only state
+- none
 
 ### Exact next step
 
-- run `git status --short --branch`, then `git add PLANS.md` and
-  `git commit --signoff -m "docs: compact g3pb handoff"` from this docs-only
-  validated state
+- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`, then
+  `git rev-parse --short=12 HEAD`, `git status --short --branch`, and `sed -n
+  '1,260p' PLANS.md`, then leave the active `G3PB` slice closed unless a fresh
+  regression or explicitly new scope appears
 
 ### Handoff for next run
 
@@ -137,7 +146,7 @@ Last updated: 2026-04-01 11:03:07 UTC
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `0d4b3257c273` before the next docs-only handoff commit
+  `0d4b3257c273`, then landed signed docs-only handoff commit(s) on top
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
