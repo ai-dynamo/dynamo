@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:04:35 UTC
+Last updated: 2026-04-01 08:07:28 UTC
 
 ## Active state
 
@@ -19,8 +19,9 @@ Last updated: 2026-04-01 08:04:35 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
-  - current `HEAD` is `637551b01afa` (`docs: refresh g3pb validation handoff`)
-  - the latest validated non-docs `G3PB` code commit directly below `HEAD` is
+  - current detached `HEAD` is expected to be a signed docs-only handoff
+    refresh above the latest validated non-docs `G3PB` code commit
+  - the latest validated non-docs `G3PB` code commit remains
     `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - no open implementation work remains for the active `G3PB` slice after the
     landed test-stability fix and the refreshed validation rerun recorded by
@@ -42,10 +43,9 @@ Last updated: 2026-04-01 08:04:35 UTC
   state:
   - detached `HEAD`
   - pickup commit: `abfc85ffd0a4`
-  - recorded signed handoff commit after validation:
-    - `637551b01 docs: refresh g3pb validation handoff`
-  - latest validated non-docs implementation commit directly below that
-    handoff:
+  - a signed docs-only handoff commit was recorded after validation
+  - latest validated non-docs implementation commit directly below the handoff
+    tip:
     - `abfc85ffd llm: stabilize g3pb cache storage test`
 - ✅ Re-ran the focused `G3PB` / bindings validation stack from the current
   landed state
@@ -58,7 +58,7 @@ Last updated: 2026-04-01 08:04:35 UTC
 ### Current findings in this run
 
 - the active `G3PB` implementation slice remains complete on current
-  `HEAD` (`637551b01afa`), with the validated non-docs implementation state at
+  detached `HEAD`, with the validated non-docs implementation state at
   `abfc85ffd0a4`
 - the previously recorded cache-storage suite flake is already fixed by the
   landed test-capacity change in `abfc85ffd`
@@ -74,18 +74,17 @@ Last updated: 2026-04-01 08:04:35 UTC
 
 ### Exact next step
 
-- if another run starts from `637551b01afa`, do not reopen the completed
+- if another run starts from the resulting detached `HEAD`, do not reopen the
+  completed
   `G3PB` slice unless a new regression appears or new scope is explicitly
   chosen; resume only from the existing non-blocking follow-on backlog
 
 ### Validation completed in this run so far
 
-- `git rev-parse --short=12 HEAD`
-  - pass (`637551b01afa`)
 - `git log --oneline -5`
   - pass
-  - current recent history:
-    - `637551b01 docs: refresh g3pb validation handoff`
+  - validation-time recent history included the stabilized test fix on top of
+    the prior docs handoff chain:
     - `abfc85ffd llm: stabilize g3pb cache storage test`
     - `988246eef docs: finalize g3pb completion handoff`
     - `f2da43712 docs: finalize g3pb completion handoff`
@@ -101,7 +100,8 @@ Last updated: 2026-04-01 08:04:35 UTC
 
 ### Decisions confirmed in this run so far
 
-- keep treating the active `G3PB` slice as complete on `637551b01afa` unless a
+- keep treating the active `G3PB` slice as complete on the resulting detached
+  `HEAD` unless a
   new focused validation rerun exposes a concrete regression
 - do not spend another run producing a near-duplicate docs-only audit refresh
   when the active code/test state has not changed
@@ -111,8 +111,8 @@ Last updated: 2026-04-01 08:04:35 UTC
 ### Handoff for next run
 
 - this run confirmed the landed cache-storage test-stability fix is present on
-  `abfc85ffd0a4`, recorded that verified state in signed handoff commit
-  `637551b01afa`, and the focused `G3PB` / bindings validation stack remains
+  `abfc85ffd0a4`, recorded that verified state in a signed docs-only handoff
+  commit above it, and the focused `G3PB` / bindings validation stack remains
   green for that code state
 - there is still no remaining in-scope implementation work for the active
   `G3PB` slice
