@@ -467,7 +467,6 @@ impl ResponseStorage for RedisResponseStorage {
 
         Ok(responses)
     }
-
 }
 
 #[cfg(test)]
@@ -477,7 +476,9 @@ mod tests {
 
     /// Helper to check if Redis is available
     async fn redis_available() -> bool {
-        RedisResponseStorage::new("redis://localhost:6379", 0).await.is_ok()
+        RedisResponseStorage::new("redis://localhost:6379", 0)
+            .await
+            .is_ok()
     }
 
     #[tokio::test]

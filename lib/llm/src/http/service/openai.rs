@@ -1900,7 +1900,9 @@ async fn responses(
                     let mut conv = match converter.lock() {
                         Ok(guard) => guard,
                         Err(_) => {
-                            tracing::error!("Response stream converter mutex poisoned, dropping chunk");
+                            tracing::error!(
+                                "Response stream converter mutex poisoned, dropping chunk"
+                            );
                             return None;
                         }
                     };
@@ -1917,7 +1919,9 @@ async fn responses(
             let mut conv = match converter_end.lock() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    tracing::error!("Response stream converter mutex poisoned, dropping end events");
+                    tracing::error!(
+                        "Response stream converter mutex poisoned, dropping end events"
+                    );
                     return stream::iter(vec![]);
                 }
             };
@@ -2075,8 +2079,6 @@ pub fn validate_response_unsupported_fields(
     }
     // Note: store: true is now supported via the stateful responses storage layer
     // Note: previous_response_id is now supported via stateful responses
-        ));
-    }
     None
 }
 
@@ -2244,12 +2246,10 @@ async fn handler_get_response(
                 message: "Response not found".to_string(),
             }))
         }
-        Err(StorageError::InvalidKey(msg)) => {
-            Err(ErrorMessage::from_http_error(HttpError {
-                code: 400,
-                message: format!("Invalid response ID: {msg}"),
-            }))
-        }
+        Err(StorageError::InvalidKey(msg)) => Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: format!("Invalid response ID: {msg}"),
+        })),
         Err(e) => {
             tracing::error!(
                 tenant_id = %session.tenant_id,
@@ -2307,12 +2307,10 @@ async fn handler_delete_response(
                 message: "Response not found".to_string(),
             }))
         }
-        Err(StorageError::InvalidKey(msg)) => {
-            Err(ErrorMessage::from_http_error(HttpError {
-                code: 400,
-                message: format!("Invalid response ID: {msg}"),
-            }))
-        }
+        Err(StorageError::InvalidKey(msg)) => Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: format!("Invalid response ID: {msg}"),
+        })),
         Err(e) => {
             tracing::error!(
                 tenant_id = %session.tenant_id,

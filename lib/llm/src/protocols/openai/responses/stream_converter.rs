@@ -111,7 +111,6 @@ impl ResponseStreamConverter {
     pub fn response_id(&self) -> &str {
         &self.response_id
     }
-    }
 
     fn next_seq(&mut self) -> u64 {
         let seq = self.sequence_number;
