@@ -12,6 +12,7 @@ aggregated and disaggregated determinism tests.
 import importlib.util
 import os
 import re
+import tempfile
 import time
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -734,9 +735,17 @@ class TestDeterminism:
         """
         import subprocess
 
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        model = llm_server.model_config.model_id
+        # Keep prompts short enough that the tokenizer decoding phase completes
+        # well within KVBM_BENCH_STARTUP_WAIT (default 120s).  2000 × 4000-token
+        # prompts take ~160s to decode; 500 × 1000-token prompts take ~10s and
+        # still create enough requests to overflow the GPU KV cache (2048 blocks /
+        # ~63 blocks per 1000-token request ≈ 33 requests to fill, easily
+        # exceeded before the 500-prompt run finishes).
+        num_prompts = int(os.environ.get("KVBM_BENCH_NUM_PROMPTS", "500"))
+        input_len = int(os.environ.get("KVBM_BENCH_INPUT_LEN", "1000"))
+        output_len = int(os.environ.get("KVBM_BENCH_OUTPUT_LEN", "180"))
+        concurrency = int(os.environ.get("KVBM_BENCH_CONCURRENCY", "7"))
         bench_cmd = [
             "vllm",
             "bench",
@@ -750,17 +759,17 @@ class TestDeterminism:
             "--dataset-name",
             "random",
             "--random-input-len",
-            "4000",
+            str(input_len),
             "--random-output-len",
-            "180",
+            str(output_len),
             "--max-concurrency",
-            "7",
+            str(concurrency),
             "--num-prompts",
-            "2000",
+            str(num_prompts),
         ]
 
         print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
-        bench_log = os.path.join(str(Path(".")), "vllm_bench_semantic.log")
+        bench_log = os.path.join(tempfile.gettempdir(), "vllm_bench_semantic.log")
         bench_file = open(bench_log, "w")
         bench_process = subprocess.Popen(
             bench_cmd,
