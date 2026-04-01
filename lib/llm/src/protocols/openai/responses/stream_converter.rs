@@ -16,12 +16,13 @@ use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent, ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ResponseUsage, ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions,
+    ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
 
@@ -150,7 +151,10 @@ impl ResponseStreamConverter {
             incomplete_details: None,
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
-            previous_response_id: None,
+            previous_response_id: self
+                .api_context
+                .as_ref()
+                .and_then(|ctx| ctx.previous_response_id.clone()),
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
@@ -944,9 +948,11 @@ mod tests {
         let _ = conv.process_chunk(&text_chunk("Hello"));
         let _end_events = conv.emit_end_events();
 
-        let _response = conv.make_response(Status::Completed, vec![]);
-        // NOTE: `store` and `previous_response_id` propagation assertions
-        // will be re-enabled once the upstream Response struct gains these fields.
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(
+            response.previous_response_id.as_deref(),
+            Some("resp_prev_123")
+        );
     }
 
     /// Without context, previous_response_id is None.

@@ -48,7 +48,7 @@ pub struct NvCreateResponse {
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
-    /// Flattened Response fields.
+    /// Flattened Response fields (includes upstream + extended spec fields).
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::Response,
@@ -676,7 +676,7 @@ fn make_function_call(name: String, arguments: String) -> OutputItem {
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
-    _api_context: Option<&crate::protocols::unified::ResponsesContext>,
+    api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
@@ -816,7 +816,8 @@ pub fn chat_completion_to_response(
         incomplete_details: None,
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
-        previous_response_id: None,
+        previous_response_id: api_context
+            .and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
         prompt_cache_key: None,
         prompt_cache_retention: None,
