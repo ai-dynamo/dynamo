@@ -19,7 +19,9 @@ package validation
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -125,6 +127,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 
 	// Validate EPP-specific constraints
 	if err := v.validateEPPConfig(ctx); err != nil {
+		return nil, err
+	}
+
+	// Validate GMS failover constraints
+	if err := v.validateFailover(); err != nil {
 		return nil, err
 	}
 
@@ -253,6 +260,36 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 		}
 	}
 	return nil
+}
+
+// validateFailover validates GMS failover configuration constraints.
+func (v *SharedSpecValidator) validateFailover() error {
+	if !v.spec.IsGMSEnabled() {
+		return nil
+	}
+
+	var errs []error
+
+	if v.spec.Failover.NumShadows < 1 {
+		errs = append(errs, fmt.Errorf("%s.failover.numShadows must be >= 1", v.fieldPath))
+	}
+
+	gpuCount := int64(0)
+	if v.spec.Resources != nil && v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "" {
+		if n, err := strconv.ParseInt(v.spec.Resources.Limits.GPU, 10, 32); err == nil {
+			gpuCount = n
+		}
+	}
+	if gpuCount < 1 {
+		errs = append(errs, fmt.Errorf("%s: GMS failover requires at least 1 GPU in resources.limits.gpu", v.fieldPath))
+	}
+
+	switch v.spec.ComponentType {
+	case consts.ComponentTypeEPP, consts.ComponentTypeFrontend, consts.ComponentTypePlanner:
+		errs = append(errs, fmt.Errorf("%s: GMS failover is not supported for componentType %q", v.fieldPath, v.spec.ComponentType))
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateServiceAnnotations validates known annotations on the service-level spec.

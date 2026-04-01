@@ -693,7 +693,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

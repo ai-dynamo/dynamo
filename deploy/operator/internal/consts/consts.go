@@ -120,6 +120,7 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+	GroveRoleSuffixGMS    = "gms"
 
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
