@@ -3,15 +3,15 @@
 
 //! Anthropic Messages API conversion logic.
 //!
-//! Pure protocol types live in `dynamo_async_openai::types::anthropic`.
+//! Pure protocol types live in `dynamo_protocols::types::anthropic`.
 //! This module provides bidirectional conversion to/from the internal
 //! chat completions format used by the Dynamo engine.
 
 // Re-export all pure Anthropic protocol types so existing `use crate::protocols::anthropic::*`
 // continues to work throughout dynamo-llm.
-pub use dynamo_async_openai::types::anthropic::*;
+pub use dynamo_protocols::types::anthropic::*;
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
@@ -96,10 +96,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
-            .map(dynamo_async_openai::types::Stop::StringArray);
+            .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
-            inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
                 temperature: req.temperature,
@@ -109,7 +109,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
-                stream_options: Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
                     continuous_usage_stats: false,
                 }),
@@ -350,7 +350,7 @@ fn convert_assistant_blocks(
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
                     r#type: ChatCompletionToolType::Function,
-                    function: dynamo_async_openai::types::FunctionCall {
+                    function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
@@ -487,11 +487,11 @@ pub fn chat_completion_to_anthropic_response(
     if let Some(choice) = choice {
         // Map finish_reason
         stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_async_openai::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_async_openai::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
+            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
         // Extract tool calls
@@ -523,8 +523,8 @@ pub fn chat_completion_to_anthropic_response(
 
         // Extract text content
         let text = match choice.message.content {
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(t)) => Some(t),
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(t)) => Some(t),
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
                 tracing::warn!(
                     "Multimodal (Parts) content in chat completion response replaced with placeholder text in Anthropic conversion."
                 );
@@ -821,24 +821,22 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
-                choices: vec![dynamo_async_openai::types::ChatChoice {
+                choices: vec![dynamo_protocols::types::ChatChoice {
                     index: 0,
-                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                        content: Some(
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                "Hello!".to_string(),
-                            ),
-                        ),
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hello!".to_string(),
+                        )),
                         refusal: None,
                         tool_calls: None,
-                        role: dynamo_async_openai::types::Role::Assistant,
+                        role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
                         reasoning_content: None,
                     },
-                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                     stop_reason: None,
                     logprobs: None,
                 }],
@@ -847,7 +845,7 @@ mod tests {
                 service_tier: None,
                 system_fingerprint: None,
                 object: "chat.completion".to_string(),
-                usage: Some(dynamo_async_openai::types::CompletionUsage {
+                usage: Some(dynamo_protocols::types::CompletionUsage {
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,

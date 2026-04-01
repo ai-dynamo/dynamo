@@ -8,8 +8,8 @@
 // Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
-use dynamo_async_openai::types::CreateTranslationRequestArgs;
-use dynamo_async_openai::{Client, types::CreateTranscriptionRequestArgs};
+use dynamo_protocols::types::CreateTranslationRequestArgs;
+use dynamo_protocols::{Client, types::CreateTranscriptionRequestArgs};
 use tokio_test::assert_err;
 
 #[tokio::test]

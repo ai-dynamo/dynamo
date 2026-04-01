@@ -46,7 +46,7 @@ use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
 
-use dynamo_async_openai::types::responses::{IncludeEnum, Reasoning, Truncation};
+use dynamo_protocols::types::responses::{IncludeEnum, Reasoning, Truncation};
 
 use super::anthropic::types::{AnthropicCreateMessageRequest, ThinkingConfig};
 use super::openai::responses::NvCreateResponse;
@@ -417,8 +417,8 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
 
     fn get_stop(&self) -> Option<Vec<String>> {
         self.inner.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_async_openai::types::Stop::String(s) => vec![s.clone()],
-            dynamo_async_openai::types::Stop::StringArray(arr) => arr.clone(),
+            dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
+            dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
         })
     }
 
@@ -466,9 +466,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         Some(self.inner.inner.messages.as_slice())
     }
 
@@ -535,7 +533,7 @@ mod tests {
     #[test]
     fn test_chat_completions_roundtrip() {
         let req = NvCreateChatCompletionRequest {
-            inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
                 ..Default::default()

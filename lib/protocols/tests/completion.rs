@@ -9,7 +9,7 @@
 // Licensed under Apache 2.0
 
 //! This test is primarily to make sure that macros_rules for From traits are correct.
-use dynamo_async_openai::types::Prompt;
+use dynamo_protocols::types::Prompt;
 
 fn prompt_input<T>(input: T) -> Prompt
 where
