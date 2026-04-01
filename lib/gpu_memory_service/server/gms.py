@@ -241,9 +241,7 @@ class GMS:
                 raise AssertionError("RW state is not active")
 
             allocations = self._allocations.list_allocations()
-            allocations_by_id = {
-                info.allocation_id: info for info in allocations
-            }
+            allocations_by_id = {info.allocation_id: info for info in allocations}
             self._validate_metadata_integrity(allocations_by_id)
             self._memory_layout_hash = self._compute_memory_layout_hash(allocations)
 

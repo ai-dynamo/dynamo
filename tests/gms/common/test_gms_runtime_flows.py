@@ -130,9 +130,13 @@ def real_gms(monkeypatch, tmp_path):
         os.close(write_fd)
         return read_fd
 
-    monkeypatch.setattr(server_allocations, "cumem_export_to_shareable_handle", export_fd)
+    monkeypatch.setattr(
+        server_allocations, "cumem_export_to_shareable_handle", export_fd
+    )
 
-    monkeypatch.setattr(client_memory_manager, "cuda_set_current_device", lambda device: None)
+    monkeypatch.setattr(
+        client_memory_manager, "cuda_set_current_device", lambda device: None
+    )
     monkeypatch.setattr(
         client_memory_manager,
         "cumem_get_allocation_granularity",
@@ -149,7 +153,9 @@ def real_gms(monkeypatch, tmp_path):
         "cumem_address_free",
         lambda va, size: None,
     )
-    monkeypatch.setattr(client_memory_manager, "cumem_map", lambda va, size, handle: None)
+    monkeypatch.setattr(
+        client_memory_manager, "cumem_map", lambda va, size, handle: None
+    )
     monkeypatch.setattr(
         client_memory_manager,
         "cumem_set_access",
@@ -786,8 +792,7 @@ async def test_new_layout_large_allocation_waits_for_dead_writer_process(
         holder_log = tmp_path / "holder.log"
         holder_script = tmp_path / "hold_import.py"
         holder_script.write_text(
-            textwrap.dedent(
-                """
+            textwrap.dedent("""
                 import sys
                 import time
                 from pathlib import Path
@@ -797,8 +802,7 @@ async def test_new_layout_large_allocation_waits_for_dead_writer_process(
 
                 while True:
                     time.sleep(1.0)
-                """
-            ),
+                """),
             encoding="utf-8",
         )
 

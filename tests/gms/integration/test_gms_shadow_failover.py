@@ -73,7 +73,11 @@ def _assert_weights_published_once(events) -> None:
 
 
 def _assert_cleared_rw_layout_prefix(events, cleared_layouts: int) -> None:
-    expected_prefix = ["rw_connected", "rw_aborted", "allocations_cleared"] * cleared_layouts
+    expected_prefix = [
+        "rw_connected",
+        "rw_aborted",
+        "allocations_cleared",
+    ] * cleared_layouts
     assert [event.kind for event in events[: len(expected_prefix)]] == expected_prefix
     clear_counts = [
         event.allocation_count

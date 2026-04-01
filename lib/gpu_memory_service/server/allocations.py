@@ -152,7 +152,9 @@ class GMSAllocationManager:
         return info
 
     def export_allocation(self, allocation_id: str) -> int:
-        return cumem_export_to_shareable_handle(self.get_allocation(allocation_id).handle)
+        return cumem_export_to_shareable_handle(
+            self.get_allocation(allocation_id).handle
+        )
 
     def free_allocation(self, allocation_id: str) -> bool:
         info = self._allocations.get(allocation_id)

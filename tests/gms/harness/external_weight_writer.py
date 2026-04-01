@@ -171,9 +171,7 @@ def _publish_vllm_dummy_weights(device: int, tag: str) -> None:
                             model_config=model_config,
                         )
                     DummyModelLoader(load_config).load_weights(model, model_config)
-                    process_weights_after_loading(
-                        model, model_config, target_device
-                    )
+                    process_weights_after_loading(model, model_config, target_device)
 
     _publish_model(manager, model)
 
