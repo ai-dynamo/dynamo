@@ -315,7 +315,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct G2G3G3pbStorageConfig {
+pub struct G3pbStorageConfig {
     pub g2_capacity_bytes: usize,
     pub foyer_memory_capacity_bytes: usize,
     pub foyer_disk_capacity_bytes: usize,
@@ -327,7 +327,7 @@ pub struct G2G3G3pbStorageConfig {
     pub demotion_threshold: u64,      // Access count to demote to G3
 }
 
-impl G2G3G3pbStorageConfig {
+impl G3pbStorageConfig {
     pub const DEFAULT_G2_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
     pub const DEFAULT_FOYER_MEMORY_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
     pub const DEFAULT_FOYER_DISK_CAPACITY_BYTES: usize = 4 * 1024 * 1024 * 1024;
@@ -357,9 +357,9 @@ impl G2G3G3pbStorageConfig {
 }
 
 #[derive(Debug, Clone)]
-struct G2G3Metadata {
+struct G3pbCacheMetadata {
     size_bytes: usize,
-    location: G2FoyerLocation,
+    location: G3pbCacheLocation,
     priority: u32,
     returned_tick: u64,
     acquired_tick: u64,
@@ -371,7 +371,7 @@ struct G2G3Metadata {
 /// Sharded metadata storage to reduce lock contention
 /// Each shard has its own RwLock, allowing concurrent access to different shards
 struct ShardedMetadata {
-    shards: Vec<RwLock<HashMap<SequenceHash, G2G3Metadata>>>,
+    shards: Vec<RwLock<HashMap<SequenceHash, G3pbCacheMetadata>>>,
     num_shards: usize,
 }
 
@@ -393,7 +393,7 @@ impl ShardedMetadata {
     fn read_shard(
         &self,
         sequence_hash: SequenceHash,
-    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<SequenceHash, G2G3Metadata>>> {
+    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<SequenceHash, G3pbCacheMetadata>>> {
         let idx = self.shard_index(sequence_hash);
         self.shards[idx]
             .read()
@@ -404,7 +404,7 @@ impl ShardedMetadata {
     fn write_shard(
         &self,
         sequence_hash: SequenceHash,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<SequenceHash, G2G3Metadata>>> {
+    ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<SequenceHash, G3pbCacheMetadata>>> {
         let idx = self.shard_index(sequence_hash);
         self.shards[idx]
             .write()
@@ -412,7 +412,7 @@ impl ShardedMetadata {
     }
 
     /// Get read guards for multiple sequence hashes (may return duplicates for same shard)
-    fn get(&self, sequence_hash: SequenceHash) -> Result<Option<G2G3Metadata>> {
+    fn get(&self, sequence_hash: SequenceHash) -> Result<Option<G3pbCacheMetadata>> {
         let guard = self.read_shard(sequence_hash)?;
         Ok(guard.get(&sequence_hash).cloned())
     }
@@ -422,7 +422,7 @@ impl ShardedMetadata {
         Ok(guard.contains_key(&sequence_hash))
     }
 
-    fn insert(&self, sequence_hash: SequenceHash, metadata: G2G3Metadata) -> Result<()> {
+    fn insert(&self, sequence_hash: SequenceHash, metadata: G3pbCacheMetadata) -> Result<()> {
         let mut guard = self.write_shard(sequence_hash)?;
         guard.insert(sequence_hash, metadata);
         Ok(())
@@ -430,7 +430,7 @@ impl ShardedMetadata {
 
     fn update<F>(&self, sequence_hash: SequenceHash, f: F) -> Result<()>
     where
-        F: FnOnce(&mut G2G3Metadata),
+        F: FnOnce(&mut G3pbCacheMetadata),
     {
         let mut guard = self.write_shard(sequence_hash)?;
         if let Some(metadata) = guard.get_mut(&sequence_hash) {
@@ -439,7 +439,7 @@ impl ShardedMetadata {
         Ok(())
     }
 
-    fn snapshot(&self) -> Result<Vec<(SequenceHash, G2G3Metadata)>> {
+    fn snapshot(&self) -> Result<Vec<(SequenceHash, G3pbCacheMetadata)>> {
         let mut items = Vec::new();
         for shard in &self.shards {
             let guard = shard
@@ -452,12 +452,12 @@ impl ShardedMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum G2FoyerLocation {
+enum G3pbCacheLocation {
     G2 { offset: usize },
     Foyer,
 }
 
-pub struct G2G3G3pbPeerStorage {
+pub struct G3pbCacheStorage {
     g2_storage: Arc<crate::block_manager::storage::PinnedStorage>,
     foyer_shards: Vec<HybridCache<SequenceHash, Vec<u8>>>,
     metadata: ShardedMetadata,
@@ -465,11 +465,11 @@ pub struct G2G3G3pbPeerStorage {
     _g2_allocator: Arc<crate::block_manager::storage::PinnedAllocator>,
     g2_free_list: RwLock<VecDeque<(usize, usize)>>, // (offset, size)
     g2_allocated: AtomicU64,
-    config: G2G3G3pbStorageConfig,
+    config: G3pbStorageConfig,
 }
 
-impl G2G3G3pbPeerStorage {
-    pub async fn new(config: G2G3G3pbStorageConfig) -> Result<Self> {
+impl G3pbCacheStorage {
+    pub async fn new(config: G3pbStorageConfig) -> Result<Self> {
         use crate::block_manager::storage::{PinnedAllocator, StorageAllocator};
 
         let g2_allocator = Arc::new(PinnedAllocator::new(config.device_id)?);
@@ -588,23 +588,23 @@ impl G2G3G3pbPeerStorage {
         }
     }
 
-    async fn get_stored_location(&self, sequence_hash: SequenceHash) -> Option<G2FoyerLocation> {
+    async fn get_stored_location(&self, sequence_hash: SequenceHash) -> Option<G3pbCacheLocation> {
         let meta = self.metadata.get(sequence_hash).ok()??;
         if !meta.payload_ready {
             return None;
         }
         match meta.location {
-            G2FoyerLocation::G2 { offset } => {
+            G3pbCacheLocation::G2 { offset } => {
                 Some(self.read_from_g2(offset, meta.size_bytes).await)
-                    .map(|_| G2FoyerLocation::G2 { offset })
+                    .map(|_| G3pbCacheLocation::G2 { offset })
             }
-            G2FoyerLocation::Foyer => self
+            G3pbCacheLocation::Foyer => self
                 .foyer_get(sequence_hash)
                 .await
                 .ok()??
                 .is_empty()
-                .then_some(G2FoyerLocation::Foyer)
-                .or(Some(G2FoyerLocation::Foyer)),
+                .then_some(G3pbCacheLocation::Foyer)
+                .or(Some(G3pbCacheLocation::Foyer)),
         }
     }
 
@@ -614,7 +614,7 @@ impl G2G3G3pbPeerStorage {
                 return Ok(());
             };
 
-            if matches!(meta.location, G2FoyerLocation::Foyer) && meta.payload_ready {
+            if matches!(meta.location, G3pbCacheLocation::Foyer) && meta.payload_ready {
                 meta.size_bytes
             } else {
                 return Ok(());
@@ -627,7 +627,7 @@ impl G2G3G3pbPeerStorage {
             if let Ok((g2_offset, _)) = self.allocate_in_g2(size).await {
                 self.write_to_g2(g2_offset, &payload).await;
                 self.metadata.update(sequence_hash, |meta| {
-                    meta.location = G2FoyerLocation::G2 { offset: g2_offset };
+                    meta.location = G3pbCacheLocation::G2 { offset: g2_offset };
                     meta.acquired_tick = self.next_tick();
                 })?;
             }
@@ -643,19 +643,19 @@ impl G2G3G3pbPeerStorage {
             };
 
             match meta.location {
-                G2FoyerLocation::G2 { offset } => (offset, meta.size_bytes),
-                G2FoyerLocation::Foyer => return Ok(()),
+                G3pbCacheLocation::G2 { offset } => (offset, meta.size_bytes),
+                G3pbCacheLocation::Foyer => return Ok(()),
             }
         };
         let _ = size_bytes;
         self.metadata.update(sequence_hash, |meta| {
             if matches!(
                 meta.location,
-                G2FoyerLocation::G2 {
+                G3pbCacheLocation::G2 {
                     offset: current_offset
                 } if current_offset == offset
             ) {
-                meta.location = G2FoyerLocation::Foyer;
+                meta.location = G3pbCacheLocation::Foyer;
                 meta.returned_tick = self.next_tick();
             }
         })?;
@@ -671,7 +671,7 @@ impl G2G3G3pbPeerStorage {
             let g2_size: usize = metadata
                 .iter()
                 .map(|(_, meta)| meta)
-                .filter(|m| matches!(m.location, G2FoyerLocation::G2 { .. }))
+                .filter(|m| matches!(m.location, G3pbCacheLocation::G2 { .. }))
                 .map(|m| m.size_bytes)
                 .sum();
 
@@ -686,7 +686,7 @@ impl G2G3G3pbPeerStorage {
 
             let mut g2_blocks: Vec<_> = metadata
                 .into_iter()
-                .filter(|(_, meta)| matches!(meta.location, G2FoyerLocation::G2 { .. }))
+                .filter(|(_, meta)| matches!(meta.location, G3pbCacheLocation::G2 { .. }))
                 .collect();
             g2_blocks.sort_by_key(|(_, meta)| (meta.returned_tick, meta.priority));
 
@@ -699,7 +699,7 @@ impl G2G3G3pbPeerStorage {
                     break;
                 }
 
-                if let G2FoyerLocation::G2 { offset } = meta.location {
+                if let G3pbCacheLocation::G2 { offset } = meta.location {
                     evicted_size += meta.size_bytes;
                     if meta.access_count >= self.config.demotion_threshold {
                         to_demote.push(hash);
@@ -718,7 +718,7 @@ impl G2G3G3pbPeerStorage {
 
         for (hash, offset, size) in to_evict {
             self.metadata.update(hash, |meta| {
-                meta.location = G2FoyerLocation::Foyer;
+                meta.location = G3pbCacheLocation::Foyer;
                 meta.returned_tick = self.next_tick();
             })?;
             self.free_in_g2(offset, size).await;
@@ -733,7 +733,7 @@ impl G2G3G3pbPeerStorage {
                 .metadata
                 .snapshot()?
                 .into_iter()
-                .filter(|(_, meta)| matches!(meta.location, G2FoyerLocation::G2 { .. }))
+                .filter(|(_, meta)| matches!(meta.location, G3pbCacheLocation::G2 { .. }))
                 .collect();
             g2_blocks.sort_by_key(|(_, meta)| (meta.returned_tick, meta.priority));
 
@@ -745,7 +745,7 @@ impl G2G3G3pbPeerStorage {
                     break;
                 }
 
-                if let G2FoyerLocation::G2 { offset } = meta.location {
+                if let G3pbCacheLocation::G2 { offset } = meta.location {
                     freed_size += meta.size_bytes;
                     to_evict.push((hash, offset, meta.size_bytes));
                 }
@@ -756,7 +756,7 @@ impl G2G3G3pbPeerStorage {
 
         for (hash, offset, size) in to_evict {
             self.metadata.update(hash, |meta| {
-                meta.location = G2FoyerLocation::Foyer;
+                meta.location = G3pbCacheLocation::Foyer;
                 meta.returned_tick = self.next_tick();
             })?;
             self.free_in_g2(offset, size).await;
@@ -775,7 +775,7 @@ impl G2G3G3pbPeerStorage {
 }
 
 #[async_trait]
-impl G3pbPeerStorage for G2G3G3pbPeerStorage {
+impl G3pbPeerStorage for G3pbCacheStorage {
     async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) {
         let tick = self.next_tick();
 
@@ -785,13 +785,13 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
             let location = if let Some(existing) = existing_location {
                 existing
             } else {
-                G2FoyerLocation::Foyer
+                G3pbCacheLocation::Foyer
             };
 
             self.metadata
                 .insert(
                     block.sequence_hash,
-                    G2G3Metadata {
+                    G3pbCacheMetadata {
                         size_bytes: block.size_bytes,
                         location,
                         priority: 0,
@@ -851,10 +851,10 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
 
             if let Some((location, _)) = existing_location {
                 match location {
-                    G2FoyerLocation::G2 { offset } => {
+                    G3pbCacheLocation::G2 { offset } => {
                         self.write_to_g2(offset, &block.payload).await;
                     }
-                    G2FoyerLocation::Foyer => {}
+                    G3pbCacheLocation::Foyer => {}
                 }
 
                 self.metadata
@@ -868,15 +868,15 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
                 let location = match self.allocate_in_g2(block.payload.len()).await {
                     Ok((offset, _)) => {
                         self.write_to_g2(offset, &block.payload).await;
-                        G2FoyerLocation::G2 { offset }
+                        G3pbCacheLocation::G2 { offset }
                     }
-                    Err(_) => G2FoyerLocation::Foyer,
+                    Err(_) => G3pbCacheLocation::Foyer,
                 };
 
                 self.metadata
                     .insert(
                         block.meta.sequence_hash,
-                        G2G3Metadata {
+                        G3pbCacheMetadata {
                             size_bytes: block.meta.size_bytes,
                             location,
                             priority: 0,
@@ -975,7 +975,7 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
 
                         // Collect blocks to promote
                         if meta.access_count >= self.config.promotion_threshold
-                            && matches!(meta.location, G2FoyerLocation::Foyer)
+                            && matches!(meta.location, G3pbCacheLocation::Foyer)
                         {
                             to_promote.push(*sequence_hash);
                         }
@@ -1015,8 +1015,8 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
         // Third pass: fetch blocks (outside lock)
         for (sequence_hash, location, size) in block_locations {
             let payload = match location {
-                G2FoyerLocation::G2 { offset } => self.read_from_g2(offset, size).await,
-                G2FoyerLocation::Foyer => {
+                G3pbCacheLocation::G2 { offset } => self.read_from_g2(offset, size).await,
+                G3pbCacheLocation::Foyer => {
                     match self
                         .foyer_get(sequence_hash)
                         .await
@@ -2050,9 +2050,9 @@ mod tests {
     #[tokio::test]
     async fn g2g3_storage_supports_basic_operations() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
-        let config = G2G3G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
+        let config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
 
-        let storage = Arc::new(G2G3G3pbPeerStorage::new(config).await?);
+        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
         let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
 
         agent

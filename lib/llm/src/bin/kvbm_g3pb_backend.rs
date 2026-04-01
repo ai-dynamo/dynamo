@@ -13,9 +13,9 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G2G3G3pbPeerStorage, G2G3G3pbStorageConfig, G3PB_COMPONENT_NAME, G3PB_ENDPOINT_NAME,
-    G3PB_NAMESPACE, G3pbError, G3pbFetchBlocksResponse, G3pbHealthResponse, G3pbPutBlock,
-    G3pbQueryHit, G3pbRpcRequest, G3pbRpcResponse, G3pbStageBlocksResponse, G3pbStorageAgent,
+    G3PB_COMPONENT_NAME, G3PB_ENDPOINT_NAME, G3PB_NAMESPACE, G3pbCacheStorage, G3pbError,
+    G3pbFetchBlocksResponse, G3pbHealthResponse, G3pbPutBlock, G3pbQueryHit, G3pbRpcRequest,
+    G3pbRpcResponse, G3pbStageBlocksResponse, G3pbStorageAgent, G3pbStorageConfig,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
@@ -77,10 +77,10 @@ impl Default for Args {
             num_layers: 1,
             outer_dim: 1,
             dtype_width_bytes: 2,
-            foyer_dirs: vec![PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)],
-            g2_bytes: G2G3G3pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
-            foyer_memory_bytes: G2G3G3pbStorageConfig::DEFAULT_FOYER_MEMORY_CAPACITY_BYTES,
-            foyer_disk_bytes: G2G3G3pbStorageConfig::DEFAULT_FOYER_DISK_CAPACITY_BYTES,
+            foyer_dirs: vec![PathBuf::from(G3pbStorageConfig::DEFAULT_FOYER_DIR)],
+            g2_bytes: G3pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
+            foyer_memory_bytes: G3pbStorageConfig::DEFAULT_FOYER_MEMORY_CAPACITY_BYTES,
+            foyer_disk_bytes: G3pbStorageConfig::DEFAULT_FOYER_DISK_CAPACITY_BYTES,
         }
     }
 }
@@ -142,8 +142,7 @@ impl Args {
                 }
                 "--foyer-dir" => {
                     if args.foyer_dirs.len() == 1
-                        && args.foyer_dirs[0]
-                            == PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)
+                        && args.foyer_dirs[0] == PathBuf::from(G3pbStorageConfig::DEFAULT_FOYER_DIR)
                     {
                         args.foyer_dirs.clear();
                     }
@@ -524,11 +523,11 @@ fn build_agent(worker_id: u64) -> Result<NixlAgent> {
 }
 
 async fn build_backend(args: &Args) -> Result<AppState> {
-    let mut config = G2G3G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
+    let mut config = G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
     config.g2_capacity_bytes = args.g2_bytes;
     config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
     config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
-    let storage = Arc::new(G2G3G3pbPeerStorage::new(config).await?);
+    let storage = Arc::new(G3pbCacheStorage::new(config).await?);
     let agent = Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage));
 
     let runtime = Arc::new(G3pbPeerRuntime::new(args).await?);
