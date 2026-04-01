@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 09:29:09 UTC
+Last updated: 2026-04-01 09:31:08 UTC
 
 ## Active state
 
@@ -48,11 +48,12 @@ Last updated: 2026-04-01 09:29:09 UTC
 - ✅ Compacted `PLANS.md` so the next run starts from the actual live validated
   tip instead of the prior run snapshot
 - ✅ Re-ran the focused `g3pb::` library test after editing `PLANS.md`
-- ⏳ Pending in this run after that spot check:
-  - write the signed docs-only handoff refresh commit
-  - re-run the focused `g3pb::` library test after that commit
-  - re-read `PLANS.md` once more and leave it in a completed no-open-work
-    state
+- ✅ Wrote a signed docs-only handoff refresh commit:
+  - `e0f1a8bf4ae2` (`docs: refresh g3pb handoff state`)
+- ✅ Re-ran the focused `g3pb::` library test after that signed docs-only
+  refresh commit
+- ✅ Re-read and normalized `PLANS.md` so it ends this run in a completed state
+  with no pending in-scope work
 
 ### Current findings in this run
 
@@ -65,6 +66,8 @@ Last updated: 2026-04-01 09:29:09 UTC
   above the older previously recorded docs-only refreshes
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
+- the most recent docs-only handoff refresh commit in the live tree is now
+  `e0f1a8bf4ae2`
 - the active `G3PB` implementation slice still appears complete on the live
   tree
 - no new `G3PB` implementation gap was identified by the audit or validation
@@ -105,6 +108,8 @@ Last updated: 2026-04-01 09:29:09 UTC
   - pass
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`) as a post-edit spot check before the docs-only commit
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`) on detached `HEAD` `e0f1a8bf4ae2`
 
 ### Decisions confirmed in this run
 
@@ -118,11 +123,7 @@ Last updated: 2026-04-01 09:29:09 UTC
 
 ### Remaining work in this run
 
-- write a signed docs-only handoff refresh commit if the post-edit spot check
-  passes
-- re-run the same focused `g3pb::` test after that commit
-- re-read `PLANS.md` and keep the final handoff compact if no regression
-  appears
+- none
 
 ### Exact next step
 
@@ -144,12 +145,10 @@ Last updated: 2026-04-01 09:29:09 UTC
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - the most recent full green validation stack in this file was run from
   detached `HEAD` `d34e673fe72b`
-- if this run stops before the post-edit spot check and signed docs-only
-  refresh commit, resume with:
-  1. `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  2. `git add PLANS.md && git commit --signoff -m "docs: refresh g3pb handoff state"`
-  3. `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  4. `sed -n '1,260p' PLANS.md`
+- the most recent docs-only handoff refresh commit written in this run is
+  `e0f1a8bf4ae2`
+- the most recent post-commit spot check in this file passed on detached
+  `HEAD` `e0f1a8bf4ae2`
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
