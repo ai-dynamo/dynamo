@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 09:38:36 UTC
+Last updated: 2026-04-01 09:39:28 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 09:38:36 UTC
   - this run is a fresh validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 09:38:36 UTC)
+## Current run (2026-04-01 09:39:28 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -51,6 +51,9 @@ Last updated: 2026-04-01 09:38:36 UTC
 - ✅ Wrote the signed docs-only handoff refresh commit for this run
 - ✅ Re-ran the focused `g3pb::` library test after the docs-only refresh
   commit in this run
+- ✅ Wrote the final signed docs-only handoff normalization commit for this run
+- ✅ Re-ran the focused `g3pb::` library test after the final docs-only refresh
+  commit in this run
 
 ### Current findings in this run
 
@@ -62,6 +65,8 @@ Last updated: 2026-04-01 09:38:36 UTC
   - `e0f1a8bf4` (`docs: refresh g3pb handoff state`)
 - the current detached `HEAD` after the first docs-only refresh commit is
   `930179ba1deb`
+- the current detached `HEAD` after the final docs-only handoff normalization
+  commit is `1d5bb4f962f5`
 - the live detached `HEAD` still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -108,6 +113,10 @@ Last updated: 2026-04-01 09:38:36 UTC
   - pass (`930179ba1`)
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`) as a post-commit spot check on `930179ba1deb`
+- `git commit --signoff -m "docs: finalize g3pb handoff refresh"`
+  - pass (`1d5bb4f96`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`) as a post-commit spot check on `1d5bb4f962f5`
 
 ### Decisions confirmed in this run
 
@@ -121,15 +130,14 @@ Last updated: 2026-04-01 09:38:36 UTC
 
 ### Remaining work in this run
 
-- rerun the focused `g3pb::` library test after this final `PLANS.md`
-  normalization
-- create a final signed docs-only handoff commit so the repo exits clean with
-  this normalized handoff state
+- none
 
 ### Exact next step
 
-- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`, then if it
-  passes commit this final handoff normalization with `git commit --signoff`
+- run `git rev-parse --short=12 HEAD && sed -n '1,220p' Agents.md && sed -n
+  '1,260p' PLANS.md && sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`,
+  then leave the active `G3PB` slice closed unless a new regression or
+  explicitly new scope appears
 
 ### Handoff for next run
 
@@ -145,7 +153,7 @@ Last updated: 2026-04-01 09:38:36 UTC
 - the most recent full green validation stack in this file was run from
   detached `HEAD` `113347556c34`, followed by green focused `g3pb::`
   post-edit and post-commit spot checks on the subsequent docs-only refresh
-  commit `930179ba1deb`
+  commits `930179ba1deb` and `1d5bb4f962f5`
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
      real additional caller is ready
