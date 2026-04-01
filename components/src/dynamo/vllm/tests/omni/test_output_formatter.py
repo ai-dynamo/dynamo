@@ -7,12 +7,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from dynamo.vllm.omni.output_formatter import (
-    DiffusionFormatter,
-    TextFormatter,
-    _build_completion_usage,
-    _error_chunk,
-)
+try:
+    from dynamo.vllm.omni.output_formatter import (
+        DiffusionFormatter,
+        TextFormatter,
+        _build_completion_usage,
+        _error_chunk,
+    )
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
