@@ -62,7 +62,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by
 |-------|-------------|-------------|-----------|
 | `dynamo-runtime@1.0.1` | Core distributed runtime library | `v1.82` | [link](https://crates.io/crates/dynamo-runtime/1.0.1) |
 | `dynamo-llm@1.0.1` | LLM inference engine | `v1.82` | [link](https://crates.io/crates/dynamo-llm/1.0.1) |
-| `dynamo-async-openai@1.0.1` | Async OpenAI-compatible API client | `v1.82` | [link](https://crates.io/crates/dynamo-async-openai/1.0.1) |
+| `dynamo-protocols@1.0.1` | Async OpenAI-compatible API client | `v1.82` | [link](https://crates.io/crates/dynamo-protocols/1.0.1) |
 | `dynamo-parsers@1.0.1` | Protocol parsers (SSE, JSON streaming) | `v1.82` | [link](https://crates.io/crates/dynamo-parsers/1.0.1) |
 | `dynamo-memory@1.0.1` | Memory management utilities | `v1.82` | [link](https://crates.io/crates/dynamo-memory/1.0.1) |
 | `dynamo-config@1.0.1` | Configuration management | `v1.82` | [link](https://crates.io/crates/dynamo-config/1.0.1) |
@@ -138,7 +138,7 @@ For API documentation, see each crate on [docs.rs](https://docs.rs/). To build D
 ```bash
 cargo add dynamo-runtime@1.0.1
 cargo add dynamo-llm@1.0.1
-cargo add dynamo-async-openai@1.0.1
+cargo add dynamo-protocols@1.0.1
 cargo add dynamo-parsers@1.0.1
 cargo add dynamo-memory@1.0.1
 cargo add dynamo-config@1.0.1
@@ -424,7 +424,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 ### Rust Crates
 
-> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens)
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens)
 >
 > To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
@@ -458,20 +458,20 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 | `dynamo-llm@0.6.1` | `v1.82` | |
 | `dynamo-llm@0.6.0` | `v1.82` | |
 
-#### dynamo-async-openai (crate)
+#### dynamo-protocols (crate)
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
-| `dynamo-async-openai@1.0.1` | `v1.82` | |
-| `dynamo-async-openai@1.0.0` | `v1.82` | |
-| `dynamo-async-openai@0.9.1` | `v1.82` | |
-| `dynamo-async-openai@0.9.0` | `v1.82` | |
-| `dynamo-async-openai@0.8.1` | `v1.82` | |
-| `dynamo-async-openai@0.8.0` | `v1.82` | |
-| `dynamo-async-openai@0.7.1` | `v1.82` | |
-| `dynamo-async-openai@0.7.0` | `v1.82` | |
-| `dynamo-async-openai@0.6.1` | `v1.82` | |
-| `dynamo-async-openai@0.6.0` | `v1.82` | |
+| `dynamo-protocols@1.0.1` | `v1.82` | |
+| `dynamo-protocols@1.0.0` | `v1.82` | |
+| `dynamo-protocols@0.9.1` | `v1.82` | |
+| `dynamo-protocols@0.9.0` | `v1.82` | |
+| `dynamo-protocols@0.8.1` | `v1.82` | |
+| `dynamo-protocols@0.8.0` | `v1.82` | |
+| `dynamo-protocols@0.7.1` | `v1.82` | |
+| `dynamo-protocols@0.7.0` | `v1.82` | |
+| `dynamo-protocols@0.6.1` | `v1.82` | |
+| `dynamo-protocols@0.6.0` | `v1.82` | |
 
 #### dynamo-parsers (crate)
 
