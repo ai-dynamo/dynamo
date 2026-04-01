@@ -7,3 +7,6 @@
 # Ignore placeholder URLs in docs templates
 ^https://\.\.\./
 ^https://github\.com/\.\.\.
+
+# Ignore internal service URLs (etcd, NATS, etc.) used in code examples
+^http://etcd-

@@ -1,25 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
-"""OpenClaw reasoning fidelity experiment.
+"""OpenClaw reasoning fidelity experiment (OpenAI format).
 
-Tests that Dynamo correctly preserves reasoning_content across multi-turn
-OpenClaw conversations. In OpenClaw's long-lived chat pattern:
-  1. User sends a reasoning-heavy prompt (triggers <think> tags)
-  2. Response includes reasoning_content in content_block_delta events
-  3. Follow-up turn references the previous reasoning
-  4. Tool-using turn follows to verify reasoning + tools coexist
+Adapted from openclaw_reasoning_fidelity.py to use OpenAI Chat Completions API
+instead of Anthropic Messages API (for use with standalone vLLM).
+
+Tests that the model correctly produces reasoning content in multi-turn
+conversations. Nemotron-3-Super uses <think>...</think> tags natively.
 
 Measures:
-  - Whether reasoning_content is present and non-empty
+  - Whether reasoning/thinking content is present
   - Whether reasoning appears BEFORE content (correct ordering)
   - Token counts for reasoning vs content
   - TTFT for turns with and without reasoning
+  - Tool calling fidelity
 
-Uses Anthropic Messages API format with streaming.
+Uses OpenAI Chat Completions API with streaming.
 
 Usage:
-    python3 openclaw_reasoning_fidelity.py \\
+    python3 openclaw_reasoning_fidelity_openai.py \\
         --url http://localhost:8000 \\
         --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \\
         --runs 5 \\
@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 import time
 
@@ -47,22 +48,24 @@ each step clearly in your thinking."""
 
 TOOL_DEFS = [
     {
-        "name": "calculator",
-        "description": "Evaluate a mathematical expression and return the result.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": "Math expression to evaluate (e.g., '42 * 17')",
-                }
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "Evaluate a mathematical expression and return the result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "Math expression to evaluate (e.g., '42 * 17')",
+                    }
+                },
+                "required": ["expression"],
             },
-            "required": ["expression"],
         },
     }
 ]
 
-# Scenario: reasoning-heavy prompt, then follow-up, then tool use
 SCENARIOS = [
     {
         "name": "tsp_then_tool",
@@ -159,26 +162,23 @@ SCENARIOS = [
 ]
 
 
-def parse_anthropic_stream(resp) -> dict:
-    """Parse a streaming Anthropic Messages API response.
+def parse_openai_stream(resp) -> dict:
+    """Parse a streaming OpenAI Chat Completions response.
 
-    Returns timing, content blocks, reasoning blocks, and tool_use blocks.
+    Detects <think>...</think> tags in the content for reasoning extraction.
+    Also detects tool_calls in the stream.
     """
     t0 = time.monotonic()
     ttft = None
 
-    reasoning_chunks = []
-    content_chunks = []
-    tool_use_blocks = []
-    event_timeline = []  # (relative_ms, event_type, brief)
-
-    # Track block types in order
-    block_order = []  # list of (block_type, block_index)
-    current_block_type = None
-    current_block_idx = None
+    full_content = ""
+    tool_calls = {}  # index -> {id, name, arguments}
+    block_order = []  # track what we see: "thinking", "text", "tool_use"
 
     input_tokens = 0
     output_tokens = 0
+
+    thinking_started = False
 
     for line in resp.iter_lines(decode_unicode=True):
         if not line or not line.startswith("data: "):
@@ -192,70 +192,81 @@ def parse_anthropic_stream(resp) -> dict:
             continue
 
         now_ms = (time.monotonic() - t0) * 1000
-        etype = event.get("type", "")
+        choices = event.get("choices", [])
+        usage = event.get("usage")
 
-        if etype == "content_block_start":
-            cb = event.get("content_block", {})
-            block_type = cb.get("type", "unknown")
-            idx = event.get("index", -1)
-            current_block_type = block_type
-            current_block_idx = idx
-            block_order.append((block_type, idx))
-            event_timeline.append((now_ms, "block_start", f"{block_type}[{idx}]"))
+        if choices:
+            delta = choices[0].get("delta", {})
+            content = delta.get("content", "")
 
-            if block_type == "tool_use":
-                tool_use_blocks.append(
-                    {
-                        "index": idx,
-                        "id": cb.get("id", ""),
-                        "name": cb.get("name", ""),
-                        "input_json": "",
-                        "start_ms": now_ms,
+            # Detect reasoning content
+            if delta.get("reasoning_content"):
+                # vLLM with reasoning parser exposes reasoning_content directly
+                if not thinking_started:
+                    block_order.append("thinking")
+                    thinking_started = True
+                if ttft is None:
+                    ttft = now_ms
+
+            if content:
+                if ttft is None:
+                    ttft = now_ms
+                full_content += content
+
+            # Detect tool calls
+            tc_list = delta.get("tool_calls", [])
+            for tc in tc_list:
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {
+                        "id": tc.get("id", ""),
+                        "name": "",
+                        "arguments": "",
                     }
-                )
+                    block_order.append("tool_use")
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls[idx]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    tool_calls[idx]["arguments"] += fn["arguments"]
 
-        elif etype == "content_block_delta":
-            delta = event.get("delta", {})
-            delta_type = delta.get("type", "")
-
-            if ttft is None:
-                ttft = now_ms
-
-            if delta_type == "thinking_delta":
-                reasoning_chunks.append(delta.get("thinking", ""))
-            elif delta_type == "text_delta":
-                content_chunks.append(delta.get("text", ""))
-            elif delta_type == "input_json_delta":
-                if tool_use_blocks:
-                    tool_use_blocks[-1]["input_json"] += delta.get("partial_json", "")
-
-        elif etype == "content_block_stop":
-            event_timeline.append(
-                (now_ms, "block_stop", f"{current_block_type}[{current_block_idx}]")
-            )
-
-        elif etype == "message_start":
-            msg = event.get("message", {})
-            usage = msg.get("usage", {})
-            input_tokens = usage.get("input_tokens", 0)
-
-        elif etype == "message_delta":
-            usage = event.get("usage", {})
-            output_tokens = usage.get("output_tokens", 0)
+        if usage:
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
 
     resp.close()
     total_ms = (time.monotonic() - t0) * 1000
 
-    reasoning_text = "".join(reasoning_chunks)
-    content_text = "".join(content_chunks)
+    # Parse <think>...</think> tags from content
+    reasoning_text = ""
+    content_text = full_content
+    think_match = re.search(r"<think>(.*?)</think>", full_content, re.DOTALL)
+    if think_match:
+        reasoning_text = think_match.group(1).strip()
+        # Remove think tags from content
+        content_text = re.sub(
+            r"<think>.*?</think>\s*", "", full_content, flags=re.DOTALL
+        ).strip()
+        if "thinking" not in block_order:
+            block_order.insert(0, "thinking")
+        if "text" not in block_order:
+            block_order.append("text")
+    elif thinking_started:
+        # reasoning_content was in delta directly
+        reasoning_text = "[via reasoning_content field]"
 
-    # Determine block ordering
-    block_types_in_order = [bt for bt, _ in block_order]
+    if content_text and "text" not in block_order:
+        block_order.append("text")
+
+    has_reasoning = len(reasoning_text) > 0 or thinking_started
+    has_content = len(content_text) > 0
+    has_tool_use = len(tool_calls) > 0
+
     reasoning_before_content = False
-    if "thinking" in block_types_in_order and "text" in block_types_in_order:
-        reasoning_before_content = block_types_in_order.index(
-            "thinking"
-        ) < block_types_in_order.index("text")
+    if "thinking" in block_order and "text" in block_order:
+        reasoning_before_content = block_order.index("thinking") < block_order.index(
+            "text"
+        )
 
     return {
         "ttft_ms": round(ttft, 2) if ttft else None,
@@ -264,23 +275,22 @@ def parse_anthropic_stream(resp) -> dict:
         "reasoning_len": len(reasoning_text),
         "content_text": content_text,
         "content_len": len(content_text),
-        "has_reasoning": len(reasoning_text) > 0,
-        "has_content": len(content_text) > 0,
-        "has_tool_use": len(tool_use_blocks) > 0,
-        "tool_use_count": len(tool_use_blocks),
-        "tool_names": [t["name"] for t in tool_use_blocks],
+        "has_reasoning": has_reasoning,
+        "has_content": has_content,
+        "has_tool_use": has_tool_use,
+        "tool_use_count": len(tool_calls),
+        "tool_names": [tc["name"] for tc in tool_calls.values()],
         "reasoning_before_content": reasoning_before_content,
-        "block_order": block_types_in_order,
+        "block_order": block_order,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "event_timeline": event_timeline[:20],  # Truncate for output
     }
 
 
 def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dict]:
     """Run a single scenario (multi-turn) and return per-turn results."""
     results = []
-    messages = []
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     for turn_idx, turn in enumerate(scenario["turns"]):
         messages.append({"role": "user", "content": turn["content"]})
@@ -289,7 +299,7 @@ def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dic
             "model": model,
             "max_tokens": 1024,
             "stream": True,
-            "system": SYSTEM_PROMPT,
+            "stream_options": {"include_usage": True},
             "messages": messages,
         }
 
@@ -298,15 +308,18 @@ def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dic
             body["tools"] = TOOL_DEFS
 
         resp = requests.post(
-            f"{url}/v1/messages",
+            f"{url}/v1/chat/completions",
             json=body,
-            headers={"Content-Type": "application/json", "x-api-key": "dummy"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer dummy",
+            },
             stream=True,
             timeout=120,
         )
         resp.raise_for_status()
 
-        parsed = parse_anthropic_stream(resp)
+        parsed = parse_openai_stream(resp)
 
         result = {
             "run": run_idx + 1,
@@ -335,7 +348,7 @@ def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dic
             "order_fidelity_ok": (
                 parsed["reasoning_before_content"]
                 if parsed["has_reasoning"] and parsed["has_content"]
-                else True  # No ordering issue if one is missing
+                else True
             ),
         }
         results.append(result)
@@ -346,23 +359,36 @@ def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dic
             if parsed["content_text"]
             else "I'll analyze this step by step."
         )
-        messages.append({"role": "assistant", "content": assistant_content})
 
-        # If there were tool uses, simulate tool results
-        if parsed["has_tool_use"]:
-            for tool in parsed.get("tool_names", []):
-                messages.append(
+        if parsed["has_tool_use"] and parsed["tool_names"]:
+            # Assistant message with tool_calls
+            tool_call_objs = []
+            for i, tn in enumerate(parsed["tool_names"]):
+                tool_call_objs.append(
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": f"tool_{turn_idx}",
-                                "content": "42.0",  # Simulated result
-                            }
-                        ],
+                        "id": f"call_turn{turn_idx}_{i}",
+                        "type": "function",
+                        "function": {"name": tn, "arguments": '{"expression": "42"}'},
                     }
                 )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_content if assistant_content else None,
+                    "tool_calls": tool_call_objs,
+                }
+            )
+            # Add tool results
+            for tc_obj in tool_call_objs:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_obj["id"],
+                        "content": "42.0",
+                    }
+                )
+        else:
+            messages.append({"role": "assistant", "content": assistant_content})
 
         ok_marker = (
             "OK"
@@ -392,7 +418,7 @@ def run_scenario(url: str, model: str, scenario: dict, run_idx: int) -> list[dic
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenClaw reasoning fidelity experiment"
+        description="OpenClaw reasoning fidelity experiment (OpenAI format)"
     )
     parser.add_argument("--url", default="http://localhost:8000")
     parser.add_argument(
@@ -453,16 +479,18 @@ def main():
 
     if reasoning_turns:
         ttfts = [r["ttft_ms"] for r in reasoning_turns if r["ttft_ms"]]
-        print(
-            f"\n  Reasoning turns TTFT: mean={sum(ttfts)/len(ttfts):.1f}ms (n={len(ttfts)})",
-            file=sys.stderr,
-        )
+        if ttfts:
+            print(
+                f"\n  Reasoning turns TTFT: mean={sum(ttfts)/len(ttfts):.1f}ms (n={len(ttfts)})",
+                file=sys.stderr,
+            )
     if tool_turns:
         ttfts = [r["ttft_ms"] for r in tool_turns if r["ttft_ms"]]
-        print(
-            f"  Tool turns TTFT:      mean={sum(ttfts)/len(ttfts):.1f}ms (n={len(ttfts)})",
-            file=sys.stderr,
-        )
+        if ttfts:
+            print(
+                f"  Tool turns TTFT:      mean={sum(ttfts)/len(ttfts):.1f}ms (n={len(ttfts)})",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
