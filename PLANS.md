@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:09:29 UTC
+Last updated: 2026-04-01 06:10:47 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 06:09:29 UTC)
+## Current run (2026-04-01 06:10:47 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1487,11 +1487,17 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Reconfirmed that the only remaining work is still the previously recorded
   non-blocking follow-on backlog rather than missing implementation in the
   active slice
+- ✅ Completed the signed docs-only audit refresh commit for this run:
+  - `19f2116f5 docs: refresh g3pb audit handoff`
+- ✅ Re-read the freshly updated handoff after that commit and corrected the
+  stale “commit next” wording so the on-disk plan matches the committed state
 
 ### Current findings before final handoff
 
 - the active `G3PB` implementation slice still appears complete on current
-  `HEAD` (`8348d29de2a3` at pickup)
+  `HEAD`
+  - pickup commit: `8348d29de2a3`
+  - current commit after the docs-only refresh: `19f2116f5de5`
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1519,6 +1525,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass as an audit search; only the existing non-blocking `G3PB` backlog plus unrelated repo-wide TODOs were found
 - `git diff --check`
   - pass before the `PLANS.md` refresh edit
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - post-edit rerun before the first docs-only commit: pass (`6 passed`)
 
 ### Decisions confirmed in this run so far
 
@@ -1532,31 +1540,29 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   extending the docs-only commit chain with stale pickup SHAs
 - refresh the latest audit block in place before committing so the next run
   starts from the actual current tip instead of stale handoff wording
+- after each docs-only commit, re-read and refresh `PLANS.md` again if the
+  latest handoff text still points at a pre-commit state
 
 ### Remaining work in this run
 
-- re-read the updated `PLANS.md`
-- run post-edit validation for the docs-only refresh
-- make the signed docs-only handoff commit
+- rerun quick post-edit validation for this final handoff refresh
+- make the final signed docs-only handoff commit that records the actual
+  current `HEAD`
 
 ### Exact next step
 
-- re-read the updated `PLANS.md`, then rerun `git diff --check` and the
-  focused `g3pb_filter` test before cutting the signed docs-only commit
+- rerun `git diff --check` and the focused `g3pb_filter` test, then commit
+  this final `PLANS.md` handoff correction with `--signoff`
 
 ### Handoff for next run
 
-- this run has refreshed the audit block to the current tip and revalidated the
-  focused `G3PB` / bindings stack, but the signed docs-only commit still
-  remains to be cut
-- after that commit, the active `G3PB` implementation slice should still be
-  treated as complete unless a future audit finds a concrete new gap
-- if another run resumes before the commit is cut:
-  1. re-read `PLANS.md`
-  2. run `git diff --check`
-  3. run `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
-  4. commit the `PLANS.md` refresh with `--signoff`
-- after the commit is cut, resume only from the existing non-blocking
+- this run has already refreshed the audit block to the current tip, rerun the
+  focused `G3PB` / bindings validation stack, and recorded the first docs-only
+  refresh commit on `HEAD`
+- once this final handoff-correction commit is cut, the active `G3PB`
+  implementation slice should still be treated as complete unless a future
+  audit finds a concrete new gap
+- after the final commit is cut, resume only from the existing non-blocking
   follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
