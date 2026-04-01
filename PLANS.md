@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:03:33 UTC
+Last updated: 2026-04-01 11:07:52 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 11:03:33 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - the live detached `HEAD` validated in this run is `0d4b3257c273`
+  - the live detached `HEAD` validated in this run is `a37839b636be`
   - the live detached `HEAD` is newer than the prior handoff tip in this file
     only by docs-only handoff commits
 - Current implementation direction:
@@ -26,11 +26,11 @@ Last updated: 2026-04-01 11:03:33 UTC
   - `c231d60fb` (`build: patch local nixl-sys invalidation`)
 - Current scope status:
   - no open implementation work remains for the active `G3PB` slice
-  - this run is another fresh validation plus handoff compaction refresh on the
+  - this run was a fresh validation plus handoff compaction refresh on the
     live detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 11:03:33 UTC)
+## Current run (2026-04-01 11:07:52 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -38,7 +38,7 @@ Last updated: 2026-04-01 11:03:33 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `0d4b3257c273`
+- Re-audited the live repo state from detached `HEAD` `a37839b636be`
 - Re-confirmed the live tree still contains the seams required by the handoff
   and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -52,7 +52,7 @@ Last updated: 2026-04-01 11:03:33 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
-  `0d4b3257c273`
+  `a37839b636be`
 - Re-ran post-edit `g3pb::` spot checks after compacting the handoff, and they
   passed
 - Landed a signed docs-only handoff commit after the post-edit validation
@@ -60,7 +60,7 @@ Last updated: 2026-04-01 11:03:33 UTC
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `0d4b3257c273`
+- the detached `HEAD` validated in this run is `a37839b636be`
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -69,18 +69,18 @@ Last updated: 2026-04-01 11:03:33 UTC
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - the live detached `HEAD` is now newer than the validated implementation tip
-  only by docs-only handoff commit(s) from this run
+  only by docs-only handoff commit(s)
 - no code changes are pending for the active `G3PB` slice
 
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`0d4b3257c273`)
+  - pass (`a37839b636be`)
 - `git log --oneline -8`
   - pass
 - `git status --short --branch`
   - pass (`## HEAD (no branch)`)
-- `sed -n '1,220p' Agents.md`
+- `sed -n '1,240p' Agents.md`
   - pass
 - `sed -n '1,260p' PLANS.md`
   - pass before refresh
@@ -112,7 +112,7 @@ Last updated: 2026-04-01 11:03:33 UTC
   - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
 - `git add PLANS.md`
   - pass
-- `git commit --signoff -m "docs: compact g3pb handoff"`
+- `git commit --signoff -m "docs: refresh g3pb handoff state"`
   - pass
 
 ### Decisions confirmed in this run
@@ -146,7 +146,7 @@ Last updated: 2026-04-01 11:03:33 UTC
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `0d4b3257c273`, then landed signed docs-only handoff commit(s) on top
+  `a37839b636be`, then landed signed docs-only handoff commit(s) on top
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
