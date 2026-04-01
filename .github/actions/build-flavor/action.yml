@@ -11,7 +11,7 @@ inputs:
     description: 'Docker platform string (e.g. linux/amd64, linux/amd64,linux/arm64)'
     required: true
   cuda_version:
-    description: 'CUDA version to build (e.g., 12.9, 13.0). Pass an empty string for planner.'
+    description: 'CUDA version to build (e.g., 12.9, 13.0). Use an empty string for no-CUDA targets.'
     required: true
   builder_name:
     description: 'Buildkit builder name'

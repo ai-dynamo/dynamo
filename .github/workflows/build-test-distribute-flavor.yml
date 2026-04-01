@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       cuda_version:
-        description: 'CUDA version to build (e.g., 12.9, 13.0). Pass an empty string for planner.'
+        description: 'CUDA version to build (e.g., 12.9, 13.0). Use an empty string for no-CUDA targets.'
         required: true
         type: string
       build_timeout_minutes:
