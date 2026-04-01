@@ -1559,7 +1559,7 @@ func GenerateGrovePodCliqueSet(
 		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isGMS)
 
 		if isGMS {
-			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfig(serviceName, component.Resources))
+			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfigs(serviceName, component.Resources, roles)...)
 		}
 
 		if usesPCSG {
@@ -1571,9 +1571,7 @@ func GenerateGrovePodCliqueSet(
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
 			if isGMS {
-				pcsg.ResourceSharing = []grovev1alpha1.ResourceClaimTemplateRef{
-					gmsResourceSharing(serviceName),
-				}
+				pcsg.ResourceSharing = gmsResourceSharingEntries(serviceName, roles)
 			}
 			scalingGroups = append(scalingGroups, pcsg)
 		}

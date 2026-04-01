@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
-	resourcev1 "k8s.io/api/resource/v1"
 )
 
 func TestGmsWeightServerPodSpec(t *testing.T) {
@@ -290,51 +289,92 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 }
 
 func TestGmsRCTName(t *testing.T) {
-	assert.Equal(t, "my-svc-gpu", gmsRCTName("my-svc"))
-	assert.Equal(t, "llama-gpu", gmsRCTName("llama"))
+	assert.Equal(t, "my-svc-gpu-rank-0", gmsRCTName("my-svc", 0))
+	assert.Equal(t, "llama-gpu-rank-2", gmsRCTName("llama", 2))
 }
 
-func TestGmsResourceClaimTemplateConfig(t *testing.T) {
+func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 	resources := &v1alpha1.Resources{
-		Limits: &v1alpha1.ResourceItem{
-			GPU:     "8",
-			GPUType: "gpu.nvidia.com/h100",
-		},
+		Limits: &v1alpha1.ResourceItem{GPU: "8", GPUType: "gpu.nvidia.com/h100"},
+	}
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	cfg := gmsResourceClaimTemplateConfig("my-svc", resources)
+	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
 
-	assert.Equal(t, "my-svc-gpu", cfg.Name)
-	require.Len(t, cfg.Template.Spec.Devices.Requests, 1)
+	require.Len(t, configs, 1)
+	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
 
-	req := cfg.Template.Spec.Devices.Requests[0]
-	assert.Equal(t, "gpu", req.Name)
+	req := configs[0].Template.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com/h100", req.Exactly.DeviceClassName)
-	assert.Equal(t, resourcev1.DeviceAllocationModeExactCount, req.Exactly.AllocationMode)
 	assert.Equal(t, int64(8), req.Exactly.Count)
 }
 
-func TestGmsResourceClaimTemplateConfig_DefaultDeviceClass(t *testing.T) {
+func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 	resources := &v1alpha1.Resources{
 		Limits: &v1alpha1.ResourceItem{GPU: "4"},
 	}
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
+		{Name: "svc-gms-1", Role: RoleGMS, Rank: 1, Replicas: 1},
+		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
+	}
 
-	cfg := gmsResourceClaimTemplateConfig("svc", resources)
+	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
 
-	req := cfg.Template.Spec.Devices.Requests[0]
+	require.Len(t, configs, 2)
+	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
+	assert.Equal(t, "svc-gpu-rank-1", configs[1].Name)
+
+	req := configs[1].Template.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(4), req.Exactly.Count)
 }
 
-func TestGmsResourceSharing(t *testing.T) {
-	ref := gmsResourceSharing("my-svc")
+func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
+	}
 
-	assert.Equal(t, "my-svc-gpu", ref.Name)
-	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, ref.Scope)
-	assert.False(t, ref.IsExternalRef)
-	assert.Nil(t, ref.Filter, "no filter = broadcast to all cliques in PCSG")
+	refs := gmsResourceSharingEntries("svc", roles)
+
+	require.Len(t, refs, 1)
+	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
+	require.NotNil(t, refs[0].Filter)
+	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[0].Filter.Mode)
+	assert.Equal(t, []string{"svc-gms-0", "svc"}, refs[0].Filter.CliqueNames)
+}
+
+func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
+		{Name: "svc-gms-1", Role: RoleGMS, Rank: 1, Replicas: 1},
+		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
+	}
+
+	refs := gmsResourceSharingEntries("svc", roles)
+
+	require.Len(t, refs, 2)
+
+	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
+	require.NotNil(t, refs[0].Filter)
+	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[0].Filter.Mode)
+	assert.Equal(t, []string{"svc-gms-0", "svc-ldr"}, refs[0].Filter.CliqueNames)
+
+	assert.Equal(t, "svc-gpu-rank-1", refs[1].Name)
+	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[1].Scope)
+	require.NotNil(t, refs[1].Filter)
+	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[1].Filter.Mode)
+	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.CliqueNames)
 }
 
 // --- helpers ---

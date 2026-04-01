@@ -20,6 +20,7 @@ package dynamo
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -215,43 +216,76 @@ func getDeviceClassName(resources *v1alpha1.Resources) string {
 	return "gpu.nvidia.com"
 }
 
-// gmsRCTName returns a deterministic ResourceClaimTemplate name scoped to the service.
-func gmsRCTName(serviceName string) string {
-	return serviceName + "-gpu"
+// gmsRCTName returns a deterministic ResourceClaimTemplate name for a given rank.
+func gmsRCTName(serviceName string, rank int32) string {
+	return fmt.Sprintf("%s-gpu-rank-%d", serviceName, rank)
 }
 
-// gmsResourceClaimTemplateConfig builds the PCS-level ResourceClaimTemplateConfig
-// for GPU sharing via DRA. The template requests the exact GPU count and device
-// class derived from the component's resource spec.
-func gmsResourceClaimTemplateConfig(serviceName string, resources *v1alpha1.Resources) grovev1alpha1.ResourceClaimTemplateConfig {
-	return grovev1alpha1.ResourceClaimTemplateConfig{
-		Name: gmsRCTName(serviceName),
-		Template: resourcev1.ResourceClaimTemplateSpec{
-			Spec: resourcev1.ResourceClaimSpec{
-				Devices: resourcev1.DeviceClaim{
-					Requests: []resourcev1.DeviceRequest{
-						{
-							Name: "gpu",
-							Exactly: &resourcev1.ExactDeviceRequest{
-								DeviceClassName: getDeviceClassName(resources),
-								AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
-								Count:           int64(getGPUCount(resources)),
+// gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig
+// per rank. Each RCT has the same GPU spec but a distinct per-rank name so that
+// each rank's GMS + engine pods get their own ResourceClaim.
+func gmsResourceClaimTemplateConfigs(serviceName string, resources *v1alpha1.Resources, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateConfig {
+	seen := map[int32]bool{}
+	var configs []grovev1alpha1.ResourceClaimTemplateConfig
+	for _, r := range roles {
+		if seen[r.Rank] {
+			continue
+		}
+		seen[r.Rank] = true
+		configs = append(configs, grovev1alpha1.ResourceClaimTemplateConfig{
+			Name: gmsRCTName(serviceName, r.Rank),
+			Template: resourcev1.ResourceClaimTemplateSpec{
+				Spec: resourcev1.ResourceClaimSpec{
+					Devices: resourcev1.DeviceClaim{
+						Requests: []resourcev1.DeviceRequest{
+							{
+								Name: "gpu",
+								Exactly: &resourcev1.ExactDeviceRequest{
+									DeviceClassName: getDeviceClassName(resources),
+									AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+									Count:           int64(getGPUCount(resources)),
+								},
 							},
 						},
 					},
 				},
 			},
-		},
+		})
 	}
+	return configs
 }
 
-// gmsResourceSharing builds the PCSG-level ResourceClaimTemplateRef that references
-// the PCS-level template. PerReplica scope ensures each PCSG replica gets its own
-// ResourceClaim, shared across all cliques (GMS + engine pods) within that replica.
-// No filter is set so all member cliques receive the claim (broadcast).
-func gmsResourceSharing(serviceName string) grovev1alpha1.ResourceClaimTemplateRef {
-	return grovev1alpha1.ResourceClaimTemplateRef{
-		Name:  gmsRCTName(serviceName),
-		Scope: grovev1alpha1.ResourceSharingScopePerReplica,
+// gmsResourceSharingEntries builds one PCSG-level ResourceClaimTemplateRef per rank.
+// Each entry uses PerReplica scope and an Include filter listing only the GMS clique
+// and the engine clique for that rank, ensuring GPU isolation between ranks.
+func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateRef {
+	type rankGroup struct {
+		cliqueNames []string
 	}
+	groups := map[int32]*rankGroup{}
+	var rankOrder []int32
+
+	for _, r := range roles {
+		g, ok := groups[r.Rank]
+		if !ok {
+			g = &rankGroup{}
+			groups[r.Rank] = g
+			rankOrder = append(rankOrder, r.Rank)
+		}
+		g.cliqueNames = append(g.cliqueNames, strings.ToLower(r.Name))
+	}
+
+	refs := make([]grovev1alpha1.ResourceClaimTemplateRef, 0, len(groups))
+	for _, rank := range rankOrder {
+		g := groups[rank]
+		refs = append(refs, grovev1alpha1.ResourceClaimTemplateRef{
+			Name:  gmsRCTName(serviceName, rank),
+			Scope: grovev1alpha1.ResourceSharingScopePerReplica,
+			Filter: &grovev1alpha1.ResourceSharingFilter{
+				Mode:        grovev1alpha1.ResourceSharingFilterModeInclude,
+				CliqueNames: g.cliqueNames,
+			},
+		})
+	}
+	return refs
 }
