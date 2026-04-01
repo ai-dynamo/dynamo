@@ -214,50 +214,9 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-/// Anthropic-style cache control hint for prefix pinning with TTL.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct CacheControl {
-    #[serde(rename = "type")]
-    pub control_type: CacheControlType,
-    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-}
-
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheControlType {
-    #[default]
-    Ephemeral,
-    #[serde(other)]
-    Unknown,
-}
-
-const MIN_TTL_SECONDS: u64 = 300;
-const MAX_TTL_SECONDS: u64 = 3600;
-
-impl CacheControl {
-    /// Parse TTL string to seconds, clamped to [300, 3600].
-    ///
-    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
-    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
-    /// Unrecognized strings default to 300s.
-    pub fn ttl_seconds(&self) -> u64 {
-        let raw = match self.ttl.as_deref() {
-            None => return MIN_TTL_SECONDS,
-            Some("5m") => 300,
-            Some("1h") => 3600,
-            Some(other) => match other.parse::<u64>() {
-                Ok(secs) => secs,
-                Err(_) => {
-                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
-                    return MIN_TTL_SECONDS;
-                }
-            },
-        };
-        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
-    }
-}
+// Re-export CacheControl types from dynamo-async-openai where they are canonically defined
+// alongside the Anthropic protocol types they originate from.
+pub use dynamo_async_openai::types::anthropic::{CacheControl, CacheControlType};
 
 impl Default for NvExt {
     fn default() -> Self {

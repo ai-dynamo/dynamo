@@ -18,11 +18,14 @@ use super::types::{
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::unified::AnthropicContext;
 
 /// State machine that converts a chat completion stream into Anthropic SSE events.
 pub struct AnthropicStreamConverter {
     model: String,
     message_id: String,
+    /// Preserved Anthropic-specific request context for faithful response reconstruction.
+    api_context: Option<AnthropicContext>,
     // Thinking/reasoning tracking
     thinking_block_started: bool,
     thinking_block_closed: bool,
@@ -60,6 +63,7 @@ impl AnthropicStreamConverter {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
+            api_context: None,
             thinking_block_started: false,
             thinking_block_closed: false,
             thinking_block_index: 0,
@@ -76,8 +80,19 @@ impl AnthropicStreamConverter {
         }
     }
 
+    /// Create a converter seeded with the original Anthropic request context.
+    /// This allows the response stream to carry forward metadata that was lost
+    /// during the Anthropic-to-OpenAI request conversion.
+    pub fn with_context(model: String, context: AnthropicContext) -> Self {
+        let mut converter = Self::new(model);
+        converter.api_context = Some(context);
+        converter
+    }
+
     /// Emit the initial `message_start` event.
     pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        // TODO: When AnthropicMessageResponse gains a `service_tier` field,
+        // populate it from `self.api_context` (if the original request specified one).
         let message = AnthropicMessageResponse {
             id: self.message_id.clone(),
             object_type: "message".to_string(),
@@ -106,7 +121,7 @@ impl AnthropicStreamConverter {
         let mut events = Vec::new();
 
         // Capture real token usage from engine when available (typically on the final chunk).
-        if let Some(usage) = &chunk.usage {
+        if let Some(usage) = &chunk.inner.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
             self.cached_token_count = usage
@@ -115,7 +130,7 @@ impl AnthropicStreamConverter {
                 .and_then(|d| d.cached_tokens);
         }
 
-        for choice in &chunk.choices {
+        for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
             // Track finish reason
@@ -182,6 +197,11 @@ impl AnthropicStreamConverter {
                     // Emit signature delta to close the thinking block.
                     // The engine doesn't produce Anthropic-style cryptographic signatures,
                     // so we use "erased" (the standard placeholder per the Anthropic spec).
+                    // When `api_context` is available and the original request had
+                    // `thinking.thinking_type == "enabled"`, this is expected — the backend
+                    // simply doesn't generate real signatures. If/when the backend starts
+                    // returning real signatures, we can use the context to validate or
+                    // pass them through instead of hardcoding "erased".
                     let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.thinking_block_index,
                         delta: AnthropicDelta::SignatureDelta {
@@ -444,7 +464,7 @@ impl AnthropicStreamConverter {
     ) -> Vec<TaggedEvent> {
         let mut events = Vec::new();
 
-        if let Some(usage) = &chunk.usage {
+        if let Some(usage) = &chunk.inner.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
             self.cached_token_count = usage
@@ -453,7 +473,7 @@ impl AnthropicStreamConverter {
                 .and_then(|d| d.cached_tokens);
         }
 
-        for choice in &chunk.choices {
+        for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
             if let Some(ref fr) = choice.finish_reason {
@@ -722,27 +742,29 @@ mod tests {
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(ChatCompletionMessageContent::Text(text.into())),
-                    function_call: None,
-                    tool_calls: None,
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: Some(ChatCompletionMessageContent::Text(text.into())),
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
             nvext: None,
         }
     }
@@ -755,35 +777,37 @@ mod tests {
     ) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: None,
-                    function_call: None,
-                    tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-                        index: tc_index,
-                        id: id.map(String::from),
-                        r#type: Some(ChatCompletionToolType::Function),
-                        function: Some(FunctionCallStream {
-                            name: name.map(String::from),
-                            arguments: args.map(String::from),
-                        }),
-                    }]),
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                            index: tc_index,
+                            id: id.map(String::from),
+                            r#type: Some(ChatCompletionToolType::Function),
+                            function: Some(FunctionCallStream {
+                                name: name.map(String::from),
+                                arguments: args.map(String::from),
+                            }),
+                        }]),
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
             nvext: None,
         }
     }
@@ -908,27 +932,29 @@ mod tests {
     fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: None,
-                    function_call: None,
-                    tool_calls: None,
-                    role: None,
-                    refusal: None,
-                    reasoning_content: Some(text.into()),
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
+            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: Some(text.into()),
+                    },
+                    finish_reason: None,
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
             nvext: None,
         }
     }
@@ -1063,6 +1089,37 @@ mod tests {
             event_types(&end_events),
             vec!["message_delta", "message_stop"],
             "no block stops in end events"
+        );
+    }
+
+    /// Verify that `with_context` stores the context and produces the same
+    /// event structure as `new` — the context is carried for future enrichment.
+    #[test]
+    fn test_with_context_preserves_context() {
+        use crate::protocols::unified::AnthropicContext;
+
+        let ctx = AnthropicContext {
+            service_tier: Some("priority".to_string()),
+            ..Default::default()
+        };
+        let mut conv = AnthropicStreamConverter::with_context("test-model".into(), ctx);
+        assert!(conv.api_context.is_some());
+        assert_eq!(
+            conv.api_context.as_ref().unwrap().service_tier.as_deref(),
+            Some("priority")
+        );
+
+        // Should produce the same events as a regular converter
+        let ev = conv.process_chunk_tagged(&text_chunk("Hello"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+
+        let end = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end),
+            vec!["content_block_stop", "message_delta", "message_stop"]
         );
     }
 }

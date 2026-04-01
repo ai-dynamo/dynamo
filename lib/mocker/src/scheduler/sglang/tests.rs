@@ -94,7 +94,7 @@ mod scheduling {
             .build()
             .unwrap();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler =
             SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None);
 
@@ -117,8 +117,8 @@ mod scheduling {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    received += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    received += output_batch.len();
                     if received >= expected_signals {
                         break;
                     }
@@ -535,7 +535,7 @@ mod core_behavior {
 
 async fn assert_sglang_scheduler_completes_all(
     scheduler: &SglangScheduler,
-    output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: &mut mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     num_requests: usize,
     prompt_len: usize,
     max_output_tokens: usize,
@@ -567,8 +567,8 @@ async fn assert_sglang_scheduler_completes_all(
     loop {
         tokio::select! {
             biased;
-            Some(_) = output_rx.recv() => {
-                received_tokens += 1;
+            Some(output_batch) = output_rx.recv() => {
+                received_tokens += output_batch.len();
                 if received_tokens >= expected_tokens {
                     break;
                 }
@@ -604,7 +604,7 @@ mod router_events {
         #[case] schedule_policy: &str,
         #[case] page_size: usize,
     ) {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(500)
             .block_size(64)
@@ -818,7 +818,7 @@ mod router_events {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let (sink, forward_task) = harness.spawn_forwarder();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler = SglangScheduler::new(
             MockEngineArgs::builder()
                 .engine_type(EngineType::Sglang)
@@ -849,8 +849,8 @@ mod router_events {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    seen += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    seen += output_batch.len();
                     if seen == expected {
                         break;
                     }

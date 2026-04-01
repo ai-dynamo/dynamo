@@ -192,19 +192,17 @@ where
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.slots.add_request(req).await
+        self.slots.add_request(req)
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots
-            .mark_prefill_completed(&request_id.to_string())
-            .await?;
+        self.slots.mark_prefill_completed(&request_id.to_string())?;
         self.queue.update().await;
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string()).await?;
+        self.slots.free(&request_id.to_string())?;
         self.queue.update().await;
         Ok(())
     }

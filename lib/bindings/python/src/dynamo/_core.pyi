@@ -841,11 +841,22 @@ class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
     Auto-discovers engine publishers via the discovery plane.
+
+    Two mutually exclusive usage modes:
+
+    1. **recv mode** (default): call ``recv()`` to pull individual messages.
+    2. **tracking mode**: call ``start_tracking()`` once, then poll
+       ``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
+       ``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+       workers are removed (via discovery watch).
     """
 
     def __init__(self, endpoint: Endpoint) -> None:
         """
         Create a subscriber that auto-discovers FPM publishers.
+
+        No background tasks are started until ``recv()`` or
+        ``start_tracking()`` is called.
 
         Args:
             endpoint: Dynamo component endpoint (provides runtime + discovery).
@@ -857,13 +868,48 @@ class FpmEventSubscriber:
         Blocking receive of the next message (raw msgspec bytes).
         Releases the GIL while waiting.
 
+        On the first call a background subscriber task is spawned (recv mode).
+        Cannot be used after ``start_tracking()``.
+
         Returns:
             Raw msgspec payload, or None if the stream is closed.
         """
         ...
 
+    def start_tracking(self) -> None:
+        """
+        Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        Spawns two background tasks:
+
+        1. Event consumption: subscribes to FPM events, extracts the composite
+           key (worker_id, dp_rank) from the msgpack payload, stores latest
+           raw bytes in an internal map.
+        2. MDC discovery watch: monitors ComponentModels for the target
+           component.  When a model is removed, all entries whose
+           worker_id matches the removed instance_id are purged.
+
+        After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def get_recent_stats(self) -> dict[tuple[str, int], bytes]:
+        """
+        Return the latest FPM bytes for every tracked (worker_id, dp_rank).
+
+        Cleanup of removed engines is handled by the MDC discovery watch
+        task spawned by ``start_tracking()``.
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``(worker_id, dp_rank)`` to raw msgspec bytes.
+            Decode each value with ``forward_pass_metrics.decode(data)``.
+        """
+        ...
+
     def shutdown(self) -> None:
-        """Shut down the subscriber."""
+        """Shut down the subscriber (all background tasks)."""
         ...
 
 
@@ -1083,6 +1129,7 @@ class RouterMode:
     PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
+    LeastLoaded: "RouterMode"
     ...
 
 class RouterConfig:
@@ -1103,7 +1150,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, KV, or Direct)
+            mode: The router mode (RoundRobin, Random, KV, Direct, or LeastLoaded)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
@@ -1133,7 +1180,6 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_enable_cache_control: bool = False,
-        min_initial_workers: int = 1,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1167,9 +1213,6 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
-            min_initial_workers: Minimum number of discovered workers required before
-                router startup continues (default: 1). Ignored when
-                skip_initial_worker_wait is enabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
@@ -1938,3 +1981,58 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
+
+
+# =============================================================================
+# Dynamo Exception Types
+#
+# Standardized exceptions for Dynamo error categories. All inherit from
+# DynamoException. The Rust error type mapping depends on the context in
+# which the exception is raised (e.g., backend context wraps as Backend.<*>).
+# =============================================================================
+
+class DynamoException(Exception):
+    """Base exception for all Dynamo error types."""
+
+    ...
+
+class Unknown(DynamoException):
+    """Uncategorized or unknown error."""
+
+    ...
+
+class InvalidArgument(DynamoException):
+    """Invalid input (e.g., prompt exceeds context length)."""
+
+    ...
+
+class CannotConnect(DynamoException):
+    """Failed to establish a connection."""
+
+    ...
+
+class Disconnected(DynamoException):
+    """An established connection was lost."""
+
+    ...
+
+class ConnectionTimeout(DynamoException):
+    """A connection or request timed out."""
+
+    ...
+
+class Cancelled(DynamoException):
+    """The request was cancelled."""
+
+    ...
+
+class EngineShutdown(DynamoException):
+    """The engine process has shut down or crashed."""
+
+    ...
+
+class StreamIncomplete(DynamoException):
+    """The response stream was terminated before completion."""
+
+    ...
+

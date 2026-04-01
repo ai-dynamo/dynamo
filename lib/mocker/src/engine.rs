@@ -16,7 +16,7 @@ use crate::scheduler::{Scheduler, SchedulerHandle, SglangScheduler};
 pub fn create_engine(
     args: MockEngineArgs,
     dp_rank: u32,
-    output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+    output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
     kv_event_publishers: KvEventPublishers,
     cancellation_token: Option<CancellationToken>,
 ) -> Box<dyn SchedulerHandle> {
