@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:01:49 UTC
+Last updated: 2026-04-01 05:02:41 UTC
 
 ## Active state
 
@@ -1029,6 +1029,82 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - detached `HEAD`
 - the remaining follow-on work returns to the same non-blocking backlog already
   captured in the prior run:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+## Current run (2026-04-01 05:02:41 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely to verify whether any concrete work remained
+  before making changes
+- ✅ Audited the current repo state against the latest handoff:
+  - clean worktree at pickup
+  - detached `HEAD`
+  - latest commits already match the prior handoff:
+    - `21c45d28f docs: finalize g3pb handoff state`
+    - `701d74a95 tests: serialize g3pb filter env cases`
+    - `126c3590d bindings: adopt native g3pb admission config`
+- ✅ Confirmed that no additional implementation slice is currently required to
+  satisfy the active `G3PB` handoff
+- ✅ Refreshed `PLANS.md` with this completion audit so the next run does not
+  have to rediscover that the remaining items are follow-on backlog, not
+  missing work in the current slice
+
+### Current findings before final handoff
+
+- the latest committed repo state matches the previous handoff without drift:
+  the bindings-side `g3pb_admission` adoption, docs refresh, and llm-side env
+  test serialization are already present on `HEAD`
+- there is no unimplemented code slice left in the active `PLANS.md` body;
+  the only remaining items are the same non-blocking follow-on backlog already
+  captured in prior runs
+- this run is therefore an execution audit, not a new product/runtime change
+- `PLANS.md` itself was the only file that needed updating in this run so the
+  handoff remains precise for the next execution
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `git diff --check`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- do not invent additional `G3PB` code work when the active plan already says
+  the implementation slice is complete
+- keep the completion audit on disk in `PLANS.md` so the next run can start
+  from a verified state instead of repeating the same audit work
+- still rerun the focused validation stack after this documentation-only audit,
+  because the user explicitly asked for a completion check rather than trusting
+  prior run logs
+
+### Remaining work in this run
+
+- make a signed small commit for the audit/handoff refresh
+
+### Exact next step
+
+- create the signed commit for this `PLANS.md` completion audit refresh
+
+### Handoff for next run
+
+- if this run completes cleanly, no additional implementation work remains in
+  the active `G3PB` plan
+- the next run should resume only from the existing non-blocking follow-on
+  backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
