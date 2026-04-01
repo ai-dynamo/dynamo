@@ -19,11 +19,7 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import (
-    AudioFormatter,
-    DiffusionFormatter,
-    TextFormatter,
-)
+from dynamo.vllm.omni.output_formatter import OutputFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -89,18 +85,11 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
 
-        model_name = config.served_model_name or config.model
-        self._text_formatter = TextFormatter(model_name=model_name)
-        self._diffusion_formatter = DiffusionFormatter(
-            model_name=model_name,
+        self.output_formatter = OutputFormatter(
+            model_name=config.served_model_name or config.model,
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
-        )
-        self._audio_formatter = AudioFormatter(
-            model_name=model_name,
-            media_fs=media_output_fs,
-            media_http_url=media_output_http_url,
         )
 
         # Audio/TTS handler — composition, not inheritance.
@@ -188,44 +177,23 @@ class OmniHandler(BaseOmniHandler):
                 async for stage_output in self.engine_client.generate(
                     **generate_kwargs,
                 ):
-                    if (
-                        stage_output.final_output_type == "text"
-                        and stage_output.request_output
-                    ):
-                        chunk = self._text_formatter.format(
-                            stage_output.request_output,
-                            request_id,
-                            previous_text=previous_text,
-                        )
-                        if chunk:
-                            output = stage_output.request_output.outputs[0]
-                            previous_text = output.text
-                            yield chunk
-
-                    elif (
-                        stage_output.final_output_type == "image"
-                        and stage_output.images
-                    ):
-                        chunk = await self._diffusion_formatter.format(
-                            stage_output,
-                            request_id,
-                            request_type=inputs.request_type,
-                            fps=inputs.fps,
-                            response_format=inputs.response_format,
-                        )
-                        if chunk:
-                            yield chunk
-
-                    elif stage_output.final_output_type == "audio":
-                        chunk = await self._audio_formatter.format(
-                            stage_output,
-                            request_id,
-                            response_format=inputs.response_format,
-                            request_type=inputs.request_type,
-                            speed=inputs.speed,
-                        )
-                        if chunk:
-                            yield chunk
+                    chunk = await self.output_formatter.format(
+                        stage_output,
+                        request_id,
+                        request_type=inputs.request_type,
+                        fps=inputs.fps,
+                        response_format=inputs.response_format,
+                        previous_text=previous_text,
+                        speed=inputs.speed,
+                    )
+                    if chunk:
+                        # Track text state for streaming delta
+                        if (
+                            stage_output.final_output_type == "text"
+                            and stage_output.request_output
+                        ):
+                            previous_text = stage_output.request_output.outputs[0].text
+                        yield chunk
 
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")

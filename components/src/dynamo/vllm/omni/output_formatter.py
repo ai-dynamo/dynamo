@@ -438,3 +438,49 @@ def _build_completion_usage(request_output: Any) -> Dict[str, Any]:
             else None
         ),
     }
+
+
+class OutputFormatter:
+    """Dispatches raw engine output to modality-specific formatters.
+
+    Shared by OmniHandler (aggregated) and any future disaggregated router.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        media_fs: Any = None,
+        media_http_url: Optional[str] = None,
+        default_fps: int = 16,
+    ) -> None:
+        self._formatters: Dict[str, Any] = {
+            "text": TextFormatter(model_name),
+            "image": DiffusionFormatter(
+                model_name, media_fs, media_http_url, default_fps
+            ),
+            "audio": AudioFormatter(model_name, media_fs, media_http_url),
+        }
+
+    async def format(
+        self,
+        stage_output: Any,
+        request_id: str,
+        *,
+        request_type: Any = None,
+        **ctx: Any,
+    ) -> Dict[str, Any] | None:
+        fmt_type = getattr(stage_output, "final_output_type", None)
+        formatter = self._formatters.get(fmt_type) if fmt_type else None
+        if formatter is None:
+            return None
+
+        # TextFormatter is sync and takes request_output, not stage_output
+        if fmt_type == "text":
+            ro = getattr(stage_output, "request_output", None)
+            if not ro:
+                return None
+            return formatter.format(ro, request_id, **ctx)
+
+        return await formatter.format(
+            stage_output, request_id, request_type=request_type, **ctx
+        )

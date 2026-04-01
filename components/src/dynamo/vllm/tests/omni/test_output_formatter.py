@@ -335,3 +335,70 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
+
+
+# ── OutputFormatter dispatcher ─────────────────────────────
+
+
+class TestOutputFormatter:
+    @pytest.mark.asyncio
+    async def test_routes_text(self):
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "text"
+        stage.request_output = _make_request_output("hello world")
+        chunk = await f.format(stage, "req-1", previous_text="")
+        assert chunk["choices"][0]["delta"]["content"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_routes_image(self):
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "image"
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"px")
+        stage.images = [img]
+        chunk = await f.format(stage, "req-1", request_type=RequestType.CHAT_COMPLETION)
+        assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
+
+    @pytest.mark.asyncio
+    async def test_routes_audio(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "audio"
+        stage.multimodal_output = {
+            "audio": np.random.randn(2400).astype(np.float32),
+            "sr": 24000,
+        }
+        chunk = await f.format(stage, "req-1")
+        assert chunk["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_returns_none(self):
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "unknown_modality"
+        result = await f.format(stage, "req-1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_text_without_request_output_returns_none(self):
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "text"
+        stage.request_output = None
+        result = await f.format(stage, "req-1")
+        assert result is None
