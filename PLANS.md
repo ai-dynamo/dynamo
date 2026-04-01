@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:58:50 UTC
+Last updated: 2026-04-01 09:02:32 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 08:58:50 UTC
   - this run is a validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 08:58:50 UTC)
+## Current run (2026-04-01 09:02:32 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -49,13 +49,13 @@ Last updated: 2026-04-01 08:58:50 UTC
   is still no remaining in-scope implementation, cleanup, docs, or validation
   work for the active `G3PB` slice
 - ✅ Compacted `PLANS.md` again so the next run starts from the current tip
-  instead of the previous docs-only handoff commit
+  instead of the previously recorded docs-only handoff commit
 
 ### Current findings in this run
 
-- the previous handoff tip recorded in `PLANS.md` (`ed0879ac0faf`) was stale;
+- the previous handoff tip recorded in `PLANS.md` (`8ce32a0a7feb`) was stale;
   validation in this run started from live detached `HEAD`
-  `8ce32a0a7feb`
+  `a4fbdf66c137`
 - the current `HEAD` is still a docs-only handoff refresh above the same
   validated non-docs `G3PB` implementation baseline
 - the active `G3PB` implementation slice still appears complete on the live
@@ -66,18 +66,18 @@ Last updated: 2026-04-01 08:58:50 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`8ce32a0a7feb`)
+  - pass (`a4fbdf66c137`)
 - `git log --oneline -8`
   - pass
   - current recent history:
+    - `a4fbdf66c docs: stabilize g3pb handoff instructions`
+    - `b482da9e9 docs: refresh g3pb handoff state`
     - `8ce32a0a7 docs: compact g3pb handoff state`
     - `ed0879ac0 docs: refresh g3pb handoff state`
     - `6b49b21a5 docs: refresh g3pb handoff state`
     - `6ba8c459d docs: refresh g3pb handoff state`
     - `7cd18e2ad docs: refresh g3pb handoff state`
     - `2f091c248 docs: normalize g3pb handoff tip`
-    - `c0f65056d docs: refresh g3pb handoff state`
-    - `95eb86204 docs: refresh g3pb handoff state`
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
