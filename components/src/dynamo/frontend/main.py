@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -229,6 +230,9 @@ async def async_main():
         kv_router_config = None
     elif config.router_mode == "power-of-two":
         router_mode = RouterMode.PowerOfTwoChoices
+        kv_router_config = None
+    elif config.router_mode == "least-loaded":
+        router_mode = RouterMode.LeastLoaded
         kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin

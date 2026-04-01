@@ -33,6 +33,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
     TOKENIZE_SECONDS,
 };
+use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -621,7 +622,13 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let encoding = self.tokenizer.encode(prompt)?;
+        let prompt = if prompt.contains('\0') {
+            tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
+            Cow::Owned(prompt.replace('\0', ""))
+        } else {
+            Cow::Borrowed(prompt)
+        };
+        let encoding = self.tokenizer.encode(prompt.as_ref())?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
