@@ -46,7 +46,6 @@ def test_parse_fastvideo_args_uses_builtin_defaults():
     assert config.dit_cpu_offload is True
     assert config.vae_cpu_offload is True
     assert config.text_encoder_cpu_offload is True
-    assert config.ltx2_vae_tiling is None
     assert config.enable_torch_compile is False
     assert config.torch_compile_mode == "max-autotune-no-cudagraphs"
     assert config.torch_compile_fullgraph is True
@@ -71,7 +70,6 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
             "--no-dit-cpu-offload",
             "--no-vae-cpu-offload",
             "--no-text-encoder-cpu-offload",
-            "--ltx2-vae-tiling",
             "--torch-compile",
             "--torch-compile-mode",
             "max-autotune",
@@ -87,7 +85,6 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
     assert config.dit_cpu_offload is False
     assert config.vae_cpu_offload is False
     assert config.text_encoder_cpu_offload is False
-    assert config.ltx2_vae_tiling is True
     assert config.enable_torch_compile is True
     assert config.torch_compile_mode == "max-autotune"
     assert config.torch_compile_fullgraph is False
@@ -170,6 +167,7 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
         json.dumps(
             {
                 "custom_option": 1,
+                "ltx2_vae_tiling": True,
                 "torch_compile_kwargs": {
                     "mode": "reduce-overhead",
                     "dynamic": True,
@@ -203,6 +201,7 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
     assert generator_kwargs["text_encoder_cpu_offload"] is False
     assert generator_kwargs["enable_torch_compile"] is True
     assert generator_kwargs["custom_option"] == 3
+    assert generator_kwargs["ltx2_vae_tiling"] is True
     assert generator_kwargs["nested"] == {
         "from_file": True,
         "from_override": True,

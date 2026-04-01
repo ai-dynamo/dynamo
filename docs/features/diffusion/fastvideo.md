@@ -243,12 +243,11 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `--dit-cpu-offload` / `--no-dit-cpu-offload` | `enabled` | Enable or disable DiT CPU offload |
 | `--vae-cpu-offload` / `--no-vae-cpu-offload` | `enabled` | Enable or disable VAE CPU offload |
 | `--text-encoder-cpu-offload` / `--no-text-encoder-cpu-offload` | `enabled` | Enable or disable text encoder CPU offload |
-| `--ltx2-vae-tiling` / `--no-ltx2-vae-tiling` | unset | Override FastVideo's LTX-2 VAE tiling setting |
 | `--torch-compile` / `--no-torch-compile` | `disabled` | Enable or disable `torch.compile` for FastVideo |
 | `--torch-compile-mode` | `max-autotune-no-cudagraphs` | `torch.compile` mode to use when compilation is enabled |
 | `--torch-compile-fullgraph` / `--no-torch-compile-fullgraph` | `enabled` | Enable or disable fullgraph mode for `torch.compile` |
 | `--fp4-quantization` / `--no-fp4-quantization` | `disabled` | Enable FP4 quantization for DiT weights on Blackwell GPUs and newer |
-| `--extra-generator-args-file` | — | YAML or JSON file with extra FastVideo generator keyword arguments |
+| `--extra-generator-args-file` | — | YAML or JSON file with extra FastVideo generator keyword arguments, including model-specific options such as `ltx2_vae_tiling` |
 | `--override-generator-args-json` | — | JSON object string applied on top of the generator args file and built-in defaults |
 
 ### Request Parameters (`nvext`)

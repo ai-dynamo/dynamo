@@ -17,11 +17,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.common.configuration.utils import (
-    add_argument,
-    add_negatable_bool_argument,
-    env_or_default,
-)
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.runtime import parse_endpoint
 
 DEFAULT_MODEL_PATH = "FastVideo/LTX2-Distilled-Diffusers"
@@ -146,18 +142,6 @@ class FastVideoArgGroup(ArgGroup):
             default=True,
             help="Enable text encoder CPU offload.",
         )
-        group.add_argument(
-            "--ltx2-vae-tiling",
-            dest="ltx2_vae_tiling",
-            action=argparse.BooleanOptionalAction,
-            default=env_or_default(
-                "DYN_FASTVIDEO_LTX2_VAE_TILING", None, value_type=bool
-            ),
-            help=(
-                "Enable LTX-2 VAE tiling overrides.\n"
-                "env var: DYN_FASTVIDEO_LTX2_VAE_TILING | default: None"
-            ),
-        )
         add_negatable_bool_argument(
             group,
             flag_name="--torch-compile",
@@ -223,7 +207,6 @@ class FastVideoConfig(DynamoRuntimeConfig):
     dit_cpu_offload: bool = True
     vae_cpu_offload: bool = True
     text_encoder_cpu_offload: bool = True
-    ltx2_vae_tiling: bool | None = None
     enable_torch_compile: bool = False
     torch_compile_mode: str = DEFAULT_TORCH_COMPILE_MODE
     torch_compile_fullgraph: bool = True

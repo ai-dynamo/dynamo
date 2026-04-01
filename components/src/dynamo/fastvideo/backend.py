@@ -178,8 +178,6 @@ class FastVideoHandler:
             "vae_cpu_offload": self.config.vae_cpu_offload,
             "text_encoder_cpu_offload": self.config.text_encoder_cpu_offload,
         }
-        if self.config.ltx2_vae_tiling is not None:
-            generator_kwargs["ltx2_vae_tiling"] = self.config.ltx2_vae_tiling
         if self.config.enable_torch_compile:
             generator_kwargs["torch_compile_kwargs"] = {
                 "backend": "inductor",
