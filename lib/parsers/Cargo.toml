@@ -26,7 +26,7 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-dynamo-async-openai = { workspace = true }
+dynamo-protocols = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

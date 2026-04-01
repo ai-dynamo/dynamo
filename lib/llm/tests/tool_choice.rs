@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{
+use dynamo_llm::protocols::common;
+use dynamo_llm::protocols::common::llm_backend::BackendOutput;
+use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
     FunctionName,
 };
-use dynamo_llm::protocols::common;
-use dynamo_llm::protocols::common::llm_backend::BackendOutput;
 
 /// Helper to extract text from ChatCompletionMessageContent
 fn get_text(content: &ChatCompletionMessageContent) -> &str {
@@ -161,7 +161,7 @@ async fn test_named_tool_choice_parses_json() {
 
     assert_eq!(
         choice.finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::Stop)
+        Some(dynamo_protocols::types::FinishReason::Stop)
     );
     let delta = &choice.delta;
     assert!(delta.content.is_none() || delta.content.as_ref().map(get_text) == Some(""));
@@ -203,7 +203,7 @@ async fn test_required_tool_choice_parses_json_array() {
 
     assert_eq!(
         choice.finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        Some(dynamo_protocols::types::FinishReason::ToolCalls)
     );
     let delta = &choice.delta;
     assert!(delta.content.is_none() || delta.content.as_ref().map(get_text) == Some(""));
@@ -318,7 +318,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
     let response = &all_responses[0];
     assert_eq!(
         response.inner.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::Stop)
+        Some(dynamo_protocols::types::FinishReason::Stop)
     );
 
     let tool_calls = response.inner.choices[0].delta.tool_calls.as_ref().unwrap();
@@ -385,7 +385,7 @@ async fn test_streaming_required_tool_parallel() {
     let response = &all_responses[0];
     assert_eq!(
         response.inner.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        Some(dynamo_protocols::types::FinishReason::ToolCalls)
     );
 
     let tool_calls = response.inner.choices[0].delta.tool_calls.as_ref().unwrap();
