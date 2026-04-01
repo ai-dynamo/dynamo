@@ -1611,7 +1611,7 @@ func generatePodSpecForRole(
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
 		}
-		return gmsWeightServerPodSpec(basePodSpec, r.Rank), nil
+		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(getGPUCount(component.Resources))), nil
 	}
 
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode GMS

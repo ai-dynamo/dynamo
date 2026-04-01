@@ -32,58 +32,58 @@ const (
 	gmsSharedVolumeName = "gms-shared"
 	gmsHostPathBase     = "/run/gms"
 	gmsSharedMountPath  = "/run/gms/shared"
-	gmsReadyFilePath    = "/tmp/gms_ready"
 	gmsFailoverLockFile = "failover.lock"
 )
 
-// gmsWrapperScript returns the shell script that starts the GMS weight server
-// and signals readiness by touching a sentinel file.
-func gmsWrapperScript() string {
-	return fmt.Sprintf(`#!/bin/sh
-set -e
-rm -f %s
-python3 -m vllm.distributed.gms &
-GMS_PID=$!
-
-while [ ! -f %s ]; do
-  if ! kill -0 $GMS_PID 2>/dev/null; then
-    echo "GMS process exited unexpectedly"
-    exit 1
-  fi
-  sleep 1
+// gmsWrapperScript generates a bash script that launches one GMS subprocess
+// per GPU device, waits for any to exit, then tears down the process group.
+func gmsWrapperScript(gpuCount int) string {
+	devList := make([]string, gpuCount)
+	for i := range gpuCount {
+		devList[i] = strconv.Itoa(i)
+	}
+	return fmt.Sprintf(
+		`cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+trap cleanup SIGTERM SIGINT
+for dev in %s; do
+  python3 -m gpu_memory_service --device "$dev" &
+  echo "Started GMS device=$dev pid=$!"
 done
-
-echo "GMS weight server ready"
-wait $GMS_PID
-`, gmsReadyFilePath, gmsReadyFilePath)
+wait -n
+echo "A GMS subprocess exited, shutting down"
+cleanup`, strings.Join(devList, " "))
 }
 
-// gmsStartupProbeCommand returns the command for the GMS weight server startup probe.
-func gmsStartupProbeCommand() []string {
-	return []string{"test", "-f", gmsReadyFilePath}
+// gmsStartupProbeCommand returns the exec probe command that verifies the
+// expected number of GMS UDS sockets exist on the shared volume.
+func gmsStartupProbeCommand(gpuCount int) []string {
+	return []string{
+		"sh", "-c",
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount),
+	}
 }
 
 // gmsWeightServerPodSpec builds a GMS weight server pod spec by cloning and
 // modifying a base engine pod spec. The GMS pod runs a different command,
 // has no liveness/readiness probes, and uses a startup probe that checks
-// for the ready sentinel file.
-func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32) *corev1.PodSpec {
+// for the expected number of GMS UDS sockets.
+func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int) *corev1.PodSpec {
 	podSpec := basePodSpec.DeepCopy()
 	if len(podSpec.Containers) == 0 {
 		return podSpec
 	}
 
 	c := &podSpec.Containers[0]
-	c.Command = []string{"/bin/sh", "-c", gmsWrapperScript()}
-	c.Args = nil
+	c.Command = []string{"bash", "-c"}
+	c.Args = []string{gmsWrapperScript(gpuCount)}
 
 	c.StartupProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: gmsStartupProbeCommand()},
+			Exec: &corev1.ExecAction{Command: gmsStartupProbeCommand(gpuCount)},
 		},
-		PeriodSeconds:    5,
+		PeriodSeconds:    2,
 		TimeoutSeconds:   2,
-		FailureThreshold: 1440, // 5s * 1440 = 7200s = 2h
+		FailureThreshold: 150, // 2s * 150 = 5 min
 	}
 	c.LivenessProbe = nil
 	c.ReadinessProbe = nil

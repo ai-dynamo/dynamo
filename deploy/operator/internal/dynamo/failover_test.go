@@ -53,17 +53,19 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 		}},
 	}
 
-	result := gmsWeightServerPodSpec(base, 0)
+	result := gmsWeightServerPodSpec(base, 0, 8)
 
 	require.Len(t, result.Containers, 1)
 	c := result.Containers[0]
 
-	assert.Contains(t, c.Command[2], "vllm.distributed.gms", "should run GMS weight server")
-	assert.Nil(t, c.Args, "args should be cleared")
+	assert.Equal(t, []string{"bash", "-c"}, c.Command, "should use bash")
+	require.Len(t, c.Args, 1)
+	assert.Contains(t, c.Args[0], "gpu_memory_service", "should run gpu_memory_service")
+	assert.Contains(t, c.Args[0], "--device", "should pass --device flag")
 	assert.Nil(t, c.LivenessProbe, "liveness probe should be nil")
 	assert.Nil(t, c.ReadinessProbe, "readiness probe should be nil")
 	assert.NotNil(t, c.StartupProbe, "startup probe should be set")
-	assert.Equal(t, gmsStartupProbeCommand(), c.StartupProbe.Exec.Command)
+	assert.Equal(t, gmsStartupProbeCommand(8), c.StartupProbe.Exec.Command)
 
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"), "GPU should be stripped")
 	assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory, "non-GPU limits should remain")
@@ -79,7 +81,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 func TestGmsWeightServerPodSpec_EmptyContainers(t *testing.T) {
 	base := &corev1.PodSpec{}
-	result := gmsWeightServerPodSpec(base, 0)
+	result := gmsWeightServerPodSpec(base, 0, 1)
 	assert.Empty(t, result.Containers)
 }
 
@@ -89,14 +91,14 @@ func TestGmsWeightServerPodSpec_SubPathExpr(t *testing.T) {
 	}
 
 	t.Run("rank 0", func(t *testing.T) {
-		result := gmsWeightServerPodSpec(base, 0)
+		result := gmsWeightServerPodSpec(base, 0, 4)
 		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
 		require.NotNil(t, mount)
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
 	})
 
 	t.Run("rank 3", func(t *testing.T) {
-		result := gmsWeightServerPodSpec(base, 3)
+		result := gmsWeightServerPodSpec(base, 3, 4)
 		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
 		require.NotNil(t, mount)
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
