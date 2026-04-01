@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:16:03 UTC
+Last updated: 2026-04-01 08:17:34 UTC
 
 ## Active state
 
@@ -21,10 +21,9 @@ Last updated: 2026-04-01 08:16:03 UTC
 - Current follow-on execution focus for this run:
   - current detached `HEAD` is a docs-only handoff chain above the latest
     validated non-docs `G3PB` code commit
-  - the current handoff tip on detached `HEAD` is
-    `89ee44c0d550` (`docs: stabilize g3pb handoff metadata`)
-  - the current docs-only handoff chain above the validated implementation
-    baseline is:
+  - the current handoff tip on detached `HEAD` is the latest docs-only
+    `PLANS.md` refresh created by this run
+  - the docs-only handoff history immediately below the current tip includes:
     - `89ee44c0d docs: stabilize g3pb handoff metadata`
     - `c1e01d4c2 docs: finalize g3pb handoff state`
     - `97cbefa84 docs: correct g3pb handoff state`
@@ -73,6 +72,9 @@ Last updated: 2026-04-01 08:16:03 UTC
   active `G3PB` slice
 - ✅ Refreshed `PLANS.md` so the actual current tip, validation results, and
   handoff state are written to disk for the next run
+- ✅ Created a signed docs-only handoff commit, then normalized `PLANS.md`
+  again so the handoff remains accurate after that commit moved detached
+  `HEAD`
 
 ### Current findings in this run
 
@@ -84,6 +86,8 @@ Last updated: 2026-04-01 08:16:03 UTC
 - the focused validation rerun is fully green on the current handoff tip:
   `89ee44c0d550`
 - no new `G3PB` implementation gap has been identified by this audit
+- the resulting detached `HEAD` for the next run is a later docs-only handoff
+  commit created after validation in this run
 
 ### Remaining work in this run
 
@@ -120,6 +124,11 @@ Last updated: 2026-04-01 08:16:03 UTC
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
+- post-commit repo-state check:
+  - `git status --short --branch`
+    - pass
+    - clean detached `HEAD` after the docs-only handoff commit created by this
+      run
 
 ### Decisions confirmed in this run so far
 
@@ -135,9 +144,10 @@ Last updated: 2026-04-01 08:16:03 UTC
 
 ### Handoff for next run
 
-- this run refreshed `PLANS.md` so it now matches the actual detached `HEAD`
-  tip `89ee44c0d550`
-- this run revalidated the focused `G3PB` / bindings stack from
+- this run refreshed `PLANS.md`, created a signed docs-only handoff commit,
+  and then normalized the handoff text so it remains accurate on the resulting
+  detached `HEAD`
+- this run revalidated the focused `G3PB` / bindings stack from validation tip
   `89ee44c0d550` and it remains green
 - the validated non-docs implementation baseline beneath the docs-only handoff
   chain remains `abfc85ffd0a4`
