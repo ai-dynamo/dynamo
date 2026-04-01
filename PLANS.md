@@ -1493,8 +1493,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the active `G3PB` implementation slice still appears complete on current
   `HEAD`
   - pickup commit: `ece486a3f599`
-  - current handoff is recorded in this file and is ready for a signed
-    docs-only commit from this run
+  - this handoff is now recorded in signed docs-only commit `048678d71`
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1547,14 +1546,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- none beyond committing this docs-only `PLANS.md` refresh if the tree is
-  still dirty
+- none
 
 ### Exact next step
 
-- if the tree is still dirty, run `git diff --check` and create the signed
-  docs-only commit for this `PLANS.md` audit refresh; otherwise resume only
-  from the existing non-blocking follow-on backlog
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
