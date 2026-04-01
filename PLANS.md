@@ -1363,21 +1363,18 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- create a signed small docs commit after the green docs-refresh validation
-  stack
+- none
 
 ### Exact next step
 
-- create the signed small docs-refresh commit for:
-  - `docs/design-docs/kvbm-g3pb-plan.md`
-  - `PLANS.md`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
-- if this run stops early, resume by:
-  1. creating the signed small docs-refresh commit for the current validated
-     state
-  2. verifying the worktree is clean again after that commit
+- this docs-refresh audit run is now committed:
+  - `b75920bf1 docs: refresh g3pb milestone handoff`
+- the worktree is clean after the signed docs refresh commit
 - if another run starts after this one completes, resume only from the
   existing non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
