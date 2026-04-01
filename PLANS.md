@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:11:46 UTC
+Last updated: 2026-04-01 06:16:30 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 06:11:46 UTC)
+## Current run (2026-04-01 06:16:30 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1470,11 +1470,11 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Re-audited the active `G3PB` surface against the current repo state:
   - detached `HEAD`
   - clean worktree at pickup
-  - current tip at pickup: `8348d29de2a3`
+  - current tip at pickup: `ece486a3f599`
   - recent audit-only commits still match the last recorded handoff:
-    - `8348d29de docs: finalize g3pb handoff wording`
-    - `3436722f3 docs: stabilize g3pb audit handoff`
-    - `18e9d177c docs: finalize g3pb audit handoff`
+    - `ece486a3f docs: stabilize g3pb audit handoff`
+    - `4819b78f1 docs: finalize g3pb audit handoff`
+    - `19f2116f5 docs: refresh g3pb audit handoff`
 - ✅ Re-searched the active handoff/code surface for remaining concrete work:
   - searched `PLANS.md`, `docs/design-docs/kvbm-g3pb-plan.md`,
     `lib/llm/src`, and `lib/bindings/kvbm/src`
@@ -1487,17 +1487,14 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Reconfirmed that the only remaining work is still the previously recorded
   non-blocking follow-on backlog rather than missing implementation in the
   active slice
-- ✅ Completed the signed docs-only audit refresh commits for this run
-- ✅ Re-read the freshly updated handoff after those commits and corrected the
-  stale “commit next” wording so the on-disk plan matches the committed state
 
 ### Current findings before final handoff
 
 - the active `G3PB` implementation slice still appears complete on current
   `HEAD`
-  - pickup commit: `8348d29de2a3`
-  - current handoff is now recorded in the latest signed docs-only commit on
-    `HEAD`
+  - pickup commit: `ece486a3f599`
+  - current handoff is recorded in this file and is ready for a signed
+    docs-only commit from this run
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1525,12 +1522,17 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass as an audit search; only the existing non-blocking `G3PB` backlog plus unrelated repo-wide TODOs were found
 - `git diff --check`
   - pass before the `PLANS.md` refresh edit
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
-  - post-edit rerun before the first docs-only commit: pass (`6 passed`)
-- `git diff --check`
-  - pass before the final handoff-correction commit
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
-  - final post-edit rerun before the last docs-only commit: pass (`6 passed`)
+- post-edit rerun from the updated handoff tree:
+  - `git diff --check`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+    - pass (`4 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
 
 ### Decisions confirmed in this run so far
 
@@ -1542,27 +1544,26 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   `G3PB` audit ties one back to the active slice
 - keep replacing the latest audit block with current verified state instead of
   extending the docs-only commit chain with stale pickup SHAs
-- refresh the latest audit block in place before committing so the next run
-  starts from the actual current tip instead of stale handoff wording
-- after each docs-only commit, re-read and refresh `PLANS.md` again if the
-  latest handoff text still points at a pre-commit state
 
 ### Remaining work in this run
 
-- none
+- none beyond committing this docs-only `PLANS.md` refresh if the tree is
+  still dirty
 
 ### Exact next step
 
-- if another run continues from here, resume only from the existing
-  non-blocking follow-on backlog
+- if the tree is still dirty, run `git diff --check` and create the signed
+  docs-only commit for this `PLANS.md` audit refresh; otherwise resume only
+  from the existing non-blocking follow-on backlog
 
 ### Handoff for next run
 
-- this run refreshed the audit block to the current tip, reran the focused
-  `G3PB` / bindings validation stack, and recorded the handoff in the latest
-  signed docs-only commit(s) on `HEAD`
+- this run refreshed the audit block to the current tip and reran the focused
+  `G3PB` / bindings validation stack
 - the active `G3PB` implementation slice should still be treated as complete
   unless a future audit finds a concrete new gap
+- if this handoff is already committed, do not spend another run repeating the
+  same audit-only refresh
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
