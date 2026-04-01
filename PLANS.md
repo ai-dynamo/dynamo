@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:41:53 UTC
+Last updated: 2026-04-01 08:47:34 UTC
 
 ## Active state
 
@@ -24,10 +24,10 @@ Last updated: 2026-04-01 08:41:53 UTC
   - the current handoff tip should be treated as the latest signed docs-only
     `PLANS.md` refresh on detached `HEAD`, not as a hard-coded commit hash
   - the validation-time docs-only handoff history for the current run was:
+    - `6b49b21a5 docs: refresh g3pb handoff state`
     - `6ba8c459d docs: refresh g3pb handoff state`
     - `7cd18e2ad docs: refresh g3pb handoff state`
     - `2f091c248 docs: normalize g3pb handoff tip`
-    - `c0f65056d docs: refresh g3pb handoff state`
   - the latest validated non-docs `G3PB` code commit remains
     `abfc85ffd0a4` (`llm: stabilize g3pb cache storage test`)
   - the previously listed `nixl-sys` invalidation patch and backend-side
@@ -38,6 +38,136 @@ Last updated: 2026-04-01 08:41:53 UTC
     is correcting handoff drift and revalidating the already-landed state
   - keep `PLANS.md` as the compact validation/handoff record until genuinely
     new scope is chosen
+
+## Current run (2026-04-01 08:47:34 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely and found handoff drift again:
+  the active summary and latest run section still referenced
+  `6ba8c459d886`, but detached `HEAD` had already advanced through a later
+  docs-only handoff commit to `6b49b21a5303`
+- ✅ Re-audited the live `G3PB` handoff/code surface against the current repo
+  state:
+  - detached `HEAD`
+  - validation-time pickup commit before this docs refresh:
+    `6b49b21a5303`
+  - recent docs-only handoff tip chain:
+    - `6b49b21a5 docs: refresh g3pb handoff state`
+    - `6ba8c459d docs: refresh g3pb handoff state`
+    - `7cd18e2ad docs: refresh g3pb handoff state`
+    - `2f091c248 docs: normalize g3pb handoff tip`
+  - latest validated non-docs implementation commit remains:
+    - `abfc85ffd llm: stabilize g3pb cache storage test`
+  - already-landed follow-on implementation commits remain present below that:
+    - `8ddc2f2e1 llm: reclaim g3pb backend staging`
+    - `c231d60fb build: patch local nixl-sys invalidation`
+- ✅ Confirmed the active tree still contains the concrete seams the current
+  handoff claims are finished:
+  - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
+  - `G3pbPeerStorage::delete_blocks` and backend reclaim wiring
+  - native bindings-side `DYN_KVBM_G3PB_ADMISSION_POLICY` adoption
+- ✅ Re-ran the focused `G3PB` / bindings validation stack from current `HEAD`
+  and it remains green
+- ✅ Re-read `PLANS.md` after validation and confirmed there is still no
+  remaining in-scope implementation, cleanup, docs, or validation work for the
+  active `G3PB` slice besides refreshing the handoff itself
+- ✅ Refreshed `PLANS.md` so the actual current tip, validation results, and
+  handoff state are written to disk for the next run
+
+### Current findings in this run
+
+- the active `G3PB` implementation slice still appears complete on current
+  detached `HEAD`
+- the only concrete issue found in this run is handoff drift:
+  `PLANS.md` lagged behind the later docs-only handoff commit already present
+  on detached `HEAD`
+- the focused validation rerun is fully green on the current handoff tip:
+  validation-time tip `6b49b21a5303`
+- no new `G3PB` implementation gap has been identified by this audit
+- the only run-scope issue identified here was handoff drift, not missing
+  implementation or validation coverage
+
+### Remaining work in this run
+
+- none
+
+### Exact next step
+
+- if another run starts from the resulting detached `HEAD`, leave the active
+  `G3PB` slice closed unless a new regression or explicitly new scope appears
+
+### Validation completed in this run so far
+
+- `git rev-parse --short=12 HEAD`
+  - pass at validation time (`6b49b21a5303`)
+- `git log --oneline -8`
+  - pass
+  - current recent history:
+    - `6b49b21a5 docs: refresh g3pb handoff state`
+    - `6ba8c459d docs: refresh g3pb handoff state`
+    - `7cd18e2ad docs: refresh g3pb handoff state`
+    - `2f091c248 docs: normalize g3pb handoff tip`
+    - `c0f65056d docs: refresh g3pb handoff state`
+    - `95eb86204 docs: refresh g3pb handoff state`
+    - `c034fd5a8 docs: normalize g3pb handoff tip`
+    - `9e42d96a4 docs: refresh g3pb handoff state`
+- `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
+  - pass as a seam audit
+  - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
+    bindings-side admission-config adoption, and smoke/backend binaries all
+    remain present in the live tree
+- `rg -n "G3PB|g3pb|TODO|FIXME|follow-on|remaining work|Exact next step|Handoff for next run" PLANS.md docs/design-docs/kvbm-g3pb-plan.md lib/llm/src lib/bindings/kvbm/src`
+  - pass as an audit search
+  - result: no new active `G3PB` implementation gap surfaced in code or the
+    design doc; the only concrete mismatch was stale handoff text in
+    `PLANS.md`
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- keep treating the active `G3PB` slice as complete on the resulting detached
+  `HEAD` unless a fresh focused validation rerun exposes a concrete regression
+- correct the handoff, not the implementation:
+  the repo state still matches the already-landed `G3PB` design and follow-on
+  fixes, so reopening implementation backlog from stale docs metadata would be
+  inaccurate
+- keep future work framed as genuinely new scope:
+  broader caller adoption, policy tuning, or upstreaming the local
+  `nixl-sys` patch are follow-on ideas, not leftover active-slice work
+
+### Handoff for next run
+
+- this run refreshed `PLANS.md` to match the actual later docs-only handoff
+  chain already present on detached `HEAD`, then revalidated the focused stack
+  from validation tip `6b49b21a5303`
+- the signed docs-only handoff commit for this run is the commit that contains
+  this `PLANS.md` refresh; treat that resulting commit as the latest handoff
+  tip without reopening the active slice just because the validation-time tip
+  above is older than the final docs-only commit
+- the validated non-docs implementation baseline beneath the docs-only handoff
+  chain remains `abfc85ffd0a4`
+- there is still no remaining in-scope implementation work for the active
+  `G3PB` slice
+- if another run continues from the resulting `HEAD`, do not reopen the active
+  slice unless a new regression appears or new scope is explicitly chosen
+- any future work should be treated as separate follow-on scope rather than
+  unfinished plan execution:
+  1. expand native `KvBlockManagerConfig.g3pb_admission` adoption beyond the
+     current bindings caller only when another real caller is ready
+  2. upstream the local `nixl-sys` invalidation patch when practical
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ## Current run (2026-04-01 08:41:53 UTC)
 
