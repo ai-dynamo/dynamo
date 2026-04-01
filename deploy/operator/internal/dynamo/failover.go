@@ -31,7 +31,8 @@ import (
 const (
 	gmsSharedVolumeName = "gms-shared"
 	gmsHostPathBase     = "/run/gms"
-	gmsSharedMountPath  = "/run/gms/shared"
+	gmsSharedMountPath  = "/run/gms/shared" // engine pod mount path
+	gmsServerSocketDir  = "/tmp"            // GMS server mount path; gpu_memory_service writes sockets here
 	gmsFailoverLockFile = "failover.lock"
 )
 
@@ -43,7 +44,8 @@ func gmsWrapperScript(gpuCount int) string {
 		devList[i] = strconv.Itoa(i)
 	}
 	return fmt.Sprintf(
-		`cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+		`rm -f /tmp/gms_*.sock
+cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
 trap cleanup SIGTERM SIGINT
 for dev in %s; do
   python3 -m gpu_memory_service --device "$dev" &
@@ -55,11 +57,12 @@ cleanup`, strings.Join(devList, " "))
 }
 
 // gmsStartupProbeCommand returns the exec probe command that verifies the
-// expected number of GMS UDS sockets exist on the shared volume.
+// expected number of GMS UDS sockets exist. The GMS container mounts the
+// shared volume at /tmp, which is where gpu_memory_service writes sockets.
 func gmsStartupProbeCommand(gpuCount int) []string {
 	return []string{
 		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount),
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsServerSocketDir, gpuCount),
 	}
 }
 
@@ -88,15 +91,11 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.LivenessProbe = nil
 	c.ReadinessProbe = nil
 
-	c.Env = append(c.Env, corev1.EnvVar{
-		Name:  "TMPDIR",
-		Value: gmsSharedMountPath,
-	})
-
 	removeGPUFromLimits(c)
 	addGPUToleration(podSpec)
 
 	vol, mount := gmsSharedVolume(rank)
+	mount.MountPath = gmsServerSocketDir // gpu_memory_service writes sockets to /tmp
 	podSpec.Volumes = append(podSpec.Volumes, vol)
 	c.VolumeMounts = append(c.VolumeMounts, mount)
 

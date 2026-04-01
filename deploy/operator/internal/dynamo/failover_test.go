@@ -72,8 +72,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 	assert.True(t, hasToleration(result, "nvidia.com/gpu"), "should have GPU toleration")
 	assert.True(t, hasVolume(result, gmsSharedVolumeName), "should have shared volume")
-	assert.True(t, hasVolumeMount(c, gmsSharedMountPath), "should have shared volume mount")
-	assert.True(t, hasEnvVar(c, "TMPDIR", gmsSharedMountPath), "should set TMPDIR")
+	assert.True(t, hasVolumeMount(c, gmsServerSocketDir), "should mount shared volume at /tmp for GMS")
 
 	// Verify original is not mutated
 	assert.Len(t, base.Containers[0].Command, 3, "original command should be unchanged")
@@ -92,15 +91,15 @@ func TestGmsWeightServerPodSpec_SubPathExpr(t *testing.T) {
 
 	t.Run("rank 0", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 0, 4)
-		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
-		require.NotNil(t, mount)
+		mount := findVolumeMount(result.Containers[0], gmsServerSocketDir)
+		require.NotNil(t, mount, "GMS container should mount shared volume at /tmp")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
 	})
 
 	t.Run("rank 3", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 3, 4)
-		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
-		require.NotNil(t, mount)
+		mount := findVolumeMount(result.Containers[0], gmsServerSocketDir)
+		require.NotNil(t, mount, "GMS container should mount shared volume at /tmp")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
 	})
 }
