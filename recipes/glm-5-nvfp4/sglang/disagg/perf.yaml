@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -42,6 +44,7 @@ spec:
         - /bin/sh
         - -c
         - |
+          set -eu
           apt-get update -qq && apt-get install -y -qq curl jq && apt-get clean
           pip install -q aiperf transformers tokenizers
 

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # GLM-5 NVFP4 — Disaggregated Prefill/Decode on GB200
 
 Serves [nvidia/GLM-5-NVFP4](https://huggingface.co/nvidia/GLM-5-NVFP4) using SGLang with
@@ -45,31 +50,25 @@ kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml
 kubectl wait --for=condition=complete job/glm5-nvfp4-download -n <your-namespace> --timeout=3600s
 ```
 
-## Step 3: Create the ComputeDomain
-
-The decode group uses NVIDIA ComputeDomain for 4-node MNNVL scheduling.
-Apply the deploy.yaml first to create the ComputeDomain, then update the domainID:
-
-```bash
-# Apply to create the ComputeDomain
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
-
-# Get the auto-generated UID
-kubectl get computedomain glm5-compute-domain -n <your-namespace> \
-  -o jsonpath='{.metadata.uid}'
-
-# Update domainID in deploy.yaml, then re-apply
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
-```
-
-## Step 4: Deploy
+## Step 3: Deploy
 
 Edit `sglang/disagg/deploy.yaml` and replace all `<placeholder>` values:
 
 - `<your-namespace>` — your Kubernetes namespace
 - `<your-registry>/sglang-dynamo-glm5:latest` — your built container image
 - `<your-model-pvc>` — PVC name containing model weights at `/models/nvidia-GLM-5-NVFP4`
-- `<compute-domain-uid>` — from Step 3
+
+Then apply to create the ComputeDomain and get its UID:
+
+```bash
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+
+# Get the auto-generated ComputeDomain UID
+kubectl get computedomain glm5-compute-domain -n <your-namespace> \
+  -o jsonpath='{.metadata.uid}'
+```
+
+Update `<compute-domain-uid>` in `deploy.yaml` with the UID from above, then re-apply:
 
 ```bash
 kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
@@ -81,7 +80,7 @@ Monitor startup (decode takes ~15 min to load and capture CUDA graphs):
 kubectl get pods -n <your-namespace> -l app.kubernetes.io/part-of=glm5-sglang -w
 ```
 
-## Step 5: Test
+## Step 4: Test
 
 ```bash
 kubectl port-forward svc/glm5-sglang-frontend 8000:8000 -n <your-namespace> &
@@ -90,7 +89,7 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"nvidia/GLM-5-NVFP4","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
 
-## Step 6: Benchmark (optional)
+## Step 5: Benchmark (optional)
 
 Edit `sglang/disagg/perf.yaml` to set your namespace and PVC, then run:
 
