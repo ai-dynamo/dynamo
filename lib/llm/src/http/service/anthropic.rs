@@ -300,10 +300,12 @@ async fn anthropic_messages(
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = Box::pin(engine_stream);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::AnthropicMessages, streaming);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        ctx.id().to_string(),
+    );
 
     if streaming {
         stream_handle.arm();
