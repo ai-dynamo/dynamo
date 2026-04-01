@@ -6,7 +6,9 @@ import dataclasses
 import logging
 import os
 import random
+import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional
 
 import pytest
@@ -38,6 +40,32 @@ def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     # handles "13", "13.0", "13.0.1", etc.
     return v.startswith("13")
+
+
+@lru_cache(maxsize=1)
+def _gpu_total_memory_gib() -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    first_line = result.stdout.strip().splitlines()[0:1]
+    if not first_line:
+        return None
+
+    try:
+        return int(first_line[0]) / 1024.0
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -623,6 +651,11 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.max_vram_gib(24.6),  # observed peak 22.3 GiB (+10% safety)
+            pytest.mark.skipif(
+                (_gpu_total_memory_gib() or float("inf")) < 24.6,
+                reason="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 exceeds sub-24.6 GiB CI GPUs",
+            ),
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
@@ -816,6 +849,7 @@ def test_serve_deployment(
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 def test_multimodal_b64(
     request,
     runtime_services_dynamic_ports,
