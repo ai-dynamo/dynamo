@@ -262,7 +262,15 @@ VllmDecodeWorker:
 
 **EFA Resource Requests:**
 
-Request EFA interfaces in your pod spec. On p5.48xlarge instances, 4 EFA interfaces per worker provides optimal bandwidth:
+Request EFA interfaces in your pod spec. The p5.48xlarge instance has **32 EFA interfaces** (8 network cards × 4 interfaces each) with 3200 Gbps total bandwidth. The number of interfaces to allocate per worker depends on your deployment:
+
+| Deployment | EFA per Worker | Rationale |
+|------------|----------------|-----------|
+| 1P + 1D per node pair | 4 | Achieved ~9.6 GB/s; leaves 24 interfaces for other pods |
+| Multi-worker per node | 2-4 | Balance between workers sharing the node |
+| Maximum bandwidth | 8-16 | For very large KV cache transfers or TP>1 |
+
+Example with 4 EFA interfaces (validated configuration):
 
 ```yaml
 extraPodSpec:
@@ -276,6 +284,8 @@ extraPodSpec:
       requests:
         vpc.amazonaws.com/efa: "4"
 ```
+
+> **Note**: NIXL/libfabric automatically stripes traffic across all allocated EFA interfaces. The 4-interface configuration achieved ~9.6 GB/s in testing, which is sufficient for Llama-3.1-8B KV cache transfers at ISL=8000. Increase the count if your workload requires higher bandwidth (e.g., larger models or higher TP).
 
 **Environment Variables:**
 
