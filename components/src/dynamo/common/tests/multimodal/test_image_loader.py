@@ -16,7 +16,6 @@
 """Tests for ImageLoader in-flight dedup, cancellation, and error contract."""
 
 import asyncio
-from collections import OrderedDict
 from io import BytesIO
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -52,7 +51,14 @@ def _mock_http_client(
     delay: float = 0.0,
     side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Return a mock httpx.AsyncClient whose .get() returns a fake response."""
+    """Return a mock httpx.AsyncClient whose .get() returns a fake response.
+
+    Args:
+        content: Raw bytes returned as the HTTP response body.
+        status_code: HTTP status code; >=400 triggers raise_for_status().
+        delay: Seconds to sleep before responding (simulates network latency).
+        side_effect: If set, .get() raises this exception instead of returning.
+    """
 
     async def _get(url: str) -> Any:
         if delay > 0:
@@ -74,19 +80,9 @@ def _mock_http_client(
     return client
 
 
-@pytest.fixture()
-def loader() -> ImageLoader:
-    return ImageLoader.__new__(ImageLoader)
-
-
 @pytest.fixture(autouse=True)
-def _init_loader(loader: ImageLoader) -> None:
-    loader._http_timeout = 30.0
-    loader._cache_size = 4
-    loader._image_cache = OrderedDict()
-    loader._inflight = {}
-    loader._enable_frontend_decoding = False
-    loader._nixl_connector = None
+def loader() -> ImageLoader:
+    return ImageLoader(cache_size=4, http_timeout=30.0)
 
 
 # --- Concurrent same-URL dedup ---
@@ -233,3 +229,30 @@ async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
 
     result = await loader.load_image("https://example.com/img.png")
     assert result is img
+
+
+async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
+    """Accessing a cached entry should protect it from eviction (LRU, not FIFO)."""
+    loader._cache_size = 3
+    mock_client = _mock_http_client()
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.get_http_client",
+        return_value=mock_client,
+    ):
+        # Fill cache: a, b, c (oldest → newest)
+        await loader.load_image("https://example.com/a.png")
+        await loader.load_image("https://example.com/b.png")
+        await loader.load_image("https://example.com/c.png")
+        assert len(loader._image_cache) == 3
+
+        # Touch "a" so it becomes most-recently-used
+        await loader.load_image("https://example.com/a.png")
+
+        # Insert "d" — should evict "b" (least recently used), not "a"
+        await loader.load_image("https://example.com/d.png")
+
+    assert "https://example.com/a.png" in loader._image_cache
+    assert "https://example.com/b.png" not in loader._image_cache
+    assert "https://example.com/c.png" in loader._image_cache
+    assert "https://example.com/d.png" in loader._image_cache

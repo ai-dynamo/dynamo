@@ -76,15 +76,19 @@ class ImageLoader:
             )  # Synchronously wait for async init
 
     @staticmethod
+    def _open_image_sync(image_data: BytesIO) -> Image.Image:
+        """Open, validate, and decode an image from raw bytes. Runs in a thread."""
+        image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        if image.format not in ("JPEG", "PNG", "WEBP"):
+            raise ValueError(f"Unsupported image format: {image.format}")
+        # Image.open() is lazy — convert() forces the actual pixel decode
+        return image.convert("RGB")
+
+    @staticmethod
     async def _open_image(image_data: BytesIO) -> Image.Image:
         """Open and validate an image from raw bytes, converting to RGB."""
         with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-            image = await asyncio.to_thread(
-                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-            )
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
-            return image.convert("RGB")
+            return await asyncio.to_thread(ImageLoader._open_image_sync, image_data)
 
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
@@ -93,7 +97,7 @@ class ImageLoader:
                 self._image_cache.popitem(last=False)
             self._image_cache[key] = image
 
-    async def _fetch_and_process(self, image_url: str, parsed_url: Any) -> Image.Image:
+    async def _fetch_and_process(self, image_url: str) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 
         All exception normalization happens here so shared callers
@@ -126,12 +130,10 @@ class ImageLoader:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
 
-    async def _fetch_and_cache(
-        self, key: str, image_url: str, parsed_url: Any
-    ) -> Image.Image:
+    async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
         """Shared task: fetch, cache, then remove from _inflight."""
         try:
-            image = await self._fetch_and_process(image_url, parsed_url)
+            image = await self._fetch_and_process(image_url)
             self._cache_put(key, image)
             return image
         finally:
@@ -147,13 +149,12 @@ class ImageLoader:
             # Check cache (sync — no await, no interleaving possible)
             if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
+                self._image_cache.move_to_end(key)
                 return self._image_cache[key]
 
             # Join existing in-flight task, or start a new one
             if key not in self._inflight:
-                task = asyncio.create_task(
-                    self._fetch_and_cache(key, image_url, parsed_url)
-                )
+                task = asyncio.create_task(self._fetch_and_cache(key, image_url))
                 # Suppress "exception was never retrieved" if all waiters cancel
                 task.add_done_callback(
                     lambda t: t.exception() if not t.cancelled() else None
