@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:28:36 UTC
+Last updated: 2026-04-01 02:32:01 UTC
 
 ## Active state
 
@@ -783,36 +783,36 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Handoff for next run
 
-- the landed request-plane/discovery slice is complete, but the next agent
-  should continue with two follow-up tracks:
-  1. finish the outstanding validation tail in the existing order
-  2. start the structural cleanup work for the long-lived G3PB shape
-- explicit structural cleanup TODOs for that next run:
-  - refactor the G3PB client seam
-  - refactor the G3PB backend seam
-  - scrub ugly transitional naming from any new/public-facing path; do not
-    propagate names like `g2g2g3*`
-  - turn the current ad hoc config discussion into a KVBM-native config plan
-- explicit architecture direction for that follow-up:
-  - the G3PB client refactor should absorb the Dynamo component/client logic and
-    client-side placement behavior such as ring-hash handling
-  - the G3PB backend refactor should produce a cleaner server boundary between
-    endpoint handling, transport, and storage policy
-  - simplify `foyer`: write all, evict by last-touch/LRU, and accept drop-on-evict
-  - treat G2 on the G3PB worker as the CPU buffer tier with LRU-style eviction
-  - preserve the default offload trigger on first reuse, plus env-driven eager
-    offload for mostly-prefill workers
-- long-term config direction to evaluate during that follow-up:
-  - expose durable G3PB/KVBM behavior through native KVBM config/state where it
-    will be visible to maintainers and future integrations
-  - keep smoke-only validation controls local to the smoke binary
-  - avoid baking backend-specific or migration-era names into the long-term
-    config surface
-  - model the long-term knobs around tier transition policy, CPU-buffer
-    retention, and simple `foyer` retention rather than one-off env wiring
-  - `foyer` metadata can be sharded or serialized with payload; choose the
-    simpler path unless scaling forces something else
-- if a future run picks this up, only pursue follow-on work outside this slice:
+- the validation tail and the first structural cleanup pass are complete
+- landed cleanup in this run:
+  - stable storage/config naming
+  - shared peer discovery/client seam
+  - cleaner backend service boundary
+- next run should focus on the native config follow-up rather than more
+  transport or endpoint restructuring
+- concrete next slice:
+  1. introduce the first KVBM-visible config surface for long-lived G3PB policy
+  2. keep backend-runtime-only knobs and smoke-only knobs out of that first
+     shared config change
+  3. rerun:
+     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+     - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+     - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+- config ownership guidance already established in this run:
+  - KVBM/core policy:
+    - offload admission policy
+    - CPU-buffer retention/eviction thresholds
+    - promotion/demotion thresholds between CPU buffer and `foyer`
+  - backend runtime:
+    - worker identity
+    - pinned host staging capacity
+    - backend device id
+    - `foyer` directory and capacity settings
+  - smoke-only validation:
+    - demo block counts
+    - sequence seed/range
+    - synthetic local device/host block counts
+- optional follow-on work outside the main slice remains:
   1. upstream or locally patch `nixl-sys` remote metadata invalidation to use
      null-terminated `CString` values
   2. decide whether backend-side eviction/reclamation is needed for long-lived
