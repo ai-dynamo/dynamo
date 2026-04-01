@@ -135,6 +135,18 @@ func TestValidateOperatorConfiguration_CheckpointEnabledRequiresNoStorageConfig(
 	}
 }
 
+func TestValidateOperatorConfiguration_CheckpointDeprecatedStorageConfigIsAccepted(t *testing.T) {
+	cfg := validConfig()
+	cfg.Checkpoint.Enabled = true
+	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeS3
+	cfg.Checkpoint.Storage.S3.URI = "s3://legacy-bucket/checkpoints"
+
+	errs := ValidateOperatorConfiguration(cfg)
+	if len(errs) != 0 {
+		t.Errorf("expected no errors for deprecated checkpoint storage config, got: %v", errs)
+	}
+}
+
 func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = false

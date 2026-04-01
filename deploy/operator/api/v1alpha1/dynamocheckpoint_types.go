@@ -37,6 +37,12 @@ const (
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
 
+// Deprecated: StorageType is retained for compatibility with older
+// DynamoCheckpoint status consumers. The current checkpoint flow publishes
+// PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
+// +kubebuilder:validation:Enum=pvc;s3;oci
+type DynamoCheckpointStorageType string
+
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
 // Two checkpoints with the same identity hash are considered equivalent
 type DynamoCheckpointIdentity struct {
@@ -104,6 +110,13 @@ type DynamoCheckpointJobConfig struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
+
+	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+	// 300 second TTL.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=300
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
@@ -137,6 +150,16 @@ type DynamoCheckpointStatus struct {
 	// This hash is used to identify equivalent checkpoints
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
+
+	// Deprecated: Location is retained for compatibility with older clients.
+	// It is derived from the current checkpoint storage path when available.
+	// +optional
+	Location string `json:"location,omitempty"`
+
+	// Deprecated: StorageType is retained for compatibility with older clients.
+	// The current checkpoint flow only publishes pvc artifacts.
+	// +optional
+	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
 	// JobName is the name of the checkpoint creation Job
 	// +optional

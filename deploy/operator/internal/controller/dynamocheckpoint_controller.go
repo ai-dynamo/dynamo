@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -58,9 +59,42 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
 }
 
+func (r *CheckpointReconciler) resolveLegacyCheckpointStatusStorage(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	checkpointID string,
+) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
+	daemonSets := &appsv1.DaemonSetList{}
+	if err := r.List(
+		ctx,
+		daemonSets,
+		client.InNamespace(ckpt.Namespace),
+		client.MatchingLabels{snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue},
+	); err != nil {
+		return "", "", fmt.Errorf("list snapshot-agent daemonsets in %s: %w", ckpt.Namespace, err)
+	}
+
+	storage, err := snapshotprotocol.DiscoverStorageFromDaemonSets(ckpt.Namespace, daemonSets.Items)
+	if err != nil {
+		return "", "", err
+	}
+
+	resolvedStorage, err := snapshotprotocol.ResolveCheckpointStorage(
+		checkpointID,
+		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+		storage,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	return resolvedStorage.Location, nvidiacomv1alpha1.DynamoCheckpointStorageType(resolvedStorage.Type), nil
+}
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
@@ -203,6 +237,13 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	ckpt.Status.JobName = jobName
 	ckpt.Status.CreatedAt = nil
 	ckpt.Status.Message = ""
+	location, storageType, err := r.resolveLegacyCheckpointStatusStorage(ctx, ckpt, hash)
+	if err != nil {
+		logger.V(1).Info("Skipping deprecated checkpoint storage status fields", "checkpoint", ckpt.Name, "error", err)
+	} else {
+		ckpt.Status.Location = location
+		ckpt.Status.StorageType = storageType
+	}
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
 		Status:             metav1.ConditionTrue,
@@ -270,6 +311,16 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	case snapshotprotocol.CheckpointJobPhaseReady:
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", observation.Message)
+
+		if ckpt.Status.Location == "" || ckpt.Status.StorageType == "" {
+			location, storageType, err := r.resolveLegacyCheckpointStatusStorage(ctx, ckpt, ckpt.Status.IdentityHash)
+			if err != nil {
+				logger.V(1).Info("Skipping deprecated checkpoint storage status fields", "checkpoint", ckpt.Name, "error", err)
+			} else {
+				ckpt.Status.Location = location
+				ckpt.Status.StorageType = storageType
+			}
+		}
 
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady

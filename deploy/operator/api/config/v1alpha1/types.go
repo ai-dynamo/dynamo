@@ -21,6 +21,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Checkpoint storage type constants retained for compatibility with older
+// operator configuration files.
+const (
+	CheckpointStorageTypePVC = "pvc"
+	CheckpointStorageTypeS3  = "s3"
+	CheckpointStorageTypeOCI = "oci"
+)
+
 // +kubebuilder:object:root=true
 
 // OperatorConfiguration is the Schema for the operator configuration.
@@ -238,6 +246,53 @@ type CheckpointConfiguration struct {
 	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
 	// +kubebuilder:default="/tmp/ready-for-checkpoint"
 	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
+	// Deprecated: Storage is retained for compatibility and ignored by the
+	// current snapshot flow. Snapshot storage is discovered from the
+	// snapshot-agent DaemonSet instead.
+	Storage CheckpointStorageConfiguration `json:"storage"`
+}
+
+// Deprecated: CheckpointStorageConfiguration is retained for compatibility and
+// ignored by the current snapshot flow.
+type CheckpointStorageConfiguration struct {
+	// Type is the legacy storage backend type: pvc, s3, or oci.
+	// +kubebuilder:default="pvc"
+	Type string `json:"type"`
+	// PVC configuration for legacy pvc-based settings.
+	PVC CheckpointPVCConfig `json:"pvc"`
+	// S3 configuration for legacy s3-based settings.
+	S3 CheckpointS3Config `json:"s3"`
+	// OCI configuration for legacy oci-based settings.
+	OCI CheckpointOCIConfig `json:"oci"`
+}
+
+// Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
+// the current snapshot flow.
+type CheckpointPVCConfig struct {
+	// PVCName is the legacy PVC name.
+	// +kubebuilder:default="snapshot-pvc"
+	PVCName string `json:"pvcName"`
+	// BasePath is the legacy base directory within the PVC.
+	// +kubebuilder:default="/checkpoints"
+	BasePath string `json:"basePath"`
+}
+
+// Deprecated: CheckpointS3Config is retained for compatibility and ignored by
+// the current snapshot flow.
+type CheckpointS3Config struct {
+	// URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
+	URI string `json:"uri"`
+	// CredentialsSecretRef is the legacy credentials secret name.
+	CredentialsSecretRef string `json:"credentialsSecretRef"`
+}
+
+// Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
+// the current snapshot flow.
+type CheckpointOCIConfig struct {
+	// URI is the legacy OCI URI (oci://registry/repository).
+	URI string `json:"uri"`
+	// CredentialsSecretRef is the legacy docker config secret name.
+	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.

@@ -8172,6 +8172,14 @@ spec:
                       x-kubernetes-validations:
                         - message: sharedMemory.size must not be set when sharedMemory.disabled is true
                           rule: '!(has(self.disabled) && self.disabled && has(self.size))'
+                    ttlSecondsAfterFinished:
+                      default: 300
+                      description: |-
+                        Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+                        300 second TTL.
+                      format: int32
+                      minimum: 0
+                      type: integer
                   required:
                     - podTemplateSpec
                   type: object
@@ -8250,6 +8258,11 @@ spec:
                 jobName:
                   description: JobName is the name of the checkpoint creation Job
                   type: string
+                location:
+                  description: |-
+                    Deprecated: Location is retained for compatibility with older clients.
+                    It is derived from the current checkpoint storage path when available.
+                  type: string
                 message:
                   description: Message provides additional information about the current state
                   type: string
@@ -8260,6 +8273,15 @@ spec:
                     - Creating
                     - Ready
                     - Failed
+                  type: string
+                storageType:
+                  description: |-
+                    Deprecated: StorageType is retained for compatibility with older clients.
+                    The current checkpoint flow only publishes pvc artifacts.
+                  enum:
+                    - pvc
+                    - s3
+                    - oci
                   type: string
               type: object
           type: object
