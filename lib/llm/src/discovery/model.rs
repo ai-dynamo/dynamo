@@ -19,6 +19,7 @@ use crate::protocols::openai::ParsingOptions;
 use crate::types::{
     generic::tensor::TensorStreamingEngine,
     openai::{
+        audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
@@ -149,6 +150,13 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
+    /// Check if any WorkerSet has an audios engine.
+    pub fn has_audios_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_audios_engine())
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -158,6 +166,7 @@ impl Model {
                 || ws.has_images_engine()
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
+                || ws.has_audios_engine()
         };
 
         let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
@@ -204,6 +213,11 @@ impl Model {
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+    }
+
+    pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
     }
 

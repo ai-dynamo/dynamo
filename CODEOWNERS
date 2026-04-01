@@ -33,7 +33,6 @@ CODEOWNERS @ai-dynamo/Devops
 /components/src/dynamo/global_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /examples/global_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /components/src/dynamo/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
-/tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # recipes
 

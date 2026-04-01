@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -39,10 +40,10 @@ pub(crate) struct VllmRequestState {
 #[derive(Default)]
 pub(crate) struct SchedulerState {
     pub(crate) waiting: VecDeque<Uuid>,
-    waiting_members: HashSet<Uuid>,
+    waiting_members: FxHashSet<Uuid>,
     pub(crate) running: VecDeque<Uuid>,
-    running_members: HashSet<Uuid>,
-    pub(crate) requests: HashMap<Uuid, VllmRequestState>,
+    running_members: FxHashSet<Uuid>,
+    pub(crate) requests: FxHashMap<Uuid, VllmRequestState>,
 }
 
 struct PreemptedRequest {
@@ -292,7 +293,7 @@ impl VllmCore {
         let requests_before = self.state.requests.len();
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
-        let mut scheduled = HashMap::new();
+        let mut scheduled = FxHashMap::default();
         let mut batch_count = 0usize;
         let mut batch_total_isl = 0usize;
         let mut batch_total_prefix = 0usize;
@@ -411,7 +412,7 @@ impl VllmCore {
         uuid: Uuid,
         from_waiting: bool,
         token_budget: &mut usize,
-        scheduled: &mut HashMap<Uuid, ScheduledWork>,
+        scheduled: &mut FxHashMap<Uuid, ScheduledWork>,
         batch_count: &mut usize,
         batch_total_isl: &mut usize,
         batch_total_prefix: &mut usize,
@@ -679,7 +680,7 @@ impl VllmCore {
     }
 }
 
-fn request_sequence_len(requests: &HashMap<Uuid, VllmRequestState>, uuid: Uuid) -> usize {
+fn request_sequence_len(requests: &FxHashMap<Uuid, VllmRequestState>, uuid: Uuid) -> usize {
     requests
         .get(&uuid)
         .map(|request| request.sequence.len())
@@ -716,7 +717,7 @@ fn debug_assert_vllm_request_progress(uuid: Uuid, request: &VllmRequestState) {
     }
 }
 
-fn debug_assert_vllm_ready_to_decode(requests: &HashMap<Uuid, VllmRequestState>, uuid: Uuid) {
+fn debug_assert_vllm_ready_to_decode(requests: &FxHashMap<Uuid, VllmRequestState>, uuid: Uuid) {
     #[cfg(debug_assertions)]
     {
         let Some(request) = requests.get(&uuid) else {
