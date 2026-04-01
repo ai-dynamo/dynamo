@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:13:11 UTC
+Last updated: 2026-04-01 11:15:42 UTC
 
 ## Active state
 
@@ -10,7 +10,10 @@ Last updated: 2026-04-01 11:13:11 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - the live detached `HEAD` validated in this run is `391fb5984adf`
+  - the current live detached `HEAD` after the handoff refresh is
+    `1eb7021d1281`
+  - the implementation state revalidated in this run is still the docs-parent
+    tip `391fb5984adf`
   - the live detached `HEAD` is newer than the prior handoff tip in this file
     only by docs-only handoff commits
 - Current implementation direction:
@@ -55,6 +58,10 @@ Last updated: 2026-04-01 11:13:11 UTC
   `391fb5984adf`
 - Re-ran post-edit `g3pb::` spot checks after compacting the handoff, and they
   passed
+- Landed a signed docs-only handoff commit on top of the validated tip:
+  - `1eb7021d1281` (`docs: refresh g3pb handoff state`)
+- Re-ran the exact next-step validation from the new detached `HEAD`, and it
+  is still green with a clean worktree
 
 ### Current findings in this run
 
@@ -68,6 +75,7 @@ Last updated: 2026-04-01 11:13:11 UTC
   as unfinished work for this `G3PB` slice
 - the live detached `HEAD` is newer than the previous handoff commit recorded
   in this file only by docs-only handoff commit(s)
+- the post-refresh signed docs-only handoff commit is `1eb7021d1281`
 - no code changes are pending for the active `G3PB` slice
 
 ### Validation completed in this run
@@ -108,6 +116,17 @@ Last updated: 2026-04-01 11:13:11 UTC
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
+- `git commit --signoff -m "docs: refresh g3pb handoff state"`
+  - pass (`1eb7021d1281`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`) as the final exact-next-step spot check from
+    `1eb7021d1281`
+- `git rev-parse --short=12 HEAD`
+  - pass (`1eb7021d1281`)
+- `git status --short --branch`
+  - pass (`## HEAD (no branch)`) with a clean worktree after the signed commit
+- `sed -n '1,260p' PLANS.md`
+  - pass as the final handoff reread from `1eb7021d1281`
 
 ### Decisions confirmed in this run
 
@@ -141,8 +160,8 @@ Last updated: 2026-04-01 11:13:11 UTC
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
   `391fb5984adf`
-- a signed docs-only handoff commit may exist on top of that validated tip
-  after this file is staged and committed
+- this run then landed and rechecked signed docs-only handoff commit
+  `1eb7021d1281`
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
