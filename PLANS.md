@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:52:11 UTC
+Last updated: 2026-04-01 10:55:21 UTC
 
 ## Active state
 
@@ -10,8 +10,7 @@ Last updated: 2026-04-01 10:52:11 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current live tip is the docs-only handoff refresh commit from this run on
-    top of validated detached `HEAD` `05c3cbd70b8e`
+  - live detached `HEAD` validated in this run: `2dcc761286cc`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -29,7 +28,7 @@ Last updated: 2026-04-01 10:52:11 UTC
     detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:49:57 UTC)
+## Current run (2026-04-01 10:55:21 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -37,9 +36,9 @@ Last updated: 2026-04-01 10:52:11 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `05c3cbd70b8e`
-- Re-confirmed the active tree still contains the seams required by the
-  handoff and design doc:
+- Re-audited the live repo state from detached `HEAD` `2dcc761286cc`
+- Re-confirmed the live tree still contains the seams required by the handoff
+  and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
   - `G3pbPeerStorage::delete_blocks` and backend reclaim wiring
   - native bindings-side `DYN_KVBM_G3PB_ADMISSION_POLICY` adoption
@@ -51,16 +50,11 @@ Last updated: 2026-04-01 10:52:11 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
-  `05c3cbd70b8e`
-- Re-ran post-edit `g3pb::` spot checks as the handoff was compacted, and they
-  passed
-- Landed signed docs-only handoff commits after the post-edit validation passed
+  `2dcc761286cc`
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `05c3cbd70b8e`
-- the current live detached `HEAD` after this run is newer than the validated
-  detached `HEAD` only by the docs-only handoff refresh commit from this run
+- the detached `HEAD` validated in this run is `2dcc761286cc`
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -73,7 +67,7 @@ Last updated: 2026-04-01 10:52:11 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`05c3cbd70b8e`)
+  - pass (`2dcc761286cc`)
 - `git log --oneline -8`
   - pass
 - `git status --short --branch`
@@ -106,16 +100,6 @@ Last updated: 2026-04-01 10:52:11 UTC
   - pass as an end-to-end test inventory search
   - result: no standalone runnable `G3PB` e2e test target surfaced beyond the
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
-- `git add PLANS.md`
-  - pass
-- `git commit --signoff -m "docs: refresh g3pb handoff state"`
-  - pass
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) after the final handoff compaction edit
-- `git commit --signoff -m "docs: finalize g3pb handoff state"`
-  - pass
 
 ### Decisions confirmed in this run
 
@@ -129,14 +113,13 @@ Last updated: 2026-04-01 10:52:11 UTC
 
 ### Remaining work in this run
 
-- none
+- update this handoff after the post-edit spot check and signed docs commit
 
 ### Exact next step
 
 - run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`, then
-  `git rev-parse --short=12 HEAD`, `git status --short --branch`, and `sed -n
-  '1,260p' PLANS.md`, then leave the active `G3PB` slice closed unless a fresh
-  regression or explicitly new scope appears
+  `git status --short --branch`, `git add PLANS.md`, and `git commit --signoff
+  -m "docs: refresh g3pb handoff state"` if the tree is still green
 
 ### Handoff for next run
 
@@ -148,7 +131,7 @@ Last updated: 2026-04-01 10:52:11 UTC
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `05c3cbd70b8e`, then landed docs-only handoff commits on top
+  `2dcc761286cc`
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
