@@ -907,6 +907,67 @@ mod tests_startup_helpers {
         let _ = listener_handle.await;
     }
 
+    #[tokio::test]
+    async fn test_start_zmq_listener_retries_initial_connect_until_publisher_binds() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let endpoint = "tcp://127.0.0.1:15556";
+        let topic = "".to_string();
+        let token = dynamo_runtime::CancellationToken::new();
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
+        let listener_handle = tokio::spawn({
+            let token = token.clone();
+            let next_event_id = next_event_id.clone();
+            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let mut pub_socket = PubSocket::new();
+        pub_socket.bind(endpoint).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events: vec![RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(7)],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+            }],
+            data_parallel_rank: Some(0),
+        };
+
+        let msg = ZmqMessage::try_from(vec![
+            Bytes::from(""),
+            Bytes::from(1_u64.to_be_bytes().to_vec()),
+            Bytes::from(rmps::to_vec(&batch).unwrap()),
+        ])
+        .expect("Failed to create ZmqMessage");
+
+        pub_socket.send(msg).await.unwrap();
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("channel closed unexpectedly")
+            .event;
+
+        let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = event.data else {
+            panic!("expected KvCacheStoreData");
+        };
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_hash.0, 7);
+
+        token.cancel();
+        let _ = listener_handle.await;
+    }
+
     //--------------------------------------------------------------------
     // Test distributed recovery: Router queries worker's LocalKvIndexer after outage
     //--------------------------------------------------------------------
