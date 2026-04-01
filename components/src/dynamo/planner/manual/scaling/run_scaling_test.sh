@@ -72,7 +72,7 @@ check_prerequisites() {
 
     if ! command -v aiperf &> /dev/null; then
         log_error "aiperf not found. This tool is required for load generation."
-        log_error "Follow components/src/dynamo/planner/tests/manual/README.md for setup."
+        log_error "Follow components/src/dynamo/planner/manual/README.md for setup."
         exit 1
     fi
 

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from dynamo.planner.tests.manual.utils.load_generator import LoadGenerator
+from dynamo.planner.tests.unit.load_generator import LoadGenerator
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

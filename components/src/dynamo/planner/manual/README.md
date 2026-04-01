@@ -34,7 +34,7 @@ When the examples below refer to `profile_results_dir`, use that path inside the
 From the repo root:
 
 ```bash
-python3 components/src/dynamo/planner/tests/manual/unit/planner_sla_dryrun.py \
+python3 components/src/dynamo/planner/manual/unit/planner_sla_dryrun.py \
   --config '{"environment":"kubernetes","backend":"vllm","ttft":200,"itl":10,"profile_results_dir":"components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","throughput_adjustment_interval":60,"no_correction":true}' \
   --dataset rr-5-45_i3000o300.jsonl \
   --start-num-p 1 \
@@ -47,7 +47,7 @@ python3 components/src/dynamo/planner/tests/manual/unit/planner_sla_dryrun.py \
 The manual scaling entrypoint is:
 
 ```bash
-components/src/dynamo/planner/tests/manual/scaling/run_scaling_test.sh --namespace <namespace>
+components/src/dynamo/planner/manual/scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 Supported modes:
@@ -65,8 +65,6 @@ components/src/dynamo/planner/tests/e2e_scaling_results/
 
 - `perf_test_configs/`: example aggregated and disaggregated perf test manifests
 - `scaling/`: manual planner scaling manifests and runner scripts
-- `figures/`: legacy dry-run and perf plots kept with the original planner assets
-- `unit/controller.py`: manual virtual-connector control helper using the current planner APIs
 
 The manifests in this directory assume the current image split:
 - `dynamo-frontend` for the frontend service
