@@ -77,6 +77,12 @@ pub enum TransferPlan {
         first: TransferStrategy,
 
         /// Bounce buffer location (always Pinned for best performance)
+        ///
+        /// Callers determine the correct allocator from the hop strategies:
+        /// - CUDA hops (`CudaAsyncD2H` / `CudaAsyncH2D`) → `allocate_pinned()`
+        /// - Level Zero hops (`ZeAsyncD2H` / `ZeAsyncH2D`) → `allocate_ze_host()`
+        ///
+        /// Both report `StorageKind::Pinned`, so validation passes either way.
         bounce_location: StorageKind,
 
         /// Second hop strategy (bounce → dst)
