@@ -118,10 +118,13 @@ class _GMSClientSession:
         logger.info("Committed weights and released RW connection")
         return True
 
-    def allocate(self, size: int, tag: str = "default") -> Tuple[str, int]:
-        response = self._transport.request(
+    def allocate_info(self, size: int, tag: str = "default") -> AllocateResponse:
+        return self._transport.request(
             AllocateRequest(size=size, tag=tag), AllocateResponse
         )
+
+    def allocate(self, size: int, tag: str = "default") -> Tuple[str, int]:
+        response = self.allocate_info(size=size, tag=tag)
         return response.allocation_id, response.aligned_size
 
     def export(self, allocation_id: str) -> int:

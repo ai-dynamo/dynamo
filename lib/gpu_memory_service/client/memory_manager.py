@@ -222,19 +222,21 @@ class GMSClientMemoryManager:
 
     # ==================== Tier 1: Handle Operations (server-side) ====================
 
-    def allocate_handle(self, size: int, tag: str = "default") -> str:
+    def allocate_handle(self, size: int, tag: str = "default") -> tuple[str, int]:
         """Allocate a cuMem handle on the server.
 
-        Returns allocation_id. Size is aligned to VMM granularity before sending.
+        Returns allocation_id and layout_slot. Size is aligned to VMM granularity
+        before sending.
         """
         self._require_rw()
         aligned_size = align_to_granularity(size, self.granularity)
-        allocation_id, server_aligned = self._client_rpc.allocate(aligned_size, tag)
-        if int(server_aligned) != aligned_size:
+        response = self._client_rpc.allocate_info(aligned_size, tag)
+        if int(response.aligned_size) != aligned_size:
             raise RuntimeError(
-                f"GMS allocation alignment mismatch: {aligned_size} vs {server_aligned}"
+                "GMS allocation alignment mismatch: "
+                f"{aligned_size} vs {response.aligned_size}"
             )
-        return allocation_id
+        return response.allocation_id, int(response.layout_slot)
 
     def export_handle(self, allocation_id: str) -> int:
         """Export allocation as POSIX FD."""
@@ -411,12 +413,11 @@ class GMSClientMemoryManager:
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
-        alloc_id = self.allocate_handle(size, tag)
-        alloc_info = self.get_handle_info(alloc_id)
+        alloc_id, layout_slot = self.allocate_handle(size, tag)
         fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
         va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag, int(alloc_info.layout_slot))
+        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -555,21 +556,19 @@ class GMSClientMemoryManager:
             if mapping.handle != 0:
                 continue
 
-            allocation_id, server_aligned = self._client_rpc.allocate(
-                mapping.aligned_size, tag
-            )
-            if int(server_aligned) != mapping.aligned_size:
+            response = self._client_rpc.allocate_info(mapping.aligned_size, tag)
+            if int(response.aligned_size) != mapping.aligned_size:
                 raise RuntimeError(
                     "GMS reallocation alignment mismatch: "
-                    f"{mapping.aligned_size} vs {server_aligned}"
+                    f"{mapping.aligned_size} vs {response.aligned_size}"
                 )
-            alloc_info = self.get_handle_info(allocation_id)
+            allocation_id = response.allocation_id
 
             old_alloc_id = mapping.allocation_id
             self._inverse_mapping.pop(old_alloc_id, None)
             self._mappings[va] = mapping.with_server_identity(
                 allocation_id,
-                int(alloc_info.layout_slot),
+                int(response.layout_slot),
             )
             self._inverse_mapping[allocation_id] = va
             reallocated += 1

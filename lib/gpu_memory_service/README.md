@@ -489,7 +489,7 @@ class GMSClientMemoryManager:
     def abort() -> None
 
     # --- Tier 1: Handle ops (server-side, RW only) ---
-    def allocate_handle(size: int, tag: str = "default") -> str     # Returns allocation_id
+    def allocate_handle(size: int, tag: str = "default") -> Tuple[str, int]  # Returns allocation_id, layout_slot
     def export_handle(allocation_id: str) -> int                     # Returns FD
     def get_handle_info(allocation_id: str) -> GetAllocationResponse
     def free_handle(allocation_id: str) -> bool
