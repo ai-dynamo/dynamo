@@ -212,7 +212,7 @@ func getDeviceClassName(resources *v1alpha1.Resources) string {
 	if resources != nil && resources.Limits != nil && resources.Limits.GPUType != "" {
 		return resources.Limits.GPUType
 	}
-	return "nvidia.com/gpu"
+	return "gpu.nvidia.com"
 }
 
 // gmsRCTName returns a deterministic ResourceClaimTemplate name scoped to the service.

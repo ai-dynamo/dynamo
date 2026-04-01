@@ -219,9 +219,9 @@ func TestGetDeviceClassName(t *testing.T) {
 		resources *v1alpha1.Resources
 		want      string
 	}{
-		{"nil resources", nil, "nvidia.com/gpu"},
-		{"nil limits", &v1alpha1.Resources{}, "nvidia.com/gpu"},
-		{"empty gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{}}, "nvidia.com/gpu"},
+		{"nil resources", nil, "gpu.nvidia.com"},
+		{"nil limits", &v1alpha1.Resources{}, "gpu.nvidia.com"},
+		{"empty gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{}}, "gpu.nvidia.com"},
 		{"custom gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPUType: "gpu.nvidia.com/h100"}}, "gpu.nvidia.com/h100"},
 	}
 
@@ -324,7 +324,7 @@ func TestGmsResourceClaimTemplateConfig_DefaultDeviceClass(t *testing.T) {
 
 	req := cfg.Template.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
-	assert.Equal(t, "nvidia.com/gpu", req.Exactly.DeviceClassName)
+	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(4), req.Exactly.Count)
 }
 
