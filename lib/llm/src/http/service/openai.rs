@@ -2867,7 +2867,9 @@ mod tests {
 
     fn make_tokenize_state_without_card(model_name: &str) -> Arc<service_v2::State> {
         let manager = Arc::new(ModelManager::new());
-        manager.add_prefill_model(model_name, "missing-card").unwrap();
+        manager
+            .add_prefill_model(model_name, "missing-card")
+            .unwrap();
 
         let discovery = Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
         Arc::new(service_v2::State::new(
