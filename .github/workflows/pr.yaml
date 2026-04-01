@@ -36,6 +36,7 @@ jobs:
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      planner: ${{ steps.changes.outputs.planner }}
       operator: ${{ steps.changes.outputs.operator }}
       deploy: ${{ steps.changes.outputs.deploy }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -59,7 +60,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -176,6 +177,30 @@ jobs:
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
 # ============================================================================
+  # ============================================================================
+  # PLANNER PIPELINE
+  # ============================================================================
+  planner-pipeline:
+    name: planner
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor.yml
+    with:
+      framework: dynamo
+      builder_flavor: general
+      target: planner
+      platform: 'linux/amd64'
+      cpu_only: true
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 45
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
   # ============================================================================
   # VLLM PIPELINE
   # ============================================================================
@@ -406,7 +431,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

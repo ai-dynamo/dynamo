@@ -40,13 +40,16 @@ const (
 	PrefillProfileName = "prefill"
 	DecodeProfileName  = "decode"
 
-	// PrefillEnabledStateKey is used to communicate prefill-enabled status
-	// from the DisaggProfileHandler to the scorer plugins via CycleState.
+	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
+	// Initially set to true by DisaggProfileHandler.Pick() if a "prefill" scheduling
+	// profile exists in the EPP config. Overwritten to false per-request in two cases:
+	//   - DisaggProfileHandler.Pick(): prefill profile result is nil (no prefill pods
+	//     passed the label-filter).
+	//   - DynPrefillScorer.Score(): prefill FFI routing failed (prefill router not yet
+	//     activated, e.g., worker registered in K8s but not yet in Dynamo discovery).
+	// The decode scorer reads this to decide whether to use overlap_score_weight=0
+	// (disaggregated) or normal KV cache overlap scoring (aggregated).
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
-
-	// PrefillWorkerIDStateKey communicates the prefill worker ID selected by
-	// DynPrefillScorer to DynDecodeScorer so it can set the x-prefill-instance-id header.
-	PrefillWorkerIDStateKey = plugins.StateKey("disagg-prefill-worker-id")
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
@@ -58,17 +61,6 @@ type PrefillEnabledState struct {
 // Clone implements plugins.StateData.
 func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
-}
-
-// PrefillWorkerIDState stores the prefill worker ID selected by DynPrefillScorer.
-// Written by DynPrefillScorer, read by DynDecodeScorer to set the header.
-type PrefillWorkerIDState struct {
-	WorkerID string
-}
-
-// Clone implements plugins.StateData.
-func (s *PrefillWorkerIDState) Clone() plugins.StateData {
-	return &PrefillWorkerIDState{WorkerID: s.WorkerID}
 }
 
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.
