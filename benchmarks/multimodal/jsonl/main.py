@@ -26,7 +26,7 @@ from generate_images import (
 )
 from generate_input_text import generate_filler
 
-SEED = int(time.time() * 1000) % (2**32)
+DEFAULT_SEED = int(time.time() * 1000) % (2**32)
 
 
 def main() -> None:
@@ -34,28 +34,51 @@ def main() -> None:
     num_requests: int = args.num_requests
     images_per_request: int = args.images_per_request
     image_pool: int = args.images_pool or (num_requests * images_per_request)
+    offset: int = args.image_offset
+    seed: int = args.image_seed if args.image_seed is not None else DEFAULT_SEED
 
-    np_rng = np.random.default_rng(SEED)
-    py_rng = random.Random(SEED)
+    np_rng = np.random.default_rng(seed)
+    py_rng = random.Random(seed)
 
     if args.image_mode == "http":
-        pool = generate_image_pool_http(py_rng, image_pool, args.coco_annotations)
+        pool = generate_image_pool_http(
+            py_rng, image_pool, args.coco_annotations, offset=offset
+        )
     else:
         pool = generate_image_pool_base64(
-            np_rng, image_pool, args.image_dir, tuple(args.image_size)
+            np_rng, image_pool, args.image_dir, tuple(args.image_size), offset=offset
         )
-    slot_refs = sample_slots(py_rng, pool, num_requests, images_per_request)
+    if args.no_reuse:
+        total_needed = num_requests * images_per_request
+        assert len(pool) >= total_needed, (
+            f"--no-reuse requires images-pool ({len(pool)}) >= "
+            f"num-requests * images-per-request ({total_needed})"
+        )
+        shuffled = pool[:]
+        py_rng.shuffle(shuffled)
+        slot_refs = shuffled[:total_needed]
+        print(
+            f"Generated {total_needed} image slots from pool of {len(pool)}: "
+            f"{total_needed} unique in use, 0 duplicate references (0.0% reuse)"
+        )
+    else:
+        slot_refs = sample_slots(py_rng, pool, num_requests, images_per_request)
 
+    unique_images = len(set(slot_refs))
     output_path = args.output
     if output_path is None:
         output_path = (
             Path(__file__).parent
-            / f"{num_requests}req_{images_per_request}img_{image_pool}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
+            / f"{num_requests}req_{images_per_request}img_{unique_images}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
         )
 
     with open(output_path, "w") as f:
         for i in range(num_requests):
-            user_text = generate_filler(py_rng, args.user_text_tokens)
+            user_text = (
+                args.prompt
+                if args.prompt
+                else generate_filler(py_rng, args.user_text_tokens)
+            )
             start = i * images_per_request
             images = slot_refs[start : start + images_per_request]
             line = json.dumps(

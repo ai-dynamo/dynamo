@@ -9,6 +9,8 @@ use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use blake3;
+
 use super::super::common::EncodedMediaData;
 use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
@@ -56,6 +58,9 @@ pub struct ImageMetadata {
     pub(crate) format: Option<ImageFormat>,
     pub(crate) color_type: ColorType,
     pub(crate) layout: ImageLayout,
+    /// blake3(raw_pixel_bytes)[0..8] as big-endian u64.
+    /// Matches Python's compute_mm_uuids_from_images: int(blake3(img.tobytes()).hexdigest()[:16], 16)
+    pub mm_hash: u64,
 }
 
 impl Decoder for ImageDecoder {
@@ -93,6 +98,15 @@ impl Decoder for ImageDecoder {
             other => anyhow::bail!("Unsupported channel count {other}"),
         };
 
+        // Compute mm_hash from raw pixel bytes before moving data into storage.
+        // Uses the same algorithm as Python's compute_mm_uuids_from_images:
+        //   int(blake3(img.tobytes()).hexdigest()[:16], 16)
+        // which is the first 8 bytes of the blake3 hash as a big-endian u64.
+        let mm_hash = {
+            let hash = blake3::hash(&data);
+            u64::from_be_bytes(hash.as_bytes()[..8].try_into().unwrap())
+        };
+
         let (width, height) = img.dimensions();
         let shape = (height as usize, width as usize, n_channels as usize);
         let array = Array3::from_shape_vec(shape, data)?;
@@ -101,6 +115,7 @@ impl Decoder for ImageDecoder {
             format,
             color_type,
             layout: ImageLayout::HWC,
+            mm_hash,
         }));
         Ok(decoded)
     }

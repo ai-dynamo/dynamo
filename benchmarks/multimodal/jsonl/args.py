@@ -51,6 +51,19 @@ def parse_args(description: str = "") -> argparse.Namespace:
         help="Directory to save generated PNG images (default: /tmp/bench_images)",
     )
     parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Fixed text prompt for every request. If set, overrides --user-text-tokens.",
+    )
+    parser.add_argument(
+        "--no-reuse",
+        action="store_true",
+        default=False,
+        help="Sample images without replacement across requests (guarantees 0%% reuse). "
+        "Requires images-pool >= num-requests * images-per-request.",
+    )
+    parser.add_argument(
         "--user-text-tokens",
         type=int,
         default=USER_TEXT_TOKENS,
@@ -77,5 +90,20 @@ def parse_args(description: str = "") -> argparse.Namespace:
         default=[512, 512],
         metavar=("WIDTH", "HEIGHT"),
         help="Size of generated PNG images in pixels (default: 512 512)",
+    )
+    parser.add_argument(
+        "--image-offset",
+        type=int,
+        default=0,
+        help="Skip the first N images in the pool (default: 0). Use to assign "
+        "disjoint image slices to different datasets so they share no images.",
+    )
+    parser.add_argument(
+        "--image-seed",
+        type=int,
+        default=None,
+        help="Fixed RNG seed for image pool generation. When set, the same seed "
+        "is used every run so --image-offset selects a reproducible disjoint slice. "
+        "Default: time-based (random each run).",
     )
     return parser.parse_args()

@@ -7,6 +7,7 @@ import logging
 from typing import Any, AsyncGenerator
 
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -34,6 +35,7 @@ class MMRouterHandler:
         self.block_size = block_size
         self._image_loader = ImageLoader()
 
+    @_nvtx.range_decorator("mm_router:_generate", color="green")
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """Main entry point: process request, compute routing, forward to best worker."""
         messages = request.get("extra_args", {}).get("messages", [])
@@ -74,14 +76,15 @@ class MMRouterHandler:
         image_urls: list[str],
     ) -> tuple[list[int], list[dict | None]]:
         """Process multimodal: load images, expand tokens, build routing info."""
-        processed = await process_multimodal(
-            messages=messages,
-            image_urls=image_urls,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-            model=self.model,
-            image_loader=self._image_loader,
-        )
+        with _nvtx.annotate("mm_router:process_mm_request", color="blue"):
+            processed = await process_multimodal(
+                messages=messages,
+                image_urls=image_urls,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                model=self.model,
+                image_loader=self._image_loader,
+            )
 
         # Strip image content from messages to reduce serialization payload
         for msg in messages:

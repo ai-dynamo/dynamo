@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use lru::LruCache;
+use tokio::sync::Mutex;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_memory::nixl::NixlAgent;
@@ -15,6 +19,7 @@ use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MEDIA_CACHE_SIZE: usize = 8;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFetcher {
@@ -72,6 +77,7 @@ pub struct MediaLoader {
     #[allow(dead_code)]
     media_fetcher: MediaFetcher,
     nixl_agent: NixlAgent,
+    url_cache: Arc<Mutex<LruCache<String, Arc<Vec<u8>>>>>,
 }
 
 impl MediaLoader {
@@ -88,11 +94,20 @@ impl MediaLoader {
 
         let nixl_agent = get_nixl_agent()?;
 
+        let cache_size = std::env::var("DYN_MM_MEDIA_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MEDIA_CACHE_SIZE);
+        let cache_capacity = NonZeroUsize::new(cache_size).unwrap_or(
+            NonZeroUsize::new(DEFAULT_MEDIA_CACHE_SIZE).unwrap(),
+        );
+
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
             nixl_agent,
+            url_cache: Arc::new(Mutex::new(LruCache::new(cache_capacity))),
         })
     }
 
@@ -112,7 +127,30 @@ impl MediaLoader {
 
                 let url = &image_part.image_url.url;
                 self.media_fetcher.check_if_url_allowed(url)?;
-                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+
+                // Check cache for HTTP(S) URLs before downloading.
+                let url_str = url.to_string();
+                let cached_bytes = if matches!(url.scheme(), "http" | "https") {
+                    self.url_cache.lock().await.get(&url_str).cloned()
+                } else {
+                    None
+                };
+
+                let data = if let Some(bytes) = cached_bytes {
+                    tracing::debug!(url = %url_str, "media cache hit");
+                    EncodedMediaData {
+                        bytes: bytes.as_ref().clone(),
+                        b64_encoded: false,
+                    }
+                } else {
+                    let fetched = EncodedMediaData::from_url(url, &self.http_client).await?;
+                    // Cache raw bytes for HTTP(S) URLs.
+                    if matches!(url.scheme(), "http" | "https") {
+                        let arc_bytes = Arc::new(fetched.bytes.clone());
+                        self.url_cache.lock().await.put(url_str, arc_bytes);
+                    }
+                    fetched
+                };
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =

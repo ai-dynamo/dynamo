@@ -64,6 +64,7 @@ class ImageLoader:
         """
         self._http_timeout = http_timeout
         self._image_cache: dict[str, Image.Image] = {}
+        self._raw_bytes_cache: dict[str, tuple[bytes, str]] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
         self._enable_frontend_decoding = enable_frontend_decoding
         # Lazy-init NIXL connector only when frontend decoding is enabled
@@ -85,6 +86,7 @@ class ImageLoader:
                 logger.debug(f"Image found in cache for URL: {image_url}")
                 return self._image_cache[image_url_lower]
 
+        raw_http_bytes: bytes | None = None
         try:
             if parsed_url.scheme == "data":
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
@@ -112,6 +114,7 @@ class ImageLoader:
                     if not response.content:
                         raise ValueError("Empty response content from image URL")
 
+                    raw_http_bytes = response.content
                     image_data = BytesIO(response.content)
             elif parsed_url.scheme in ("", "file"):
                 # Local file path (plain path or file:// URI)
@@ -146,8 +149,14 @@ class ImageLoader:
                 if self._cache_queue.full():
                     oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
+                    self._raw_bytes_cache.pop(oldest_image_url, None)
 
                 self._image_cache[image_url_lower] = image_converted
+                if raw_http_bytes is not None:
+                    self._raw_bytes_cache[image_url_lower] = (
+                        raw_http_bytes,
+                        image.format,
+                    )
                 await self._cache_queue.put(image_url_lower)
 
             return image_converted
@@ -158,6 +167,15 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
+
+    def get_cached_raw_bytes(self, image_url: str) -> tuple[bytes, str] | None:
+        """Return cached (raw_bytes, format) for an HTTP URL, or None if not cached.
+
+        format is the PIL format string: "JPEG", "PNG", or "WEBP".
+        Only populated for URLs fetched via HTTP(S); data URIs and local files
+        are not stored here.
+        """
+        return self._raw_bytes_cache.get(image_url.lower())
 
     async def load_image_batch(
         self,
