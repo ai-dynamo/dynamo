@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:59:30 UTC
+Last updated: 2026-04-01 12:04:45 UTC
 
 ## Active state
 
@@ -10,13 +10,11 @@ Last updated: 2026-04-01 11:59:30 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD` revalidated again in this run: `16017c70704b`
-  - prior docs-only handoff commit before the current validation refresh:
-    `6039a1a925ee`
-  - the newer detached `HEAD` commits since `1eb7021d1281` are still
-    docs-only handoff compactions
-  - the latest signed docs-only handoff commit currently in the tree is:
-    `16017c70704b` (`docs: refresh g3pb handoff`)
+  - live detached `HEAD` revalidated in this run: `381aa3580955`
+  - latest committed docs-only handoff before this run: `381aa3580955`
+    (`docs: refresh g3pb handoff`)
+  - the newer detached `HEAD` commits since `1eb7021d1281` are still docs-only
+    handoff compactions
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -30,11 +28,11 @@ Last updated: 2026-04-01 11:59:30 UTC
   - `c231d60fb` (`build: patch local nixl-sys invalidation`)
 - Current scope status:
   - no open implementation work remains for the active `G3PB` slice
-  - this run is another fresh validation and handoff compaction refresh from
-    the live detached `HEAD`
+  - this run is a fresh validation and handoff compaction refresh from the live
+    detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 11:59:30 UTC)
+## Current run (2026-04-01 12:04:45 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -42,7 +40,7 @@ Last updated: 2026-04-01 11:59:30 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `16017c70704b`
+- Re-audited the live repo state from detached `HEAD` `381aa3580955`
 - Re-confirmed the live tree still contains the seams required by the handoff
   and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -57,16 +55,12 @@ Last updated: 2026-04-01 11:59:30 UTC
   active `G3PB` slice; this run refreshes validation and handoff state only
 - Confirmed again that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
-- Reconfirmed from the live tree that detached `HEAD` `16017c70704b` still
-  contains only the previously validated non-docs `G3PB` implementation plus
-  docs-only handoff compactions
-- Refreshing `PLANS.md` again so it reflects the current live detached `HEAD`,
-  exact validation results from this run, and the final remaining docs-only
-  handoff steps
+- Refreshed `PLANS.md` with the current live detached `HEAD`, exact validation
+  results from this run, and the remaining docs-only handoff steps
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `16017c70704b`
+- the detached `HEAD` validated in this run is still `381aa3580955`
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -75,12 +69,7 @@ Last updated: 2026-04-01 11:59:30 UTC
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- the latest signed docs-only handoff commit still in the tree is
-  `16017c70704b`
-- no further non-docs work surfaced for the active `G3PB` slice
-- the only remaining work in this run is docs-only handoff refresh,
-  post-edit validation, and the signed docs-only commit if the tree stays
-  green
+- no remaining non-docs execution work is open for the active `G3PB` slice
 
 ### Validation completed in this run
 
@@ -93,9 +82,11 @@ Last updated: 2026-04-01 11:59:30 UTC
 - `sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`
   - pass
 - `git rev-parse --short=12 HEAD`
-  - pass (`16017c70704b`)
+  - pass (`381aa3580955`)
 - `git log --oneline -8`
   - pass
+- `date -u '+%Y-%m-%d %H:%M:%S UTC'`
+  - pass (`2026-04-01 12:04:45 UTC`)
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
@@ -118,10 +109,6 @@ Last updated: 2026-04-01 11:59:30 UTC
   - pass as an end-to-end test inventory search
   - result: no standalone runnable `G3PB` e2e test target surfaced beyond the
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
-- `git status --short --branch`
-  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
-- `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 11:59:30 UTC`)
 
 ### Decisions confirmed in this run
 
@@ -135,15 +122,17 @@ Last updated: 2026-04-01 11:59:30 UTC
 
 ### Remaining work in this run
 
-- rerun the post-edit `g3pb::` spot check after this `PLANS.md` refresh
-- if the tree remains green, land one more signed docs-only handoff commit
-- re-read `PLANS.md`, rerun the final spot check, and leave an exact on-disk
-  handoff for the next run
+- rerun the post-edit `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  spot check with only `PLANS.md` dirty
+- create the next signed docs-only handoff commit if the post-edit spot check
+  is still green
+- re-read `PLANS.md` after the commit and refresh the final handoff note with
+  the new detached `HEAD`
 
 ### Exact next step
 
 - run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` as the
-  post-edit spot check for this `PLANS.md` refresh
+  post-edit spot check
 
 ### Handoff for next run
 
@@ -155,11 +144,10 @@ Last updated: 2026-04-01 11:59:30 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run revalidated the active slice from detached `HEAD`
-  `16017c70704b`
-- the active `G3PB` slice still has no pending code changes, but this run has
-  not yet completed its final docs-only handoff steps
+  `381aa3580955`
+- the active `G3PB` slice still has no pending code changes
 - if work resumes later, start by rerunning the same focused audit and
-  validation stack from the live detached `HEAD` before assuming this
+  validation stack from the live detached `HEAD` before assuming the latest
   docs-only tip is still current
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
