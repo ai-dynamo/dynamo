@@ -35,7 +35,7 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Modality | Models |
 |---|---|
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
-| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B`, `zai-org/GLM-Image` (disagg) |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
 | Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
@@ -318,6 +318,109 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
+## Disaggregated Multi-Stage Serving
+
+For models with multiple pipeline stages (e.g., AR + Diffusion), Dynamo supports disaggregated serving where each stage runs as an independent process on its own GPU. This enables independent scaling, GPU isolation, and multi-worker replicas per stage.
+
+### Architecture
+
+In aggregated mode, vLLM-Omni's monolithic `AsyncOmni` engine runs all stages in a single process. In disaggregated mode, Dynamo splits the pipeline into separate stage workers coordinated by a lightweight router:
+
+```mermaid
+flowchart LR
+  client["Client"] --> frontend["Frontend:8000"]
+  frontend --> router["OmniStageRouter"]
+  router -- "gRPC" --> stage0["Stage 0: AR(GPU 0)"]
+  stage0 -- "SHM" --> router
+  router -- "write" --> connector[("Connector(shared memory)")]
+  router -- "gRPC" --> stage1["Stage 1: DiT (GPU 1)"]
+  connector -- "read" --> stage1
+  stage1 -- "SHM" --> router
+  router --> frontend --> client
+```
+
+<!-- TODO: Add key design choices section -->
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant F as Frontend
+  participant R as Router
+  participant S0 as Stage 0 (AR)
+  participant SHM as /dev/shm
+  participant S1 as Stage 1 (DiT)
+
+  C->>F: POST /v1/images/generations
+  F->>R: generate(request)
+  R->>S0: round_robin({engine_inputs: prompt})
+  S0->>S0: AsyncOmni.generate() with YAML defaults
+  S0-->>R: OmniRequestOutput (token_ids) via SHM
+  R->>R: ar2diffusion(token_ids) -> diffusion_input
+  R->>SHM: connector.put(diffusion_input)
+  R->>S1: round_robin({from_connector: true})
+  S1->>SHM: try_recv_via_connector()
+  S1->>S1: AsyncOmni.generate() with YAML defaults
+  S1-->>R: OmniRequestOutput (images) via SHM
+  R->>R: OutputFormatter -> NvImagesResponse
+  R-->>F: response
+  F-->>C: {"data": [{"b64_json": "..."}]}
+```
+
+### Quick Start: GLM-Image (2-Stage, 2 GPUs)
+
+GLM-Image is a 2-stage text-to-image model with an AR stage (generates prior token IDs) and a DiT stage (diffusion denoising + VAE decode). The built-in vLLM-Omni stage config already assigns each stage to a separate GPU.
+
+```bash
+bash examples/backends/vllm/launch/disagg_omni_glm_image.sh
+```
+
+Test:
+
+```bash
+curl -s http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "zai-org/GLM-Image",
+    "prompt": "A red apple on a white table",
+    "size": "1024x1024",
+    "response_format": "url"
+  }' | jq
+```
+
+### Scaling Stage Replicas
+
+To run multiple replicas of a stage (e.g., 2x AR workers):
+
+```bash
+# AR replica 1
+CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 \
+  python -m dynamo.vllm.omni --model zai-org/GLM-Image \
+    --stage-id 0 --stage-configs-path $YAML ...
+
+# AR replica 2 (same endpoint, different port)
+CUDA_VISIBLE_DEVICES=2 DYN_SYSTEM_PORT=8084 \
+  python -m dynamo.vllm.omni --model zai-org/GLM-Image \
+    --stage-id 0 --stage-configs-path $YAML ...
+```
+
+Both replicas register at the same Dynamo endpoint (`dynamo/ar/generate`). The router automatically load-balances across them.
+
+### Tested Models
+
+| Model | Stages | Output | Stage Config |
+|---|---|---|---|
+| GLM-Image (`zai-org/GLM-Image`) | AR -> DiT | Image | `glm_image.yaml` (built-in) |
+
+### CLI Flags (Disaggregated Mode)
+
+| Flag | Description |
+|---|---|
+| `--stage-id <int>` | Run as a single-stage worker for the given stage ID. Requires `--stage-configs-path`. |
+| `--omni-router` | Run as the stage router. Requires `--stage-configs-path`. Mutually exclusive with `--stage-id`. |
+| `--stage-configs-path <path>` | Path to vLLM-Omni stage configuration YAML. |
+
 ## Current Limitations
 
 - Image input is supported only for I2V via `input_reference` in `/v1/videos`. Other endpoints accept text prompts only.
@@ -325,3 +428,5 @@ Omni pipelines are configured via YAML stage configs. See [`examples/backends/vl
 - Each worker supports a single output modality at a time.
 - Audio: streaming (`stream: true`) is not yet supported.
 - Audio: Base task (voice cloning) is not yet supported.
+- Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet supported.
+- Disaggregated mode: 3+ stage pipelines (e.g., Qwen2.5-Omni) are not yet tested.

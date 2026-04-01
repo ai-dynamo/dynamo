@@ -112,13 +112,20 @@ async def test_generate_uses_request_local_proxies():
     async def run_one():
         return [chunk async for chunk in router.generate({"prompt": "x"}, context=None)]
 
-    with patch.object(stage_router, "_shm_deserialize", side_effect=lambda meta: meta["value"]):
-        with patch.object(stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}):
+    with patch.object(
+        stage_router, "_shm_deserialize", side_effect=lambda meta: meta["value"]
+    ):
+        with patch.object(
+            stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}
+        ):
             with patch(
                 "dynamo.common.utils.output_modalities.parse_request_type",
                 return_value=(None, "chat"),
             ):
-                with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", side_effect=["req-A", "req-B"]):
+                with patch(
+                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
+                    side_effect=["req-A", "req-B"],
+                ):
                     await asyncio.gather(run_one(), run_one())
 
     # engine_outputs is wrapped in a list to match monolithic orchestrator format
@@ -147,13 +154,23 @@ async def test_generate_cleans_connectors_when_connector_put_fails():
     router.connectors = {("0", "1"): connector}
 
     with patch.object(stage_router, "_shm_deserialize", return_value="decoded"):
-        with patch.object(stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}):
+        with patch.object(
+            stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}
+        ):
             with patch(
                 "dynamo.common.utils.output_modalities.parse_request_type",
                 return_value=(None, "chat"),
             ):
-                with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-put-fail"):
-                    chunks = [chunk async for chunk in router.generate({"prompt": "x"}, context=None)]
+                with patch(
+                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
+                    return_value="req-put-fail",
+                ):
+                    chunks = [
+                        chunk
+                        async for chunk in router.generate(
+                            {"prompt": "x"}, context=None
+                        )
+                    ]
 
     assert chunks == [{"error": "connector.put() failed", "finished": True}]
     assert connector.cleanup_calls == ["req-put-fail"]
@@ -180,13 +197,23 @@ async def test_generate_cleans_connectors_when_stage_returns_error():
     router.connectors = {("0", "1"): connector}
 
     with patch.object(stage_router, "_shm_deserialize", return_value="decoded"):
-        with patch.object(stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}):
+        with patch.object(
+            stage_router, "_parse_engine_inputs", return_value={"engine_inputs": "x"}
+        ):
             with patch(
                 "dynamo.common.utils.output_modalities.parse_request_type",
                 return_value=(None, "chat"),
             ):
-                with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-stage-error"):
-                    chunks = [chunk async for chunk in router.generate({"prompt": "x"}, context=None)]
+                with patch(
+                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
+                    return_value="req-stage-error",
+                ):
+                    chunks = [
+                        chunk
+                        async for chunk in router.generate(
+                            {"prompt": "x"}, context=None
+                        )
+                    ]
 
     assert chunks == [{"error": "stage exploded", "finished": True}]
     assert connector.cleanup_calls == ["req-stage-error"]
@@ -223,10 +250,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
                     "dynamo.vllm.omni.stage_router.uuid.uuid4",
                     return_value="req-fmt",
                 ):
-                    chunks = [
-                        c
-                        async for c in router.generate(request, context=None)
-                    ]
+                    chunks = [c async for c in router.generate(request, context=None)]
 
     assert chunks == [{"data": [{"b64_json": "abc"}]}]
     mock_formatter.format.assert_awaited_once_with(
