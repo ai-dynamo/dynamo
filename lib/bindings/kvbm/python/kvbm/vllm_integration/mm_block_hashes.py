@@ -75,22 +75,21 @@ def compute_mm_block_hashes(
     num_blocks = math.ceil(num_tokens / block_size) if num_tokens > 0 else 0
     result: list[Optional[int]] = [None] * num_blocks
 
-    # vLLM 0.18+: Request no longer has top-level mm_positions; each
-    # MultiModalFeatureSpec carries PlaceholderRange as mm_position.
-    # Derive paired (position, feature) to keep alignment when some features
-    # lack a position.
-    if not mm_positions and mm_features:
-        pairs = [(getattr(f, "mm_position", None), f) for f in mm_features]
-        pairs = [(p, f) for p, f in pairs if p is not None]
-        mm_positions = [p for p, _ in pairs]
-        features_list = [f for _, f in pairs]
-    else:
-        features_list = list(mm_features) if mm_features else []
+    # mm_features is always present for multimodal requests.
+    # mm_positions is a legacy field that older vLLM provides as a top-level
+    # list; vLLM 0.18+ embeds the position on each MultiModalFeatureSpec
+    # instead.  Derive mm_positions from features when not provided.
+    features_list = list(mm_features) if mm_features else []
+
+    if not mm_positions:
+        mm_positions = [getattr(f, "mm_position", None) for f in features_list]
 
     if not mm_positions:
         return result
 
     for i, pos_range in enumerate(mm_positions):
+        if pos_range is None:
+            continue
         feature = features_list[i] if i < len(features_list) else None
         feature_hash = _hash_features_to_u64(feature) if feature is not None else 0
 
