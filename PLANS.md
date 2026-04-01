@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 01:51:53 UTC
+Last updated: 2026-04-01 02:00:50 UTC
 
 ## Active state
 
@@ -940,6 +940,86 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   handoff in the real KVBM bindings caller path
 - after the commit is cut, the remaining work should return to follow-on items
   rather than more admission config plumbing:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+## Current run (2026-04-01 02:00:50 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read `PLANS.md` after the config-adoption commit to verify whether any
+  concrete work remained unrecorded
+- ✅ Revalidated the focused `G3PB` / bindings stack from the current clean
+  `HEAD` instead of assuming the prior run log was still sufficient
+- ✅ Found and fixed one remaining test-only reliability gap:
+  - `lib/llm/src/block_manager/offload/g3pb_filter.rs`
+  - the `g3pb_filter` env-legacy tests were still mutating
+    `G3PB_OFFLOAD_ALL` without serialization
+  - a fresh validation run exposed the race in
+    `test_legacy_env_false_string`
+  - fixed by serializing the env-mutating tests with a local mutex, matching
+    the bindings-side parser test strategy
+- ✅ Refreshed the handoff state in `PLANS.md` after the post-commit audit
+
+### Current findings before final handoff
+
+- the config-adoption/docs slice from the prior run was already committed and
+  signed before this run started:
+  - `126c3590d bindings: adopt native g3pb admission config`
+- the only remaining issue discovered by re-running the planned validation was
+  the `g3pb_filter` env-test race
+- no additional product/runtime behavior changes are required for the current
+  `G3PB` slice once that test reliability fix is in
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - initial audit pass: pass (`15 passed`)
+  - post-fix rerun: pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - initial audit pass: fail in
+    `block_manager::offload::g3pb_filter::tests::test_legacy_env_false_string`
+    because `G3PB_OFFLOAD_ALL` was racing another env-mutating test
+  - post-fix rerun: pass (`6 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - audit pass before the llm-side test fix: pass (`4 passed`)
+  - post-fix hygiene rerun: pass (`4 passed`)
+- `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+  - pass
+- `cargo fmt --manifest-path lib/bindings/kvbm/Cargo.toml --all`
+  - pass
+- `git diff --check`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- keep re-reading `PLANS.md` after each landed slice; the post-commit audit
+  found a real test gap that the prior handoff had not captured
+- treat env-mutating test serialization as required in both bindings and llm
+  test modules whenever policy/env compatibility paths are covered
+- keep the current follow-on queue focused on the already-known non-blocking
+  items rather than inventing new `G3PB` surface area
+
+### Remaining work in this run
+
+- make a signed small commit for:
+  - the `g3pb_filter` test-race fix
+  - the `PLANS.md` refresh for this audit run
+
+### Exact next step
+
+- create the signed commit for the test-race fix and refreshed handoff
+
+### Handoff for next run
+
+- the config-adoption/docs slice is already committed
+- this audit run found and fixed the last currently known focused-validation
+  gap: the `g3pb_filter` env-test race
+- after the commit is cut, the remaining follow-on work returns to the same
+  non-blocking backlog already captured in the prior run:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice

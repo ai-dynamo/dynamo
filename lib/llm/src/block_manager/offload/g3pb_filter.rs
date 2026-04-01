@@ -78,6 +78,12 @@ impl Default for G3pbAdmissionFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn hash(x: u64) -> SequenceHash {
         SequenceHash::from(x)
@@ -109,6 +115,7 @@ mod tests {
 
     #[test]
     fn test_legacy_env_true_string() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("G3PB_OFFLOAD_ALL", "true");
         }
@@ -124,6 +131,7 @@ mod tests {
 
     #[test]
     fn test_legacy_env_false_string() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("G3PB_OFFLOAD_ALL", "false");
         }
@@ -158,6 +166,7 @@ mod tests {
 
     #[test]
     fn test_default_trait() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("G3PB_OFFLOAD_ALL");
         }
