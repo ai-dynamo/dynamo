@@ -70,7 +70,8 @@ When you need to use a tool, emit a tool_use block. Available tools:
 
 # Pad system prompt to ~8K tokens for measurable cache effect
 # (OpenClaw system prompts are shorter than Claude Code's 54K but still significant)
-PADDING = """
+PADDING = (
+    """
 # Additional Context and Knowledge Base
 
 ## Project Management
@@ -97,7 +98,9 @@ The user works primarily with:
 - Distributed systems and networking
 
 When discussing these topics, use precise technical terminology.
-""" * 8  # Repeat to pad to ~8K tokens
+"""
+    * 8
+)  # Repeat to pad to ~8K tokens
 
 
 def build_system_prompt(condition: str, base_prompt: str) -> str:
