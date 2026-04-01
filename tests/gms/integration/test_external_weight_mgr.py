@@ -27,14 +27,14 @@ from ..harness.external_weight_writer import run_external_weight_writer  # noqa:
 pytestmark = [pytest.mark.nightly]
 
 # Event flow under test:
-# 1. The engine starts in read-only mode and waits for a committed weights epoch.
+# 1. The engine starts in read-only mode and waits for a committed weights layout.
 # 2. An external writer acquires RW on the weights GMS, loads dummy weights, commits, and exits.
-# 3. The engine comes online with those committed weights while owning its own KV-cache RW epoch.
-# 4. The engine sleeps, preserving its weight VAs but dropping the KV-cache epoch.
-# 5. A second external writer acquires RW on the weights GMS, creates a fresh committed epoch with
+# 3. The engine comes online with those committed weights while owning its own KV-cache RW layout.
+# 4. The engine sleeps, preserving its weight VAs but dropping the KV-cache layout.
+# 5. A second external writer acquires RW on the weights GMS, creates a fresh committed layout with
 #    different allocation IDs but the same structural layout, and exits.
-# 6. The engine wakes, remaps the preserved weight VAs into the new committed epoch, recreates its
-#    KV cache in a new RW epoch, and serves inference without a stale-layout error.
+# 6. The engine wakes, remaps the preserved weight VAs into the new committed layout, recreates its
+#    KV cache in a new RW layout, and serves inference without a stale-layout error.
 
 
 class _SleepWakeEngine(Protocol):
@@ -92,7 +92,7 @@ def _run_external_weight_mgr_test(
             start_future = executor.submit(engine.__enter__)
             try:
                 # The read-only engine must stall until some external writer
-                # publishes the first committed weights epoch.
+                # publishes the first committed weights layout.
                 time.sleep(2.0)
                 assert (
                     not start_future.done()
@@ -100,7 +100,7 @@ def _run_external_weight_mgr_test(
                 assert weights_gms.get_runtime_state().state == ServerState.EMPTY
                 assert kv_cache_gms.get_runtime_state().state == ServerState.EMPTY
 
-                # Publish the first weights epoch out-of-process, then let the
+                # Publish the first weights layout out-of-process, then let the
                 # engine finish importing those committed weights.
                 run_external_weight_writer(backend)
                 start_future.result(timeout=300)
@@ -112,19 +112,16 @@ def _run_external_weight_mgr_test(
                 )
 
                 assert first_weights_state.state == ServerState.RO
-                assert first_weights_state.committed_epoch_id is not None
-                assert first_weights_state.active_rw_epoch_id is None
                 assert first_weights_state.allocation_count > 0
+                assert first_weights_state.memory_layout_hash
                 assert first_kv_state.state == ServerState.RW
-                assert first_kv_state.active_rw_epoch_id is not None
-                assert first_kv_state.committed_epoch_id is None
                 assert first_allocations
 
                 result = send_completion(ports["frontend"])
                 assert result["choices"]
 
                 # Sleep preserves the engine's weight VAs but tears down the KV
-                # cache epoch so the process can wake against a later weights epoch.
+                # cache layout so the process can wake against a later weights layout.
                 assert engine.sleep()["status"] == "ok"
 
                 deadline = time.monotonic() + 30.0
@@ -133,14 +130,10 @@ def _run_external_weight_mgr_test(
                     kv_after_sleep = kv_cache_gms.get_runtime_state()
                     if (
                         weights_after_sleep.state == ServerState.COMMITTED
-                        and weights_after_sleep.committed_epoch_id
-                        == first_weights_state.committed_epoch_id
                         and weights_after_sleep.memory_layout_hash
                         == first_weights_state.memory_layout_hash
                         and weights_after_sleep.ro_session_count == 0
                         and kv_after_sleep.state == ServerState.EMPTY
-                        and kv_after_sleep.committed_epoch_id is None
-                        and kv_after_sleep.active_rw_epoch_id is None
                         and kv_after_sleep.allocation_count == 0
                     ):
                         break
@@ -150,7 +143,7 @@ def _run_external_weight_mgr_test(
                         )
                     time.sleep(0.1)
 
-                # Publish a second committed weights epoch with the same logical
+                # Publish a second committed weights layout with the same logical
                 # layout but fresh allocation IDs.
                 run_external_weight_writer(backend)
 
@@ -160,26 +153,21 @@ def _run_external_weight_mgr_test(
                     second_kv_state = kv_cache_gms.get_runtime_state()
                     if (
                         second_weights_state.state == ServerState.COMMITTED
-                        and second_weights_state.committed_epoch_id is not None
-                        and second_weights_state.committed_epoch_id
-                        != first_weights_state.committed_epoch_id
                         and second_weights_state.memory_layout_hash
                         == first_weights_state.memory_layout_hash
                         and second_weights_state.allocation_count
                         == first_weights_state.allocation_count
                         and second_kv_state.state == ServerState.EMPTY
-                        and second_kv_state.active_rw_epoch_id is None
-                        and second_kv_state.committed_epoch_id is None
                         and second_kv_state.allocation_count == 0
                     ):
                         break
                     if time.monotonic() > deadline:
                         raise TimeoutError(
-                            "external writer did not publish a new committed weights epoch"
+                            "external writer did not publish a new committed weights layout"
                         )
                     time.sleep(0.1)
 
-                # The second epoch must reuse the same layout slots and sizes so
+                # The second publish must reuse the same layout slots and sizes so
                 # RO remap can bind the preserved VAs to new allocations.
                 second_allocations = _list_committed_weight_allocations(
                     weights_gms.socket_path
@@ -195,45 +183,23 @@ def _run_external_weight_mgr_test(
                     item[1] for item in first_allocations
                 ]
 
-                # The weights GMS should show the expected epoch progression:
-                # first publish, old epoch cleanup, second publish.
-                weights_events = [
-                    (event.kind, event.epoch_id, event.allocation_count)
-                    for event in weights_gms.get_event_history().events
+                # The weights GMS should show the expected publish progression:
+                # first publish, old layout cleanup, second publish.
+                weights_events = weights_gms.get_event_history().events
+                assert [event.kind for event in weights_events] == [
+                    "rw_connected",
+                    "committed",
+                    "allocations_cleared",
+                    "rw_connected",
+                    "committed",
                 ]
-                first_epoch = first_weights_state.committed_epoch_id
-                second_epoch = second_weights_state.committed_epoch_id
-                first_connect = ("rw_connected", first_epoch, 0)
-                first_commit = ("committed", first_epoch, 0)
-                clears = [
-                    event
-                    for event in weights_events
-                    if event[0] == "allocations_cleared" and event[1] == first_epoch
-                ]
-                assert len(clears) == 1
-                first_clear = clears[0]
-                second_connect = ("rw_connected", second_epoch, 0)
-                second_commit = ("committed", second_epoch, 0)
-                assert first_connect in weights_events
-                assert first_commit in weights_events
-                assert second_connect in weights_events
-                assert second_commit in weights_events
-                assert first_clear[2] == first_weights_state.allocation_count
-                assert weights_events.index(first_connect) < weights_events.index(
-                    first_commit
-                )
-                assert weights_events.index(first_commit) < weights_events.index(
-                    first_clear
-                )
-                assert weights_events.index(first_clear) < weights_events.index(
-                    second_connect
-                )
-                assert weights_events.index(second_connect) < weights_events.index(
-                    second_commit
+                assert (
+                    weights_events[2].allocation_count
+                    == first_weights_state.allocation_count
                 )
 
                 # Wake should remap the preserved RO weight VAs into the new
-                # committed epoch and recreate KV cache in a new RW epoch.
+                # committed layout and recreate KV cache in a new RW layout.
                 assert engine.wake()["status"] == "ok"
 
                 deadline = time.monotonic() + 30.0
@@ -242,11 +208,9 @@ def _run_external_weight_mgr_test(
                     kv_after_wake = kv_cache_gms.get_runtime_state()
                     if (
                         weights_after_wake.state == ServerState.RO
-                        and weights_after_wake.committed_epoch_id == second_epoch
                         and weights_after_wake.memory_layout_hash
                         == first_weights_state.memory_layout_hash
                         and kv_after_wake.state == ServerState.RW
-                        and kv_after_wake.active_rw_epoch_id is not None
                         and kv_after_wake.allocation_count > 0
                     ):
                         break

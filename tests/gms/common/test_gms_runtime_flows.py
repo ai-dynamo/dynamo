@@ -16,6 +16,7 @@ import time
 
 import pynvml
 import pytest
+from gpu_memory_service.client import memory_manager as client_memory_manager
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -34,8 +35,8 @@ from gpu_memory_service.common.types import (
     RequestedLockType,
     ServerState,
 )
+from gpu_memory_service.server import allocations as server_allocations
 from gpu_memory_service.server.allocations import GMSAllocationManager
-from gpu_memory_service.server.epochs import GMSEpochManager
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from tests.gms.harness.gms import ServerThread
@@ -111,80 +112,60 @@ def real_gms(monkeypatch, tmp_path):
     client_handles = itertools.count(10000)
     next_va = itertools.count(0x100000, 0x10000)
 
+    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
     monkeypatch.setattr(
-        "gpu_memory_service.server.allocations.cuda_ensure_initialized",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.server.allocations.cumem_get_allocation_granularity",
+        server_allocations,
+        "cumem_get_allocation_granularity",
         lambda device: 4096,
     )
     monkeypatch.setattr(
-        "gpu_memory_service.server.allocations.cumem_create_tolerate_oom",
+        server_allocations,
+        "cumem_create_tolerate_oom",
         lambda size, device: (True, next(server_handles)),
     )
-    monkeypatch.setattr(
-        "gpu_memory_service.server.allocations.cumem_release",
-        lambda handle: None,
-    )
+    monkeypatch.setattr(server_allocations, "cumem_release", lambda handle: None)
 
     def export_fd(handle: int) -> int:
         read_fd, write_fd = os.pipe()
         os.close(write_fd)
         return read_fd
 
-    monkeypatch.setattr(
-        "gpu_memory_service.server.allocations.cumem_export_to_shareable_handle",
-        export_fd,
-    )
+    monkeypatch.setattr(server_allocations, "cumem_export_to_shareable_handle", export_fd)
 
+    monkeypatch.setattr(client_memory_manager, "cuda_set_current_device", lambda device: None)
     monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_set_current_device",
-        lambda device: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_get_allocation_granularity",
+        client_memory_manager,
+        "cumem_get_allocation_granularity",
         lambda device: 4096,
     )
+    monkeypatch.setattr(client_memory_manager, "cuda_synchronize", lambda: None)
     monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_synchronize",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_address_reserve",
+        client_memory_manager,
+        "cumem_address_reserve",
         lambda size, granularity: next(next_va),
     )
     monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_address_free",
+        client_memory_manager,
+        "cumem_address_free",
         lambda va, size: None,
     )
+    monkeypatch.setattr(client_memory_manager, "cumem_map", lambda va, size, handle: None)
     monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_map",
-        lambda va, size, handle: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_set_access",
+        client_memory_manager,
+        "cumem_set_access",
         lambda va, size, device, mode: None,
     )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_unmap",
-        lambda va, size: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_release",
-        lambda handle: None,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_validate_pointer",
-        lambda va: True,
-    )
+    monkeypatch.setattr(client_memory_manager, "cumem_unmap", lambda va, size: None)
+    monkeypatch.setattr(client_memory_manager, "cumem_release", lambda handle: None)
+    monkeypatch.setattr(client_memory_manager, "cuda_validate_pointer", lambda va: True)
 
     def import_fd(fd: int) -> int:
         os.close(fd)
         return next(client_handles)
 
     monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_import_from_shareable_handle_close_fd",
+        client_memory_manager,
+        "cumem_import_from_shareable_handle_close_fd",
         import_fd,
     )
 
@@ -223,7 +204,7 @@ def test_rw_commit_publishes_allocations_metadata_and_layout_hash(real_gms):
     _wait_for_server_state(server, ServerState.COMMITTED)
 
 
-def test_rw_disconnect_aborts_epoch_and_next_writer_starts_clean(real_gms):
+def test_rw_disconnect_aborts_layout_and_next_writer_starts_clean(real_gms):
     server, socket_path = real_gms
 
     writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
@@ -287,18 +268,13 @@ def test_runtime_state_and_event_history_are_side_effect_free(real_gms):
     assert state.is_ready
     assert state.ro_session_count == 0
     assert state.waiting_writers == 0
-    assert state.committed_epoch_id == 1
-    assert state.active_rw_epoch_id is None
     assert state.allocation_count == 1
     assert state.memory_layout_hash
-    assert [(event.kind, event.epoch_id) for event in history.events] == [
-        ("rw_connected", 1),
-        ("committed", 1),
-    ]
+    assert [event.kind for event in history.events] == ["rw_connected", "committed"]
     assert server._gms._sessions.snapshot().ro_session_count == 0
 
 
-def test_committed_epoch_is_replaced_when_new_writer_connects(real_gms):
+def test_committed_layout_is_replaced_when_new_writer_connects(real_gms):
     server, socket_path = real_gms
 
     first_writer = GMSClientMemoryManager(socket_path, device=0)
@@ -315,13 +291,13 @@ def test_committed_epoch_is_replaced_when_new_writer_connects(real_gms):
         assert second_writer.list_allocations() == []
         assert second_writer.metadata_list() == []
         assert server._gms.allocation_count == 0
-        assert server._gms.committed_epoch_id is None
-        assert server._gms.active_rw_epoch_id is not None
+        assert server.state == ServerState.RW
+        assert not server._gms.committed
     finally:
         second_writer.close()
 
 
-def test_reader_mapping_disconnect_then_next_writer_clears_old_epoch(real_gms):
+def test_reader_mapping_disconnect_then_next_writer_clears_old_layout(real_gms):
     server, socket_path = real_gms
 
     writer = GMSClientMemoryManager(socket_path, device=0)
@@ -365,8 +341,8 @@ def test_reader_mapping_disconnect_then_next_writer_clears_old_epoch(real_gms):
         assert next_writer.lock_type == GrantedLockType.RW
         assert next_writer.list_allocations() == []
         assert server._gms.allocation_count == 0
-        assert server._gms.committed_epoch_id is None
-        assert server._gms.active_rw_epoch_id is not None
+        assert server.state == ServerState.RW
+        assert not server._gms.committed
     finally:
         next_writer.close()
 
@@ -590,7 +566,7 @@ def test_remap_all_vas_succeeds_when_committed_layout_is_unchanged(real_gms):
     reader.close()
 
 
-def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
+def test_remap_all_vas_rejects_stale_layout_after_new_layout_commit(real_gms):
     _, socket_path = real_gms
 
     writer = GMSClientMemoryManager(socket_path, device=0)
@@ -616,7 +592,7 @@ def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
     reader.abort()
 
 
-def test_remap_all_vas_accepts_new_epoch_with_same_structural_layout(real_gms):
+def test_remap_all_vas_accepts_new_layout_with_same_structural_layout(real_gms):
     _, socket_path = real_gms
 
     first_writer = GMSClientMemoryManager(socket_path, device=0)
@@ -649,7 +625,7 @@ def test_remap_all_vas_accepts_new_epoch_with_same_structural_layout(real_gms):
     reader.close()
 
 
-def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
+def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(real_gms):
     server, socket_path = real_gms
 
     manager = GMSClientMemoryManager(socket_path, device=0)
@@ -680,7 +656,7 @@ def test_same_process_republish_remaps_against_new_committed_hash(real_gms):
     manager.connect(RequestedLockType.RW)
     va = manager.create_mapping(size=4096, tag="weights")
     first_allocation_id = manager.mappings[va].allocation_id
-    manager.metadata_put("tensor", first_allocation_id, 0, b"epoch-1")
+    manager.metadata_put("tensor", first_allocation_id, 0, b"publish-1")
     assert manager.commit()
 
     manager.connect(RequestedLockType.RO)
@@ -693,7 +669,7 @@ def test_same_process_republish_remaps_against_new_committed_hash(real_gms):
     second_allocation_id = manager.mappings[va].allocation_id
     assert second_allocation_id != first_allocation_id
     manager.remap_all_vas()
-    manager.metadata_put("tensor", second_allocation_id, 0, b"epoch-2")
+    manager.metadata_put("tensor", second_allocation_id, 0, b"publish-2")
     assert manager.commit()
 
     manager.connect(RequestedLockType.RO)
@@ -701,7 +677,7 @@ def test_same_process_republish_remaps_against_new_committed_hash(real_gms):
 
     assert manager.mappings[va].va == va
     assert manager.mappings[va].allocation_id == second_allocation_id
-    assert manager.metadata_get("tensor") == (second_allocation_id, 0, b"epoch-2")
+    assert manager.metadata_get("tensor") == (second_allocation_id, 0, b"publish-2")
 
     manager.close()
 
@@ -764,7 +740,7 @@ def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writ
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
-async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
+async def test_new_layout_large_allocation_waits_for_dead_writer_process(
     tmp_path,
     monkeypatch,
 ):
@@ -791,28 +767,21 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
         allocation_retry_interval=0.1,
         allocation_retry_timeout=120.0,
     )
-    epochs = GMSEpochManager()
     holder = None
     allocation_task = None
 
     try:
-        assert epochs.on_rw_connect() is None
-        first_epoch = epochs.active_rw_epoch_id
         first = await allocations.allocate(
             size=size,
-            epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
             tag="weights",
             is_connected=lambda: True,
         )
-        assert first.epoch_id == first_epoch
+        assert first.layout_slot == 0
 
         free_after_first = _gpu_memory_free_bytes()
         assert free_after_first < free_before - (size // 2)
 
-        exported_fd = allocations.export_allocation(
-            first.allocation_id,
-            epochs.require_epoch_id(GrantedLockType.RW),
-        )
+        exported_fd = allocations.export_allocation(first.allocation_id)
         holder_ready = tmp_path / "holder.ready"
         holder_log = tmp_path / "holder.log"
         holder_script = tmp_path / "hold_import.py"
@@ -854,21 +823,12 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
             assert time.monotonic() < deadline, holder_log.read_text(encoding="utf-8")
             await asyncio.sleep(0.1)
 
-        cleared_epoch_id = epochs.on_rw_abort()
-        assert cleared_epoch_id == first_epoch
-        assert cleared_epoch_id is not None
-        allocations.clear_all_allocations(cleared_epoch_id)
-        assert epochs.active_rw_epoch_id is None
+        allocations.clear_all()
         assert allocations.allocation_count == 0
-
-        assert epochs.on_rw_connect() is None
-        second_epoch = epochs.active_rw_epoch_id
-        assert second_epoch != first_epoch
 
         allocation_task = asyncio.create_task(
             allocations.allocate(
                 size=size,
-                epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
                 tag="weights",
                 is_connected=lambda: True,
             )
@@ -883,19 +843,15 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
 
         assert oom_failures > 0
         assert not allocation_task.done()
-        assert epochs.active_rw_epoch_id == second_epoch
 
         os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
         holder.wait(timeout=30.0)
 
         second = await asyncio.wait_for(allocation_task, timeout=120.0)
-        assert second.epoch_id == second_epoch
+        assert second.layout_slot == 0
         assert allocations.allocation_count == 1
 
-        cleared_epoch_id = epochs.on_rw_abort()
-        assert cleared_epoch_id == second_epoch
-        assert cleared_epoch_id is not None
-        allocations.clear_all_allocations(cleared_epoch_id)
+        allocations.clear_all()
         assert allocations.allocation_count == 0
 
         deadline = time.monotonic() + 30.0
@@ -909,11 +865,8 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
                 await allocation_task
             except asyncio.CancelledError:
                 pass
-        active_epoch_id = epochs.active_rw_epoch_id
-        if active_epoch_id is not None:
-            cleared_epoch_id = epochs.on_rw_abort()
-            if cleared_epoch_id is not None:
-                allocations.clear_all_allocations(cleared_epoch_id)
+        if allocations.allocation_count > 0:
+            allocations.clear_all()
         if holder is not None and holder.poll() is None:
             os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
             holder.wait(timeout=30.0)

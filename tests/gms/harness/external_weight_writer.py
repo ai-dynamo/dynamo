@@ -135,7 +135,13 @@ def _sglang_single_rank_distributed(device: int):
 
 
 def _publish_vllm_dummy_weights(device: int, tag: str) -> None:
-    from vllm.config import DeviceConfig, LoadConfig, ModelConfig, VllmConfig
+    from vllm.config import (
+        DeviceConfig,
+        LoadConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
     from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
@@ -155,16 +161,19 @@ def _publish_vllm_dummy_weights(device: int, tag: str) -> None:
     target_device = torch.device("cuda", device)
     manager = _get_writer_manager(device, tag)
 
-    with _vllm_single_rank_distributed(device):
-        with set_default_torch_dtype(model_config.dtype):
-            with gms_use_mem_pool(tag, target_device):
-                with target_device:
-                    model = initialize_model(
-                        vllm_config=vllm_config,
-                        model_config=model_config,
+    with set_current_vllm_config(vllm_config):
+        with _vllm_single_rank_distributed(device):
+            with set_default_torch_dtype(model_config.dtype):
+                with gms_use_mem_pool(tag, target_device):
+                    with target_device:
+                        model = initialize_model(
+                            vllm_config=vllm_config,
+                            model_config=model_config,
+                        )
+                    DummyModelLoader(load_config).load_weights(model, model_config)
+                    process_weights_after_loading(
+                        model, model_config, target_device
                     )
-                DummyModelLoader(load_config).load_weights(model, model_config)
-                process_weights_after_loading(model, model_config, target_device)
 
     _publish_model(manager, model)
 

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import deque
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from gpu_memory_service.common.protocol.messages import (
@@ -47,11 +49,17 @@ from gpu_memory_service.common.types import (
     StateEvent,
 )
 
-from .allocations import GMSAllocationManager
-from .epochs import GMSEpochManager
+from .allocations import AllocationInfo, GMSAllocationManager
 from .session import Connection, GMSSessionManager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class MetadataEntry:
+    allocation_id: str
+    offset_bytes: int
+    value: bytes
 
 
 class GMS:
@@ -71,9 +79,10 @@ class GMS:
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
         )
-        self._epochs = GMSEpochManager()
         self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
+        self._metadata: dict[str, MetadataEntry] = {}
+        self._memory_layout_hash = ""
         logger.info("GMS initialized: device=%d", device)
 
     @property
@@ -83,14 +92,6 @@ class GMS:
     @property
     def committed(self) -> bool:
         return self._sessions.snapshot().committed
-
-    @property
-    def committed_epoch_id(self) -> int | None:
-        return self._epochs.committed_epoch_id
-
-    @property
-    def active_rw_epoch_id(self) -> int | None:
-        return self._epochs.active_rw_epoch_id
 
     @property
     def allocation_count(self) -> int:
@@ -108,10 +109,8 @@ class GMS:
             waiting_writers=session.waiting_writers,
             committed=session.committed,
             is_ready=session.is_ready,
-            committed_epoch_id=self._epochs.committed_epoch_id,
-            active_rw_epoch_id=self._epochs.active_rw_epoch_id,
             allocation_count=self._allocations.allocation_count,
-            memory_layout_hash=self._epochs.memory_layout_hash,
+            memory_layout_hash=self._memory_layout_hash,
         )
 
     def get_event_history(self) -> GetEventHistoryResponse:
@@ -135,64 +134,97 @@ class GMS:
     ) -> None:
         await self._sessions.cancel_connect(session_id, mode)
 
+    def _validate_metadata_target(
+        self,
+        allocation: AllocationInfo,
+        offset_bytes: int,
+    ) -> None:
+        if offset_bytes < 0:
+            raise ValueError(f"offset_bytes must be >= 0, got {offset_bytes}")
+        if offset_bytes >= allocation.aligned_size:
+            raise ValueError(
+                f"offset_bytes {offset_bytes} out of range for allocation {allocation.allocation_id} "
+                f"(aligned_size={allocation.aligned_size})"
+            )
+
+    def _drop_metadata_for_allocation(self, allocation_id: str) -> int:
+        keys_to_remove = [
+            key
+            for key, entry in self._metadata.items()
+            if entry.allocation_id == allocation_id
+        ]
+        for key in keys_to_remove:
+            self._metadata.pop(key, None)
+        return len(keys_to_remove)
+
+    def _validate_metadata_integrity(
+        self,
+        allocations_by_id: dict[str, AllocationInfo],
+    ) -> None:
+        for key, entry in self._metadata.items():
+            info = allocations_by_id.get(entry.allocation_id)
+            if info is None:
+                raise AssertionError(
+                    f"Metadata key {key!r} references missing allocation "
+                    f"{entry.allocation_id!r}"
+                )
+
+            if entry.offset_bytes < 0 or entry.offset_bytes >= info.aligned_size:
+                raise AssertionError(
+                    f"Metadata key {key!r} has invalid offset {entry.offset_bytes} "
+                    f"for allocation {entry.allocation_id!r} "
+                    f"(aligned_size={info.aligned_size})"
+                )
+
+    def _compute_memory_layout_hash(self, allocations: list[AllocationInfo]) -> str:
+        h = hashlib.sha256()
+        allocation_slots_by_id: dict[str, int] = {}
+        for info in sorted(allocations, key=lambda info: info.layout_slot):
+            allocation_slots_by_id[info.allocation_id] = info.layout_slot
+            h.update(
+                f"{info.layout_slot}:{info.size}:{info.aligned_size}:{info.tag}".encode()
+            )
+
+        for key in sorted(self._metadata):
+            entry = self._metadata[key]
+            layout_slot = allocation_slots_by_id[entry.allocation_id]
+            h.update(f"{key}:{layout_slot}:{entry.offset_bytes}:".encode())
+            h.update(entry.value)
+        return h.hexdigest()
+
+    def _clear_layout_state(self) -> int:
+        self._metadata.clear()
+        self._memory_layout_hash = ""
+        return self._allocations.clear_all()
+
     def on_connect(self, conn: Connection) -> None:
-        rw_epoch_initialized = False
-        try:
-            if conn.mode == GrantedLockType.RW:
-                old_committed_epoch_id = self._epochs.on_rw_connect()
-                rw_epoch_initialized = True
-                if old_committed_epoch_id is not None:
-                    cleared = self._allocations.clear_all_allocations(
-                        old_committed_epoch_id
-                    )
-                    self._events.append(
-                        GMSRuntimeEvent(
-                            kind="allocations_cleared",
-                            epoch_id=old_committed_epoch_id,
-                            allocation_count=cleared,
-                        )
-                    )
-            self._sessions.on_connect(conn)
-            if conn.mode == GrantedLockType.RW:
+        if conn.mode == GrantedLockType.RW:
+            had_committed_layout = self._sessions.snapshot().committed
+            cleared = self._clear_layout_state()
+            if had_committed_layout:
                 self._events.append(
                     GMSRuntimeEvent(
-                        kind="rw_connected",
-                        epoch_id=self._epochs.require_epoch_id(GrantedLockType.RW),
+                        kind="allocations_cleared",
+                        allocation_count=cleared,
                     )
                 )
-        except Exception:
-            if rw_epoch_initialized:
-                active_epoch_id = self._epochs.on_rw_abort()
-                if active_epoch_id is not None:
-                    self._events.append(
-                        GMSRuntimeEvent(kind="rw_aborted", epoch_id=active_epoch_id)
-                    )
-                    cleared = self._allocations.clear_all_allocations(active_epoch_id)
-                    self._events.append(
-                        GMSRuntimeEvent(
-                            kind="allocations_cleared",
-                            epoch_id=active_epoch_id,
-                            allocation_count=cleared,
-                        )
-                    )
-            raise
+
+        self._sessions.on_connect(conn)
+        if conn.mode == GrantedLockType.RW:
+            self._events.append(GMSRuntimeEvent(kind="rw_connected"))
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
         event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
-            active_epoch_id = self._epochs.on_rw_abort()
-            if active_epoch_id is not None:
-                self._events.append(
-                    GMSRuntimeEvent(kind="rw_aborted", epoch_id=active_epoch_id)
+            logger.warning("RW aborted; clearing active layout")
+            cleared = self._clear_layout_state()
+            self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="allocations_cleared",
+                    allocation_count=cleared,
                 )
-                cleared = self._allocations.clear_all_allocations(active_epoch_id)
-                self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocations_cleared",
-                        epoch_id=active_epoch_id,
-                        allocation_count=cleared,
-                    )
-                )
+            )
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(
@@ -205,42 +237,35 @@ class GMS:
         self._sessions.check_operation(msg_type, conn)
 
         if msg_type is CommitRequest:
-            old_committed_epoch_id = self._epochs.on_commit(
-                self._allocations.list_allocations(
-                    self._epochs.require_epoch_id(GrantedLockType.RW)
-                )
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
+            allocations = self._allocations.list_allocations()
+            allocations_by_id = {
+                info.allocation_id: info for info in allocations
+            }
+            self._validate_metadata_integrity(allocations_by_id)
+            self._memory_layout_hash = self._compute_memory_layout_hash(allocations)
+
+            logger.info(
+                "Committed layout with state hash: %s...",
+                self._memory_layout_hash[:16],
             )
-            if old_committed_epoch_id is not None:
-                cleared = self._allocations.clear_all_allocations(
-                    old_committed_epoch_id
-                )
-                self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocations_cleared",
-                        epoch_id=old_committed_epoch_id,
-                        allocation_count=cleared,
-                    )
-                )
             self._sessions.on_commit(conn)
-            self._events.append(
-                GMSRuntimeEvent(
-                    kind="committed",
-                    epoch_id=self._epochs.committed_epoch_id,
-                )
-            )
+            self._events.append(GMSRuntimeEvent(kind="committed"))
             return CommitResponse(success=True), -1, True
 
         if msg_type is AllocateRequest:
-            epoch_id = self._epochs.require_epoch_id(GrantedLockType.RW)
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
             info = await self._allocations.allocate(
                 size=msg.size,
-                epoch_id=epoch_id,
                 tag=msg.tag,
                 is_connected=is_connected,
                 on_oom=lambda: self._events.append(
                     GMSRuntimeEvent(
                         kind="allocation_oom",
-                        epoch_id=epoch_id,
                         allocation_count=self._allocations.allocation_count,
                     )
                 ),
@@ -250,7 +275,6 @@ class GMS:
                     allocation_id=info.allocation_id,
                     size=info.size,
                     aligned_size=info.aligned_size,
-                    epoch_id=info.epoch_id,
                     layout_slot=info.layout_slot,
                 ),
                 -1,
@@ -282,18 +306,14 @@ class GMS:
             )
 
         if msg_type is ExportAllocationRequest:
-            info = self._allocations.get_allocation(
-                msg.allocation_id,
-                self._epochs.require_epoch_id(conn.mode),
-            )
-            fd = self._allocations.export_allocation(info.allocation_id, info.epoch_id)
+            info = self._allocations.get_allocation(msg.allocation_id)
+            fd = self._allocations.export_allocation(info.allocation_id)
             return (
                 ExportAllocationResponse(
                     allocation_id=info.allocation_id,
                     size=info.size,
                     aligned_size=info.aligned_size,
                     tag=info.tag,
-                    epoch_id=info.epoch_id,
                     layout_slot=info.layout_slot,
                 ),
                 fd,
@@ -302,25 +322,19 @@ class GMS:
 
         if msg_type is GetStateHashRequest:
             return (
-                GetStateHashResponse(
-                    memory_layout_hash=self._epochs.memory_layout_hash
-                ),
+                GetStateHashResponse(memory_layout_hash=self._memory_layout_hash),
                 -1,
                 False,
             )
 
         if msg_type is GetAllocationRequest:
-            info = self._allocations.get_allocation(
-                msg.allocation_id,
-                self._epochs.require_epoch_id(conn.mode),
-            )
+            info = self._allocations.get_allocation(msg.allocation_id)
             return (
                 GetAllocationResponse(
                     allocation_id=info.allocation_id,
                     size=info.size,
                     aligned_size=info.aligned_size,
                     tag=info.tag,
-                    epoch_id=info.epoch_id,
                     layout_slot=info.layout_slot,
                 ),
                 -1,
@@ -336,13 +350,9 @@ class GMS:
                             size=info.size,
                             aligned_size=info.aligned_size,
                             tag=info.tag,
-                            epoch_id=info.epoch_id,
                             layout_slot=info.layout_slot,
                         )
-                        for info in self._allocations.list_allocations(
-                            self._epochs.require_epoch_id(conn.mode),
-                            msg.tag,
-                        )
+                        for info in self._allocations.list_allocations(msg.tag)
                     ]
                 ),
                 -1,
@@ -350,10 +360,9 @@ class GMS:
             )
 
         if msg_type is FreeAllocationRequest:
-            epoch_id = self._epochs.require_epoch_id(GrantedLockType.RW)
-            success = self._allocations.free_allocation(msg.allocation_id, epoch_id)
+            success = self._allocations.free_allocation(msg.allocation_id)
             if success:
-                self._epochs.drop_metadata_for_allocation(msg.allocation_id)
+                self._drop_metadata_for_allocation(msg.allocation_id)
             return (
                 FreeAllocationResponse(success=success),
                 -1,
@@ -361,20 +370,17 @@ class GMS:
             )
 
         if msg_type is MetadataPutRequest:
-            allocation = self._allocations.get_allocation(
-                msg.allocation_id,
-                self._epochs.require_epoch_id(GrantedLockType.RW),
-            )
-            self._epochs.put_metadata(
-                allocation,
-                msg.key,
-                msg.offset_bytes,
-                msg.value,
+            allocation = self._allocations.get_allocation(msg.allocation_id)
+            self._validate_metadata_target(allocation, msg.offset_bytes)
+            self._metadata[msg.key] = MetadataEntry(
+                allocation_id=allocation.allocation_id,
+                offset_bytes=msg.offset_bytes,
+                value=msg.value,
             )
             return MetadataPutResponse(success=True), -1, False
 
         if msg_type is MetadataGetRequest:
-            entry = self._epochs.get_metadata(conn.mode, msg.key)
+            entry = self._metadata.get(msg.key)
             if entry is None:
                 return MetadataGetResponse(found=False), -1, False
             return (
@@ -390,18 +396,20 @@ class GMS:
 
         if msg_type is MetadataDeleteRequest:
             return (
-                MetadataDeleteResponse(deleted=self._epochs.delete_metadata(msg.key)),
+                MetadataDeleteResponse(
+                    deleted=self._metadata.pop(msg.key, None) is not None
+                ),
                 -1,
                 False,
             )
 
         if msg_type is MetadataListRequest:
-            return (
-                MetadataListResponse(
-                    keys=self._epochs.list_metadata(conn.mode, msg.prefix)
-                ),
-                -1,
-                False,
-            )
+            if not msg.prefix:
+                keys = sorted(self._metadata)
+            else:
+                keys = sorted(
+                    key for key in self._metadata if key.startswith(msg.prefix)
+                )
+            return MetadataListResponse(keys=keys), -1, False
 
         raise ValueError(f"Unknown request: {msg_type.__name__}")

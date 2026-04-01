@@ -170,6 +170,7 @@ def _make_allocation_manager() -> GMSAllocationManager:
     manager = object.__new__(GMSAllocationManager)
     manager._device = 0
     manager._allocations = {}
+    manager._next_layout_slot = 0
     manager._granularity = 1
     manager._allocation_retry_interval = 0.0
     manager._allocation_retry_timeout = None
@@ -178,25 +179,21 @@ def _make_allocation_manager() -> GMSAllocationManager:
 
 @dataclass
 class _FakeHandler:
-    committed_epoch_id: int | None = None
-    active_rw_epoch_id: int | None = None
+    has_committed_layout: bool = False
     rw_connect_calls: int = 0
     rw_abort_calls: int = 0
     commit_calls: int = 0
 
     def on_rw_connect(self) -> None:
         self.rw_connect_calls += 1
-        self.active_rw_epoch_id = 2
-        self.committed_epoch_id = None
+        self.has_committed_layout = False
 
     def on_rw_abort(self) -> None:
         self.rw_abort_calls += 1
-        self.active_rw_epoch_id = None
 
     def on_commit(self) -> None:
         self.commit_calls += 1
-        self.committed_epoch_id = self.active_rw_epoch_id or 1
-        self.active_rw_epoch_id = None
+        self.has_committed_layout = True
 
     def handle_get_lock_state(
         self,
@@ -227,7 +224,7 @@ class _FakeGMS:
     def __init__(self, handler: _FakeHandler | None = None):
         self.handler = handler or _FakeHandler()
         self._sessions = GMSSessionManager()
-        if self.handler.committed_epoch_id is not None:
+        if self.handler.has_committed_layout:
             self._sessions._locking._committed = True
 
     @property
@@ -430,7 +427,7 @@ async def test_rw_or_ro_waiter_becomes_rw_after_writer_abort():
 
 
 @pytest.mark.asyncio
-async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
+async def test_gms_clears_aborted_rw_layout_before_waking_waiters():
     gms = object.__new__(GMS)
     cleanup_order: list[str] = []
     conn, _ = _make_connection(GrantedLockType.RW, "session_1")
@@ -443,12 +440,9 @@ async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
     async def finish_cleanup(self, cleanup_conn):
         cleanup_order.append("finish_cleanup")
 
-    def on_rw_abort(self):
-        cleanup_order.append("on_rw_abort")
-        return 7
-
-    def clear_all_allocations(self, epoch_id):
-        cleanup_order.append(f"clear_{epoch_id}")
+    def clear_layout_state():
+        cleanup_order.append("clear_layout_state")
+        return 3
 
     gms._sessions = type(
         "_Sessions",
@@ -458,23 +452,13 @@ async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
             "finish_cleanup": finish_cleanup,
         },
     )()
-    gms._epochs = type(
-        "_Epochs",
-        (),
-        {"on_rw_abort": on_rw_abort},
-    )()
-    gms._allocations = type(
-        "_Allocations",
-        (),
-        {"clear_all_allocations": clear_all_allocations},
-    )()
+    gms._clear_layout_state = clear_layout_state
 
     await gms.cleanup_connection(conn)
 
     assert cleanup_order == [
         "begin_cleanup",
-        "on_rw_abort",
-        "clear_7",
+        "clear_layout_state",
         "finish_cleanup",
     ]
 
@@ -483,7 +467,7 @@ async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
 async def test_request_response_send_failure_disconnects_without_error_response(
     monkeypatch,
 ):
-    handler = _FakeHandler(committed_epoch_id=1)
+    handler = _FakeHandler(has_committed_layout=True)
     server = _make_server(handler)
     server._gms._sessions._locking._committed = True
 
@@ -518,7 +502,7 @@ async def test_request_response_send_failure_disconnects_without_error_response(
 
 @pytest.mark.asyncio
 async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
-    handler = _FakeHandler(active_rw_epoch_id=2)
+    handler = _FakeHandler()
     server = _make_server(handler)
 
     conn, writer = _make_connection(GrantedLockType.RW, "session_3")
@@ -636,7 +620,7 @@ async def test_allocate_rejects_non_positive_size_before_cuda():
     manager = _make_allocation_manager()
 
     with pytest.raises(ValueError, match="size must be > 0"):
-        await manager.allocate(0, epoch_id=1, tag="weights", is_connected=None)
+        await manager.allocate(0, tag="weights", is_connected=None)
 
 
 @pytest.mark.asyncio
@@ -658,4 +642,4 @@ async def test_allocate_aborts_retry_when_writer_disconnects(monkeypatch):
     with pytest.raises(
         ConnectionAbortedError, match="RW client disconnected during allocation retry"
     ):
-        await manager.allocate(1, epoch_id=1, tag="weights", is_connected=is_connected)
+        await manager.allocate(1, tag="weights", is_connected=is_connected)

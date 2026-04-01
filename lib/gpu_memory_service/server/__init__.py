@@ -14,13 +14,7 @@ from gpu_memory_service.server.allocations import (
     AllocationNotFoundError,
     GMSAllocationManager,
 )
-from gpu_memory_service.server.epochs import (
-    Epoch,
-    EpochState,
-    GMSEpochManager,
-    MetadataEntry,
-)
-from gpu_memory_service.server.gms import GMS
+from gpu_memory_service.server.gms import GMS, MetadataEntry
 from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.session import (
     Connection,
@@ -33,13 +27,10 @@ __all__ = [
     "GMSRPCServer",
     "GMS",
     "GMSSessionManager",
-    "GMSEpochManager",
     "GMSAllocationManager",
     "AllocationInfo",
     "AllocationNotFoundError",
     "MetadataEntry",
-    "Epoch",
-    "EpochState",
     "Connection",
     "GrantedLockType",
     "RequestedLockType",

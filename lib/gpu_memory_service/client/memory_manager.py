@@ -207,7 +207,7 @@ class GMSClientMemoryManager:
             self._last_memory_layout_hash = ""
             return
         # Preserve the pre-unmap hash across reconnects so remap_all_vas can
-        # detect that another epoch changed the committed layout while this
+        # detect that another writer changed the committed layout while this
         # process was disconnected.
         if self._client.committed and (
             not self._va_preserved or not self._last_memory_layout_hash
@@ -503,7 +503,7 @@ class GMSClientMemoryManager:
             alloc_info = allocations_by_slot.get(mapping.layout_slot)
             if alloc_info is None:
                 raise StaleMemoryLayoutError(
-                    f"Layout slot {mapping.layout_slot} is missing from the committed epoch"
+                    f"Layout slot {mapping.layout_slot} is missing from the committed layout"
                 )
             if int(alloc_info.aligned_size) != mapping.aligned_size:
                 raise StaleMemoryLayoutError(

@@ -29,12 +29,12 @@ from ..harness.vllm import VLLMWithGMSProcess
 pytestmark = [pytest.mark.nightly]
 
 # Event flow under test:
-# 1. Shadow A starts with committed weights and a live RW KV epoch, then sleeps.
-# 2. Shadow B starts from the same committed weights epoch, then sleeps as well.
-# 3. Primary wakes and owns the next RW KV epoch.
-# 4. Shadow A wakes after a forced primary disconnect and enters a new RW epoch.
+# 1. Shadow A starts with committed weights and a live RW KV layout, then sleeps.
+# 2. Shadow B starts from the same committed weights layout, then sleeps as well.
+# 3. Primary wakes and owns the next RW KV layout.
+# 4. Shadow A wakes after a forced primary disconnect and enters a new RW layout.
 # 5. Shadow A blocks on allocation_oom until the still-alive primary is killed.
-# 6. After primary death, the old KV epoch clears and Shadow A finishes wake.
+# 6. After primary death, the old KV layout clears and Shadow A finishes wake.
 
 logger = logging.getLogger(__name__)
 
@@ -68,38 +68,20 @@ def _is_process_alive(process: ManagedProcess) -> bool:
     return True
 
 
-def _assert_weights_published_once(events, epoch_id: int) -> None:
-    pairs = [(event.kind, event.epoch_id) for event in events]
-    connect = ("rw_connected", epoch_id)
-    commit = ("committed", epoch_id)
-    assert connect in pairs
-    assert commit in pairs
-    assert pairs.count(connect) == 1
-    assert pairs.count(commit) == 1
-    assert pairs.index(connect) < pairs.index(commit)
+def _assert_weights_published_once(events) -> None:
+    assert [event.kind for event in events] == ["rw_connected", "committed"]
 
 
-def _assert_cleared_rw_epoch(events, epoch_id: int) -> None:
-    pairs = [(event.kind, event.epoch_id) for event in events]
-    connect = ("rw_connected", epoch_id)
-    abort = ("rw_aborted", epoch_id)
-    clear = ("allocations_cleared", epoch_id)
-    assert connect in pairs
-    assert abort in pairs
-    assert clear in pairs
-    assert pairs.count(connect) == 1
-    assert pairs.count(abort) == 1
-    assert pairs.count(clear) == 1
-    assert pairs.index(connect) < pairs.index(abort)
-    assert pairs.index(abort) < pairs.index(clear)
-    assert (
-        next(
-            event
-            for event in events
-            if event.kind == "allocations_cleared" and event.epoch_id == epoch_id
-        ).allocation_count
-        > 0
-    )
+def _assert_cleared_rw_layout_prefix(events, cleared_layouts: int) -> None:
+    expected_prefix = ["rw_connected", "rw_aborted", "allocations_cleared"] * cleared_layouts
+    assert [event.kind for event in events[: len(expected_prefix)]] == expected_prefix
+    clear_counts = [
+        event.allocation_count
+        for event in events
+        if event.kind == "allocations_cleared"
+    ]
+    assert len(clear_counts) >= cleared_layouts
+    assert all(count > 0 for count in clear_counts[:cleared_layouts])
 
 
 def _sleep_shadow(
@@ -107,8 +89,8 @@ def _sleep_shadow(
     weights_gms: ThreadedGMSServer,
     kv_cache_gms: ThreadedGMSServer,
     shadow: ManagedProcess,
-    expected_weights_epoch_id: int | None = None,
-) -> tuple[int, int, int, int]:
+    expected_weights_hash: str | None = None,
+) -> tuple[str, int, int]:
     result = send_completion(frontend_port)
     assert result["choices"], "Shadow inference failed"
     logger.info("Shadow inference OK: %s", result)
@@ -118,12 +100,10 @@ def _sleep_shadow(
         weights_state = weights_gms.get_runtime_state()
         kv_state = kv_cache_gms.get_runtime_state()
         if (
-            weights_state.committed_epoch_id is not None
-            and weights_state.active_rw_epoch_id is None
+            weights_state.state == ServerState.RO
             and weights_state.allocation_count > 0
+            and weights_state.memory_layout_hash
             and kv_state.state == ServerState.RW
-            and kv_state.active_rw_epoch_id is not None
-            and kv_state.committed_epoch_id is None
             and kv_state.allocation_count > 0
         ):
             break
@@ -131,8 +111,8 @@ def _sleep_shadow(
             raise TimeoutError("shadow startup did not stabilize GMS state")
         time.sleep(0.1)
 
-    if expected_weights_epoch_id is not None:
-        assert weights_state.committed_epoch_id == expected_weights_epoch_id
+    if expected_weights_hash is not None:
+        assert weights_state.memory_layout_hash == expected_weights_hash
 
     shadow_memory_before_sleep = get_gpu_memory_used()
     assert shadow.sleep()["status"] == "ok"
@@ -153,15 +133,10 @@ def _sleep_shadow(
         kv_after_sleep = kv_cache_gms.get_runtime_state()
         if (
             weights_after_sleep.state == ServerState.COMMITTED
-            and weights_after_sleep.committed_epoch_id
-            == weights_state.committed_epoch_id
-            and weights_after_sleep.active_rw_epoch_id is None
             and weights_after_sleep.allocation_count == weights_state.allocation_count
             and weights_after_sleep.memory_layout_hash
             == weights_state.memory_layout_hash
             and kv_after_sleep.state == ServerState.EMPTY
-            and kv_after_sleep.committed_epoch_id is None
-            and kv_after_sleep.active_rw_epoch_id is None
             and kv_after_sleep.allocation_count == 0
         ):
             break
@@ -170,8 +145,7 @@ def _sleep_shadow(
         time.sleep(0.1)
 
     return (
-        weights_state.committed_epoch_id,
-        kv_state.active_rw_epoch_id,
+        weights_state.memory_layout_hash,
         shadow_released_bytes,
         shadow_memory_after_sleep,
     )
@@ -198,15 +172,13 @@ def _run_shadow_failover_test(
         )
         with make_shadow_a() as shadow_a:
             (
-                weights_epoch_id,
-                shadow_a_kv_epoch_id,
+                weights_hash,
                 shadow_a_released_bytes,
                 _shadow_a_memory_after_sleep,
             ) = _sleep_shadow(frontend_port, weights_gms, kv_cache_gms, shadow_a)
             with make_shadow_b() as shadow_b:
                 (
-                    sleeping_weights_epoch_id,
-                    shadow_b_kv_epoch_id,
+                    sleeping_weights_hash,
                     _shadow_b_released_bytes,
                     sleeping_memory_after_sleep,
                 ) = _sleep_shadow(
@@ -214,25 +186,17 @@ def _run_shadow_failover_test(
                     weights_gms,
                     kv_cache_gms,
                     shadow_b,
-                    expected_weights_epoch_id=weights_epoch_id,
+                    expected_weights_hash=weights_hash,
                 )
-                assert sleeping_weights_epoch_id == weights_epoch_id
-                assert shadow_b_kv_epoch_id != shadow_a_kv_epoch_id
+                assert sleeping_weights_hash == weights_hash
 
                 weights_events_after_shadow_sleep = (
                     weights_gms.get_event_history().events
                 )
-                _assert_weights_published_once(
-                    weights_events_after_shadow_sleep, weights_epoch_id
-                )
+                _assert_weights_published_once(weights_events_after_shadow_sleep)
 
                 kv_events_after_shadow_sleep = kv_cache_gms.get_event_history().events
-                _assert_cleared_rw_epoch(
-                    kv_events_after_shadow_sleep, shadow_a_kv_epoch_id
-                )
-                _assert_cleared_rw_epoch(
-                    kv_events_after_shadow_sleep, shadow_b_kv_epoch_id
-                )
+                _assert_cleared_rw_layout_prefix(kv_events_after_shadow_sleep, 2)
 
                 with make_primary() as primary:
                     result = send_completion(frontend_port, "Primary test")
@@ -257,13 +221,9 @@ def _run_shadow_failover_test(
                         if (
                             weights_with_primary.state == ServerState.RO
                             and weights_with_primary.ro_session_count >= 1
-                            and weights_with_primary.committed_epoch_id
-                            == weights_epoch_id
-                            and weights_with_primary.active_rw_epoch_id is None
                             and weights_with_primary.allocation_count > 0
+                            and weights_with_primary.memory_layout_hash == weights_hash
                             and kv_with_primary.state == ServerState.RW
-                            and kv_with_primary.active_rw_epoch_id is not None
-                            and kv_with_primary.committed_epoch_id is None
                             and kv_with_primary.allocation_count > 0
                         ):
                             break
@@ -272,12 +232,23 @@ def _run_shadow_failover_test(
                                 "primary did not acquire KV cache GMS state"
                             )
                         time.sleep(0.1)
-                    primary_kv_epoch_id = kv_with_primary.active_rw_epoch_id
+                    expected_kv_kinds_before_disconnect = [
+                        "rw_connected",
+                        "rw_aborted",
+                        "allocations_cleared",
+                        "rw_connected",
+                        "rw_aborted",
+                        "allocations_cleared",
+                        "rw_connected",
+                    ]
+                    assert [
+                        event.kind for event in kv_cache_gms.get_event_history().events
+                    ] == expected_kv_kinds_before_disconnect
 
                     with ThreadPoolExecutor(max_workers=1) as executor:
                         # Shadow A wakes while Shadow B remains asleep. After we
                         # force-disconnect the primary from GMS, Shadow A should enter
-                        # a new RW epoch but block on real CUDA OOM until the primary dies.
+                        # a new RW layout but block on real CUDA OOM until the primary dies.
                         wake_future = executor.submit(shadow_a.wake, 180)
                         deadline = time.monotonic() + 10.0
                         while time.monotonic() < deadline:
@@ -290,12 +261,20 @@ def _run_shadow_failover_test(
                         )
                         kv_while_blocked = kv_cache_gms.get_runtime_state()
                         assert kv_while_blocked.state == ServerState.RW
-                        assert (
-                            kv_while_blocked.active_rw_epoch_id == primary_kv_epoch_id
-                        )
+                        assert kv_while_blocked.allocation_count > 0
 
                         kv_cache_gms.disconnect_rw_session()
 
+                        expected_kv_kinds_while_blocked = (
+                            expected_kv_kinds_before_disconnect
+                            + [
+                                "rw_aborted",
+                                "allocations_cleared",
+                                "rw_connected",
+                                "allocation_oom",
+                            ]
+                        )
+                        blocked_allocation_count: int | None = None
                         deadline = time.monotonic() + 30.0
                         while time.monotonic() < deadline:
                             kv_after_forced_disconnect = (
@@ -304,28 +283,34 @@ def _run_shadow_failover_test(
                             kv_events_after_forced_disconnect = (
                                 kv_cache_gms.get_event_history().events
                             )
-                            saw_shadow_oom = any(
-                                event.kind == "allocation_oom"
-                                and event.epoch_id
-                                == kv_after_forced_disconnect.active_rw_epoch_id
-                                for event in kv_events_after_forced_disconnect
-                            )
                             if (
                                 kv_after_forced_disconnect.state == ServerState.RW
-                                and kv_after_forced_disconnect.active_rw_epoch_id
-                                is not None
-                                and kv_after_forced_disconnect.active_rw_epoch_id
-                                != primary_kv_epoch_id
-                                and saw_shadow_oom
+                                and [
+                                    event.kind
+                                    for event in kv_events_after_forced_disconnect
+                                ]
+                                == expected_kv_kinds_while_blocked
                                 and not wake_future.done()
                             ):
-                                break
+                                blocked_allocation_count = (
+                                    kv_after_forced_disconnect.allocation_count
+                                )
+                                if (
+                                    blocked_allocation_count
+                                    < kv_while_blocked.allocation_count
+                                    and blocked_allocation_count
+                                    == kv_events_after_forced_disconnect[
+                                        -1
+                                    ].allocation_count
+                                ):
+                                    break
                             time.sleep(0.2)
                         else:
                             raise TimeoutError(
-                                "shadow never entered a new KV-cache epoch blocked on allocation"
+                                "shadow never entered a new KV-cache layout blocked on allocation"
                             )
 
+                        assert blocked_allocation_count is not None
                         linger_deadline = time.monotonic() + 3.0
                         while time.monotonic() < linger_deadline:
                             kv_while_lingering = kv_cache_gms.get_runtime_state()
@@ -334,15 +319,12 @@ def _run_shadow_failover_test(
                             )
                             assert kv_while_lingering.state == ServerState.RW
                             assert (
-                                kv_while_lingering.active_rw_epoch_id
-                                == kv_after_forced_disconnect.active_rw_epoch_id
+                                kv_while_lingering.allocation_count
+                                == blocked_allocation_count
                             )
-                            assert any(
-                                event.kind == "allocation_oom"
-                                and event.epoch_id
-                                == kv_while_lingering.active_rw_epoch_id
-                                for event in kv_events_while_lingering
-                            )
+                            assert [
+                                event.kind for event in kv_events_while_lingering
+                            ] == expected_kv_kinds_while_blocked
                             assert _is_process_alive(
                                 primary
                             ), "primary died before the linger window completed"
@@ -365,9 +347,6 @@ def _run_shadow_failover_test(
                             kv_after_primary_kill = kv_cache_gms.get_runtime_state()
                             if (
                                 kv_after_primary_kill.state == ServerState.RW
-                                and kv_after_primary_kill.active_rw_epoch_id is not None
-                                and kv_after_primary_kill.active_rw_epoch_id
-                                != primary_kv_epoch_id
                                 and kv_after_primary_kill.allocation_count > 0
                             ):
                                 break
@@ -376,7 +355,6 @@ def _run_shadow_failover_test(
                             raise TimeoutError(
                                 "shadow did not reacquire KV cache after failover"
                             )
-                        shadow_kv_epoch_id = kv_after_primary_kill.active_rw_epoch_id
 
                         wake_result = wake_future.result(timeout=180)
 
@@ -396,7 +374,7 @@ def _run_shadow_failover_test(
                 ) >= shadow_a_released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
 
                 # Once the primary is gone, the failover shadow should finish wake
-                # with the same committed weights epoch and a new live RW KV-cache epoch.
+                # with the same committed weights layout and a new live RW KV-cache layout.
                 deadline = time.monotonic() + 30.0
                 while True:
                     weights_after_wake = weights_gms.get_runtime_state()
@@ -404,14 +382,10 @@ def _run_shadow_failover_test(
                     if (
                         weights_after_wake.state == ServerState.RO
                         and weights_after_wake.ro_session_count >= 1
-                        and weights_after_wake.committed_epoch_id == weights_epoch_id
-                        and weights_after_wake.active_rw_epoch_id is None
                         and weights_after_wake.allocation_count > 0
                         and weights_after_wake.memory_layout_hash
                         == weights_with_primary.memory_layout_hash
                         and kv_after_wake.state == ServerState.RW
-                        and kv_after_wake.active_rw_epoch_id == shadow_kv_epoch_id
-                        and kv_after_wake.committed_epoch_id is None
                         and kv_after_wake.allocation_count > 0
                     ):
                         break
@@ -422,33 +396,26 @@ def _run_shadow_failover_test(
                     time.sleep(0.1)
 
                 # The final KV history should show the full handoff:
-                # shadow A slept -> shadow B slept -> primary epoch ->
+                # shadow A slept -> shadow B slept -> primary layout ->
                 # primary abort/clear -> shadow A reconnects -> shadow A sees OOM.
                 weights_events_after_wake = weights_gms.get_event_history().events
-                _assert_weights_published_once(
-                    weights_events_after_wake, weights_epoch_id
-                )
+                _assert_weights_published_once(weights_events_after_wake)
 
                 kv_events_after_wake = kv_cache_gms.get_event_history().events
-                _assert_cleared_rw_epoch(kv_events_after_wake, shadow_a_kv_epoch_id)
-                _assert_cleared_rw_epoch(kv_events_after_wake, shadow_b_kv_epoch_id)
-                _assert_cleared_rw_epoch(kv_events_after_wake, primary_kv_epoch_id)
-
-                kv_pairs_after_wake = [
-                    (event.kind, event.epoch_id) for event in kv_events_after_wake
+                _assert_cleared_rw_layout_prefix(kv_events_after_wake, 3)
+                assert [event.kind for event in kv_events_after_wake] == [
+                    "rw_connected",
+                    "rw_aborted",
+                    "allocations_cleared",
+                    "rw_connected",
+                    "rw_aborted",
+                    "allocations_cleared",
+                    "rw_connected",
+                    "rw_aborted",
+                    "allocations_cleared",
+                    "rw_connected",
+                    "allocation_oom",
                 ]
-                shadow_connect = ("rw_connected", shadow_kv_epoch_id)
-                shadow_oom = ("allocation_oom", shadow_kv_epoch_id)
-                assert shadow_connect in kv_pairs_after_wake
-                assert shadow_oom in kv_pairs_after_wake
-                assert kv_pairs_after_wake.count(shadow_connect) == 1
-                assert kv_pairs_after_wake.count(shadow_oom) == 1
-                assert kv_pairs_after_wake.index(
-                    ("allocations_cleared", primary_kv_epoch_id)
-                ) < kv_pairs_after_wake.index(shadow_connect)
-                assert kv_pairs_after_wake.index(
-                    shadow_connect
-                ) < kv_pairs_after_wake.index(shadow_oom)
 
                 result = send_completion(frontend_port, "Post failover")
                 assert result["choices"], "Shadow inference after failover failed"

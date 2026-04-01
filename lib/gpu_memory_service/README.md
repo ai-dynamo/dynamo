@@ -69,7 +69,7 @@ The server consists of three main components:
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
-3. **Metadata Store / Epoch State** - Owns active vs committed epoch state. Metadata and the memory layout hash are both scoped to a specific epoch and move with that epoch when it is committed.
+3. **Metadata Store / Layout State** - `GMS` owns the metadata table and committed layout hash. Allocations and metadata live in one flat store that is cleared on each new writer connect or writer abort.
 
 Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
 
@@ -152,18 +152,18 @@ stateDiagram-v2
 
 | State | Description | Can Connect RW | Can Connect RO |
 |-------|-------------|:--------------:|:--------------:|
-| `EMPTY` | No connections, no committed epoch visible | ✓ | ✗ |
+| `EMPTY` | No connections, no committed layout visible | ✓ | ✗ |
 | `RW` | Writer connected (exclusive access) | ✗ | ✗ |
-| `COMMITTED` | Committed epoch visible to readers, no active connections | ✓ | ✓ |
+| `COMMITTED` | Committed layout visible to readers, no active connections | ✓ | ✓ |
 | `RO` | One or more readers connected (shared access) | ✗ | ✓ |
 
 ### Events
 
 | Event | Trigger | Description |
 |-------|---------|-------------|
-| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, invalidates previous committed visibility immediately, and opens a new active RW epoch |
-| `RW_COMMIT` | Writer calls `commit()` | Publishes the current active RW epoch as the committed epoch and releases the lock |
-| `RW_ABORT` | Writer disconnects without commit | Drops active RW epoch and returns to `EMPTY` |
+| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, clears the previous committed layout immediately, and starts a fresh RW layout build |
+| `RW_COMMIT` | Writer calls `commit()` | Publishes the current RW layout as the committed layout and releases the lock |
+| `RW_ABORT` | Writer disconnects without commit | Drops the active RW layout and returns to `EMPTY` |
 | `RO_CONNECT` | Reader connects | Acquires shared read lock |
 | `RO_DISCONNECT` | Reader disconnects | Releases shared lock; if last reader, returns to COMMITTED |
 
@@ -177,27 +177,26 @@ A handshaken socket connection **is** the lock:
 
 The only exception is the runtime inspection probes (`GetRuntimeState`, `GetEventHistory`): they connect, fetch diagnostics, and close without entering the lock FSM.
 
-### Epoch Model
+### Layout Lifecycle
 
-Epoch creation and publication work like this:
+Layout creation and publication work like this:
 
 ```mermaid
 flowchart LR
-    A[EMPTY or COMMITTED] -->|RW_CONNECT| B[New epoch N]
-    B -->|Allocate memory and write metadata in epoch N| C{Writer outcome}
-    C -->|RW_COMMIT| D[Publish epoch N as committed]
-    C -->|RW_ABORT| E[Discard epoch N]
-    D -->|Next RW_CONNECT| F[New epoch N + 1]
+    A[EMPTY or COMMITTED] -->|RW_CONNECT| B[Fresh RW layout]
+    B -->|Allocate memory and write metadata| C{Writer outcome}
+    C -->|RW_COMMIT| D[Publish layout as committed]
+    C -->|RW_ABORT| E[Discard layout]
+    D -->|Next RW_CONNECT| F[Fresh RW layout]
     E -->|Next RW_CONNECT| F
 ```
 
-- `RW_CONNECT` creates a new active epoch.
-- `RW_COMMIT` publishes the current active epoch; it does not create another epoch.
-- `RW_ABORT` discards the current active epoch and returns the system to `EMPTY`.
-- Every allocation gets an immutable `epoch_id` at creation time.
-- Metadata entries belong to exactly one epoch, and the memory layout hash is computed for one committed epoch at a time.
-- RO requests are served only from the committed epoch, while RW requests mutate only the active epoch.
-- Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) are scoped to the committed epoch for RO clients and to the active epoch for RW clients.
+- `RW_CONNECT` starts a fresh RW layout build.
+- `RW_COMMIT` publishes the current layout; it does not create another one.
+- `RW_ABORT` discards the current RW layout and returns the system to `EMPTY`.
+- Allocations and metadata live in one flat store that is cleared on `RW_CONNECT` and `RW_ABORT`.
+- RO requests are served only from the committed layout, while RW requests mutate only the active layout.
+- Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) operate on that single live store. This is safe because the FSM prevents RW and RO sessions from coexisting.
 - `metadata_put` validates allocation ownership and offset bounds, `free` cascades metadata cleanup, and `commit` rejects dangling metadata references.
 
 ### Allocation Backpressure on OOM
@@ -210,7 +209,7 @@ When a writer requests a new allocation, GMS treats CUDA OOM as a transient cond
   - `--alloc-retry-interval` (default `0.5`)
   - `--alloc-retry-timeout` (default unset = wait indefinitely)
 
-This ensures the "new epoch gets new allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
+This ensures the "new writer gets fresh allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
 
 ### Guarantees
 
@@ -219,8 +218,8 @@ This ensures the "new epoch gets new allocations" workflow can wait for memory r
 - The only non-fatal client connection failure is lock acquisition timeout. Other client-side GMS transport, protocol, and server error responses raise.
 - Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
 - On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
-- Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own epoch state.
-- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW epochs use fresh allocations and may wait for memory reclamation before allocation succeeds.
+- Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own layout state.
+- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW layouts use fresh allocations and may wait for memory reclamation before allocation succeeds.
 
 ---
 
@@ -248,7 +247,7 @@ flowchart TD
 - `Drop connection` means the server stops trusting that socket and unwinds only that connection's lock state.
 - After `RW_COMMIT`, disconnect cleanup only closes the committed writer socket; it does not roll the server back to `RW_ABORT`.
 - `Valid client request?` covers mode/state violations, unknown requests, and request validation failures like bad metadata offsets.
-- `Did request expose server invariant failure?` covers impossible epoch/FSM states and commit-time metadata integrity failures.
+- `Did request expose server invariant failure?` covers impossible layout/FSM states and commit-time metadata integrity failures.
 
 ## Sequence Diagrams
 
@@ -266,8 +265,8 @@ sequenceDiagram
     W->>C: mgr.connect(RW)
     C->>S: HandshakeRequest(lock_type=RW)
     S->>S: Session FSM: EMPTY/COMMITTED -> RW
-    S->>S: Invalidate prior committed epoch
-    S->>S: Create new active epoch
+    S->>S: Clear prior committed layout
+    S->>S: Start fresh RW layout
     S-->>C: HandshakeResponse(success=true)
 
     loop For each tensor
@@ -280,7 +279,7 @@ sequenceDiagram
     C->>GPU: synchronize()
     C->>GPU: cuMemUnmap(...) + cuMemRelease(...)
     C->>S: CommitRequest()
-    S->>S: Publish active epoch as committed
+    S->>S: Publish current layout as committed
     S->>S: FSM: RW → COMMITTED
     S-->>C: CommitResponse(success=true)
     W->>C: mgr.connect(RO)
@@ -342,7 +341,7 @@ sequenceDiagram
     S->>S: FSM: RO → COMMITTED (if last reader)
 
     Note over R,GPU: GPU memory released, VA preserved
-    Note over R,GPU: Another writer could publish a new epoch here
+    Note over R,GPU: Another writer could publish a new layout here
 
     R->>C: mgr.connect(RO)
     R->>C: mgr.remap_all_vas()
@@ -350,7 +349,7 @@ sequenceDiagram
     S-->>C: GetStateHashResponse(hash)
 
     alt hash == saved_hash
-        C->>S: Export preserved allocations from committed epoch
+        C->>S: Export preserved allocations from the committed layout
         S-->>C: Response + FDs
         C->>GPU: Import handles and remap at preserved VAs
         C-->>R: Remap succeeds and tensor pointers stay valid
@@ -370,7 +369,7 @@ sequenceDiagram
     participant C as GMSClientMemoryManager
     participant S as GMS
 
-    Note over P,S: Auto-mode: try RW only when no committed epoch exists
+    Note over P,S: Auto-mode: try RW only when no committed layout exists
 
     P->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     P->>C: mgr.connect(RW_OR_RO)
@@ -387,7 +386,7 @@ sequenceDiagram
         S-->>C: HandshakeResponse(granted=RO, committed=true)
         Note over P: Subsequent process - import from GMS
     else RW held by another
-        S->>S: Wait until a committed epoch becomes available
+        S->>S: Wait until a committed layout becomes available
         S->>S: Then grant RO from COMMITTED
         S-->>C: HandshakeResponse(granted=RO, committed=true)
         Note over P: Wait for writer to publish committed weights
@@ -429,14 +428,14 @@ During `remap_all_vas()`:
 ### 4. Memory Layout Hash
 
 On commit, the server computes a hash of:
-- All allocation IDs, sizes, aligned sizes, tags, and epoch IDs
-- All metadata entries
+- All allocation layout slots, sizes, aligned sizes, and tags
+- All metadata keys, offsets, and values
 
 On `remap_all_vas()`, this hash is checked:
 - If match: Safe to remap (layout unchanged)
 - If mismatch: Raise `StaleMemoryLayoutError` (must re-import)
 
-The hash is tied to the currently committed epoch and is cleared as soon as a writer acquires RW.
+The hash is tied to the currently committed layout and is cleared as soon as a writer acquires RW.
 
 **Important**: This detects **structural** changes, not **content** changes.
 Weight values can be modified in-place (e.g., RL training updates) as long as the structure is preserved.
@@ -530,7 +529,7 @@ GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `
 When `--load-format gms` is set:
 
 1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: if no committed epoch exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed epoch and then get RO to import published weights.
+2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed layout and then get RO to import published weights.
 3. Both weights and KV cache are managed by GMS, but they use separate tags:
    - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
    - `kv_cache`: separate RW-only tag for mutable KV-cache memory
@@ -585,7 +584,7 @@ Under the hood, sleeping calls `unmap_all_vas()` + `abort()` to release GPU memo
 
 Tensor pointers remain valid because the original virtual addresses are preserved.
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a new RW epoch in its own GMS tag before it is reallocated.
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
 
 ### Configuration via `model_loader_extra_config`
 

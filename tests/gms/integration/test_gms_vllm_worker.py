@@ -135,6 +135,7 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
     )
 
     worker = object.__new__(GMSWorker)
+    worker.local_rank = 0
     worker.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
     worker.model_runner = SimpleNamespace(
         kv_caches={"layer_0": True},

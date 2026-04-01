@@ -73,7 +73,6 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
     aligned_size: int
-    epoch_id: int
     layout_slot: int
 
 
@@ -86,7 +85,6 @@ class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response")
     size: int
     aligned_size: int
     tag: str
-    epoch_id: int
     layout_slot: int
 
 
@@ -99,7 +97,6 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     size: int
     aligned_size: int
     tag: str
-    epoch_id: int
     layout_slot: int
 
 
@@ -181,15 +178,12 @@ class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
     waiting_writers: int
     committed: bool
     is_ready: bool
-    committed_epoch_id: Optional[int] = None
-    active_rw_epoch_id: Optional[int] = None
     allocation_count: int = 0
     memory_layout_hash: str = ""
 
 
 class GMSRuntimeEvent(msgspec.Struct):
     kind: str
-    epoch_id: int
     allocation_count: int = 0
 
 

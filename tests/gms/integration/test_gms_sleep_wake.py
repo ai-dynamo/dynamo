@@ -26,11 +26,11 @@ from ..harness.vllm import VLLMWithGMSProcess
 pytestmark = [pytest.mark.nightly]
 
 # Event flow under test:
-# 1. Weights are published once as a committed epoch.
-# 2. KV cache starts as a live RW epoch.
-# 3. Sleep keeps weights committed but aborts and clears the KV epoch.
-# 4. Wake reconnects weights as RO to the same committed epoch.
-# 5. Wake recreates KV cache in a fresh RW epoch after the old one was cleared.
+# 1. Weights are published once as a committed layout.
+# 2. KV cache starts as a live RW layout build.
+# 3. Sleep keeps weights committed but aborts and clears the KV layout.
+# 4. Wake reconnects weights as RO to the same committed layout.
+# 5. Wake recreates KV cache in a fresh RW layout after the old one was cleared.
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +55,17 @@ def _run_sleep_wake_test(
             logger.info("Initial inference result: %s", result)
             assert result["choices"]
 
-            # Before sleep, weights must already be published as a committed epoch
-            # while KV cache remains a live RW epoch owned by the engine.
+            # Before sleep, weights must already be published and visible to RO
+            # readers while KV cache remains a live RW layout owned by the engine.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_before_sleep = weights_gms.get_runtime_state()
                 kv_before_sleep = kv_cache_gms.get_runtime_state()
                 if (
-                    weights_before_sleep.committed_epoch_id is not None
-                    and weights_before_sleep.active_rw_epoch_id is None
+                    weights_before_sleep.state == ServerState.RO
                     and weights_before_sleep.allocation_count > 0
+                    and weights_before_sleep.memory_layout_hash
                     and kv_before_sleep.state == ServerState.RW
-                    and kv_before_sleep.active_rw_epoch_id is not None
-                    and kv_before_sleep.committed_epoch_id is None
                     and kv_before_sleep.allocation_count > 0
                 ):
                     break
@@ -87,24 +85,19 @@ def _run_sleep_wake_test(
             assert mem_after_sleep < mem_before, "Sleep should reduce memory"
             assert released_bytes > 0
 
-            # Sleep preserves the committed weights epoch but aborts and clears the
-            # mutable KV-cache epoch, which is what should release GPU memory.
+            # Sleep preserves the committed weights layout but aborts and clears the
+            # mutable KV-cache layout, which is what should release GPU memory.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_sleep = weights_gms.get_runtime_state()
                 kv_after_sleep = kv_cache_gms.get_runtime_state()
                 if (
                     weights_after_sleep.state == ServerState.COMMITTED
-                    and weights_after_sleep.committed_epoch_id
-                    == weights_before_sleep.committed_epoch_id
-                    and weights_after_sleep.active_rw_epoch_id is None
                     and weights_after_sleep.allocation_count
                     == weights_before_sleep.allocation_count
                     and weights_after_sleep.memory_layout_hash
                     == weights_before_sleep.memory_layout_hash
                     and kv_after_sleep.state == ServerState.EMPTY
-                    and kv_after_sleep.committed_epoch_id is None
-                    and kv_after_sleep.active_rw_epoch_id is None
                     and kv_after_sleep.allocation_count == 0
                 ):
                     break
@@ -117,41 +110,20 @@ def _run_sleep_wake_test(
             # Weights are immutable across sleep/wake, so their event history should
             # still be the original publish: connect once, commit once.
             weights_events = weights_gms.get_event_history().events
-            weights_pairs = [(event.kind, event.epoch_id) for event in weights_events]
-            weights_connect = ("rw_connected", weights_before_sleep.committed_epoch_id)
-            weights_commit = ("committed", weights_before_sleep.committed_epoch_id)
-            assert weights_connect in weights_pairs
-            assert weights_commit in weights_pairs
-            assert weights_pairs.count(weights_connect) == 1
-            assert weights_pairs.count(weights_commit) == 1
-            assert weights_pairs.index(weights_connect) < weights_pairs.index(
-                weights_commit
-            )
+            assert [event.kind for event in weights_events] == [
+                "rw_connected",
+                "committed",
+            ]
 
-            # KV cache is different: sleep must abort the old RW epoch and clear its
-            # server-owned allocations before wake can start a new RW epoch.
+            # KV cache is different: sleep must abort the old RW layout and clear its
+            # server-owned allocations before wake can start a new RW layout.
             kv_events = kv_cache_gms.get_event_history().events
-            kv_pairs = [(event.kind, event.epoch_id) for event in kv_events]
-            kv_connect = ("rw_connected", kv_before_sleep.active_rw_epoch_id)
-            kv_abort = ("rw_aborted", kv_before_sleep.active_rw_epoch_id)
-            kv_clear = ("allocations_cleared", kv_before_sleep.active_rw_epoch_id)
-            assert kv_connect in kv_pairs
-            assert kv_abort in kv_pairs
-            assert kv_clear in kv_pairs
-            assert kv_pairs.count(kv_connect) == 1
-            assert kv_pairs.count(kv_abort) == 1
-            assert kv_pairs.count(kv_clear) == 1
-            assert kv_pairs.index(kv_connect) < kv_pairs.index(kv_abort)
-            assert kv_pairs.index(kv_abort) < kv_pairs.index(kv_clear)
-            assert (
-                next(
-                    event
-                    for event in kv_events
-                    if event.kind == "allocations_cleared"
-                    and event.epoch_id == kv_before_sleep.active_rw_epoch_id
-                ).allocation_count
-                > 0
-            )
+            assert [event.kind for event in kv_events] == [
+                "rw_connected",
+                "rw_aborted",
+                "allocations_cleared",
+            ]
+            assert kv_events[-1].allocation_count > 0
 
             wake_result = engine.wake()
             assert wake_result["status"] == "ok"
@@ -164,26 +136,19 @@ def _run_sleep_wake_test(
                 reacquired_bytes
             ) >= released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
 
-            # Wake reconnects weights as RO to the same committed epoch, but KV cache
-            # must come back as a fresh RW epoch with new allocations.
+            # Wake reconnects weights as RO to the same committed layout, but KV cache
+            # must come back as a fresh RW layout with new allocations.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_wake = weights_gms.get_runtime_state()
                 kv_after_wake = kv_cache_gms.get_runtime_state()
                 if (
                     weights_after_wake.state == ServerState.RO
-                    and weights_after_wake.committed_epoch_id
-                    == weights_before_sleep.committed_epoch_id
-                    and weights_after_wake.active_rw_epoch_id is None
                     and weights_after_wake.allocation_count
                     == weights_before_sleep.allocation_count
                     and weights_after_wake.memory_layout_hash
                     == weights_before_sleep.memory_layout_hash
                     and kv_after_wake.state == ServerState.RW
-                    and kv_after_wake.active_rw_epoch_id is not None
-                    and kv_after_wake.active_rw_epoch_id
-                    != kv_before_sleep.active_rw_epoch_id
-                    and kv_after_wake.committed_epoch_id is None
                     and kv_after_wake.allocation_count > 0
                 ):
                     break
@@ -192,50 +157,21 @@ def _run_sleep_wake_test(
                 time.sleep(0.1)
 
             weights_events_after_wake = weights_gms.get_event_history().events
-            weights_pairs_after_wake = [
-                (event.kind, event.epoch_id) for event in weights_events_after_wake
+            assert [event.kind for event in weights_events_after_wake] == [
+                "rw_connected",
+                "committed",
             ]
-            assert weights_connect in weights_pairs_after_wake
-            assert weights_commit in weights_pairs_after_wake
-            assert weights_pairs_after_wake.count(weights_connect) == 1
-            assert weights_pairs_after_wake.count(weights_commit) == 1
-            assert weights_pairs_after_wake.index(
-                weights_connect
-            ) < weights_pairs_after_wake.index(weights_commit)
 
             # The wake history should therefore extend the old KV sequence with one
-            # new RW connect after the previous epoch was fully cleared.
+            # new RW connect after the previous layout was fully cleared.
             kv_events_after_wake = kv_cache_gms.get_event_history().events
-            kv_pairs_after_wake = [
-                (event.kind, event.epoch_id) for event in kv_events_after_wake
+            assert [event.kind for event in kv_events_after_wake] == [
+                "rw_connected",
+                "rw_aborted",
+                "allocations_cleared",
+                "rw_connected",
             ]
-            kv_reconnect = ("rw_connected", kv_after_wake.active_rw_epoch_id)
-            assert kv_connect in kv_pairs_after_wake
-            assert kv_abort in kv_pairs_after_wake
-            assert kv_clear in kv_pairs_after_wake
-            assert kv_reconnect in kv_pairs_after_wake
-            assert kv_pairs_after_wake.count(kv_connect) == 1
-            assert kv_pairs_after_wake.count(kv_abort) == 1
-            assert kv_pairs_after_wake.count(kv_clear) == 1
-            assert kv_pairs_after_wake.count(kv_reconnect) == 1
-            assert kv_pairs_after_wake.index(kv_connect) < kv_pairs_after_wake.index(
-                kv_abort
-            )
-            assert kv_pairs_after_wake.index(kv_abort) < kv_pairs_after_wake.index(
-                kv_clear
-            )
-            assert kv_pairs_after_wake.index(kv_clear) < kv_pairs_after_wake.index(
-                kv_reconnect
-            )
-            assert (
-                next(
-                    event
-                    for event in kv_events_after_wake
-                    if event.kind == "allocations_cleared"
-                    and event.epoch_id == kv_before_sleep.active_rw_epoch_id
-                ).allocation_count
-                > 0
-            )
+            assert kv_events_after_wake[2].allocation_count > 0
 
             result = send_completion(ports["frontend"], "Goodbye")
             logger.info("Post-wake inference result: %s", result)
