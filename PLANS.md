@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:11:46 UTC
+Last updated: 2026-04-01 10:13:14 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 10:11:46 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current live tip validated in this run: `32dad895f6a0`
+  - current live tip after this run's signed docs refresh: `ab549220647e`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -27,7 +27,7 @@ Last updated: 2026-04-01 10:11:46 UTC
   - this run is a fresh validation plus handoff compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:11:46 UTC)
+## Current run (2026-04-01 10:13:14 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -50,10 +50,13 @@ Last updated: 2026-04-01 10:11:46 UTC
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
   `32dad895f6a0`
+- Landed signed docs-only handoff commit `ab549220647e`
 
 ### Current findings in this run
 
 - the detached `HEAD` validated in this run was `32dad895f6a0`
+- the current detached `HEAD` after landing the docs-only handoff refresh is
+  `ab549220647e`
 - `PLANS.md` was stale at the start of the run because it still named older
   docs-only tip `526d8548a164`
 - no non-docs tree delta was needed in this run; only the handoff document is
@@ -134,7 +137,7 @@ Last updated: 2026-04-01 10:11:46 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `32dad895f6a0`; only a docs-only handoff refresh should differ from that tip
+  `32dad895f6a0`, then landed docs-only handoff commit `ab549220647e`
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
