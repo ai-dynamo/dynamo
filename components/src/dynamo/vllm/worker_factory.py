@@ -22,11 +22,7 @@ from .args import Config
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
-from .multimodal_handlers import (
-    EncodeWorkerHandler,
-    MultimodalDecodeWorkerHandler,
-    MultimodalPDWorkerHandler,
-)
+from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
@@ -58,65 +54,6 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
 
-    @staticmethod
-    def handles(config: Config) -> bool:
-        """Return True if this factory handles the given config."""
-        try:
-            WorkerFactory._validate_config(config)
-            return True
-        except (ValueError, NotImplementedError) as e:
-            logger.error(
-                f"WorkerFactory cannot handle config: {e}, provided config: {WorkerFactory._config_str(config)}"
-            )
-            return False
-
-    @staticmethod
-    def _config_str(config: Config) -> str:
-        """Helper function to format config for logging."""
-        return (
-            "{ "
-            f"multimodal_worker: {config.multimodal_worker}, "
-            f"multimodal_decode_worker: {config.multimodal_decode_worker}, "
-            f"multimodal_encode_worker: {config.multimodal_encode_worker}, "
-            f"disaggregation_mode: {config.disaggregation_mode}, "
-            f"route_to_encoder: {config.route_to_encoder}"
-            " }"
-        )
-
-    @staticmethod
-    def _validate_config(config: Config) -> None:
-        # [gluo FIXME] We are validating config combination for
-        # the transition away from "legacy" E/PD creation, which uses specialized
-        # P/D classes.
-        # In the future, we should rely on Dynamo runtime for P/D orchestration,
-        # thus the P/D worker in 'handlers.py' should soon be extended to support
-        # remote encode workflow, i.e. aware of encode worker client and perform remote
-        # encode when needed.
-        # Until then, we have validation on disaggregation mode and multimodal settings
-        # to guide user to use legacy mode for unsupported combination (see FIXME below).
-        legacy_multimodal_llm_worker = (
-            config.multimodal_worker or config.multimodal_decode_worker
-        )
-        if legacy_multimodal_llm_worker:
-            # [gluo] Sanity check, may be removed once legacy mode is removed.
-            # In the legacy mode, the specialized worker have P -> (optional D),
-            # so multimodal worker can be AGGREGATED or PREFILL, while
-            # multimodal decode worker can only be DECODE.
-            if (
-                config.multimodal_decode_worker
-                and config.disaggregation_mode == DisaggregationMode.PREFILL
-            ):
-                raise ValueError(
-                    "Multimodal decode worker with PREFILL disaggregation mode is not supported."
-                )
-            if (
-                config.multimodal_worker
-                and config.disaggregation_mode == DisaggregationMode.DECODE
-            ):
-                raise ValueError(
-                    "Multimodal worker with DECODE disaggregation mode is not supported."
-                )
-
     async def create(
         self,
         runtime: DistributedRuntime,
@@ -126,38 +63,12 @@ class WorkerFactory:
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
-        WorkerFactory._validate_config(config)
 
-        # Standalone encode worker
-        if config.multimodal_encode_worker:
+        if config.disaggregation_mode == DisaggregationMode.ENCODE:
             await self._create_multimodal_encode_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )
-            return
-
-        # [gluo WIP] This conditional should only be within worker creation,
-        # put here as some LLM worker setting is not compatible with
-        # standalone encode worker, so check supported combinations early.
-        # LLM connects to standalone encode worker
-        legacy_multimodal_llm_worker = (
-            config.multimodal_worker or config.multimodal_decode_worker
-        )
-
-        # Create P/D worker, internally may use remote encode worker for multimodal work
-        if legacy_multimodal_llm_worker:
-            await self._create_multimodal_worker(
-                runtime,
-                config,
-                shutdown_event,
-                shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
-            )
-            return
-
-        # [gluo FIXME] currently refactoring DecodeWorkerHandler from main.py for
-        # the use case of only disaggregating encode worker, so adding only decode
-        # worker creation for now, which is used in DisaggregationMode.AGGREGATED.
-        if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        elif config.disaggregation_mode == DisaggregationMode.PREFILL:
             await self._create_prefill_worker(
                 runtime,
                 config,
@@ -166,6 +77,7 @@ class WorkerFactory:
                 snapshot_engine=snapshot_engine,
             )
         else:
+            # AGGREGATED or DECODE
             await self._create_decode_worker(
                 runtime,
                 config,
@@ -174,162 +86,6 @@ class WorkerFactory:
                 snapshot_engine=snapshot_engine,
             )
         return
-
-    async def _create_multimodal_worker(
-        self,
-        runtime: DistributedRuntime,
-        config: Config,
-        shutdown_event: asyncio.Event,
-        shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
-    ) -> None:
-        """
-        Initialize multimodal worker component.
-
-        Supports:
-        - --multimodal-worker: PD worker that may receive embeddings from encoder
-        - --multimodal-decode-worker: Decode-only worker
-
-        Modes:
-        - Aggregated (P+D): Prefill and decode on same worker
-        - Disaggregated (P→D): Prefill forwards to separate decode worker
-        """
-        generate_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
-        )
-        clear_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.clear_kv_blocks"
-        )
-        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
-
-        lora_enabled = config.engine_args.enable_lora
-        if lora_enabled:
-            load_lora_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.load_lora"
-            )
-            unload_lora_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.unload_lora"
-            )
-            list_loras_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.list_loras"
-            )
-            shutdown_endpoints.extend(
-                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
-            )
-        # Use pre-created engine if provided (checkpoint mode), otherwise create new
-        if snapshot_engine is not None:
-            (
-                engine_client,
-                vllm_config,
-                _default_sampling_params,
-                prometheus_temp_dir,
-                _component_gauges,
-            ) = snapshot_engine
-        else:
-            (
-                engine_client,
-                vllm_config,
-                _default_sampling_params,
-                prometheus_temp_dir,
-                _component_gauges,
-            ) = self.setup_vllm_engine(config)
-
-        # Set up encode worker client when routing to encoder is enabled
-        encode_worker_client = await self._maybe_get_encode_worker_client(
-            runtime, config
-        )
-
-        # Set up decode worker client for disaggregated mode
-        decode_worker_client = None
-        if config.disaggregation_mode == DisaggregationMode.PREFILL:
-            decode_worker_client = await runtime.endpoint(
-                f"{config.namespace}.decoder.generate"
-            ).client()
-            await decode_worker_client.wait_for_instances()
-            logger.info("Connected to decode worker for disaggregated mode")
-
-        # Choose handler based on worker type
-        handler: MultimodalDecodeWorkerHandler | MultimodalPDWorkerHandler
-        if config.multimodal_decode_worker:
-            handler = MultimodalDecodeWorkerHandler(
-                runtime,
-                engine_client,
-                config,
-                shutdown_event,
-                generate_endpoint=generate_endpoint,
-            )
-        else:
-            handler = MultimodalPDWorkerHandler(
-                runtime,
-                engine_client,
-                config,
-                encode_worker_client,
-                decode_worker_client,
-                shutdown_event,
-                generate_endpoint=generate_endpoint,
-            )
-        handler.add_temp_dir(prometheus_temp_dir)
-
-        await handler.async_init(runtime)
-
-        # Set up KV event publisher for prefix caching if enabled
-        kv_publisher = self.setup_kv_event_publisher(
-            config, generate_endpoint, vllm_config
-        )
-        if kv_publisher:
-            handler.kv_publisher = kv_publisher  # type: ignore[attr-defined, union-attr]
-
-        if not config.multimodal_decode_worker:
-            model_type = parse_endpoint_types(config.endpoint_types)
-            model_input = (
-                ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-            )
-            await self.register_vllm_model(
-                model_input,
-                model_type,
-                generate_endpoint,
-                config,
-                engine_client,
-                vllm_config,
-            )
-
-        metrics_labels = [("model", config.served_model_name or config.model)]
-        try:
-            serve_tasks = [
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                ),
-                clear_endpoint.serve_endpoint(
-                    handler.clear_kv_blocks,
-                    metrics_labels=metrics_labels,
-                ),
-            ]
-
-            if lora_enabled:
-                serve_tasks.extend(
-                    [
-                        load_lora_endpoint.serve_endpoint(
-                            handler.load_lora,
-                            metrics_labels=metrics_labels,
-                        ),
-                        unload_lora_endpoint.serve_endpoint(
-                            handler.unload_lora,
-                            metrics_labels=metrics_labels,
-                        ),
-                        list_loras_endpoint.serve_endpoint(
-                            handler.list_loras,
-                            metrics_labels=metrics_labels,
-                        ),
-                    ]
-                )
-
-            await asyncio.gather(*serve_tasks)
-        except Exception as e:
-            logger.error(f"Failed to serve endpoints: {e}")
-            raise
-        finally:
-            handler.cleanup()
 
     async def _create_multimodal_encode_worker(
         self,
@@ -780,11 +536,12 @@ class WorkerFactory:
     ) -> Optional[Any]:
         """Helper function to get encode worker client if routing to encoder is enabled."""
         if config.route_to_encoder:
+            # [gluo NOTE] hardcoded component name
             encode_worker_client = await runtime.endpoint(
-                f"{config.namespace}.encoder.generate"
+                f"{config.namespace}.encode.generate"
             ).client()
             logger.info("Waiting for Encoder Worker Instances ...")
             await encode_worker_client.wait_for_instances()
-            logger.info("Connected to encoder workers")
+            logger.info("Connected to encode workers")
             return encode_worker_client
         return None
