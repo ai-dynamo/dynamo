@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 07:58:37 UTC
+Last updated: 2026-04-01 08:02:51 UTC
 
 ## Active state
 
@@ -19,10 +19,102 @@ Last updated: 2026-04-01 07:58:37 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
+  - current `HEAD` is `abfc85ffd0a4` (`llm: stabilize g3pb cache storage
+    test`)
   - no open implementation work remains for the active `G3PB` slice after the
-    current test-stability fix and validation rerun
+    landed test-stability fix and the refreshed validation rerun on this `HEAD`
   - keep `PLANS.md` as the compact validation/handoff record until new scope is
     explicitly chosen
+
+## Current run (2026-04-01 08:02:51 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely and confirmed the active top-of-file state
+  still marks the current `G3PB` slice complete after the landed test fix
+- ✅ Re-audited the live `G3PB` handoff/code surface against the current repo
+  state:
+  - detached `HEAD`
+  - pickup commit: `abfc85ffd0a4`
+  - the current top commit is now the concrete test-stability fix rather than
+    another docs-only handoff refresh:
+    - `abfc85ffd llm: stabilize g3pb cache storage test`
+- ✅ Re-ran the focused `G3PB` / bindings validation stack from the current
+  landed state
+- ✅ Re-read `PLANS.md` after validation and confirmed there is still no
+  remaining in-scope implementation, cleanup, docs, or validation work for the
+  active slice
+- ✅ Refreshed `PLANS.md` so the verified state of `abfc85ffd0a4` is written to
+  disk as the next handoff
+
+### Current findings in this run
+
+- the active `G3PB` implementation slice remains complete on current
+  `HEAD` (`abfc85ffd0a4`)
+- the previously recorded cache-storage suite flake is already fixed by the
+  landed test-capacity change in `abfc85ffd`
+- the refreshed focused validation rerun is fully green on the current commit
+- the only currently open `G3PB` items remain the same non-blocking follow-ons:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+### Remaining work in this run
+
+- none
+
+### Exact next step
+
+- if another run starts from `abfc85ffd0a4`, do not reopen the completed
+  `G3PB` slice unless a new regression appears or new scope is explicitly
+  chosen; resume only from the existing non-blocking follow-on backlog
+
+### Validation completed in this run so far
+
+- `git rev-parse --short=12 HEAD`
+  - pass (`abfc85ffd0a4`)
+- `git log --oneline -5`
+  - pass
+  - current recent history:
+    - `abfc85ffd llm: stabilize g3pb cache storage test`
+    - `988246eef docs: finalize g3pb completion handoff`
+    - `f2da43712 docs: finalize g3pb completion handoff`
+    - `a19b6f8b4 docs: refresh g3pb completion handoff`
+    - `1e04cf61f docs: stabilize g3pb completion handoff`
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- keep treating the active `G3PB` slice as complete on `abfc85ffd0a4` unless a
+  new focused validation rerun exposes a concrete regression
+- do not spend another run producing a near-duplicate docs-only audit refresh
+  when the active code/test state has not changed
+- keep `PLANS.md` compact at the top with the latest verified state and use the
+  existing historical trail only as older context
+
+### Handoff for next run
+
+- this run confirmed the landed cache-storage test-stability fix is present on
+  `abfc85ffd0a4` and the focused `G3PB` / bindings validation stack is green on
+  that commit
+- there is still no remaining in-scope implementation work for the active
+  `G3PB` slice
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ## Current run (2026-04-01 07:55:11 UTC)
 
