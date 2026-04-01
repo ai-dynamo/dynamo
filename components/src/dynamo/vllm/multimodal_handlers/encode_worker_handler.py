@@ -77,9 +77,6 @@ class EncodeWorkerHandler:
         )
 
         # Device verification logging
-        logger.info("=" * 60)
-        logger.info("ENCODER DEVICE VERIFICATION")
-        logger.info("=" * 60)
         logger.info(f"Requested encoder device (DYN_ENCODER_DEVICE): {encoder_device}")
 
         # Check what device the vision model is on
