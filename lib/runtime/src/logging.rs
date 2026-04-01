@@ -321,6 +321,10 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         model = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
     );
 
     if let Some(context) = otel_context {
