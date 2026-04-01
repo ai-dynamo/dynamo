@@ -99,7 +99,7 @@ Before testing SLA planner on real deployments, we provide a dry run feature to 
 To dry run SLA planner,
 
 ```bash
-python components/src/dynamo/planner/manual/unit/planner_sla_dryrun.py \
+python components/src/dynamo/planner/tests/manual/unit/planner_sla_dryrun.py \
     --config '{"environment":"kubernetes","backend":"vllm","ttft":200,"itl":10,"profile_results_dir":"components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","throughput_adjustment_interval":60,"no_correction":true}' \
     --dataset rr-5-45_i3000o300.jsonl \
     --start-num-p 1 \
@@ -163,13 +163,13 @@ The main test scenario validates prefill scaling for H200 with 1P1D -> 2P1D conf
 Run the test with:
 
 ```bash
-components/src/dynamo/planner/manual/scaling/run_scaling_test.sh --namespace <namespace>
+components/src/dynamo/planner/tests/manual/scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `components/src/dynamo/planner/tests/e2e_scaling_results` instead of `/tmp`:
 
 ```bash
-components/src/dynamo/planner/manual/scaling/run_scaling_test.sh --namespace <namespace> --save-results
+components/src/dynamo/planner/tests/manual/scaling/run_scaling_test.sh --namespace <namespace> --save-results
 ```
 
 ### Instructions for End-to-End Perf Tests
