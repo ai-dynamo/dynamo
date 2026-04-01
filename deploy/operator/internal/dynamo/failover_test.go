@@ -72,7 +72,15 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 	assert.True(t, hasToleration(result, "nvidia.com/gpu"), "should have GPU toleration")
 	assert.True(t, hasVolume(result, gmsSharedVolumeName), "should have shared volume")
-	assert.True(t, hasVolumeMount(c, gmsServerSocketDir), "should mount shared volume at /tmp for GMS")
+	assert.True(t, hasVolumeMount(c, gmsSharedMountPath), "should have shared volume mount")
+	assert.True(t, hasEnvVar(c, "TMPDIR", gmsSharedMountPath), "should set TMPDIR")
+
+	require.Len(t, result.InitContainers, 1, "should have perm-fix init container")
+	initC := result.InitContainers[0]
+	assert.Equal(t, gmsPermFixInitName, initC.Name)
+	assert.Equal(t, c.Image, initC.Image, "init container should reuse the service image")
+	require.NotNil(t, initC.SecurityContext)
+	assert.Equal(t, int64(0), *initC.SecurityContext.RunAsUser)
 
 	// Verify original is not mutated
 	assert.Len(t, base.Containers[0].Command, 3, "original command should be unchanged")
@@ -91,15 +99,15 @@ func TestGmsWeightServerPodSpec_SubPathExpr(t *testing.T) {
 
 	t.Run("rank 0", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 0, 4)
-		mount := findVolumeMount(result.Containers[0], gmsServerSocketDir)
-		require.NotNil(t, mount, "GMS container should mount shared volume at /tmp")
+		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
+		require.NotNil(t, mount, "GMS container should mount shared volume")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
 	})
 
 	t.Run("rank 3", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 3, 4)
-		mount := findVolumeMount(result.Containers[0], gmsServerSocketDir)
-		require.NotNil(t, mount, "GMS container should mount shared volume at /tmp")
+		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
+		require.NotNil(t, mount, "GMS container should mount shared volume")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
 	})
 }
@@ -137,6 +145,16 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
 	assert.True(t, hasToleration(podSpec, "nvidia.com/gpu"))
 	assert.True(t, hasVolume(podSpec, gmsSharedVolumeName))
+
+	require.Len(t, podSpec.InitContainers, 1, "should have perm-fix init container")
+	initC := podSpec.InitContainers[0]
+	assert.Equal(t, gmsPermFixInitName, initC.Name)
+	assert.Equal(t, c.Image, initC.Image, "init container should reuse the service image")
+	require.NotNil(t, initC.SecurityContext)
+	assert.Equal(t, int64(0), *initC.SecurityContext.RunAsUser)
+	initMount := findVolumeMount(initC, gmsSharedMountPath)
+	require.NotNil(t, initMount, "init container should mount shared volume")
+	assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-1", initMount.SubPathExpr)
 }
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {

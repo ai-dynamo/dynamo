@@ -26,14 +26,15 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
 	gmsSharedVolumeName = "gms-shared"
 	gmsHostPathBase     = "/run/gms"
-	gmsSharedMountPath  = "/run/gms/shared" // engine pod mount path
-	gmsServerSocketDir  = "/tmp"            // GMS server mount path; gpu_memory_service writes sockets here
+	gmsSharedMountPath  = "/run/gms/shared"
 	gmsFailoverLockFile = "failover.lock"
+	gmsPermFixInitName  = "fix-gms-perms"
 )
 
 // gmsWrapperScript generates a bash script that launches one GMS subprocess
@@ -44,7 +45,7 @@ func gmsWrapperScript(gpuCount int) string {
 		devList[i] = strconv.Itoa(i)
 	}
 	return fmt.Sprintf(
-		`rm -f /tmp/gms_*.sock
+		`rm -f %s/gms_*.sock
 cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
 trap cleanup SIGTERM SIGINT
 for dev in %s; do
@@ -53,16 +54,15 @@ for dev in %s; do
 done
 wait -n
 echo "A GMS subprocess exited, shutting down"
-cleanup`, strings.Join(devList, " "))
+cleanup`, gmsSharedMountPath, strings.Join(devList, " "))
 }
 
 // gmsStartupProbeCommand returns the exec probe command that verifies the
-// expected number of GMS UDS sockets exist. The GMS container mounts the
-// shared volume at /tmp, which is where gpu_memory_service writes sockets.
+// expected number of GMS UDS sockets exist on the shared volume.
 func gmsStartupProbeCommand(gpuCount int) []string {
 	return []string{
 		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsServerSocketDir, gpuCount),
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount),
 	}
 }
 
@@ -91,13 +91,19 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.LivenessProbe = nil
 	c.ReadinessProbe = nil
 
+	c.Env = append(c.Env, corev1.EnvVar{
+		Name:  "TMPDIR",
+		Value: gmsSharedMountPath,
+	})
+
 	removeGPUFromLimits(c)
 	addGPUToleration(podSpec)
 
 	vol, mount := gmsSharedVolume(rank)
-	mount.MountPath = gmsServerSocketDir // gpu_memory_service writes sockets to /tmp
 	podSpec.Volumes = append(podSpec.Volumes, vol)
 	c.VolumeMounts = append(c.VolumeMounts, mount)
+
+	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
 
 	return podSpec
 }
@@ -122,7 +128,8 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 }
 
 // augmentEngineForGMS modifies an engine pod spec in-place to work with GMS failover:
-// injects env vars, shared volume, strips GPU limits, and adds toleration.
+// injects env vars, shared volume, strips GPU limits, adds toleration, and
+// prepends an init container to fix hostPath directory permissions.
 func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	if len(podSpec.Containers) == 0 {
 		return
@@ -138,6 +145,8 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	vol, mount := gmsSharedVolume(rank)
 	podSpec.Volumes = append(podSpec.Volumes, vol)
 	c.VolumeMounts = append(c.VolumeMounts, mount)
+
+	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
 }
 
 // gmsSharedVolume returns a hostPath volume and mount with a subPathExpr that
@@ -159,6 +168,23 @@ func gmsSharedVolume(rank int32) (corev1.Volume, corev1.VolumeMount) {
 		SubPathExpr: fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-%d", rank),
 	}
 	return vol, mount
+}
+
+// gmsPermFixInitContainer returns an init container that runs as root and
+// fixes the hostPath directory permissions so the non-root application user
+// can write UDS sockets and lock files. It uses the same subPathExpr as the
+// main container so kubelet creates the isolated subdirectory first.
+func gmsPermFixInitContainer(rank int32, image string) corev1.Container {
+	_, mount := gmsSharedVolume(rank)
+	return corev1.Container{
+		Name:    gmsPermFixInitName,
+		Image:   image,
+		Command: []string{"sh", "-c", fmt.Sprintf("chmod 1777 %s", gmsSharedMountPath)},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser: ptr.To[int64](0),
+		},
+		VolumeMounts: []corev1.VolumeMount{mount},
+	}
 }
 
 // removeGPUFromLimits strips nvidia.com/gpu from the container's resource
