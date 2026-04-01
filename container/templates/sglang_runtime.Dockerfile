@@ -172,6 +172,10 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+RUN rm -rf \
+    /workspace/components/src/dynamo/planner \
+    /workspace/components/src/dynamo/profiler \
+    /workspace/components/src/dynamo/global_planner
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1

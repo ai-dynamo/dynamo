@@ -54,6 +54,10 @@ COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
+RUN rm -rf \
+    /workspace/components/src/dynamo/planner \
+    /workspace/components/src/dynamo/profiler \
+    /workspace/components/src/dynamo/global_planner
 # Copy attribution files with correct ownership
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
