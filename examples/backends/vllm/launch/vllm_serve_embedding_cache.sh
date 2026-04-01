@@ -27,9 +27,13 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
         \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": $CAPACITY_GB}
     }")
 fi
+
+GPU_MEM_UTIL="${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-.9}"
+
+CUDA_VISIBLE_DEVICES=2 \
 vllm serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \
-    --gpu-memory-utilization .9 \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
     "${EC_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
