@@ -302,6 +302,18 @@ runs:
         echo "🧹 Cleaning up MinIO container..."
         docker rm -f dynamo-minio-test 2>/dev/null || true
 
+    - name: Push Test Metrics
+      if: always()
+      uses: ./.github/actions/push-metrics
+      with:
+        pushgateway-url: ${{ env.PUSHGATEWAY_URL }}
+        loki-url: ${{ env.LOKI_URL }}
+        test-results: test-results/
+        framework: ${{ inputs.framework }}
+        test-type: ${{ inputs.test_type }}
+        arch: ${{ inputs.platform_arch }}
+        job-status: ${{ env.TEST_EXIT_CODE == '0' && 'success' || 'failure' }}
+
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
       if: always()  # Always upload test results, even if tests failed
