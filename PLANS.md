@@ -1278,8 +1278,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   audit
 - this run revalidated the focused llm/bindings test and build stack from the
   current `HEAD`
-- this run is committed in:
-  - `06e45ae79 docs: refresh g3pb audit handoff`
+- this run is recorded on disk and committed in the latest signed docs-only
+  handoff refresh commits on `HEAD`
 - no uncommitted work should remain after this run
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
