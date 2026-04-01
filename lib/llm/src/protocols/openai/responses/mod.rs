@@ -504,6 +504,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
+                store: resp.inner.store,
                 parallel_tool_calls: resp.inner.parallel_tool_calls,
                 top_logprobs,
                 metadata: resp
@@ -935,6 +936,15 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn test_store_mapped_to_chat_completion_request() {
+        let mut req = make_response_with_input("audit me");
+        req.inner.store = Some(true);
+
+        let nv_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(nv_req.inner.store, Some(true));
     }
 
     #[test]
