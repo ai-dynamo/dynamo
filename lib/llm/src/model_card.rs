@@ -105,8 +105,14 @@ impl TokenizerKind {
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
     #[serde(alias = "hf_chat_template")]
-    HfChatTemplateJinja { is_custom: bool, file: CheckedFile },
-    HfChatTemplateJson { is_custom: bool, file: CheckedFile },
+    HfChatTemplateJinja {
+        is_custom: bool,
+        file: CheckedFile,
+    },
+    HfChatTemplateJson {
+        is_custom: bool,
+        file: CheckedFile,
+    },
 }
 
 impl PromptFormatterArtifact {
@@ -114,7 +120,9 @@ impl PromptFormatterArtifact {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
             PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
-            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.checksum().to_string(),
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => {
+                c.checksum().to_string()
+            }
         }
     }
 
