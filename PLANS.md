@@ -1547,8 +1547,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - this run rechecked the active handoff/code surface and did not uncover any
   new `G3PB`-specific TODOs, cleanup items, docs gaps, or validation gaps
 - this run is recorded in the latest signed docs-only audit/handoff commit on
-  `HEAD`:
-  - `18e9d177c docs: finalize g3pb audit handoff`
+  `HEAD` at handoff time
 - the active `G3PB` implementation slice should still be treated as complete
 - resume only from the existing non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
