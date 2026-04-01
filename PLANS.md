@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:09:21 UTC
+Last updated: 2026-04-01 05:15:11 UTC
 
 ## Active state
 
@@ -1195,6 +1195,91 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the active `G3PB` implementation slice remains complete after a fresh audit
 - this run revalidated the focused test/build stack from the current `HEAD`
 - this run is committed as a signed docs-only handoff refresh
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+## Current run (2026-04-01 05:15:11 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely before changing anything to confirm whether
+  the active `G3PB` plan still contained unfinished implementation work
+- ✅ Audited the current repo state against the latest handoff:
+  - detached `HEAD`
+  - clean worktree at pickup
+  - latest audit/handoff commits on `HEAD`:
+    - `745fbef1c docs: finalize g3pb audit handoff`
+    - `3cf603369 docs: refresh g3pb completion audit`
+    - `f2ac59dec docs: stabilize g3pb audit handoff`
+    - `f1219b704 docs: finalize g3pb audit handoff`
+    - `d8cd551c5 docs: refresh g3pb completion audit`
+- ✅ Revalidated the focused `G3PB` and bindings stack from the current tip
+- ✅ Refreshed `PLANS.md` again so this run records the same conclusion on
+  disk: the active `G3PB` implementation slice is complete and the remaining
+  work is follow-on backlog only
+
+### Current findings before final handoff
+
+- the repo still matches the active handoff: there is no unimplemented code
+  slice remaining in `PLANS.md`
+- the bindings-side native `g3pb_admission` adoption remains present in the
+  tree, so the previously identified “first real caller” follow-up is still
+  complete
+- the focused validation stack is green from the current `HEAD`, not only from
+  prior run logs
+- no new `G3PB`-specific TODO, cleanup item, docs gap, or validation gap was
+  uncovered in this audit
+- the only remaining work continues to be the existing non-blocking backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+- `git diff --check`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- continue treating the active `G3PB` implementation slice as complete unless a
+  fresh audit exposes a concrete regression
+- keep writing audit results back into `PLANS.md` so the next run can start
+  from verified state instead of repeating discovery work
+- do not invent more `G3PB` implementation scope when the active plan body and
+  current tree already match
+
+### Remaining work in this run
+
+- make the signed docs-only handoff refresh commit for this `PLANS.md` update
+
+### Exact next step
+
+- create the signed commit for this audit-only `PLANS.md` refresh, then leave
+  the next run pointed only at the existing non-blocking follow-on backlog
+
+### Handoff for next run
+
+- the active `G3PB` implementation slice remains complete after another fresh
+  audit
+- this run revalidated the focused llm/bindings test and build stack from the
+  current `HEAD`
+- after the commit for this `PLANS.md` refresh, no uncommitted work should
+  remain
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
