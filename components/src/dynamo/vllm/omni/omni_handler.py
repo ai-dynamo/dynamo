@@ -8,14 +8,16 @@ import time
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import (
     ImageData,
     NvCreateImageRequest,
@@ -34,6 +36,8 @@ from dynamo.common.utils.video_utils import (
     normalize_video_frames,
     parse_size,
 )
+from dynamo.llm.exceptions import EngineShutdown
+from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 logger = logging.getLogger(__name__)
@@ -55,17 +59,19 @@ class EngineInputs:
             image requests). None means use the default for the request type.
     """
 
-    prompt: OmniTextPrompt
+    prompt: Union[OmniTextPrompt, Dict[str, Any]]
     sampling_params_list: list | None = None
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
+    speed: float = 1.0
     response_format: str | None = None
 
 
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, and text-to-video generation.
+    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
+    Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
     def __init__(
@@ -98,9 +104,17 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
 
+        # Audio/TTS handler — composition, not inheritance.
+        self.audio = AudioGenerationHandler(
+            config=config,
+            engine_client=self.engine_client,
+            media_output_fs=media_output_fs,
+            media_output_http_url=media_output_http_url,
+        )
+
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs via the unified OpenAI mode.
 
         Args:
@@ -111,18 +125,23 @@ class OmniHandler(BaseOmniHandler):
             Response dictionaries.
         """
         request_id = context.id()
+        assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
-        self, request: Dict[str, Any], context, request_id: str
+        self, request: Dict[str, Any], context: Context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request, request_type = parse_request_type(
+        parsed_request_raw, request_type = parse_request_type(
             request, self.config.output_modalities
+        )
+        parsed_request = cast(
+            Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
+            parsed_request_raw,
         )
 
         # Pre-load input image for I2V requests (async I/O before sync build)
@@ -147,7 +166,14 @@ class OmniHandler(BaseOmniHandler):
                 }
                 return
 
-        inputs = self.build_engine_inputs(parsed_request, request_type, image=image)
+        try:
+            inputs = await self.build_engine_inputs(
+                parsed_request, request_type, image=image
+            )
+        except (ValueError, NotImplementedError) as e:
+            logger.error(f"Invalid request {request_id}: {e}")
+            yield self._error_chunk(request_id, str(e), request_type)
+            return
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -200,17 +226,33 @@ class OmniHandler(BaseOmniHandler):
                         if chunk:
                             yield chunk
 
-            except GeneratorExit:
+                    elif stage_output.final_output_type == "audio":
+                        mm_output = stage_output.multimodal_output
+                        if mm_output:
+                            chunk = await self.audio.format_output(
+                                mm_output,
+                                request_id,
+                                response_format=inputs.response_format,
+                                request_type=inputs.request_type,
+                                speed=inputs.speed,
+                            )
+                            if chunk:
+                                yield chunk
+
+            except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e))
+                yield self._error_chunk(request_id, str(e), inputs.request_type)
 
-    def build_engine_inputs(
+    async def build_engine_inputs(
         self,
         parsed_request: Union[
-            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+            NvCreateImageRequest,
+            NvCreateVideoRequest,
+            NvCreateAudioSpeechRequest,
+            Dict[str, Any],
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
@@ -219,7 +261,7 @@ class OmniHandler(BaseOmniHandler):
 
         Args:
             parsed_request: Output from parse_request_type -- a Pydantic model
-                for image/video requests, or a raw dict for chat completions.
+                for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
 
@@ -227,34 +269,32 @@ class OmniHandler(BaseOmniHandler):
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
+            assert isinstance(parsed_request, dict)
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
+            assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
+            assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
-
         elif request_type == RequestType.AUDIO_GENERATION:
-            raise NotImplementedError("Audio generation is not yet supported")
+            assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
+            return await self.audio.build_engine_inputs(parsed_request)
 
         raise ValueError(f"Unknown request type: {request_type}")
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
-        # Chat completions request does not support extra_body passthrough
-        # So, we can't extract any diffusion related params from the raw_request
-        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
         prompt = OmniTextPrompt(prompt=text_prompt)
 
-        sampling_params_list = None
-
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=sampling_params_list,
+            sampling_params_list=None,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
@@ -266,9 +306,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
+            negative_prompt=(
+                nvext.negative_prompt if nvext and nvext.negative_prompt else None
+            ),
         )
 
         sp = OmniDiffusionSamplingParams(
@@ -321,9 +361,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
+            negative_prompt=(
+                nvext.negative_prompt if nvext and nvext.negative_prompt else None
+            ),
         )
 
         if image is not None:
@@ -567,9 +607,11 @@ class OmniHandler(BaseOmniHandler):
                         "role": "assistant",
                         "content": delta_text,
                     },
-                    "finish_reason": normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
+                    "finish_reason": (
+                        normalize_finish_reason(output.finish_reason)
+                        if output.finish_reason
+                        else None
+                    ),
                 }
             ],
         }

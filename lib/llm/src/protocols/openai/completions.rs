@@ -48,6 +48,8 @@ pub struct NvCreateCompletionRequest {
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 impl ContentProvider for dynamo_async_openai::types::Choice {
@@ -296,9 +298,8 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
-            nvext: None, // Will be populated by router layer if needed
         };
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 }
 

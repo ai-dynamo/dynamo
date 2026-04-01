@@ -24,6 +24,10 @@ navigation:
         path: getting-started/quickstart.md
       - page: Introduction
         path: getting-started/introduction.md
+      - page: Local Installation
+        path: getting-started/local-installation.md
+      - page: Building from Source
+        path: getting-started/building-from-source.md
       - page: Contribution Guide
         path: contribution-guide.md
 
@@ -38,6 +42,8 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - page: Glossary
+        path: reference/glossary.md
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
@@ -63,10 +69,14 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Rolling Update
             path: kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - page: Snapshot
             path: kubernetes/snapshot.md
+          - page: Disagg Communication
+            path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -81,6 +91,8 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Grove
             path: kubernetes/grove.md
+          - page: Topology Aware Scheduling
+            path: kubernetes/topology-aware-scheduling.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -93,6 +105,12 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - page: Mocker Offline Trace Replay
+        path: benchmarks/mocker-trace-replay.md
+      - section: Testing
+        contents:
+          - page: Mocker
+            path: mocker/mocker.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:
@@ -117,6 +135,8 @@ navigation:
             path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
+      - page: Reasoning
+        path: agents/reasoning.md
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Agents
@@ -334,8 +354,6 @@ navigation:
       - page: Model Caching with Fluid
         path: kubernetes/model-caching-with-fluid.md
       # -- Reference --
-      - page: Glossary
-        path: reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: performance/tuning.md
       # -- Frontend (hidden sub-pages) --
