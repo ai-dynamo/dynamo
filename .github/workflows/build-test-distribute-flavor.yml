@@ -52,6 +52,11 @@ on:
         required: false
         type: number
         default: 10
+      cpu_only_test_max_vram_gib:
+        description: 'Optional VRAM budget passed to CPU-only pytest lanes'
+        required: false
+        type: string
+        default: ''
       run_single_gpu_tests:
         description: 'Whether to run single GPU tests'
         required: false
@@ -66,6 +71,11 @@ on:
         required: false
         type: number
         default: 30
+      single_gpu_test_max_vram_gib:
+        description: 'Optional VRAM budget passed to single-GPU pytest lanes'
+        required: false
+        type: string
+        default: ''
       run_multi_gpu_tests:
         description: 'Whether to run multi-gpu tests'
         required: false
@@ -80,6 +90,11 @@ on:
         required: false
         type: number
         default: 30
+      multi_gpu_test_max_vram_gib:
+        description: 'Optional VRAM budget passed to multi-GPU pytest lanes'
+        required: false
+        type: string
+        default: ''
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
@@ -311,6 +326,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          max_vram_gib: ${{ inputs.cpu_only_test_max_vram_gib }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
@@ -327,6 +343,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
+          max_vram_gib: ${{ inputs.single_gpu_test_max_vram_gib }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
@@ -385,6 +402,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
+          max_vram_gib: ${{ inputs.multi_gpu_test_max_vram_gib }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: amd64
