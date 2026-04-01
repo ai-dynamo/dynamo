@@ -8,7 +8,7 @@ from typing import Tuple
 
 import yaml
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,

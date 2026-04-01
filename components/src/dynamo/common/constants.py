@@ -12,6 +12,7 @@ class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
+    ENCODE = "encode"
 
 
 class EmbeddingTransferMode(Enum):

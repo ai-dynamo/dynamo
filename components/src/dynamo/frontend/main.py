@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
 def setup_engine_factory(
@@ -228,10 +231,14 @@ async def async_main():
     elif config.router_mode == "power-of-two":
         router_mode = RouterMode.PowerOfTwoChoices
         kv_router_config = None
+    elif config.router_mode == "least-loaded":
+        router_mode = RouterMode.LeastLoaded
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
         router_mode,
         kv_router_config,

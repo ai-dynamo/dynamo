@@ -333,9 +333,6 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
-    /// Minimum number of workers required before KV router startup continues.
-    pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
-
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
@@ -495,7 +492,6 @@ mod tests {
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
-            router::DYN_ROUTER_MIN_INITIAL_WORKERS,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             // Event Plane

@@ -153,21 +153,11 @@ def update_dynamo_config_with_engine(
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
 
-    if dynamo_config.route_to_encoder:
-        dynamo_config.component = "processor"
+    # Multi-modal related component/endpoint resolution
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        dynamo_config.component = "encode"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_encode_worker:
-        dynamo_config.component = "encoder"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_decode_worker:
-        dynamo_config.component = "decoder"
-        dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.multimodal_worker
-        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
-    ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
+    # Standard component/endpoint resolution
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"

@@ -248,14 +248,14 @@ impl OfflineReplayRouter {
 
     pub(crate) fn mark_prefill_completed(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
         self.slots
-            .mark_prefill_completed_sync(&uuid.to_string())
+            .mark_prefill_completed(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
 
     pub(crate) fn free(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
         self.slots
-            .free_sync(&uuid.to_string())
+            .free(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
         self.drain_pending()
     }
@@ -315,8 +315,6 @@ impl OfflineReplayRouter {
             indexer: self.indexer.debug_snapshot(),
         }
     }
-
-    pub(crate) fn shutdown(&mut self) {}
 
     fn enqueue_key(&self, now_ms: f64, request: &PendingRequest) -> ReplayQueueKey {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
@@ -400,7 +398,7 @@ impl OfflineReplayRouter {
         let request_id = request.request_id();
 
         self.slots
-            .add_request_sync(SequenceRequest {
+            .add_request(SequenceRequest {
                 request_id,
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
