@@ -10,12 +10,13 @@ Last updated: 2026-04-01 11:15:42 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - the current live detached `HEAD` after the handoff refresh is
+  - the last fully rechecked docs-only handoff commit in this run is
     `1eb7021d1281`
   - the implementation state revalidated in this run is still the docs-parent
     tip `391fb5984adf`
-  - the live detached `HEAD` is newer than the prior handoff tip in this file
-    only by docs-only handoff commits
+  - any detached `HEAD` newer than those commits should differ only by
+    docs-only handoff commits unless a fresh regression or explicitly new scope
+    appears
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
