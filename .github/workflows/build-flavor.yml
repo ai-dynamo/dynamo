@@ -131,11 +131,11 @@ jobs:
         uses: ./.github/actions/skopeo-copy
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ steps.build.outputs.target_tag_plain }}-cuda${{ steps.build.outputs.cuda_version_plain }}
+          source_image: ${{ steps.build.outputs.image_name }}
+          source_tag: ${{ steps.build.outputs.image_tag }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.build.outputs.target_tag_plain }}-cuda${{ steps.build.outputs.cuda_version_plain }}
+          target_image: ${{ steps.build.outputs.image_name }}
+          target_tag: ${{ steps.build.outputs.image_tag }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -147,12 +147,9 @@ jobs:
         if: inputs.run_compliance_scan
         shell: bash
         run: |
+          echo "runtime_image=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/${{ steps.build.outputs.image_name }}:${{ steps.build.outputs.image_tag }}" >> $GITHUB_OUTPUT
           CUDA_MAJOR="${{ matrix.cuda_version }}"
-          CUDA_MAJOR="${CUDA_MAJOR%%.*}"
-          TARGET_TAG="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}"
-          IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}-cuda${CUDA_MAJOR}"
-          echo "runtime_image=${IMAGE}" >> $GITHUB_OUTPUT
-          echo "cuda_major=${CUDA_MAJOR}" >> $GITHUB_OUTPUT
+          echo "cuda_major=${CUDA_MAJOR%%.*}" >> $GITHUB_OUTPUT
       - name: Compliance scan (amd64)
         if: inputs.run_compliance_scan && contains(inputs.platform, 'amd64')
         uses: ./.github/actions/compliance-scan

@@ -187,10 +187,9 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor.yml
     with:
       framework: dynamo
-      builder_flavor: general
       target: planner
       platform: 'linux/amd64'
-      cpu_only: true
+      cuda_version: ''
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
       run_cpu_only_tests: true
