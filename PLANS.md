@@ -1154,8 +1154,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   no new `G3PB`-specific gap that belongs in the active execution slice
 - this run remains an execution audit and handoff refresh, not a new
   product/runtime change
-- `PLANS.md` is the only file that needs to change in this run unless the final
-  re-read finds a missing handoff detail
+- this run is now committed in a signed docs-only audit refresh commit
 
 ### Validation completed in this run so far
 
@@ -1185,12 +1184,17 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Exact next step
 
-- commit this audit refresh with `--signoff`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ### Handoff for next run
 
 - the active `G3PB` implementation slice remains complete after a fresh audit
 - this run revalidated the focused test/build stack from the current `HEAD`
+- this run is committed as a signed docs-only handoff refresh
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
