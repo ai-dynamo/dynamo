@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:49:57 UTC
+Last updated: 2026-04-01 10:52:11 UTC
 
 ## Active state
 
@@ -52,10 +52,9 @@ Last updated: 2026-04-01 10:49:57 UTC
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
   `05c3cbd70b8e`
-- Re-ran the post-edit `g3pb::` spot check with only `PLANS.md` dirty, and it
+- Re-ran post-edit `g3pb::` spot checks as the handoff was compacted, and they
   passed
-- Landed a signed docs-only handoff refresh commit after the post-edit
-  validation passed
+- Landed signed docs-only handoff commits after the post-edit validation passed
 
 ### Current findings in this run
 
@@ -112,7 +111,11 @@ Last updated: 2026-04-01 10:49:57 UTC
 - `git add PLANS.md`
   - pass
 - `git commit --signoff -m "docs: refresh g3pb handoff state"`
-  - pass (`c1d613757`)
+  - pass
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`) after the final handoff compaction edit
+- `git commit --signoff -m "docs: finalize g3pb handoff state"`
+  - pass
 
 ### Decisions confirmed in this run
 
@@ -145,7 +148,7 @@ Last updated: 2026-04-01 10:49:57 UTC
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `05c3cbd70b8e`, then landed docs-only handoff commit `c1d613757`
+  `05c3cbd70b8e`, then landed docs-only handoff commits on top
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
