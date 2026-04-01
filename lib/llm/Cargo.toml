@@ -67,7 +67,6 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-foyer = { version = "0.22.3", features = ["serde"] }
 hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
@@ -99,6 +98,7 @@ offset-allocator = "0.2"
 rayon = "1"
 dashmap = { version = "5.5.3" }
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
+foyer = "0.22.3"
 
 # lora
 object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }

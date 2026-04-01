@@ -25,7 +25,7 @@ Use this order when picking up work:
 - Reuse existing transfer utilities where possible; keep peer-local disk
   details behind the `G3PB` backend rather than exposing a new remote disk tier
   unless `PLANS.md` clearly calls for it.
-- If you make commits in this repo, use `--signoff`.
+- If you make commits in this repo, use `--signoff`. Do not make commits unless all end to end g3pb tests are working
 
 ## Current Focus
 

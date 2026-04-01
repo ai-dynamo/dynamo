@@ -20,10 +20,10 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse, G3pbFetchRequest,
-    G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest, G3pbOfferRequest,
-    G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest,
-    G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
+    G2G3G3pbPeerStorage, G2G3G3pbStorageConfig, G3pbCommitRequest, G3pbError,
+    G3pbFetchBlocksResponse, G3pbFetchRequest, G3pbHealthResponse, G3pbLoadRemoteRequest,
+    G3pbOfferRequest, G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit,
+    G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
@@ -57,7 +57,8 @@ struct Args {
     num_layers: usize,
     outer_dim: usize,
     dtype_width_bytes: usize,
-    foyer_dir: Option<PathBuf>,
+    foyer_dirs: Vec<PathBuf>,
+    g2_bytes: usize,
     foyer_memory_bytes: usize,
     foyer_disk_bytes: usize,
 }
@@ -74,9 +75,10 @@ impl Default for Args {
             num_layers: 1,
             outer_dim: 1,
             dtype_width_bytes: 2,
-            foyer_dir: None,
-            foyer_memory_bytes: G3pbFoyerStorageConfig::DEFAULT_MEMORY_CAPACITY_BYTES,
-            foyer_disk_bytes: G3pbFoyerStorageConfig::DEFAULT_DISK_CAPACITY_BYTES,
+            foyer_dirs: vec![PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)],
+            g2_bytes: G2G3G3pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
+            foyer_memory_bytes: G2G3G3pbStorageConfig::DEFAULT_FOYER_MEMORY_CAPACITY_BYTES,
+            foyer_disk_bytes: G2G3G3pbStorageConfig::DEFAULT_FOYER_DISK_CAPACITY_BYTES,
         }
     }
 }
@@ -140,8 +142,19 @@ impl Args {
                         .parse()?
                 }
                 "--foyer-dir" => {
-                    args.foyer_dir =
-                        Some(it.next().context("missing value for --foyer-dir")?.into())
+                    if args.foyer_dirs.len() == 1
+                        && args.foyer_dirs[0] == PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)
+                    {
+                        args.foyer_dirs.clear();
+                    }
+                    args.foyer_dirs
+                        .push(it.next().context("missing value for --foyer-dir")?.into())
+                }
+                "--g2-bytes" => {
+                    args.g2_bytes = it
+                        .next()
+                        .context("missing value for --g2-bytes")?
+                        .parse()?
                 }
                 "--foyer-memory-bytes" => {
                     args.foyer_memory_bytes = it
@@ -167,9 +180,10 @@ impl Args {
   --num-layers <n>                KVBM num layers (default 1)
   --outer-dim <n>                 KVBM outer dim (default 1)
   --dtype-width-bytes <bytes>     KVBM dtype width bytes (default 2)
-  --foyer-dir <path>              enable foyer-backed peer storage at this path
-  --foyer-memory-bytes <bytes>    foyer memory cache capacity
-  --foyer-disk-bytes <bytes>      foyer disk cache capacity"
+  --foyer-dir <path>              foyer storage directory; repeat for multiple locations
+  --g2-bytes <bytes>              pinned G2 staging capacity
+  --foyer-memory-bytes <bytes>    foyer in-memory capacity
+  --foyer-disk-bytes <bytes>      foyer disk capacity (split across dirs)"
                     );
                     std::process::exit(0);
                 }
@@ -533,17 +547,12 @@ fn build_agent(worker_id: u64) -> Result<NixlAgent> {
 }
 
 async fn build_backend(args: &Args) -> Result<AppState> {
-    let agent = if let Some(dir) = &args.foyer_dir {
-        let mut config = G3pbFoyerStorageConfig::new(dir.clone());
-        config.name = format!("g3pb-peer-cache-{}", args.worker_id);
-        config.memory_capacity_bytes = args.foyer_memory_bytes;
-        config.disk_capacity_bytes = args.foyer_disk_bytes;
-
-        let storage = Arc::new(FoyerG3pbPeerStorage::new(config).await?);
-        Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage))
-    } else {
-        Arc::new(G3pbStorageAgent::new(args.worker_id))
-    };
+    let mut config = G2G3G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
+    config.g2_capacity_bytes = args.g2_bytes;
+    config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
+    config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
+    let storage = Arc::new(G2G3G3pbPeerStorage::new(config).await?);
+    let agent = Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage));
 
     let runtime = Arc::new(G3pbPeerRuntime::new(args).await?);
 

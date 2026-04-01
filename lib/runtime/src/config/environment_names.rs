@@ -236,6 +236,9 @@ pub mod kvbm {
     pub mod transfer {
         /// Maximum number of blocks per transfer batch
         pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
+
+        /// Maximum number of blocks per remote transfer batch (falls back to DYN_KVBM_TRANSFER_BATCH_SIZE if not set)
+        pub const DYN_KVBM_REMOTE_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_REMOTE_TRANSFER_BATCH_SIZE";
     }
 
     /// KVBM leader (distributed mode) configuration

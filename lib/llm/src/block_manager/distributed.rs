@@ -10,12 +10,13 @@ mod leader;
 mod worker;
 
 pub use g3pb::{
-    FoyerG3pbPeerStorage, G3pbCommitRequest, G3pbError, G3pbFetchBlocksResponse, G3pbFetchRequest,
-    G3pbFetchResponse, G3pbFoyerStorageConfig, G3pbHealthResponse, G3pbLoadRemoteRequest,
-    G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock, G3pbPutPayloadRequest,
-    G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse,
-    G3pbStorageAgent, G3pbStorageClient, G3pbTransferBlock, route_g3pb_put_blocks_by_owner,
-    route_g3pb_sequence_hashes_by_owner, route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
+    G2G3G3pbPeerStorage, G2G3G3pbStorageConfig, G3pbCommitRequest, G3pbError,
+    G3pbFetchBlocksResponse, G3pbFetchRequest, G3pbFetchResponse, G3pbHealthResponse,
+    G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock,
+    G3pbPutPayloadRequest, G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest,
+    G3pbStageBlocksResponse, G3pbStorageAgent, G3pbStorageClient, G3pbTransferBlock,
+    route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner,
+    route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;

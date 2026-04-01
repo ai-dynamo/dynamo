@@ -59,6 +59,7 @@ use std::env;
 use std::collections::BTreeSet;
 
 pub mod filter;
+pub mod g3pb_filter;
 mod pending;
 pub mod request;
 
@@ -72,6 +73,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
 const DEFAULT_MAX_TRANSFER_BATCH_SIZE: usize = 16;
+const DEFAULT_REMOTE_TRANSFER_BATCH_SIZE: usize = 32;
 
 pub fn max_concurrent_transfers() -> usize {
     read_usize_env(
@@ -84,6 +86,13 @@ pub fn max_transfer_batch_size() -> usize {
     read_usize_env(
         "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
         DEFAULT_MAX_TRANSFER_BATCH_SIZE,
+    )
+}
+
+pub fn max_remote_transfer_batch_size() -> usize {
+    read_usize_env(
+        "DYN_KVBM_REMOTE_TRANSFER_BATCH_SIZE",
+        DEFAULT_REMOTE_TRANSFER_BATCH_SIZE,
     )
 }
 

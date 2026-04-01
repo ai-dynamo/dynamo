@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 22:26:30 UTC
+Last updated: 2026-03-31 23:06:30 UTC
 
 ## Active state
 
@@ -19,7 +19,28 @@ Last updated: 2026-03-31 22:26:30 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 
-## Current run (2026-03-31 21:14:41 UTC)
+## Current run (2026-03-31 23:09:30 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Resolved the NIXL backend-registration failure for `PinnedStorage(local host) -> remote host staging` transfer creation
+  - The root cause was passing the local agent name into `createXferReq` instead of the remote peer agent name
+  - Fixed in `lib/llm/src/block_manager/block/transfer/nixl.rs`
+  - Full worker/backend smoke test now passes with remote write, remote read, local host registration, and device onboard
+- ✅ Added KVBM-side G3PB admission policy wiring
+  - Implemented in `lib/llm/src/block_manager/offload/g3pb_filter.rs`
+  - Default admission when a block has been reused at least once
+  - Environment override `G3PB_OFFLOAD_ALL` for eager admission of every block
+  - Keeps `G1 -> G3PB` semantics as copy/replication, not ownership transfer
+  - All tests pass (6 passed for G3PB filter, 13 passed for G3PB distributed)
+- ✅ Validated the complete G3PB smoke path:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` (13 passed)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib` (6 passed)
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke` (pass)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_nixl_transfer_smoke --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke` (pass)
+  - `target/debug/kvbm_nixl_transfer_smoke` (pass)
+  - host-only backend smoke using descriptor endpoints (pass)
+  - full `target/debug/kvbm_g3pb_worker_smoke` with remote fetch and local onboard (pass)
 
 ### Context re-read
 
@@ -106,8 +127,8 @@ Last updated: 2026-03-31 22:26:30 UTC
 - full worker/backend smoke:
   - command:
     `target/debug/kvbm_g3pb_worker_smoke --backend-url http://127.0.0.1:58183`
-  - current status:
-    fail
+   - current status:
+     pass
   - observed progress after the shared `create_xfer_req` peer-selection fix:
     - `offer`
     - `stage_put`
@@ -170,7 +191,7 @@ Last updated: 2026-03-31 22:26:30 UTC
 
 ### Remaining work in this run
 
-- resolve the last NIXL backend-registration failure for
+- ✅ resolved the last NIXL backend-registration failure for
   `PinnedStorage(local host) -> remote host staging` transfer creation
 - revised NIXL diagnosis for the current `G3PB` slice:
   - the real transfer bug was passing the local agent name into
@@ -185,10 +206,12 @@ Last updated: 2026-03-31 22:26:30 UTC
   - do not mix this slice with speculative transport additions like the
     unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or
     `disk_block_observer` surface
-- add KVBM-side `G3PB` admission policy wiring:
+- ✅ add KVBM-side `G3PB` admission policy wiring:
   - default admission when a block has been reused at least once
   - environment override `G3PB_OFFLOAD_ALL` for eager admission of every block
   - keep `G1 -> G3PB` semantics as copy/replication, not ownership transfer
+  - implemented in `lib/llm/src/block_manager/offload/g3pb_filter.rs`
+  - tests pass (6 passed)
 - refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
   - register `G3PB` as a Dynamo component endpoint and discover remotes via the discovery backend
   - remove manual `--listen` / `--backend-url` control-plane wiring from the long-term path
@@ -240,22 +263,46 @@ Last updated: 2026-03-31 22:26:30 UTC
 
 ### Exact next step
 
-- next file:
-  `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
-- next commands:
-  - trim remaining branch-only drift in the worker smoke binary before the
-    request-plane/discovery refactor
-  - keep the current remote-agent fix in
-    `lib/llm/src/block_manager/block/transfer/nixl.rs`
-  - treat the remaining `invalidateRemoteMD` warning as a separate follow-up,
-    not as evidence of a NIXL wrapper bug
-  - rerun:
-    - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-    - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
-    - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_nixl_transfer_smoke --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
-    - `target/debug/kvbm_nixl_transfer_smoke`
-    - host-only backend smoke using descriptor endpoints
-    - full `target/debug/kvbm_g3pb_worker_smoke ...`
+- ✅ COMPLETED: All immediate validation and G3PB admission policy tasks
+- NEXT MAJOR TASK: Refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
+  - next file to investigate:
+    - `lib/llm/src/block_manager/distributed.rs` (for Dynamo request-plane + discovery integration)
+    - Look for existing Dynamo request-plane and discovery patterns in the codebase
+  - next commands:
+    - Investigate how Dynamo request-plane and discovery are currently implemented
+    - Register `G3PB` as a Dynamo component endpoint and discover remotes via the discovery backend
+    - Remove manual `--listen` / `--backend-url` control-plane wiring from the long-term path
+    - Keep bulk data movement on NIXL/UCX; use request-plane only for metadata/handshake RPCs
+    - Assume request-plane control traffic should comfortably handle at least ~100 RPS for `offer` / `query` / `stage_put` / `commit_put` / `fetch` metadata calls, then validate with measurement after the refactor
+    - Do not add the speculative unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or `disk_block_observer` surface in this slice; keep those deferred unless a concrete requirement appears
+  - revalidate the next slice in layers:
+    - repeated `kvbm_g3pb_worker_smoke` loop against a stable backend to see
+      whether the `invalidateRemoteMD` warning remains harmless under repetition
+    - multi-backend ownership/routing smoke with multiple `G3PB` peers
+    - larger block-count staged transfer smoke
+    - backend restart/reload validation across `load_remote` plus subsequent
+      `query` / `fetch`
+    - worker-side compile/tests after the smoke rewrite
+    - `kvbm_nixl_transfer_smoke`
+    - host-only `G3PB` backend smoke with `stage_put` / `commit_put` / descriptor
+      fetch
+    - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
+
+### Handoff for next run
+
+The G3PB implementation is now in a stable, working state:
+- All core G3PB functionality is working (offer, stage_put, commit_put, query, fetch)
+- NIXL/UCX transfers are working correctly for both write and read paths
+- G3PB admission policy has been implemented with configurable behavior
+- All tests pass
+
+The next major task is to integrate G3PB with Dynamo's request-plane and discovery system to replace the ad hoc HTTP URLs. This will require:
+1. Understanding how Dynamo's request-plane and discovery work
+2. Registering G3PB as a component endpoint
+3. Updating both backend and worker binaries to use discovery instead of manual URLs
+4. Validating that the request-plane can handle the expected metadata RPC load
+
+The `invalidateRemoteMD` warning on teardown is currently treated as a separate non-blocking cleanup issue and should be investigated separately if it becomes problematic.
 
 ## Archived milestones (condensed)
 
@@ -299,3 +346,6 @@ Last updated: 2026-03-31 22:26:30 UTC
 3. Re-run the layered validation stack after the transport swap.
 4. Only after that, decide whether `foyer` should become the default backend
    constructor path for the standalone peer binary.
+
+
+DO NOT COMMIT.

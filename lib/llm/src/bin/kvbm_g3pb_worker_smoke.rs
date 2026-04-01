@@ -7,12 +7,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use dynamo_llm::block_manager::KvBlockManager;
 use dynamo_llm::block_manager::Storage;
+use dynamo_llm::block_manager::block::transfer::{
+    PoolConfig, TransferContext, WriteTo, read_from_remote,
+};
+use dynamo_llm::block_manager::offload::max_remote_transfer_batch_size;
 use dynamo_llm::block_manager::block::{
     BasicMetadata, BlockDataProvider, BlockDataProviderMut, MutableBlock, data::BlockDataExt,
     locality::LocalityProvider,
-};
-use dynamo_llm::block_manager::block::transfer::{
-    PoolConfig, TransferContext, WriteTo, read_from_remote,
 };
 use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
@@ -342,7 +343,7 @@ fn build_transfer_context(
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: 4,
-        max_transfer_batch_size: args.count.max(1),
+        max_transfer_batch_size: max_remote_transfer_batch_size(),
         num_outer_components: 1,
         num_layers: 1,
     };
@@ -536,10 +537,7 @@ async fn main() -> Result<()> {
         println!("uploaded accepted blocks to worker {worker_id} via staged NIXL transfer");
     }
 
-    let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks
-        .iter()
-        .cloned()
-        .collect();
+    let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks.iter().cloned().collect();
     if !duplicate_offer_blocks.is_empty() {
         let duplicate_offer_routes =
             route_g3pb_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
@@ -678,8 +676,11 @@ async fn main() -> Result<()> {
             complete_block(block, &demo.tokens)?;
         }
 
-        let notify =
-            read_from_remote(&remote_blocks, &mut local_host_blocks, transfer_context.clone())?;
+        let notify = read_from_remote(
+            &remote_blocks,
+            &mut local_host_blocks,
+            transfer_context.clone(),
+        )?;
         notify.await.context("remote fetch transfer dropped")?;
 
         let immutable_host_blocks = host_pool.register_blocks(local_host_blocks).await?;
@@ -698,7 +699,9 @@ async fn main() -> Result<()> {
                 .iter()
                 .find(|block| block.sequence_hash() == *sequence_hash)
                 .with_context(|| {
-                    format!("missing registered host block for fetched sequence hash {sequence_hash}")
+                    format!(
+                        "missing registered host block for fetched sequence hash {sequence_hash}"
+                    )
                 })?;
             anyhow::ensure!(
                 read_block_payload(host_block)? == expected.payload,
@@ -756,8 +759,7 @@ async fn main() -> Result<()> {
     );
     println!(
         "transferred {} blocks / {} bytes via staged G3PB NIXL descriptors",
-        fetched_transfer_count,
-        transferred_bytes
+        fetched_transfer_count, transferred_bytes
     );
     println!(
         "note: this validates staged remote host writes, remote host reads, local host registration, and device onboard over the G3PB smoke path."
