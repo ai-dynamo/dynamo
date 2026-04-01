@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 07:28:29 UTC
+Last updated: 2026-04-01 07:38:12 UTC
 
 ## Active state
 
@@ -19,10 +19,116 @@ Last updated: 2026-04-01 07:28:29 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
-  - complete the pinned `nixl-sys` teardown fix and backend reclaim follow-on
-    backlog
-  - finish with a compact, validated handoff that reflects the new complete
-    `G3PB` state
+  - no open implementation work remains for the active `G3PB` slice
+  - keep `PLANS.md` as the compact validation/handoff record until new scope is
+    explicitly chosen
+
+## Current run (2026-04-01 07:38:12 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-audited the current tree against the top-of-file handoff and confirmed
+  the implementation commits described there are already present at `HEAD`:
+  - `c231d60fb build: patch local nixl-sys invalidation`
+  - `8ddc2f2e1 llm: reclaim g3pb backend staging`
+- ✅ Revalidated the focused `G3PB` / bindings stack from the current clean
+  detached `HEAD`
+- ✅ Revalidated the same-backend reclaim smoke from the current tree
+- ✅ Captured one current-runtime validation nuance on disk:
+  - `DYN_FILE_KV` for the file discovery backend must point to a directory root;
+    using a precreated file still fails registration with
+    `Not a directory (os error 20)`
+
+### Current findings in this run
+
+- the working tree already contained the last two concrete implementation
+  slices called out by the handoff, so this run was a completion audit and
+  validation pass rather than a code-change pass
+- the current runtime behavior still matches the intended `G3PB` design:
+  - local `nixl-sys` invalidation uses the vendored workspace patch
+  - backend reclaim still supports the same-backend `24`-block then `40`-block
+    sequential smoke without a backend restart
+- the previous handoff examples that use file-shaped temporary names for
+  `DYN_FILE_KV` are only safe when that path is actually created as a directory;
+  the runtime file backend expects a directory root
+- the successful rerun again did not emit the earlier
+  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning
+
+### Remaining work in this run
+
+- none
+
+### Exact next step
+
+- if a future run starts from here, treat the current `G3PB` slice as complete
+  and only open new work if a fresh regression or explicitly new scope appears
+
+### Validation completed in this run so far
+
+- focused validation:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+    - pass (`4 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - `git diff --check`
+    - pass
+- same-backend reclaim rerun from the current tree:
+  - first attempt with `DYN_FILE_KV=/tmp/g3pb-discovery.audit.xOTL8I`
+    - fail at backend startup
+    - discovery registration returned `Not a directory (os error 20)`
+  - validated rerun using a real discovery directory root:
+    - backend:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.auditdir.lbwKoe target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 48 --foyer-dir /tmp/g3pb-foyer.audit2.Yf9YqA`
+      - pass
+    - first worker smoke:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.auditdir.lbwKoe target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --num-device-blocks 64 --host-blocks 40 --count 24`
+      - pass
+      - transferred `24` blocks / `196608` bytes
+    - second worker smoke against the same backend, no restart:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.auditdir.lbwKoe target/debug/kvbm_g3pb_worker_smoke --worker-id 22 --num-device-blocks 96 --host-blocks 56 --count 40 --sequence-start 5000`
+      - pass
+      - transferred `40` blocks / `327680` bytes
+    - request-plane timings for the successful `40`-block same-backend run:
+      - `health`: `1` op in `0.002180s` (`458.64 ops/s`)
+      - `load_remote`: `1` op in `0.003144s` (`318.08 ops/s`)
+      - `offer`: `1` op in `0.001302s` (`768.10 ops/s`)
+      - `stage_put`: `1` op in `0.008331s` (`120.04 ops/s`)
+      - `commit_put`: `1` op in `0.001168s` (`856.24 ops/s`)
+      - `query`: `1` op in `0.001127s` (`887.14 ops/s`)
+      - `fetch`: `1` op in `0.001630s` (`613.45 ops/s`)
+      - total metadata RPCs: `7` ops in `0.018882s` (`370.72 ops/s`)
+
+### Decisions confirmed in this run
+
+- do not reopen implementation work just because `PLANS.md` still contains
+  older historical sections with pre-fix backlog; the active top-of-file state
+  and the current tree agree that the slice is complete
+- keep the discovery-root nuance documented in `PLANS.md` rather than changing
+  runtime code in this run, because the runtime behavior is already explicit in
+  `lib/runtime` and the `G3PB` implementation itself is not broken
+
+### Handoff for next run
+
+- active `G3PB` scope remains complete at the current detached `HEAD`
+- validated outcomes now reconfirmed on disk:
+  - focused `g3pb` tests pass
+  - focused `g3pb_filter` tests pass
+  - bindings-side `read_g3pb_admission_config` tests pass
+  - backend/worker binaries build
+  - same-backend `24`-block then `40`-block sequential reclaim smoke passes
+    without a backend restart
+  - the successful rerun again did not show the old
+    `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` warning
+- if another run continues from here, it should start new scope rather than
+  trying to “finish” leftover work from this plan
 
 ## Current run (2026-04-01 07:02:22 UTC)
 
