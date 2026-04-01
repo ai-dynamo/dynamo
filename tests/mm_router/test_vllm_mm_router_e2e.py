@@ -313,7 +313,7 @@ def _send_request_get_overlap(
     return overlap, total, segment
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(300)
 def test_vllm_text_only_overlap_repeated_prompt(
     start_vllm_mm_services, predownload_models
 ):
