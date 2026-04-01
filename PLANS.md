@@ -1357,14 +1357,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- run `git diff --check`
-- create the signed docs-only audit refresh commit if `PLANS.md` remains the
-  only delta
+- none
 
 ### Exact next step
 
-- run `git diff --check`, inspect the resulting worktree, and if clean aside
-  from `PLANS.md`, create the signed docs-only handoff refresh commit
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
@@ -1374,6 +1372,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   current `HEAD`
 - this run also rechecked the required design doc and searched for new
   `G3PB`-specific drift; no new active-slice work was found
+- this run is now committed as:
+  - `10a731513 docs: refresh g3pb audit handoff`
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
