@@ -676,6 +676,7 @@ fn make_function_call(name: String, arguments: String) -> OutputItem {
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
+    _api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
@@ -1169,7 +1170,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
@@ -1229,7 +1231,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
             OutputItem::FunctionCall(fc) => {
@@ -1424,7 +1427,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
         assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
     }
@@ -1457,7 +1460,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let text = resp.inner.text.unwrap();
         assert_eq!(text.format, TextResponseFormatConfiguration::JsonObject);
     }
@@ -1485,7 +1488,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
     }
 
@@ -1571,7 +1574,7 @@ thinking
     fn test_include_logprobs_stripped_by_default() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
 
         for item in &resp.inner.output {
             if let OutputItem::Message(msg) = item {
@@ -1596,7 +1599,7 @@ thinking
             include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
 
         let mut found_text = false;
         for item in &resp.inner.output {
@@ -1624,7 +1627,7 @@ thinking
             truncation: Some(Truncation::Auto),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Auto));
     }
 
@@ -1632,7 +1635,7 @@ thinking
     fn test_truncation_defaults_to_disabled() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 }
