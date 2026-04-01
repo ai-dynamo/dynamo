@@ -21,12 +21,12 @@ testing-full = ["testing-cuda", "testing-nixl"]
 testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
 testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:synapse", "dep:nix", "dep:aligned-vec", "cuda", "hpu"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:synapse", "dep:level-zero", "dep:nix", "dep:aligned-vec", "cuda", "hpu", "xpu"]
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
-xpu = []  # Level-Zero backend (placeholder for Phase 7)
+xpu = ["dep:level-zero"]  # Level-Zero backend
 hpu = ["dep:synapse"]  # Synapse backend (Phase 3)
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
@@ -115,6 +115,7 @@ aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { version = "=0.10.1", optional = true }
 cudarc = { workspace = true, optional = true }
 synapse = { workspace = true, optional = true }
+level-zero = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
 # media (zlib compression for NIXL metadata)
@@ -212,3 +213,8 @@ required-features = ["block-manager-bench"]
 name = "test_hpu_standalone_v2"
 path = "bin/test_hpu_standalone_v2.rs"
 required-features = ["block-manager-bench", "hpu"]
+
+[[bin]]
+name = "test_xpu_standalone_v2"
+path = "bin/test_xpu_standalone_v2.rs"
+required-features = ["block-manager-bench", "xpu"]
