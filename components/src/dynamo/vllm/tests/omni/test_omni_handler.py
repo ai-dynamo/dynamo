@@ -48,44 +48,6 @@ class TestEngineInputs:
         assert ei.response_format is None
 
 
-class TestPrepareImageOutput:
-    @pytest.mark.asyncio
-    async def test_b64_json(self):
-        """b64_json format returns data URI with base64 prefix."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
-        results = await handler._prepare_image_output([img], "req-1", "b64_json")
-        assert len(results) == 1
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_b64_default_when_none(self):
-        """None response_format defaults to base64 encoding."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
-        results = await handler._prepare_image_output([img], "req-1", None)
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_invalid_format(self):
-        """Unsupported response_format raises ValueError."""
-        handler = _make_handler()
-        with pytest.raises(ValueError, match="Invalid response format"):
-            await handler._prepare_image_output([MagicMock()], "req-1", "invalid")
-
-    @pytest.mark.asyncio
-    async def test_multiple_images(self):
-        """Multiple input images produce one output entry each."""
-        handler = _make_handler()
-        imgs = [MagicMock() for _ in range(3)]
-        for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
-        results = await handler._prepare_image_output(imgs, "req-1", "b64_json")
-        assert len(results) == 3
-
-
 class TestBuildEngineInputs:
     @pytest.mark.asyncio
     async def test_chat_completion(self):
@@ -142,76 +104,6 @@ class TestBuildEngineInputs:
         )
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
-
-
-class TestFormatImageChunk:
-    @pytest.mark.asyncio
-    async def test_chat_completion_format(self):
-        """Chat completion route returns image_url content parts."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
-        )
-        assert chunk["object"] == "chat.completion.chunk"
-        assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
-
-    @pytest.mark.asyncio
-    async def test_image_generation_b64_format(self):
-        """Image generation with b64_json format returns base64 data."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format="b64_json",
-            request_type=RequestType.IMAGE_GENERATION,
-        )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_image_generation_default_format_returns_b64(self):
-        """Image generation with response_format=None defaults to b64_json."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format=None,
-            request_type=RequestType.IMAGE_GENERATION,
-        )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_empty_images_returns_error(self):
-        """Empty image list produces an error chunk."""
-        handler = _make_handler()
-        chunk = await handler._format_image_chunk([], "req-1")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-
-class TestFormatVideoChunk:
-    @pytest.mark.asyncio
-    async def test_empty_frames_returns_none(self):
-        """Empty frame list returns None."""
-        handler = _make_handler()
-        result = await handler._format_video_chunk([], "req-1", fps=16)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_error_returns_failed_status(self):
-        """Encoding failure returns NvVideosResponse with failed status and error."""
-        handler = _make_handler()
-        with patch(
-            "dynamo.vllm.omni.omni_handler.normalize_video_frames",
-            side_effect=RuntimeError("boom"),
-        ):
-            chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
-        assert chunk["status"] == "failed"
-        assert "boom" in chunk["error"]
 
 
 class TestI2VEngineInputs:

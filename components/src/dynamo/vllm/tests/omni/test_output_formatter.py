@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from dynamo.vllm.omni.output_formatter import (
+    DiffusionFormatter,
     TextFormatter,
     _build_completion_usage,
     _error_chunk,
@@ -98,6 +99,125 @@ class TestErrorChunk:
         assert chunk["choices"][0]["delta"]["content"] == "Error: something broke"
         assert chunk["choices"][0]["finish_reason"] == "error"
         assert chunk["model"] == "my-model"
+
+
+# ── DiffusionFormatter ─────────────────────────────────────
+
+
+def _make_diffusion_formatter():
+    return DiffusionFormatter(
+        model_name="test-model", media_fs=None, media_http_url=None
+    )
+
+
+class TestDiffusionFormatterPrepareImages:
+    @pytest.mark.asyncio
+    async def test_b64_json(self):
+        f = _make_diffusion_formatter()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"fake_png_data")
+        results = await f._prepare_images([img], "req-1", "b64_json")
+        assert len(results) == 1
+        assert results[0].startswith("data:image/png;base64,")
+
+    @pytest.mark.asyncio
+    async def test_b64_default_when_none(self):
+        f = _make_diffusion_formatter()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"data")
+        results = await f._prepare_images([img], "req-1", None)
+        assert results[0].startswith("data:image/png;base64,")
+
+    @pytest.mark.asyncio
+    async def test_invalid_format(self):
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="Invalid response format"):
+            await f._prepare_images([MagicMock()], "req-1", "invalid")
+
+    @pytest.mark.asyncio
+    async def test_multiple_images(self):
+        f = _make_diffusion_formatter()
+        imgs = [MagicMock() for _ in range(3)]
+        for img in imgs:
+            img.save = lambda b, format: b.write(b"px")
+        results = await f._prepare_images(imgs, "req-1", "b64_json")
+        assert len(results) == 3
+
+
+class TestDiffusionFormatterImage:
+    @pytest.mark.asyncio
+    async def test_chat_completion_format(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"px")
+        chunk = await f._encode_image(
+            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
+        )
+        assert chunk["object"] == "chat.completion.chunk"
+        assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
+
+    @pytest.mark.asyncio
+    async def test_image_generation_b64_format(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"px")
+        chunk = await f._encode_image(
+            [img],
+            "req-1",
+            response_format="b64_json",
+            request_type=RequestType.IMAGE_GENERATION,
+        )
+        assert chunk["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_image_generation_default_format_returns_b64(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"px")
+        chunk = await f._encode_image(
+            [img],
+            "req-1",
+            response_format=None,
+            request_type=RequestType.IMAGE_GENERATION,
+        )
+        assert chunk["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_empty_images_returns_error(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        chunk = await f._encode_image(
+            [], "req-1", request_type=RequestType.IMAGE_GENERATION
+        )
+        assert "Error" in chunk["choices"][0]["delta"]["content"]
+
+
+class TestDiffusionFormatterVideo:
+    @pytest.mark.asyncio
+    async def test_empty_frames_returns_none(self):
+        f = _make_diffusion_formatter()
+        result = await f._encode_video([], "req-1", fps=16)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_error_returns_failed_status(self):
+        from unittest.mock import patch
+
+        f = _make_diffusion_formatter()
+        with patch(
+            "dynamo.common.utils.video_utils.normalize_video_frames",
+            side_effect=RuntimeError("boom"),
+        ):
+            chunk = await f._encode_video([MagicMock()], "req-1", fps=16)
+        assert chunk["status"] == "failed"
+        assert "boom" in chunk["error"]
 
 
 class TestBuildCompletionUsage:
