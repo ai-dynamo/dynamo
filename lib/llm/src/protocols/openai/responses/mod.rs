@@ -22,8 +22,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionName, FunctionObject, ImageDetail as ChatImageDetail,
-    FunctionType, ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
+    CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
+    ImageDetail as ChatImageDetail, ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -504,6 +504,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
+                parallel_tool_calls: resp.inner.parallel_tool_calls,
                 top_logprobs,
                 metadata: resp
                     .inner
@@ -613,6 +614,7 @@ pub struct ResponseParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_output_tokens: Option<u32>,
+    pub parallel_tool_calls: Option<bool>,
     pub store: Option<bool>,
     pub tools: Option<Vec<Tool>>,
     pub tool_choice: Option<ToolChoiceParam>,
@@ -790,7 +792,7 @@ pub fn chat_completion_to_response(
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
         metadata: Some(HashMap::new()),
-        parallel_tool_calls: Some(true),
+        parallel_tool_calls: params.parallel_tool_calls.or(Some(true)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
@@ -816,8 +818,7 @@ pub fn chat_completion_to_response(
         incomplete_details: None,
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
-        previous_response_id: api_context
-            .and_then(|ctx| ctx.previous_response_id.clone()),
+        previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
         prompt_cache_key: None,
         prompt_cache_retention: None,
@@ -1402,6 +1403,15 @@ thinking
     }
 
     #[test]
+    fn test_parallel_tool_calls_mapped_to_chat_completion() {
+        let mut req = make_response_with_input("parallel tools off");
+        req.inner.parallel_tool_calls = Some(false);
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.parallel_tool_calls, Some(false));
+    }
+
+    #[test]
     fn test_response_echoes_reasoning() {
         use dynamo_protocols::types::ReasoningEffort;
         use dynamo_protocols::types::responses::Reasoning;
@@ -1491,6 +1501,31 @@ thinking
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
+    }
+
+    #[test]
+    fn test_response_echoes_parallel_tool_calls() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                choices: vec![],
+                created: 0,
+                id: "test".into(),
+                model: "m".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
+            nvext: None,
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        assert_eq!(resp.inner.parallel_tool_calls, Some(false));
     }
 
     #[test]

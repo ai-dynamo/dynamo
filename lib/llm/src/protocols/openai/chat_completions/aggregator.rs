@@ -821,7 +821,10 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].r#type, dynamo_protocols::types::FunctionType::Function);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
 
         // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
         assert_eq!(
@@ -865,7 +868,10 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].r#type, dynamo_protocols::types::FunctionType::Function);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
 
         // Verify that finish reason was overridden to ToolCalls despite original being Length
         assert_eq!(
@@ -1137,7 +1143,10 @@ mod tests {
         assert_eq!(choice.message.content, None);
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].r#type, dynamo_protocols::types::FunctionType::Function);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
         assert_eq!(tool_calls[0].function.name, "get_weather");
         assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"SF\"}");
     }
