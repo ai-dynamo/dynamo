@@ -422,6 +422,16 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "LayoutType::FullyContiguous")]
     disk_layout_type: LayoutType,
 
+    /// Explicit outer dimension (1 for MLA, 2 for standard K/V).
+    /// When set, skips shape inference. Python should always provide this.
+    #[builder(default = "None")]
+    pub outer_dim: Option<usize>,
+
+    /// Explicit inner dimension (head_size for MLA, num_heads * head_dim for standard).
+    /// When set, skips shape inference. Python should always provide this.
+    #[builder(default = "None")]
+    pub inner_dim: Option<usize>,
+
     #[builder(default = "None")]
     scheduler_client: Option<TransferSchedulerClient>,
 
@@ -476,8 +486,10 @@ impl KvbmWorker {
         let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
             LayoutType::FullyContiguous => {
                 let num_layers = shape[1];
-                let outer_dim = shape[2];
-                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                let outer_dim = config.outer_dim.unwrap_or(shape[2]);
+                let inner_dim = config
+                    .inner_dim
+                    .unwrap_or_else(|| shape[3..].iter().product::<usize>() / config.page_size);
                 tracing::info!(
                     "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
                     num_layers,
@@ -494,21 +506,22 @@ impl KvbmWorker {
                 )
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
-                // Use the already-detected layout type from config (no re-detection needed)
                 let layout_type = config.device_layout_type;
-
-                // Extract outer_dim based on the provided outer_contiguous value
-                let outer_dim = if outer_contiguous {
-                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
-                } else {
-                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
-                };
-
                 let num_layers = device_tensors.len();
-                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+
+                let outer_dim = config.outer_dim.unwrap_or_else(|| {
+                    if outer_contiguous {
+                        shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                    } else {
+                        shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                    }
+                });
+                let inner_dim = config
+                    .inner_dim
+                    .unwrap_or_else(|| shape[2..].iter().product::<usize>() / config.page_size);
 
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    "Layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
                     num_layers,
                     outer_dim,
                     outer_contiguous,
