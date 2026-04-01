@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 11:51:30 UTC
+Last updated: 2026-04-01 11:59:30 UTC
 
 ## Active state
 
@@ -10,14 +10,13 @@ Last updated: 2026-04-01 11:51:30 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD` revalidated again in this run: `6039a1a925ee`
+  - live detached `HEAD` revalidated again in this run: `16017c70704b`
   - prior docs-only handoff commit before the current validation refresh:
-    `7fcc6753792d`
+    `6039a1a925ee`
   - the newer detached `HEAD` commits since `1eb7021d1281` are still
     docs-only handoff compactions
-  - the current live detached `HEAD` remains the latest signed docs-only
-    handoff commit:
-    `6039a1a925ee` (`docs: refresh g3pb handoff`)
+  - the latest signed docs-only handoff commit currently in the tree is:
+    `16017c70704b` (`docs: refresh g3pb handoff`)
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -35,7 +34,7 @@ Last updated: 2026-04-01 11:51:30 UTC
     the live detached `HEAD`
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 11:51:30 UTC)
+## Current run (2026-04-01 11:59:30 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -43,7 +42,7 @@ Last updated: 2026-04-01 11:51:30 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `6039a1a925ee`
+- Re-audited the live repo state from detached `HEAD` `16017c70704b`
 - Re-confirmed the live tree still contains the seams required by the handoff
   and design doc:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -58,15 +57,16 @@ Last updated: 2026-04-01 11:51:30 UTC
   active `G3PB` slice; this run refreshes validation and handoff state only
 - Confirmed again that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
-- Reconfirmed from the live tree that detached `HEAD` `6039a1a925ee` still
+- Reconfirmed from the live tree that detached `HEAD` `16017c70704b` still
   contains only the previously validated non-docs `G3PB` implementation plus
   docs-only handoff compactions
-- Updated `PLANS.md` so it reflects the current live detached `HEAD`, exact
-  validation results from this run, and the remaining docs-only handoff step
+- Refreshing `PLANS.md` again so it reflects the current live detached `HEAD`,
+  exact validation results from this run, and the final remaining docs-only
+  handoff steps
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `6039a1a925ee`
+- the detached `HEAD` validated in this run is `16017c70704b`
 - the live tree still contains the same validated non-docs `G3PB`
   implementation baseline and follow-on code changes
 - the active `G3PB` implementation slice still appears complete on the live
@@ -75,10 +75,12 @@ Last updated: 2026-04-01 11:51:30 UTC
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- the latest signed docs-only handoff commit remains `6039a1a925ee`
+- the latest signed docs-only handoff commit still in the tree is
+  `16017c70704b`
 - no further non-docs work surfaced for the active `G3PB` slice
-- the only work left in this run is the docs-only handoff finish:
-  post-edit spot check, signed commit, and final handoff reread
+- the only remaining work in this run is docs-only handoff refresh,
+  post-edit validation, and the signed docs-only commit if the tree stays
+  green
 
 ### Validation completed in this run
 
@@ -91,7 +93,7 @@ Last updated: 2026-04-01 11:51:30 UTC
 - `sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`
   - pass
 - `git rev-parse --short=12 HEAD`
-  - pass (`7fcc6753792d`)
+  - pass (`16017c70704b`)
 - `git log --oneline -8`
   - pass
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
@@ -119,7 +121,7 @@ Last updated: 2026-04-01 11:51:30 UTC
 - `git status --short --branch`
   - pass (`## HEAD (no branch)` with only `PLANS.md` dirty)
 - `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 11:51:30 UTC`)
+  - pass (`2026-04-01 11:59:30 UTC`)
 
 ### Decisions confirmed in this run
 
@@ -133,17 +135,15 @@ Last updated: 2026-04-01 11:51:30 UTC
 
 ### Remaining work in this run
 
-- run a post-edit `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  spot check with only `PLANS.md` dirty
-- make one signed docs-only handoff commit if the spot check passes
-- re-read `PLANS.md` after the commit and record any final dirty handoff delta
-  needed for the next run
+- rerun the post-edit `g3pb::` spot check after this `PLANS.md` refresh
+- if the tree remains green, land one more signed docs-only handoff commit
+- re-read `PLANS.md`, rerun the final spot check, and leave an exact on-disk
+  handoff for the next run
 
 ### Exact next step
 
-- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` with only
-  `PLANS.md` dirty, then create the signed docs-only handoff commit if it stays
-  green
+- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` as the
+  post-edit spot check for this `PLANS.md` refresh
 
 ### Handoff for next run
 
@@ -155,10 +155,9 @@ Last updated: 2026-04-01 11:51:30 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run revalidated the active slice from detached `HEAD`
-  `6039a1a925ee`
-- the active `G3PB` slice still has no pending code changes
-- if the current run stops before the docs-only handoff commit lands, resume by
-  running the post-edit `g3pb::` spot check first
+  `16017c70704b`
+- the active `G3PB` slice still has no pending code changes, but this run has
+  not yet completed its final docs-only handoff steps
 - if work resumes later, start by rerunning the same focused audit and
   validation stack from the live detached `HEAD` before assuming this
   docs-only tip is still current
