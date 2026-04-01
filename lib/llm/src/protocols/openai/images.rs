@@ -16,6 +16,26 @@ pub struct NvCreateImageRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateImageRequest,
 
+    /// Optional image reference that guides generation (for I2I)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_reference: Option<String>,
+
+    /// Random seed. Top-level alternative to nvext; nvext takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u32>,
+
+    /// Negative prompt. Top-level alternative to nvext; nvext takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+
+    /// Number of denoising steps. Top-level alternative to nvext; nvext takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_inference_steps: Option<u32>,
+
+    /// CFG guidance scale. Top-level alternative to nvext; nvext takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guidance_scale: Option<f32>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 }

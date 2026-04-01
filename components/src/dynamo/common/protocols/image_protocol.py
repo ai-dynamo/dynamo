@@ -65,8 +65,23 @@ class NvCreateImageRequest(BaseModel):
     moderation: Optional[str] = None
     """Content moderation level: auto or low."""
 
+    input_reference: Optional[str] = None
+    """Optional image reference that guides generation (for I2I)."""
+
+    seed: Optional[int] = None
+    """Random seed (top-level, SGLang-compatible)."""
+
+    negative_prompt: Optional[str] = None
+    """Negative prompt (top-level, SGLang-compatible)."""
+
+    num_inference_steps: Optional[int] = None
+    """Denoising steps (top-level, SGLang-compatible)."""
+
+    guidance_scale: Optional[float] = None
+    """CFG guidance scale (top-level, SGLang-compatible)."""
+
     nvext: Optional[ImageNvExt] = None
-    """NVIDIA extensions."""
+    """NVIDIA extensions (takes precedence over top-level params)."""
 
 
 class ImageData(BaseModel):
