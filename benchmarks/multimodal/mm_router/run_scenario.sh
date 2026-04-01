@@ -89,6 +89,13 @@ run_sweep() {
 mkdir -p "${LOG_DIR}"
 
 for conc in "${CONC_LEVELS[@]}"; do
+    # Scale image cache to cover pool_50 (conc*60 unique images) plus ~17% buffer.
+    # Formula: max(500, conc * 70). Matches empirical values: conc=4→500, conc=32→2240, conc=64→4480.
+    computed_cache=$(( conc * 70 ))
+    if (( computed_cache < 500 )); then computed_cache=500; fi
+    export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE_OVERRIDE:-${computed_cache}}"
+    export DYN_MM_MEDIA_CACHE_SIZE="${DYN_MM_MEDIA_CACHE_SIZE_OVERRIDE:-${computed_cache}}"
+    echo "[$(date '+%H:%M:%S')] conc=${conc} -> DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE} DYN_MM_MEDIA_CACHE_SIZE=${DYN_MM_MEDIA_CACHE_SIZE}"
     start_server
     run_sweep "${conc}"
     stop_server
