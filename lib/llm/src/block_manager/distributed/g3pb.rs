@@ -6,7 +6,7 @@ use crate::block_manager::block::nixl::{BlockDescriptorList, SerializedNixlBlock
 use crate::block_manager::storage::Storage;
 use crate::tokens::{SequenceHash, compute_hash_v2};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use dynamo_runtime::{
     component::Component,
@@ -1242,6 +1242,17 @@ pub struct G3pbRequestPlaneClient {
     router: PushRouter<G3pbRpcRequest, Annotated<G3pbRpcResponse>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct G3pbPeerInstance {
+    pub peer: G3pbPeer,
+    pub instance_id: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct G3pbDiscoveredPeers {
+    peers_by_worker: HashMap<WorkerID, G3pbPeerInstance>,
+}
+
 impl G3pbRequestPlaneClient {
     pub async fn new(component: Component) -> Result<Self> {
         let client = component.endpoint(G3PB_ENDPOINT_NAME).client().await?;
@@ -1378,6 +1389,97 @@ impl G3pbRequestPlaneClient {
             other => anyhow::bail!("unexpected G3PB load_remote response: {other:?}"),
         }
     }
+}
+
+impl G3pbDiscoveredPeers {
+    pub fn from_health_responses(discovered: Vec<(u64, G3pbHealthResponse)>) -> Result<Self> {
+        let mut peers_by_worker = HashMap::with_capacity(discovered.len());
+        for (instance_id, health) in discovered {
+            let peer = G3pbPeer {
+                worker_id: health.worker_id,
+                endpoint: health.listen,
+            };
+            let resolved = G3pbPeerInstance {
+                peer: peer.clone(),
+                instance_id,
+            };
+
+            if let Some(previous) = peers_by_worker.insert(health.worker_id, resolved) {
+                anyhow::bail!(
+                    "duplicate remote worker_id {} discovered at instance {} and {}",
+                    health.worker_id,
+                    previous.instance_id,
+                    instance_id
+                );
+            }
+        }
+
+        Ok(Self { peers_by_worker })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.peers_by_worker.is_empty()
+    }
+
+    pub fn peers(&self) -> Vec<G3pbPeer> {
+        let mut peers: Vec<_> = self
+            .peers_by_worker
+            .values()
+            .map(|resolved| resolved.peer.clone())
+            .collect();
+        peers.sort_by_key(|peer| peer.worker_id);
+        peers
+    }
+
+    pub fn instances(&self) -> Vec<G3pbPeerInstance> {
+        let mut instances: Vec<_> = self.peers_by_worker.values().cloned().collect();
+        instances.sort_by_key(|resolved| resolved.peer.worker_id);
+        instances
+    }
+
+    pub fn instance_id(&self, worker_id: WorkerID) -> Result<u64> {
+        self.peers_by_worker
+            .get(&worker_id)
+            .map(|resolved| resolved.instance_id)
+            .ok_or_else(|| anyhow::anyhow!("missing backend instance for worker {worker_id}"))
+    }
+
+    pub async fn load_remote_blockset(
+        &self,
+        request_client: &G3pbRequestPlaneClient,
+        blockset: SerializedNixlBlockSet,
+    ) -> Result<()> {
+        for resolved in self.instances() {
+            request_client
+                .load_remote(
+                    resolved.instance_id,
+                    G3pbLoadRemoteRequest {
+                        blockset: blockset.clone(),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to publish local blockset to worker {}",
+                        resolved.peer.worker_id
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+}
+
+pub async fn discover_g3pb_peers(
+    request_client: &G3pbRequestPlaneClient,
+) -> Result<G3pbDiscoveredPeers> {
+    let mut discovered = Vec::new();
+    for instance_id in request_client.instance_ids() {
+        let health = request_client.health(instance_id).await?;
+        discovered.push((instance_id, health));
+    }
+
+    G3pbDiscoveredPeers::from_health_responses(discovered)
 }
 
 impl G3pbStorageClient {
@@ -1675,6 +1777,69 @@ mod tests {
             });
             assert_eq!(*hashes, expected);
         }
+    }
+
+    #[test]
+    fn discovered_peers_reject_duplicate_worker_ids() {
+        let err = G3pbDiscoveredPeers::from_health_responses(vec![
+            (
+                101,
+                G3pbHealthResponse {
+                    worker_id: 10,
+                    listen: "tcp://peer-10-a".to_string(),
+                },
+            ),
+            (
+                202,
+                G3pbHealthResponse {
+                    worker_id: 10,
+                    listen: "tcp://peer-10-b".to_string(),
+                },
+            ),
+        ])
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("duplicate remote worker_id 10 discovered")
+        );
+    }
+
+    #[test]
+    fn discovered_peers_sort_instances_by_worker_id() {
+        let discovered = G3pbDiscoveredPeers::from_health_responses(vec![
+            (
+                303,
+                G3pbHealthResponse {
+                    worker_id: 30,
+                    listen: "tcp://peer-30".to_string(),
+                },
+            ),
+            (
+                101,
+                G3pbHealthResponse {
+                    worker_id: 10,
+                    listen: "tcp://peer-10".to_string(),
+                },
+            ),
+            (
+                202,
+                G3pbHealthResponse {
+                    worker_id: 20,
+                    listen: "tcp://peer-20".to_string(),
+                },
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            discovered
+                .instances()
+                .into_iter()
+                .map(|resolved| (resolved.peer.worker_id, resolved.instance_id))
+                .collect::<Vec<_>>(),
+            vec![(10, 101), (20, 202), (30, 303)]
+        );
     }
 
     #[tokio::test]
@@ -2048,7 +2213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn g2g3_storage_supports_basic_operations() -> Result<()> {
+    async fn g3pb_cache_storage_supports_basic_operations() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
 

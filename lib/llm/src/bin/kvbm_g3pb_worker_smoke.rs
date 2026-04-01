@@ -20,8 +20,8 @@ use dynamo_llm::block_manager::config::{
 };
 use dynamo_llm::block_manager::distributed::{
     G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbCommitRequest, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbPeer, G3pbPutBlock,
-    G3pbQueryHit, G3pbQueryRequest, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
+    G3pbFetchRequest, G3pbOfferRequest, G3pbPutBlock, G3pbQueryHit, G3pbQueryRequest,
+    G3pbRequestPlaneClient, G3pbStageBlocksRequest, discover_g3pb_peers,
     route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
@@ -398,61 +398,33 @@ async fn app(runtime: Runtime) -> Result<()> {
     let request_client = G3pbRequestPlaneClient::new(g3pb_component).await?;
     let mut rpc_timings = Vec::new();
 
-    let mut backend_instances_by_worker = HashMap::<u64, u64>::new();
-    let mut remote_workers = Vec::new();
     let health_start = Instant::now();
-    for instance_id in request_client.instance_ids() {
-        let health = match request_client.health(instance_id).await {
-            Ok(health) => health,
-            Err(err) => {
-                eprintln!("skipping G3PB instance {instance_id} after failed health RPC: {err}");
-                continue;
-            }
-        };
-        if let Some(previous) = backend_instances_by_worker.insert(health.worker_id, instance_id) {
-            anyhow::bail!(
-                "duplicate remote worker_id {} discovered at instance {} and {}",
-                health.worker_id,
-                previous,
-                instance_id
-            );
-        }
-
-        remote_workers.push(G3pbPeer {
-            worker_id: health.worker_id,
-            endpoint: health.listen.clone(),
-        });
+    let discovered_peers = discover_g3pb_peers(&request_client).await?;
+    for resolved in discovered_peers.instances() {
         println!(
             "remote backend ready: worker_id={} endpoint={} instance_id={}",
-            health.worker_id, health.listen, instance_id
+            resolved.peer.worker_id, resolved.peer.endpoint, resolved.instance_id
         );
     }
     rpc_timings.push(RpcTiming {
         label: "health",
-        ops: backend_instances_by_worker.len(),
+        ops: discovered_peers.instances().len(),
         elapsed: health_start.elapsed(),
     });
+    let remote_workers = discovered_peers.peers();
 
     anyhow::ensure!(
-        !remote_workers.is_empty(),
+        !discovered_peers.is_empty(),
         "no healthy G3PB backends discovered in {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}"
     );
 
     let load_remote_start = Instant::now();
-    for (worker_id, instance_id) in &backend_instances_by_worker {
-        request_client
-            .load_remote(
-                *instance_id,
-                G3pbLoadRemoteRequest {
-                    blockset: local_blockset.clone(),
-                },
-            )
-            .await
-            .with_context(|| format!("failed to publish local blockset to worker {worker_id}"))?;
-    }
+    discovered_peers
+        .load_remote_blockset(&request_client, local_blockset.clone())
+        .await?;
     rpc_timings.push(RpcTiming {
         label: "load_remote",
-        ops: backend_instances_by_worker.len(),
+        ops: discovered_peers.instances().len(),
         elapsed: load_remote_start.elapsed(),
     });
 
@@ -474,10 +446,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let offer_start = Instant::now();
     let offers = join_all(offered_by_owner.into_iter().map(|(worker_id, blocks)| {
         let request_client = request_client.clone();
-        let instance_id = backend_instances_by_worker
-            .get(&worker_id)
-            .cloned()
-            .with_context(|| format!("missing backend instance for worker {worker_id}"));
+        let instance_id = discovered_peers.instance_id(worker_id);
         async move {
             let instance_id = instance_id?;
             let offer = request_client
@@ -519,10 +488,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let stage_put_start = Instant::now();
     let staged_responses = join_all(staged_by_owner.into_iter().map(|(worker_id, blocks)| {
         let request_client = request_client.clone();
-        let instance_id = backend_instances_by_worker
-            .get(&worker_id)
-            .cloned()
-            .with_context(|| format!("missing backend instance for worker {worker_id}"));
+        let instance_id = discovered_peers.instance_id(worker_id);
         async move {
             let instance_id = instance_id?;
             let response = request_client
@@ -591,12 +557,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                 .into_iter()
                 .map(|(worker_id, blocks)| {
                     let request_client = request_client.clone();
-                    let instance_id = backend_instances_by_worker
-                        .get(&worker_id)
-                        .cloned()
-                        .with_context(|| {
-                            format!("missing backend instance for worker {worker_id}")
-                        });
+                    let instance_id = discovered_peers.instance_id(worker_id);
                     async move {
                         let instance_id = instance_id?;
                         let offer = request_client
@@ -631,10 +592,7 @@ async fn app(runtime: Runtime) -> Result<()> {
             .into_iter()
             .map(|(worker_id, sequence_hashes)| {
                 let request_client = request_client.clone();
-                let instance_id = backend_instances_by_worker
-                    .get(&worker_id)
-                    .cloned()
-                    .with_context(|| format!("missing backend instance for worker {worker_id}"));
+                let instance_id = discovered_peers.instance_id(worker_id);
                 async move {
                     let instance_id = instance_id?;
                     let hits = request_client
@@ -685,10 +643,7 @@ async fn app(runtime: Runtime) -> Result<()> {
             .into_iter()
             .map(|(worker_id, sequence_hashes)| {
                 let request_client = request_client.clone();
-                let instance_id = backend_instances_by_worker
-                    .get(&worker_id)
-                    .cloned()
-                    .with_context(|| format!("missing backend instance for worker {worker_id}"));
+                let instance_id = discovered_peers.instance_id(worker_id);
                 async move {
                     let instance_id = instance_id?;
                     let fetched: G3pbFetchBlocksResponse = request_client

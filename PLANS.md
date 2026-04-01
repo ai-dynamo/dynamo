@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 02:02:11 UTC
+Last updated: 2026-04-01 02:17:44 UTC
 
 ## Active state
 
@@ -492,6 +492,15 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - `G3pbCacheStorage`
     - internal metadata/location helpers now use `G3pbCache*` terminology
   - behavior intentionally unchanged in this slice
+- ✅ Added a reusable request-plane discovery/client seam for G3PB peers
+  - lifted peer discovery, worker-id to instance-id resolution, and
+    broadcast `load_remote` wiring out of `kvbm_g3pb_worker_smoke`
+  - new shared helpers/types live in `lib/llm/src/block_manager/distributed/g3pb.rs`:
+    - `discover_g3pb_peers`
+    - `G3pbDiscoveredPeers`
+    - `G3pbPeerInstance`
+  - `kvbm_g3pb_worker_smoke` now reuses that shared seam instead of carrying
+    its own ad hoc discovery bookkeeping
 
 ### Current findings before edits
 
@@ -528,6 +537,9 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the first structural cleanup slice is low-risk and independently landable:
   the naming cleanup is isolated from request-plane behavior, NIXL transfer
   behavior, and storage semantics
+- the next structural cleanup slice is also now proven low-risk:
+  peer discovery and instance resolution can live in the shared G3PB client
+  surface without changing request-plane timings or transfer behavior
 
 ### Validation completed in this run so far
 
@@ -622,6 +634,17 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
     - pass (`6 passed`)
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
     - pass
+- post-client-seam validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`15 passed`)
+    - added unit coverage for duplicate-worker discovery rejection and
+      deterministic worker-id ordering in discovered peer registries
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
 
 ### Decisions confirmed in this run so far
 
@@ -657,6 +680,9 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - first naming cleanup
   - then reusable client seam cleanup
   - then backend/service boundary cleanup
+- keep the worker smoke timing buckets stable while refactoring:
+  move discovery bookkeeping into shared helpers, but leave timing ownership in
+  the smoke binary so measurements stay comparable across runs
 
 ### Remaining work in this run
 
@@ -665,6 +691,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - refactor `kvbm_g3pb_worker_smoke` / shared client-side request-plane logic
     into a cleaner G3PB client seam that is easier to reuse outside the smoke
     binary
+    - naming cleanup complete
+    - shared discovery/client seam complete
   - refactor `kvbm_g3pb_backend` around a cleaner backend/service boundary so
     transport wiring, storage policy, and endpoint handling are less entangled
   - the client refactor should be broader than the smoke binary wrapper:
@@ -704,12 +732,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Exact next step
 
-- continue this run with the reusable G3PB client seam:
-  - lift peer discovery, health resolution, and worker-id to instance-id mapping
-    out of `kvbm_g3pb_worker_smoke`
-  - keep placement/routing in shared `distributed/g3pb.rs`
+- continue this run with the backend/service boundary cleanup:
+  - separate backend request handling from endpoint wiring in
+    `kvbm_g3pb_backend`
+  - keep runtime/storage behavior unchanged in that slice
   - rerun the focused `g3pb` / `g3pb_filter` tests plus backend/worker build
-    after that milestone before touching the backend boundary
+    after the backend cleanup before considering config-surface follow-up
 
 ### Handoff for next run
 
