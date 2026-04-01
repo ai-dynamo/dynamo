@@ -4,9 +4,12 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
+import json
 import logging
 import os
+import time as _time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
@@ -33,6 +36,68 @@ logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+
+
+async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
+    """Wait for benchmark result files and aggregate across DP ranks."""
+    base_path = Path(bench_cfg["output_path"])
+    timeout = int(bench_cfg.get("timeout", 300))
+
+    dp_start, dp_size = 0, 1
+    try:
+        from .main import get_dp_range_for_worker
+
+        dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+    except Exception:
+        pass
+
+    rank_paths = []
+    for dp_rank in range(dp_start, dp_start + dp_size):
+        if dp_rank == 0:
+            rank_paths.append(base_path)
+        else:
+            stem, ext = os.path.splitext(str(base_path))
+            rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
+
+    for p in rank_paths:
+        p.unlink(missing_ok=True)
+
+    logger.info(
+        "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
+        rank_paths,
+        timeout,
+    )
+
+    deadline = _time.monotonic() + timeout
+    for p in rank_paths:
+        while not p.exists():
+            if _time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Benchmark did not complete within {timeout}s. " f"Missing: {p}"
+                )
+            await asyncio.sleep(0.1)
+
+    merged: dict = {}
+    for i, p in enumerate(rank_paths):
+        with open(p) as f:
+            data = json.load(f)
+        if i == 0:
+            merged = data
+            for r in merged.get("results", []):
+                r["point"]["dp_rank"] = dp_start
+        else:
+            dp_rank = dp_start + i
+            for r in data.get("results", []):
+                r["point"]["dp_rank"] = dp_rank
+            merged.setdefault("results", []).extend(data.get("results", []))
+
+    logger.info(
+        "Benchmark complete, %d points across %d rank(s)",
+        len(merged.get("results", [])),
+        len(rank_paths),
+    )
+    return merged
+
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
@@ -540,6 +605,13 @@ class WorkerFactory:
             handler._quiesce_controller.mark_resumed()
             logger.info("[Shadow] Engine awake, registering with discovery")
 
+        # Wait for self-benchmark to complete before registering.
+        bench_cfg = getattr(config, "_benchmark_additional_config", None)
+        if bench_cfg:
+            handler._benchmark_results = await _wait_and_load_benchmark(
+                bench_cfg, vllm_config
+            )
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -552,6 +624,11 @@ class WorkerFactory:
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
         ).to_dict()
+
+        perf_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.get_perf_metrics"
+        )
+        shutdown_endpoints.append(perf_endpoint)
 
         try:
             logger.debug("Starting serve_endpoint for decode worker")
@@ -578,6 +655,10 @@ class WorkerFactory:
                 ),
                 clear_endpoint.serve_endpoint(
                     handler.clear_kv_blocks,
+                    metrics_labels=model_metrics_labels,
+                ),
+                perf_endpoint.serve_endpoint(
+                    handler.get_perf_metrics,
                     metrics_labels=model_metrics_labels,
                 ),
             ]
@@ -711,7 +792,17 @@ class WorkerFactory:
             "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
         )
 
-        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
+        # Wait for self-benchmark to complete before registering.
+        bench_cfg = getattr(config, "_benchmark_additional_config", None)
+        if bench_cfg:
+            handler._benchmark_results = await _wait_and_load_benchmark(
+                bench_cfg, vllm_config
+            )
+
+        perf_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.get_perf_metrics"
+        )
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
         # Register prefill model with ModelType.Prefill
         model_input = (
@@ -730,41 +821,33 @@ class WorkerFactory:
             engine_client, use_text_input=config.use_vllm_tokenizer
         ).to_dict()
 
+        prefill_metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                config.served_model_name or config.model,
+            ),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ]
+
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
             await asyncio.gather(
-                # for prefill, we want to shutdown the engine after all prefill requests are finished because
-                #     (temp reason): we don't support re-routing prefill requests
-                #     (long-term reason): prefill engine should pull from a global queue so there is
-                #                         only a few in-flight requests that can be quickly finished
                 generate_endpoint.serve_endpoint(
                     handler.generate,  # type: ignore
                     graceful_shutdown=True,
-                    # In practice config.served_model_name is always set, but mypy needs the "or" here.
-                    metrics_labels=[
-                        (
-                            prometheus_names.labels.MODEL,
-                            config.served_model_name or config.model,
-                        ),
-                        (
-                            prometheus_names.labels.MODEL_NAME,
-                            config.served_model_name or config.model,
-                        ),
-                    ],
+                    metrics_labels=prefill_metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
                 clear_endpoint.serve_endpoint(
                     handler.clear_kv_blocks,  # type: ignore
-                    metrics_labels=[
-                        (
-                            prometheus_names.labels.MODEL,
-                            config.served_model_name or config.model,
-                        ),
-                        (
-                            prometheus_names.labels.MODEL_NAME,
-                            config.served_model_name or config.model,
-                        ),
-                    ],
+                    metrics_labels=prefill_metrics_labels,
+                ),
+                perf_endpoint.serve_endpoint(
+                    handler.get_perf_metrics,
+                    metrics_labels=prefill_metrics_labels,
                 ),
             )
             logger.debug("serve_endpoint completed for prefill worker")

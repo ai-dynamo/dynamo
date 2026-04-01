@@ -556,6 +556,11 @@ def setup_vllm_engine(
     if fpm_worker_id is not None:
         vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
+    # Pass benchmark config to InstrumentedScheduler via additional_config.
+    if hasattr(config, "_benchmark_additional_config"):
+        vllm_config.additional_config["benchmark"] = config._benchmark_additional_config
+        logger.info("Benchmark config injected into additional_config")
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)

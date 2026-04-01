@@ -683,6 +683,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         except Exception as e:
             yield {"status": "error", "message": str(e)}
 
+    async def get_perf_metrics(self, request=None):
+        """Return self-benchmark FPM results, or an error dict if none."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
+
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
         if temp_dir is not None:

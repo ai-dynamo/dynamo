@@ -171,6 +171,78 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        # Benchmark / self-profiling
+        add_argument(
+            g,
+            flag_name="--benchmark-mode",
+            env_var="DYN_BENCHMARK_MODE",
+            default=None,
+            choices=["prefill", "decode", "agg"],
+            help=(
+                "Run self-benchmark on startup before accepting requests. "
+                "Sweeps prefill ISLs and/or decode (context_length x batch_size) "
+                "points, collecting ForwardPassMetrics at each operating point."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-prefill-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_GRANULARITY",
+            default=16,
+            type=int,
+            help="Number of ISL sample points for prefill sweep (default: 16).",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-length-granularity",
+            env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
+            default=6,
+            type=int,
+            help=(
+                "Number of context length sample points for decode sweep "
+                "(default: 6)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-batch-granularity",
+            env_var="DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
+            default=6,
+            type=int,
+            help=(
+                "Number of batch size sample points per context length " "(default: 6)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-warmup-iterations",
+            env_var="DYN_BENCHMARK_WARMUP_ITERATIONS",
+            default=5,
+            type=int,
+            help="Warmup iterations before benchmark (default: 5).",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-output-path",
+            env_var="DYN_BENCHMARK_OUTPUT_PATH",
+            default="/tmp/benchmark_results.json",
+            help=(
+                "Path to write benchmark results JSON "
+                "(default: /tmp/benchmark_results.json)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-timeout",
+            env_var="DYN_BENCHMARK_TIMEOUT",
+            default=300,
+            type=int,
+            help=(
+                "Maximum seconds to wait for benchmark to complete "
+                "(default: 300). Worker startup fails if exceeded."
+            ),
+        )
+
 
 # @dataclass()
 class DynamoVllmConfig(ConfigBase):
@@ -203,6 +275,15 @@ class DynamoVllmConfig(ConfigBase):
 
     # GMS shadow mode
     gms_shadow_mode: bool = False
+
+    # Benchmark / self-profiling
+    benchmark_mode: Optional[str] = None
+    benchmark_prefill_granularity: int = 16
+    benchmark_decode_length_granularity: int = 6
+    benchmark_decode_batch_granularity: int = 6
+    benchmark_warmup_iterations: int = 5
+    benchmark_output_path: str = "/tmp/benchmark_results.json"
+    benchmark_timeout: int = 300
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""

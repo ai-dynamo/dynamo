@@ -284,6 +284,28 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
 
+    if dynamo_config.benchmark_mode is not None:
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        dynamo_config._benchmark_additional_config = {
+            "mode": dynamo_config.benchmark_mode,
+            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
+            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
+            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
+            "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
+            "output_path": dynamo_config.benchmark_output_path,
+            "timeout": dynamo_config.benchmark_timeout,
+        }
+        logger.info(
+            "Benchmark mode=%s configured (output=%s)",
+            dynamo_config.benchmark_mode,
+            dynamo_config.benchmark_output_path,
+        )
+
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(engine_config, key):
