@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 05:43:49 UTC
+Last updated: 2026-04-01 05:47:49 UTC
 
 ## Active state
 
@@ -1451,6 +1451,90 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   none beyond the existing backlog
 - this run also corrected the last stale handoff detail after the docs-only
   audit commit so `PLANS.md` now matches the current committed repo state
+- resume only from the existing non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+## Current run (2026-04-01 05:47:49 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely before changing anything so the on-disk
+  execution log, active handoff, and earlier audit tail were all verified
+  against the current tree
+- ✅ Re-audited the active `G3PB` surface against the current repo state:
+  - detached `HEAD`
+  - clean worktree at pickup
+  - current tip at pickup: `3d33f05a46de`
+  - active design/handoff surfaces still match the landed implementation
+- ✅ Re-searched the active `G3PB` handoff/code surface for remaining concrete
+  work:
+  - searched `PLANS.md`, `docs/design-docs/kvbm-g3pb-plan.md`,
+    `lib/llm/src`, and `lib/bindings/kvbm/src`
+  - repo-wide unrelated `TODO` / `FIXME` markers still exist, but no new
+    `G3PB`-specific implementation gap, cleanup item, docs gap, or validation
+    gap was found in the active slice
+- ✅ Revalidated the focused `G3PB` / bindings stack from the current tip
+- ✅ Refreshed `PLANS.md` again so this audit, the exact validation set, and
+  the next-run handoff are all written to disk
+
+### Current findings before final handoff
+
+- the active `G3PB` implementation slice still appears complete on current
+  `HEAD` (`3d33f05a46de` at pickup)
+- `Agents.md`, `PLANS.md`, and
+  `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
+  - request-plane + discovery remain the active control-plane path
+  - `KvBlockManagerConfig.g3pb_admission` remains the first native config
+    surface already adopted by a real non-smoke caller
+  - the remaining config work is broader caller adoption, not missing initial
+    adoption
+- the only remaining `G3PB` work is still the existing non-blocking follow-on
+  backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+### Validation completed in this run so far
+
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- keep treating the active `G3PB` plan as complete unless a fresh audit
+  exposes a concrete regression or real handoff/design drift
+- keep writing the exact audit scope and validation set into `PLANS.md` so the
+  next run can start from verified state instead of repeating discovery work
+- keep repo-wide unrelated TODO markers out of this plan unless a targeted
+  `G3PB` audit ties one back to the active slice
+
+### Remaining work in this run
+
+- none beyond recording this docs-only audit refresh as a signed small commit
+
+### Exact next step
+
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
+
+### Handoff for next run
+
+- this signed docs-only refresh should leave the active `G3PB`
+  implementation slice still treated as complete
+- this run rechecked the active handoff/code surface and did not uncover any
+  new `G3PB`-specific TODOs, cleanup items, docs gaps, or validation gaps
 - resume only from the existing non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
   2. decide whether retained committed blocks need backend-side reclamation
