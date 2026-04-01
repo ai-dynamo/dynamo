@@ -633,7 +633,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Exact next step
 
-- none; validated changes are already committed in `bbc48751b`
+- none; validated changes are already committed at the current detached `HEAD`
 
 ### Handoff for next run
 
