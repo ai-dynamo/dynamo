@@ -291,6 +291,14 @@ def update_engine_config_with_dynamo(
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
             logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        elif existing_cls is not None and "InstrumentedScheduler" not in str(
+            existing_cls
+        ):
+            raise ValueError(
+                f"--benchmark-mode requires InstrumentedScheduler but "
+                f"--scheduler-cls is set to '{existing_cls}'. Either remove "
+                f"--scheduler-cls or use a subclass of InstrumentedScheduler."
+            )
         dynamo_config._benchmark_additional_config = {
             "mode": dynamo_config.benchmark_mode,
             "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
