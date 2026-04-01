@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 06:22:19 UTC
+Last updated: 2026-04-01 06:23:13 UTC
 
 ## Active state
 
@@ -1456,7 +1456,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   2. decide whether retained committed blocks need backend-side reclamation
   3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
-## Current run (2026-04-01 06:22:19 UTC)
+## Current run (2026-04-01 06:23:13 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -1494,7 +1494,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - the active `G3PB` implementation slice still appears complete on current
   `HEAD`
   - pickup commit: `7d83c49c5ed3`
-  - this run only needs a docs-only `PLANS.md` refresh commit after the audit
+  - audit-refresh commit created in this run: `cbc426b16fe2`
 - `Agents.md`, `PLANS.md`, and
   `docs/design-docs/kvbm-g3pb-plan.md` remain consistent with the landed tree:
   - request-plane + discovery remain the active control-plane path
@@ -1522,6 +1522,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass as an audit search; only the existing non-blocking `G3PB` backlog plus unrelated repo-wide TODOs were found
 - `git diff --check`
   - pass before the `PLANS.md` refresh edit
+- `git commit --signoff -m "docs: refresh g3pb audit handoff"`
+  - pass (`cbc426b16fe2`)
 
 ### Decisions confirmed in this run so far
 
@@ -1536,13 +1538,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- run `git diff --check` after the `PLANS.md` refresh edit
-- make the signed small docs-only commit for this audit refresh
+- none
 
 ### Exact next step
 
-- run `git diff --check`, then commit this `PLANS.md` audit refresh with
-  `--signoff`
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog
 
 ### Handoff for next run
 
@@ -1550,8 +1551,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   `G3PB` / bindings validation stack
 - the active `G3PB` implementation slice should still be treated as complete
   unless a future audit finds a concrete new gap
-- after the signed docs-only commit for this refresh, do not spend another run
-  repeating the same audit-only update unless the repo state has actually moved
+- do not spend another run repeating the same audit-only update unless the
+  repo state has actually moved
 - if another run continues from here, resume only from the existing
   non-blocking follow-on backlog:
   1. upstream or locally patch the `nixl-sys` teardown warning if needed
