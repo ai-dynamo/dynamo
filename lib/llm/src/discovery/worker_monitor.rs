@@ -263,6 +263,19 @@ impl KvWorkerMonitor {
         scaled as f64 / THRESHOLD_SCALE as f64
     }
 
+    /// Get a reference to the live worker load states (updated by background monitor).
+    ///
+    /// Each entry is keyed by worker_id and contains per-dp_rank maps of:
+    /// - `active_decode_blocks`: KV cache blocks in active decode
+    /// - `kv_total_blocks`: total KV cache capacity
+    /// - `active_prefill_tokens`: tokens currently being prefilled
+    /// - `max_num_batched_tokens`: max batch capacity
+    ///
+    /// Reads from the returned DashMap are lock-free and safe on hot paths.
+    pub fn worker_load_states(&self) -> &Arc<DashMap<u64, WorkerLoadState>> {
+        &self.worker_load_states
+    }
+
     /// Get the current active decode blocks threshold value as f64.
     pub fn active_decode_blocks_threshold(&self) -> f64 {
         Self::scaled_to_f64(self.active_decode_blocks_threshold.load(Ordering::Relaxed))

@@ -275,6 +275,15 @@ impl OverlapScores {
     fn frequencies(&self) -> Vec<usize> {
         self.inner.frequencies.clone()
     }
+
+    #[getter]
+    fn tree_sizes(&self) -> HashMap<(u64, u32), usize> {
+        self.inner
+            .tree_sizes
+            .iter()
+            .map(|(worker, size)| ((worker.worker_id, worker.dp_rank), *size))
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -607,6 +616,7 @@ async fn create_kv_router_from_endpoint(
 #[pyclass]
 pub(crate) struct KvRouter {
     inner: Arc<RsKvPushRouter>,
+    worker_monitor: Option<WorkerLoadMonitor>,
 }
 
 /// Inject worker_id info from tracker into response's disaggregated_params.
@@ -749,8 +759,23 @@ impl KvRouter {
 
             let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
 
+            // Create and start a WorkerLoadMonitor for live utilization metrics.
+            // Uses the same Client as the KvRouter to subscribe to NATS ActiveLoad
+            // events and RuntimeConfig watches. Reads are lock-free (DashMap).
+            let monitor_client = endpoint.inner.client().await.map_err(to_pyerr)?;
+            let kv_monitor = llm_rs::discovery::KvWorkerMonitor::new(
+                monitor_client,
+                llm_rs::discovery::LoadThresholdConfig::default(),
+            );
+            use dynamo_runtime::pipeline::WorkerLoadMonitor as _;
+            kv_monitor.start_monitoring().await.map_err(to_pyerr)?;
+            let worker_monitor = Some(WorkerLoadMonitor::from_kv_worker_monitor(&kv_monitor));
+
+            tracing::info!("WorkerLoadMonitor started for KvRouter");
+
             Ok(Self {
                 inner: Arc::new(kv_push_router),
+                worker_monitor,
             })
         })
     }
@@ -992,5 +1017,163 @@ impl KvRouter {
             let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
             Ok(json_str)
         })
+    }
+
+    /// Get the WorkerLoadMonitor for live per-worker utilization metrics.
+    ///
+    /// Returns None if the monitor failed to initialize (e.g., NATS unavailable).
+    /// The returned monitor reads are lock-free and safe on hot paths.
+    #[getter]
+    fn worker_load_monitor(&self) -> Option<WorkerLoadMonitor> {
+        self.worker_monitor.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkerLoadMonitor — synchronous reader for live per-worker load states
+// ---------------------------------------------------------------------------
+
+/// Python-accessible reader for per-worker load and capacity metrics.
+///
+/// Wraps `KvWorkerMonitor`'s live `DashMap` of worker load states, which is
+/// updated asynchronously by background NATS subscriptions and config watches.
+/// All reads are lock-free (DashMap readers never block) and safe on the hot
+/// routing path.
+///
+/// Returned metrics per worker per dp_rank:
+///   - `active_decode_blocks`: KV cache blocks in active decode (compute load)
+///   - `kv_total_blocks`:      total KV cache capacity (hardware-dependent)
+///   - `active_prefill_tokens`: tokens currently being prefilled (queue depth)
+///   - `max_num_batched_tokens`: max token batch capacity
+#[pyclass]
+#[derive(Clone)]
+pub(crate) struct WorkerLoadMonitor {
+    inner: Arc<dashmap::DashMap<u64, llm_rs::discovery::WorkerLoadState>>,
+}
+
+impl WorkerLoadMonitor {
+    pub fn from_kv_worker_monitor(monitor: &llm_rs::discovery::KvWorkerMonitor) -> Self {
+        Self {
+            inner: monitor.worker_load_states().clone(),
+        }
+    }
+}
+
+#[pymethods]
+impl WorkerLoadMonitor {
+    /// Get load states for all workers as a dict of:
+    ///   { worker_id: { dp_rank: { "active_decode_blocks": int, "kv_total_blocks": int,
+    ///                              "active_prefill_tokens": int, "max_num_batched_tokens": int } } }
+    ///
+    /// Reads are lock-free. Returns only workers with known load data.
+    fn get_all(&self) -> HashMap<u64, HashMap<u32, HashMap<String, u64>>> {
+        let mut result = HashMap::new();
+        for entry in self.inner.iter() {
+            let worker_id: u64 = *entry.key();
+            let state = entry.value();
+
+            let mut dp_map: HashMap<u32, HashMap<String, u64>> = HashMap::new();
+
+            // Collect all dp_ranks from all metric maps
+            let mut dp_ranks: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            dp_ranks.extend(state.active_decode_blocks.keys());
+            dp_ranks.extend(state.kv_total_blocks.keys());
+            dp_ranks.extend(state.active_prefill_tokens.keys());
+            dp_ranks.extend(state.max_num_batched_tokens.keys());
+
+            for dp_rank in dp_ranks {
+                let mut metrics = HashMap::new();
+                if let Some(&v) = state.active_decode_blocks.get(&dp_rank) {
+                    metrics.insert("active_decode_blocks".to_string(), v);
+                }
+                if let Some(&v) = state.kv_total_blocks.get(&dp_rank) {
+                    metrics.insert("kv_total_blocks".to_string(), v);
+                }
+                if let Some(&v) = state.active_prefill_tokens.get(&dp_rank) {
+                    metrics.insert("active_prefill_tokens".to_string(), v);
+                }
+                if let Some(&v) = state.max_num_batched_tokens.get(&dp_rank) {
+                    metrics.insert("max_num_batched_tokens".to_string(), v);
+                }
+                if !metrics.is_empty() {
+                    dp_map.insert(dp_rank, metrics);
+                }
+            }
+
+            if !dp_map.is_empty() {
+                result.insert(worker_id, dp_map);
+            }
+        }
+        result
+    }
+
+    /// Get load state for a single worker (all dp_ranks).
+    /// Returns None if worker is unknown.
+    fn get_worker(&self, worker_id: u64) -> Option<HashMap<u32, HashMap<String, u64>>> {
+        let entry = self.inner.get(&worker_id)?;
+        let state = entry.value();
+
+        let mut dp_map: HashMap<u32, HashMap<String, u64>> = HashMap::new();
+
+        let mut dp_ranks: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        dp_ranks.extend(state.active_decode_blocks.keys());
+        dp_ranks.extend(state.kv_total_blocks.keys());
+        dp_ranks.extend(state.active_prefill_tokens.keys());
+        dp_ranks.extend(state.max_num_batched_tokens.keys());
+
+        for dp_rank in dp_ranks {
+            let mut metrics = HashMap::new();
+            if let Some(&v) = state.active_decode_blocks.get(&dp_rank) {
+                metrics.insert("active_decode_blocks".to_string(), v);
+            }
+            if let Some(&v) = state.kv_total_blocks.get(&dp_rank) {
+                metrics.insert("kv_total_blocks".to_string(), v);
+            }
+            if let Some(&v) = state.active_prefill_tokens.get(&dp_rank) {
+                metrics.insert("active_prefill_tokens".to_string(), v);
+            }
+            if let Some(&v) = state.max_num_batched_tokens.get(&dp_rank) {
+                metrics.insert("max_num_batched_tokens".to_string(), v);
+            }
+            if !metrics.is_empty() {
+                dp_map.insert(dp_rank, metrics);
+            }
+        }
+
+        if dp_map.is_empty() { None } else { Some(dp_map) }
+    }
+
+    /// Get KV utilization ratio (active_decode_blocks / total_kv_blocks) per worker.
+    /// Returns { worker_id: float } averaging across dp_ranks.
+    /// Workers without capacity data are omitted.
+    fn get_kv_utilization(&self) -> HashMap<u64, f64> {
+        let mut result = HashMap::new();
+        for entry in self.inner.iter() {
+            let worker_id: u64 = *entry.key();
+            let state = entry.value();
+
+            let mut total_active: u64 = 0;
+            let mut total_capacity: u64 = 0;
+            for (&dp_rank, &total_blocks) in &state.kv_total_blocks {
+                if total_blocks > 0 {
+                    let active = state
+                        .active_decode_blocks
+                        .get(&dp_rank)
+                        .copied()
+                        .unwrap_or(0);
+                    total_active += active;
+                    total_capacity += total_blocks;
+                }
+            }
+            if total_capacity > 0 {
+                result.insert(worker_id, total_active as f64 / total_capacity as f64);
+            }
+        }
+        result
+    }
+
+    fn __repr__(&self) -> String {
+        let count = self.inner.len();
+        format!("WorkerLoadMonitor({count} workers)")
     }
 }

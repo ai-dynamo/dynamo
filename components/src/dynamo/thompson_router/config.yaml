@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# KvThompsonRouter Default Configuration
+# =======================================
+#
+# Bundled with dynamo.thompson_router. Override at runtime by setting
+# THOMPSON_CONFIG_PATH=/path/to/custom/config.yaml
+#
+# All routing parameters are under the `kv_thompson:` key.
+# The router reads this at startup and exposes hot-reload via POST /config.
+
+infrastructure:
+  block_size: 16
+  router_type: kv_thompson
+  min_workers: 1
+
+kv_thompson:
+
+  # --- Learner hyperparameters ---
+  beta_decay: 0.995
+  lints_lambda: 1.0
+  lints_v: 0.25
+  lints_forget_rate: 0.995
+  latency_ema_alpha: 0.2
+
+  # --- Base scoring parameters ---
+  ts_weight: 0.05
+  idle_boost: 0.135
+  temperature: 1.70
+  temp_min: 0.15
+  temp_max: 2.0
+  queue_penalty_weight: 2.5
+  cold_start_threshold: 0.37
+  load_mod_floor: 0.3
+
+  # --- Feature toggles ---
+  enable_softmax: false
+  enable_cold_start: false
+  enable_idle_boost: false
+  enable_load_mod_floor: false
+  enable_lints: true
+  enable_affinity: false
+  enable_switching_cost: false
+  enable_adaptive_temp: false
+  enable_adaptive_explore: false
+  enable_sticky_floor: false
+
+  # --- Feature-specific weights ---
+  lints_weight: -1.0
+  affinity_base: 0.15
+  affinity_reuse_weight: 0.02
+  switch_base: 0.04
+  switch_reuse: 0.01
+  sticky_load_floor: 0.01
+  adaptive_temp_base: 1.0
