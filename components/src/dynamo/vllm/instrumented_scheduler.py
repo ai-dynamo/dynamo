@@ -512,7 +512,6 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_fpms: list[dict] = []
         self._bench_active_req_ids: set[str] = set()
         self._bench_seq = 0
-        self._bench_warmup_remaining = self._bench_config.warmup_iterations
         self._bench_grid_built = False
         self._bench_drain_pending = False
 
@@ -716,25 +715,17 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_step_warmup(self) -> SchedulerOutput | None:
         if not self._bench_active_req_ids:
-            if self._bench_warmup_remaining > 0:
-                self._bench_inject_prefill(
-                    prompt_len=256,
-                    max_tokens=self._bench_warmup_remaining + 1,
-                )
-                logger.info(
-                    "Benchmark warmup: injected request " "(iters_remaining=%d)",
-                    self._bench_warmup_remaining,
-                )
+            iters = self._bench_config.warmup_iterations
+            if iters > 0:
+                self._bench_inject_prefill(prompt_len=256, max_tokens=iters)
+                logger.info("Benchmark warmup: 1 prefill + %d decode steps", iters)
             else:
                 self._bench_transition_after_warmup()
             return None
 
         still_alive = any(rid in self.requests for rid in self._bench_active_req_ids)
         if not still_alive:
-            self._bench_active_req_ids.clear()
-            self._bench_warmup_remaining -= 1
-            if self._bench_warmup_remaining <= 0:
-                self._bench_transition_after_warmup()
+            self._bench_transition_after_warmup()
         return None
 
     def _bench_transition_after_warmup(self) -> None:
