@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:52:31 UTC
+Last updated: 2026-04-01 08:57:05 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 08:52:31 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current handoff tip at validation pickup: `ed0879ac0faf`
+  - current handoff tip at validation pickup: `8ce32a0a7feb`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -27,7 +27,7 @@ Last updated: 2026-04-01 08:52:31 UTC
   - this run is a validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 08:52:31 UTC)
+## Current run (2026-04-01 08:57:05 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -44,16 +44,18 @@ Last updated: 2026-04-01 08:52:31 UTC
   - `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` binaries
 - ✅ Re-ran the focused `G3PB` and bindings validation stack from current
   `HEAD`, and it is green
-- ✅ Re-read the current handoff state after validation and confirmed there is
-  still no remaining in-scope implementation, cleanup, or validation work for
-  the active `G3PB` slice
-- ✅ Compacted the repeated historical handoff log into this single current
-  record so future runs start from a precise, low-noise state
+- ✅ Re-read the refreshed handoff state after validation and confirmed there
+  is still no remaining in-scope implementation, cleanup, docs, or validation
+  work for the active `G3PB` slice
+- ✅ Compacted `PLANS.md` again so the next run starts from the current tip
+  instead of the previous docs-only handoff commit
 
 ### Current findings in this run
 
-- the current `HEAD` (`ed0879ac0faf`) is another docs-only handoff refresh
-  above the same validated non-docs `G3PB` implementation baseline
+- the previous handoff tip recorded in `PLANS.md` (`ed0879ac0faf`) was stale;
+  the live detached `HEAD` for this run is `8ce32a0a7feb`
+- the current `HEAD` is still a docs-only handoff refresh above the same
+  validated non-docs `G3PB` implementation baseline
 - the active `G3PB` implementation slice still appears complete on the live
   tree
 - no new `G3PB` implementation gap was identified by the audit or validation
@@ -62,10 +64,11 @@ Last updated: 2026-04-01 08:52:31 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`ed0879ac0faf`)
+  - pass (`8ce32a0a7feb`)
 - `git log --oneline -8`
   - pass
   - current recent history:
+    - `8ce32a0a7 docs: compact g3pb handoff state`
     - `ed0879ac0 docs: refresh g3pb handoff state`
     - `6b49b21a5 docs: refresh g3pb handoff state`
     - `6ba8c459d docs: refresh g3pb handoff state`
@@ -73,7 +76,6 @@ Last updated: 2026-04-01 08:52:31 UTC
     - `2f091c248 docs: normalize g3pb handoff tip`
     - `c0f65056d docs: refresh g3pb handoff state`
     - `95eb86204 docs: refresh g3pb handoff state`
-    - `c034fd5a8 docs: normalize g3pb handoff tip`
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
@@ -114,8 +116,8 @@ Last updated: 2026-04-01 08:52:31 UTC
 
 ### Handoff for next run
 
-- this file is now the compact current handoff; do not re-expand it with
-  repeated per-run history unless genuinely new scope or a regression appears
+- this file is the compact current handoff; do not re-expand it with repeated
+  per-run history unless genuinely new scope or a regression appears
 - start by re-reading:
   - `Agents.md`
   - `PLANS.md`
