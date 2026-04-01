@@ -1522,7 +1522,7 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 
 ### Remaining work in this run
 
-- none beyond recording this docs-only audit refresh as a signed small commit
+- none
 
 ### Exact next step
 
