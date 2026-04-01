@@ -2,17 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-};
 use dynamo_llm::block_manager::block::nixl::{BlockDescriptorList, BlockMutability};
 use dynamo_llm::block_manager::block::{BasicMetadata, BlockDataExt, BlockDataProvider};
 use dynamo_llm::block_manager::block::{MutableBlock, locality::Local};
@@ -20,14 +13,22 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G2G3G3pbPeerStorage, G2G3G3pbStorageConfig, G3pbCommitRequest, G3pbError,
-    G3pbFetchBlocksResponse, G3pbFetchRequest, G3pbHealthResponse, G3pbLoadRemoteRequest,
-    G3pbOfferRequest, G3pbOfferResponse, G3pbPutBlock, G3pbPutPayloadRequest, G3pbQueryHit,
-    G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse, G3pbStorageAgent,
+    G2G3G3pbPeerStorage, G2G3G3pbStorageConfig, G3PB_COMPONENT_NAME, G3PB_ENDPOINT_NAME,
+    G3PB_NAMESPACE, G3pbError, G3pbFetchBlocksResponse, G3pbHealthResponse, G3pbPutBlock,
+    G3pbQueryHit, G3pbRpcRequest, G3pbRpcResponse, G3pbStageBlocksResponse, G3pbStorageAgent,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
 use dynamo_llm::block_manager::{CancellationToken, KvBlockManager};
+use dynamo_runtime::{
+    DistributedRuntime, Runtime, Worker, logging,
+    pipeline::{
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
+    },
+    protocols::annotated::Annotated,
+    stream,
+};
 use serde_json::json;
 
 fn make_descriptor_list(
@@ -36,7 +37,10 @@ fn make_descriptor_list(
     mutability: BlockMutability,
     block_indices: Vec<usize>,
 ) -> Result<BlockDescriptorList> {
-    anyhow::ensure!(!block_indices.is_empty(), "block descriptor list cannot be empty");
+    anyhow::ensure!(
+        !block_indices.is_empty(),
+        "block descriptor list cannot be empty"
+    );
 
     Ok(serde_json::from_value(json!({
         "worker_id": worker_id,
@@ -48,7 +52,6 @@ fn make_descriptor_list(
 
 #[derive(Clone, Debug)]
 struct Args {
-    listen: SocketAddr,
     worker_id: u64,
     device_id: usize,
     host_blocks: usize,
@@ -66,7 +69,6 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:58080".parse().unwrap(),
             worker_id: 41,
             device_id: 0,
             host_blocks: 64,
@@ -90,9 +92,6 @@ impl Args {
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
-                "--listen" => {
-                    args.listen = it.next().context("missing value for --listen")?.parse()?
-                }
                 "--worker-id" => {
                     args.worker_id = it
                         .next()
@@ -143,7 +142,8 @@ impl Args {
                 }
                 "--foyer-dir" => {
                     if args.foyer_dirs.len() == 1
-                        && args.foyer_dirs[0] == PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)
+                        && args.foyer_dirs[0]
+                            == PathBuf::from(G2G3G3pbStorageConfig::DEFAULT_FOYER_DIR)
                     {
                         args.foyer_dirs.clear();
                     }
@@ -151,10 +151,7 @@ impl Args {
                         .push(it.next().context("missing value for --foyer-dir")?.into())
                 }
                 "--g2-bytes" => {
-                    args.g2_bytes = it
-                        .next()
-                        .context("missing value for --g2-bytes")?
-                        .parse()?
+                    args.g2_bytes = it.next().context("missing value for --g2-bytes")?.parse()?
                 }
                 "--foyer-memory-bytes" => {
                     args.foyer_memory_bytes = it
@@ -171,7 +168,6 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g3pb_backend
-  --listen <addr>                 HTTP listen address (default 127.0.0.1:58080)
   --worker-id <id>                backend worker id (default 41)
   --device-id <id>                CUDA device id for pinned host registration (default 0)
   --host-blocks <n>               pinned host staging capacity (default 64)
@@ -430,111 +426,92 @@ impl G3pbPeerRuntime {
 struct AppState {
     agent: Arc<G3pbStorageAgent>,
     runtime: Arc<G3pbPeerRuntime>,
-    listen: SocketAddr,
+    endpoint_id: String,
 }
 
-async fn health(State(state): State<AppState>) -> Json<G3pbHealthResponse> {
-    Json(G3pbHealthResponse {
-        worker_id: state.agent.worker_id(),
-        listen: state.listen.to_string(),
-    })
+#[derive(Clone)]
+struct G3pbEndpointHandler {
+    state: AppState,
 }
 
-async fn put_blocks(
-    State(state): State<AppState>,
-    Json(blocks): Json<Vec<G3pbPutBlock>>,
-) -> StatusCode {
-    state.agent.put_blocks(blocks).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn query_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbQueryRequest>,
-) -> Json<Vec<G3pbQueryHit>> {
-    Json(
-        state
-            .runtime
-            .query_blocks(&state.agent, &request.sequence_hashes)
-            .await,
-    )
-}
-
-async fn offer_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbOfferRequest>,
-) -> Json<G3pbOfferResponse> {
-    let accepted = state
-        .runtime
-        .offer_blocks(&state.agent, &request.blocks)
-        .await;
-
-    Json(G3pbOfferResponse { accepted })
-}
-
-async fn stage_put_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbStageBlocksRequest>,
-) -> Result<Json<G3pbStageBlocksResponse>, StatusCode> {
-    match state.runtime.stage_put_blocks(request.blocks).await {
-        Ok(response) => Ok(Json(response)),
-        Err(_) => Err(StatusCode::BAD_REQUEST),
+impl G3pbEndpointHandler {
+    fn new(state: AppState) -> Arc<Self> {
+        Arc::new(Self { state })
     }
-}
 
-async fn commit_put_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbCommitRequest>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .runtime
-        .commit_staged_blocks(&state.agent, &request.sequence_hashes)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::BAD_REQUEST)
-}
-
-async fn load_remote_blockset(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbLoadRemoteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .runtime
-        .load_remote_blockset(request.blockset)
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| StatusCode::BAD_REQUEST)
-}
-
-async fn put_payload_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbPutPayloadRequest>,
-) -> Result<StatusCode, StatusCode> {
-    match state
-        .agent
-        .offer_and_put_payload_blocks(request.blocks)
-        .await
-    {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(dynamo_llm::block_manager::distributed::G3pbError::InvalidPayloadSize { .. }) => {
-            Err(StatusCode::BAD_REQUEST)
+    async fn handle(&self, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
+        match request {
+            G3pbRpcRequest::Health => Ok(G3pbRpcResponse::Health(G3pbHealthResponse {
+                worker_id: self.state.agent.worker_id(),
+                listen: self.state.endpoint_id.clone(),
+            })),
+            G3pbRpcRequest::PutBlocks(blocks) => {
+                self.state.agent.put_blocks(blocks).await;
+                Ok(G3pbRpcResponse::Ack)
+            }
+            G3pbRpcRequest::Offer(request) => {
+                let accepted = self
+                    .state
+                    .runtime
+                    .offer_blocks(&self.state.agent, &request.blocks)
+                    .await;
+                Ok(G3pbRpcResponse::Offer(
+                    dynamo_llm::block_manager::distributed::G3pbOfferResponse { accepted },
+                ))
+            }
+            G3pbRpcRequest::PutPayload(request) => Ok(G3pbRpcResponse::PutPayload(
+                self.state
+                    .agent
+                    .offer_and_put_payload_blocks(request.blocks)
+                    .await?,
+            )),
+            G3pbRpcRequest::Query(request) => Ok(G3pbRpcResponse::Query(
+                self.state
+                    .runtime
+                    .query_blocks(&self.state.agent, &request.sequence_hashes)
+                    .await,
+            )),
+            G3pbRpcRequest::Fetch(request) => Ok(G3pbRpcResponse::Fetch(
+                self.state
+                    .runtime
+                    .fetch_descriptors(&request.sequence_hashes)?,
+            )),
+            G3pbRpcRequest::StagePut(request) => Ok(G3pbRpcResponse::StagePut(
+                self.state.runtime.stage_put_blocks(request.blocks).await?,
+            )),
+            G3pbRpcRequest::CommitPut(request) => {
+                self.state
+                    .runtime
+                    .commit_staged_blocks(&self.state.agent, &request.sequence_hashes)
+                    .await?;
+                Ok(G3pbRpcResponse::Ack)
+            }
+            G3pbRpcRequest::LoadRemote(request) => {
+                self.state.runtime.load_remote_blockset(request.blockset)?;
+                Ok(G3pbRpcResponse::Ack)
+            }
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-async fn fetch_blocks(
-    State(state): State<AppState>,
-    Json(request): Json<G3pbFetchRequest>,
-) -> Result<Json<G3pbFetchBlocksResponse>, StatusCode> {
-    let blocks = state
-        .runtime
-        .fetch_descriptors(&request.sequence_hashes)
-        .map_err(|err| match err {
-            G3pbError::NotFound { .. } => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
-
-    Ok(Json(blocks))
+#[async_trait]
+impl AsyncEngine<SingleIn<G3pbRpcRequest>, ManyOut<Annotated<G3pbRpcResponse>>, Error>
+    for G3pbEndpointHandler
+{
+    async fn generate(
+        &self,
+        input: SingleIn<G3pbRpcRequest>,
+    ) -> anyhow::Result<ManyOut<Annotated<G3pbRpcResponse>>> {
+        let (request, ctx) = input.into_parts();
+        let response = match self.handle(request).await {
+            Ok(response) => Annotated::from_data(response),
+            Err(err) => Annotated::from_error(err.to_string()),
+        };
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { response })),
+            ctx.context(),
+        ))
+    }
 }
 
 fn build_agent(worker_id: u64) -> Result<NixlAgent> {
@@ -559,29 +536,35 @@ async fn build_backend(args: &Args) -> Result<AppState> {
     Ok(AppState {
         agent,
         runtime,
-        listen: args.listen,
+        endpoint_id: format!("{G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}"),
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
+    let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
     let state = build_backend(&args).await?;
+    let handler = G3pbEndpointHandler::new(state);
+    let ingress = Ingress::for_engine(handler)?;
+    let component = distributed
+        .namespace(G3PB_NAMESPACE)?
+        .component(G3PB_COMPONENT_NAME)?;
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/offer", post(offer_blocks))
-        .route("/put", post(put_blocks))
-        .route("/load_remote", post(load_remote_blockset))
-        .route("/stage_put", post(stage_put_blocks))
-        .route("/commit_put", post(commit_put_blocks))
-        .route("/put_payload", post(put_payload_blocks))
-        .route("/query", post(query_blocks))
-        .route("/fetch", post(fetch_blocks))
-        .with_state(state);
+    println!(
+        "kvbm_g3pb_backend registering worker_id={} on {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}",
+        args.worker_id
+    );
+    component
+        .endpoint(G3PB_ENDPOINT_NAME)
+        .endpoint_builder()
+        .handler(ingress)
+        .graceful_shutdown(true)
+        .start()
+        .await
+}
 
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    println!("kvbm_g3pb_backend listening on http://{}", args.listen);
-    axum::serve(listener, app).await?;
-    Ok(())
+fn main() -> Result<()> {
+    logging::init();
+    let worker = Worker::from_settings()?;
+    worker.execute(app)
 }

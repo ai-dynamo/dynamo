@@ -10,7 +10,6 @@ use dynamo_llm::block_manager::Storage;
 use dynamo_llm::block_manager::block::transfer::{
     PoolConfig, TransferContext, WriteTo, read_from_remote,
 };
-use dynamo_llm::block_manager::offload::max_remote_transfer_batch_size;
 use dynamo_llm::block_manager::block::{
     BasicMetadata, BlockDataProvider, BlockDataProviderMut, MutableBlock, data::BlockDataExt,
     locality::LocalityProvider,
@@ -19,22 +18,22 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G3pbCommitRequest, G3pbFetchBlocksResponse, G3pbFetchRequest, G3pbHealthResponse,
-    G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbOfferResponse, G3pbPeer, G3pbPutBlock,
-    G3pbQueryHit, G3pbQueryRequest, G3pbStageBlocksRequest, G3pbStageBlocksResponse,
+    G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbCommitRequest, G3pbFetchBlocksResponse,
+    G3pbFetchRequest, G3pbLoadRemoteRequest, G3pbOfferRequest, G3pbPeer, G3pbPutBlock,
+    G3pbQueryHit, G3pbQueryRequest, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
     route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
+use dynamo_llm::block_manager::offload::max_remote_transfer_batch_size;
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, PinnedAllocator, PinnedStorage, nixl::NixlAgent,
 };
+use dynamo_runtime::{DistributedRuntime, Runtime, logging};
 use futures::future::join_all;
-use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 struct Args {
-    backend_urls: Vec<String>,
     worker_id: u64,
     device_id: usize,
     num_device_blocks: usize,
@@ -58,7 +57,6 @@ struct DemoBlock {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            backend_urls: vec!["http://127.0.0.1:58080".to_string()],
             worker_id: 11,
             device_id: 0,
             num_device_blocks: 8,
@@ -75,18 +73,9 @@ impl Args {
     fn parse() -> Result<Self> {
         let mut args = Self::default();
         let mut it = std::env::args().skip(1);
-        let mut saw_backend_url = false;
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
-                "--backend-url" => {
-                    if !saw_backend_url {
-                        args.backend_urls.clear();
-                        saw_backend_url = true;
-                    }
-                    args.backend_urls
-                        .push(it.next().context("missing value for --backend-url")?)
-                }
                 "--worker-id" => {
                     args.worker_id = it
                         .next()
@@ -135,8 +124,6 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g3pb_worker_smoke
-  --backend-url <url>             remote backend base url; repeat to add owners
-                                  (default http://127.0.0.1:58080)
   --worker-id <id>                local worker id (default 11)
   --device-id <id>                CUDA device id (default 0)
   --num-device-blocks <n>         local worker device blocks (default 8)
@@ -151,15 +138,6 @@ impl Args {
                 other => anyhow::bail!("unknown flag: {other}"),
             }
         }
-
-        let mut unique_backend_urls = Vec::new();
-        let mut seen_backend_urls = HashSet::new();
-        for backend_url in args.backend_urls {
-            if seen_backend_urls.insert(backend_url.clone()) {
-                unique_backend_urls.push(backend_url);
-            }
-        }
-        args.backend_urls = unique_backend_urls;
 
         Ok(args)
     }
@@ -356,9 +334,9 @@ fn build_transfer_context(
     )?))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
+    let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
     let nixl_agent = build_agent(args.worker_id)?;
     let block_manager = build_local_runtime(&args, nixl_agent.clone()).await?;
     let transfer_context = build_transfer_context(&args, block_manager.nixl_agent())?;
@@ -374,57 +352,54 @@ async fn main() -> Result<()> {
     let missing_demo_block = &demo_blocks[args.count];
     let local_blockset = block_manager.export_local_blockset()?;
 
-    let client = Client::new();
-    let health_checks = join_all(args.backend_urls.iter().map(|backend_url| {
-        let client = client.clone();
-        let backend_url = backend_url.clone();
-        async move {
-            let health: G3pbHealthResponse = client
-                .get(format!("{backend_url}/health"))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+    let g3pb_component = distributed
+        .namespace(G3PB_NAMESPACE)?
+        .component(G3PB_COMPONENT_NAME)?;
+    let request_client = G3pbRequestPlaneClient::new(g3pb_component).await?;
 
-            Ok::<_, anyhow::Error>((backend_url, health))
-        }
-    }))
-    .await;
-
-    let mut backend_urls_by_worker = HashMap::<u64, String>::new();
+    let mut backend_instances_by_worker = HashMap::<u64, u64>::new();
     let mut remote_workers = Vec::new();
-    for result in health_checks {
-        let (backend_url, health) = result?;
-        if let Some(previous) = backend_urls_by_worker.insert(health.worker_id, backend_url.clone())
-        {
+    for instance_id in request_client.instance_ids() {
+        let health = match request_client.health(instance_id).await {
+            Ok(health) => health,
+            Err(err) => {
+                eprintln!("skipping G3PB instance {instance_id} after failed health RPC: {err}");
+                continue;
+            }
+        };
+        if let Some(previous) = backend_instances_by_worker.insert(health.worker_id, instance_id) {
             anyhow::bail!(
-                "duplicate remote worker_id {} discovered at {} and {}",
+                "duplicate remote worker_id {} discovered at instance {} and {}",
                 health.worker_id,
                 previous,
-                backend_url
+                instance_id
             );
         }
 
         remote_workers.push(G3pbPeer {
             worker_id: health.worker_id,
-            endpoint: backend_url.clone(),
+            endpoint: health.listen.clone(),
         });
         println!(
-            "remote backend ready: worker_id={} listen={} base_url={}",
-            health.worker_id, health.listen, backend_url
+            "remote backend ready: worker_id={} endpoint={} instance_id={}",
+            health.worker_id, health.listen, instance_id
         );
     }
 
-    for (worker_id, backend_url) in &backend_urls_by_worker {
-        client
-            .post(format!("{backend_url}/load_remote"))
-            .json(&G3pbLoadRemoteRequest {
-                blockset: local_blockset.clone(),
-            })
-            .send()
-            .await?
-            .error_for_status()
+    anyhow::ensure!(
+        !remote_workers.is_empty(),
+        "no healthy G3PB backends discovered in {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}"
+    );
+
+    for (worker_id, instance_id) in &backend_instances_by_worker {
+        request_client
+            .load_remote(
+                *instance_id,
+                G3pbLoadRemoteRequest {
+                    blockset: local_blockset.clone(),
+                },
+            )
+            .await
             .with_context(|| format!("failed to publish local blockset to worker {worker_id}"))?;
     }
 
@@ -443,20 +418,15 @@ async fn main() -> Result<()> {
 
     let offered_by_owner = route_g3pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
     let offers = join_all(offered_by_owner.into_iter().map(|(worker_id, blocks)| {
-        let client = client.clone();
-        let backend_url = backend_urls_by_worker
+        let request_client = request_client.clone();
+        let instance_id = backend_instances_by_worker
             .get(&worker_id)
             .cloned()
-            .with_context(|| format!("missing backend url for worker {worker_id}"));
+            .with_context(|| format!("missing backend instance for worker {worker_id}"));
         async move {
-            let backend_url = backend_url?;
-            let offer: G3pbOfferResponse = client
-                .post(format!("{backend_url}/offer"))
-                .json(&G3pbOfferRequest { blocks })
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
+            let instance_id = instance_id?;
+            let offer = request_client
+                .offer(instance_id, G3pbOfferRequest { blocks })
                 .await?;
             Ok::<_, anyhow::Error>((worker_id, offer.accepted))
         }
@@ -486,29 +456,27 @@ async fn main() -> Result<()> {
     let mut imported_workers = HashSet::new();
     let staged_by_owner = route_g3pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
     let staged_responses = join_all(staged_by_owner.into_iter().map(|(worker_id, blocks)| {
-        let client = client.clone();
-        let backend_url = backend_urls_by_worker
+        let request_client = request_client.clone();
+        let instance_id = backend_instances_by_worker
             .get(&worker_id)
             .cloned()
-            .with_context(|| format!("missing backend url for worker {worker_id}"));
+            .with_context(|| format!("missing backend instance for worker {worker_id}"));
         async move {
-            let backend_url = backend_url?;
-            let response: G3pbStageBlocksResponse = client
-                .post(format!("{backend_url}/stage_put"))
-                .json(&G3pbStageBlocksRequest {
-                    blocks: blocks.clone(),
-                })
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
+            let instance_id = instance_id?;
+            let response = request_client
+                .stage_put(
+                    instance_id,
+                    G3pbStageBlocksRequest {
+                        blocks: blocks.clone(),
+                    },
+                )
                 .await?;
-            Ok::<_, anyhow::Error>((worker_id, backend_url, blocks, response))
+            Ok::<_, anyhow::Error>((worker_id, instance_id, blocks, response))
         }
     }))
     .await;
     for result in staged_responses {
-        let (worker_id, backend_url, blocks, response) = result?;
+        let (worker_id, instance_id, blocks, response) = result?;
         if imported_workers.insert(worker_id) {
             block_manager.import_remote_blockset(response.blockset.clone())?;
         }
@@ -526,14 +494,14 @@ async fn main() -> Result<()> {
         let notify = local_host_blocks.write_to(&mut remote_blocks, transfer_context.clone())?;
         notify.await.context("remote stage_put transfer dropped")?;
 
-        client
-            .post(format!("{backend_url}/commit_put"))
-            .json(&G3pbCommitRequest {
-                sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
-            })
-            .send()
-            .await?
-            .error_for_status()?;
+        request_client
+            .commit_put(
+                instance_id,
+                G3pbCommitRequest {
+                    sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
+                },
+            )
+            .await?;
         println!("uploaded accepted blocks to worker {worker_id} via staged NIXL transfer");
     }
 
@@ -545,20 +513,17 @@ async fn main() -> Result<()> {
             duplicate_offer_routes
                 .into_iter()
                 .map(|(worker_id, blocks)| {
-                    let client = client.clone();
-                    let backend_url = backend_urls_by_worker
+                    let request_client = request_client.clone();
+                    let instance_id = backend_instances_by_worker
                         .get(&worker_id)
                         .cloned()
-                        .with_context(|| format!("missing backend url for worker {worker_id}"));
+                        .with_context(|| {
+                            format!("missing backend instance for worker {worker_id}")
+                        });
                     async move {
-                        let backend_url = backend_url?;
-                        let offer: G3pbOfferResponse = client
-                            .post(format!("{backend_url}/offer"))
-                            .json(&G3pbOfferRequest { blocks })
-                            .send()
-                            .await?
-                            .error_for_status()?
-                            .json()
+                        let instance_id = instance_id?;
+                        let offer = request_client
+                            .offer(instance_id, G3pbOfferRequest { blocks })
                             .await?;
                         Ok::<_, anyhow::Error>((worker_id, offer.accepted))
                     }
@@ -586,20 +551,15 @@ async fn main() -> Result<()> {
         query_routes
             .into_iter()
             .map(|(worker_id, sequence_hashes)| {
-                let client = client.clone();
-                let backend_url = backend_urls_by_worker
+                let request_client = request_client.clone();
+                let instance_id = backend_instances_by_worker
                     .get(&worker_id)
                     .cloned()
-                    .with_context(|| format!("missing backend url for worker {worker_id}"));
+                    .with_context(|| format!("missing backend instance for worker {worker_id}"));
                 async move {
-                    let backend_url = backend_url?;
-                    let hits: Vec<G3pbQueryHit> = client
-                        .post(format!("{backend_url}/query"))
-                        .json(&G3pbQueryRequest { sequence_hashes })
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json()
+                    let instance_id = instance_id?;
+                    let hits = request_client
+                        .query(instance_id, G3pbQueryRequest { sequence_hashes })
                         .await?;
                     Ok::<_, anyhow::Error>(hits)
                 }
@@ -638,22 +598,20 @@ async fn main() -> Result<()> {
         fetch_routes
             .into_iter()
             .map(|(worker_id, sequence_hashes)| {
-                let client = client.clone();
-                let backend_url = backend_urls_by_worker
+                let request_client = request_client.clone();
+                let instance_id = backend_instances_by_worker
                     .get(&worker_id)
                     .cloned()
-                    .with_context(|| format!("missing backend url for worker {worker_id}"));
+                    .with_context(|| format!("missing backend instance for worker {worker_id}"));
                 async move {
-                    let backend_url = backend_url?;
-                    let fetched: G3pbFetchBlocksResponse = client
-                        .post(format!("{backend_url}/fetch"))
-                        .json(&G3pbFetchRequest {
-                            sequence_hashes: sequence_hashes.clone(),
-                        })
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json()
+                    let instance_id = instance_id?;
+                    let fetched: G3pbFetchBlocksResponse = request_client
+                        .fetch(
+                            instance_id,
+                            G3pbFetchRequest {
+                                sequence_hashes: sequence_hashes.clone(),
+                            },
+                        )
                         .await?;
                     Ok::<_, anyhow::Error>((worker_id, sequence_hashes, fetched))
                 }
@@ -766,4 +724,11 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    logging::init();
+    let runtime = Runtime::from_current()?;
+    app(runtime).await
 }

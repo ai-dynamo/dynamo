@@ -8,21 +8,29 @@ use crate::tokens::{SequenceHash, compute_hash_v2};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use dynamo_runtime::{
+    component::Component,
+    pipeline::{RouterMode, SingleIn, network::egress::push_router::PushRouter},
+    protocols::annotated::Annotated,
+};
 use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCachePolicy, PsyncIoEngineConfig,
 };
-use futures::future::join_all;
+use futures::{StreamExt, future::join_all};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 
 const DEFAULT_METADATA_SHARDS: usize = 16;
+pub const G3PB_NAMESPACE: &str = "kvbm-g3pb";
+pub const G3PB_COMPONENT_NAME: &str = "peer-cache";
+pub const G3PB_ENDPOINT_NAME: &str = "g3pb";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbPeer {
@@ -100,6 +108,30 @@ pub struct G3pbFetchRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbFetchResponse {
     pub blocks: Vec<G3pbTransferBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum G3pbRpcRequest {
+    Health,
+    PutBlocks(Vec<G3pbPutBlock>),
+    Offer(G3pbOfferRequest),
+    PutPayload(G3pbPutPayloadRequest),
+    Query(G3pbQueryRequest),
+    Fetch(G3pbFetchRequest),
+    StagePut(G3pbStageBlocksRequest),
+    CommitPut(G3pbCommitRequest),
+    LoadRemote(G3pbLoadRemoteRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum G3pbRpcResponse {
+    Ack,
+    Health(G3pbHealthResponse),
+    Offer(G3pbOfferResponse),
+    PutPayload(Vec<G3pbTransferBlock>),
+    Query(Vec<G3pbQueryHit>),
+    Fetch(G3pbFetchBlocksResponse),
+    StagePut(G3pbStageBlocksResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,10 +321,10 @@ pub struct G2G3G3pbStorageConfig {
     pub foyer_disk_capacity_bytes: usize,
     pub foyer_dirs: Vec<PathBuf>,
     pub device_id: usize,
-    pub g2_high_watermark_pct: usize,  // Evict when G2 is this full
-    pub g2_low_watermark_pct: usize,   // Evict until G2 is this full
-    pub promotion_threshold: u64,      // Access count to promote to G2
-    pub demotion_threshold: u64,       // Access count to demote to G3
+    pub g2_high_watermark_pct: usize, // Evict when G2 is this full
+    pub g2_low_watermark_pct: usize,  // Evict until G2 is this full
+    pub promotion_threshold: u64,     // Access count to promote to G2
+    pub demotion_threshold: u64,      // Access count to demote to G3
 }
 
 impl G2G3G3pbStorageConfig {
@@ -300,8 +332,8 @@ impl G2G3G3pbStorageConfig {
     pub const DEFAULT_FOYER_MEMORY_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
     pub const DEFAULT_FOYER_DISK_CAPACITY_BYTES: usize = 4 * 1024 * 1024 * 1024;
     pub const DEFAULT_FOYER_DIR: &str = "/tmp/dynamo-g3pb-foyer";
-    pub const DEFAULT_G2_HIGH_WATERMARK_PCT: usize = 90;  // 90%
-    pub const DEFAULT_G2_LOW_WATERMARK_PCT: usize = 70;   // 70%
+    pub const DEFAULT_G2_HIGH_WATERMARK_PCT: usize = 90; // 90%
+    pub const DEFAULT_G2_LOW_WATERMARK_PCT: usize = 70; // 70%
     pub const DEFAULT_PROMOTION_THRESHOLD: u64 = 10;
     pub const DEFAULT_DEMOTION_THRESHOLD: u64 = 5;
 
@@ -363,7 +395,9 @@ impl ShardedMetadata {
         sequence_hash: SequenceHash,
     ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<SequenceHash, G2G3Metadata>>> {
         let idx = self.shard_index(sequence_hash);
-        self.shards[idx].read().map_err(|_| anyhow::anyhow!("metadata lock poisoned"))
+        self.shards[idx]
+            .read()
+            .map_err(|_| anyhow::anyhow!("metadata lock poisoned"))
     }
 
     /// Get a write guard for the shard containing the sequence hash
@@ -372,7 +406,9 @@ impl ShardedMetadata {
         sequence_hash: SequenceHash,
     ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<SequenceHash, G2G3Metadata>>> {
         let idx = self.shard_index(sequence_hash);
-        self.shards[idx].write().map_err(|_| anyhow::anyhow!("metadata lock poisoned"))
+        self.shards[idx]
+            .write()
+            .map_err(|_| anyhow::anyhow!("metadata lock poisoned"))
     }
 
     /// Get read guards for multiple sequence hashes (may return duplicates for same shard)
@@ -427,7 +463,7 @@ pub struct G2G3G3pbPeerStorage {
     metadata: ShardedMetadata,
     tick_counter: AtomicU64,
     _g2_allocator: Arc<crate::block_manager::storage::PinnedAllocator>,
-    g2_free_list: RwLock<VecDeque<(usize, usize)>>,  // (offset, size)
+    g2_free_list: RwLock<VecDeque<(usize, usize)>>, // (offset, size)
     g2_allocated: AtomicU64,
     config: G2G3G3pbStorageConfig,
 }
@@ -440,8 +476,7 @@ impl G2G3G3pbPeerStorage {
         let g2_storage = Arc::new(g2_allocator.allocate(config.g2_capacity_bytes)?);
 
         let num_foyer_shards = config.foyer_dirs.len().max(1);
-        let foyer_memory_per_shard =
-            (config.foyer_memory_capacity_bytes / num_foyer_shards).max(1);
+        let foyer_memory_per_shard = (config.foyer_memory_capacity_bytes / num_foyer_shards).max(1);
         let foyer_disk_per_shard = (config.foyer_disk_capacity_bytes / num_foyer_shards).max(1);
         let mut foyer_shards = Vec::with_capacity(num_foyer_shards);
         for (idx, dir) in config.foyer_dirs.iter().enumerate() {
@@ -476,7 +511,8 @@ impl G2G3G3pbPeerStorage {
     }
 
     fn next_tick(&self) -> u64 {
-        self.tick_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.tick_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     fn foyer_shard_index(&self, sequence_hash: SequenceHash) -> usize {
@@ -545,7 +581,8 @@ impl G2G3G3pbPeerStorage {
         // For now, we'll use unsafe to get mutable access to the Arc's inner data
         // This is safe because we're the only owner of this Arc
         unsafe {
-            let storage_ptr = Arc::as_ptr(&self.g2_storage) as *mut crate::block_manager::storage::cuda::PinnedStorage;
+            let storage_ptr = Arc::as_ptr(&self.g2_storage)
+                as *mut crate::block_manager::storage::cuda::PinnedStorage;
             let ptr = (*storage_ptr).as_mut_ptr().add(offset);
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
         }
@@ -557,9 +594,15 @@ impl G2G3G3pbPeerStorage {
             return None;
         }
         match meta.location {
-            G2FoyerLocation::G2 { offset } => Some(self.read_from_g2(offset, meta.size_bytes).await)
-                .map(|_| G2FoyerLocation::G2 { offset }),
-            G2FoyerLocation::Foyer => self.foyer_get(sequence_hash).await.ok()??.is_empty()
+            G2FoyerLocation::G2 { offset } => {
+                Some(self.read_from_g2(offset, meta.size_bytes).await)
+                    .map(|_| G2FoyerLocation::G2 { offset })
+            }
+            G2FoyerLocation::Foyer => self
+                .foyer_get(sequence_hash)
+                .await
+                .ok()??
+                .is_empty()
                 .then_some(G2FoyerLocation::Foyer)
                 .or(Some(G2FoyerLocation::Foyer)),
         }
@@ -720,7 +763,11 @@ impl G2G3G3pbPeerStorage {
         }
 
         if freed_size < required_size {
-            return Err(anyhow::anyhow!("Failed to evict enough space: needed {}, freed {}", required_size, freed_size));
+            return Err(anyhow::anyhow!(
+                "Failed to evict enough space: needed {}, freed {}",
+                required_size,
+                freed_size
+            ));
         }
 
         Ok(())
@@ -741,16 +788,21 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
                 G2FoyerLocation::Foyer
             };
 
-            self.metadata.insert(block.sequence_hash, G2G3Metadata {
-                size_bytes: block.size_bytes,
-                location,
-                priority: 0,
-                returned_tick: tick,
-                acquired_tick: tick,
-                access_count: 0,
-                last_access_tick: tick,
-                payload_ready: existing_location.is_some(),
-            }).expect("metadata lock poisoned");
+            self.metadata
+                .insert(
+                    block.sequence_hash,
+                    G2G3Metadata {
+                        size_bytes: block.size_bytes,
+                        location,
+                        priority: 0,
+                        returned_tick: tick,
+                        acquired_tick: tick,
+                        access_count: 0,
+                        last_access_tick: tick,
+                        payload_ready: existing_location.is_some(),
+                    },
+                )
+                .expect("metadata lock poisoned");
         }
     }
 
@@ -805,11 +857,13 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
                     G2FoyerLocation::Foyer => {}
                 }
 
-                self.metadata.update(block.meta.sequence_hash, |meta| {
-                    meta.returned_tick = tick;
-                    meta.last_access_tick = tick;
-                    meta.payload_ready = true;
-                }).expect("metadata lock poisoned");
+                self.metadata
+                    .update(block.meta.sequence_hash, |meta| {
+                        meta.returned_tick = tick;
+                        meta.last_access_tick = tick;
+                        meta.payload_ready = true;
+                    })
+                    .expect("metadata lock poisoned");
             } else {
                 let location = match self.allocate_in_g2(block.payload.len()).await {
                     Ok((offset, _)) => {
@@ -819,16 +873,21 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
                     Err(_) => G2FoyerLocation::Foyer,
                 };
 
-                self.metadata.insert(block.meta.sequence_hash, G2G3Metadata {
-                    size_bytes: block.meta.size_bytes,
-                    location,
-                    priority: 0,
-                    returned_tick: tick,
-                    acquired_tick: tick,
-                    access_count: 0,
-                    last_access_tick: tick,
-                    payload_ready: true,
-                }).expect("metadata lock poisoned");
+                self.metadata
+                    .insert(
+                        block.meta.sequence_hash,
+                        G2G3Metadata {
+                            size_bytes: block.meta.size_bytes,
+                            location,
+                            priority: 0,
+                            returned_tick: tick,
+                            acquired_tick: tick,
+                            access_count: 0,
+                            last_access_tick: tick,
+                            payload_ready: true,
+                        },
+                    )
+                    .expect("metadata lock poisoned");
             }
         }
 
@@ -845,10 +904,14 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
         let mut hits = Vec::new();
 
         // Group by shard to minimize lock acquisitions
-        let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> = std::collections::HashMap::new();
+        let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> =
+            std::collections::HashMap::new();
         for &hash in sequence_hashes {
             let shard_idx = self.metadata.shard_index(hash);
-            hashes_by_shard.entry(shard_idx).or_insert_with(Vec::new).push(hash);
+            hashes_by_shard
+                .entry(shard_idx)
+                .or_insert_with(Vec::new)
+                .push(hash);
         }
 
         // Query each shard separately
@@ -885,10 +948,14 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
         let mut to_promote = Vec::new();
 
         // Group sequence hashes by shard to minimize lock acquisitions
-        let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> = std::collections::HashMap::new();
+        let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> =
+            std::collections::HashMap::new();
         for &hash in sequence_hashes {
             let shard_idx = self.metadata.shard_index(hash);
-            hashes_by_shard.entry(shard_idx).or_insert_with(Vec::new).push(hash);
+            hashes_by_shard
+                .entry(shard_idx)
+                .or_insert_with(Vec::new)
+                .push(hash);
         }
 
         // First pass: update access tracking and collect blocks to promote
@@ -948,14 +1015,15 @@ impl G3pbPeerStorage for G2G3G3pbPeerStorage {
         // Third pass: fetch blocks (outside lock)
         for (sequence_hash, location, size) in block_locations {
             let payload = match location {
-                G2FoyerLocation::G2 { offset } => {
-                    self.read_from_g2(offset, size).await
-                }
+                G2FoyerLocation::G2 { offset } => self.read_from_g2(offset, size).await,
                 G2FoyerLocation::Foyer => {
-                    match self.foyer_get(sequence_hash).await.map_err(|_| G3pbError::NotFound {
-                        worker_id,
-                        sequence_hashes: vec![sequence_hash],
-                    })? {
+                    match self
+                        .foyer_get(sequence_hash)
+                        .await
+                        .map_err(|_| G3pbError::NotFound {
+                            worker_id,
+                            sequence_hashes: vec![sequence_hash],
+                        })? {
                         Some(p) => p,
                         None => {
                             missing.push(sequence_hash);
@@ -1167,6 +1235,149 @@ impl G3pbStorageAgent {
 pub struct G3pbStorageClient {
     peers: Vec<G3pbPeer>,
     agents: HashMap<WorkerID, Arc<G3pbStorageAgent>>,
+}
+
+#[derive(Clone)]
+pub struct G3pbRequestPlaneClient {
+    router: PushRouter<G3pbRpcRequest, Annotated<G3pbRpcResponse>>,
+}
+
+impl G3pbRequestPlaneClient {
+    pub async fn new(component: Component) -> Result<Self> {
+        let client = component.endpoint(G3PB_ENDPOINT_NAME).client().await?;
+        client.wait_for_instances().await?;
+        let router = PushRouter::from_client_no_fault_detection(client, RouterMode::Direct).await?;
+        Ok(Self { router })
+    }
+
+    pub fn instance_ids(&self) -> Vec<u64> {
+        self.router.client.instance_ids()
+    }
+
+    async fn request(&self, instance_id: u64, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
+        let mut stream = self
+            .router
+            .direct(SingleIn::new(request), instance_id)
+            .await?;
+        let response = stream.next().await.ok_or_else(|| {
+            anyhow::anyhow!("G3PB request to instance {instance_id} returned no response")
+        })?;
+
+        response.into_result()?.ok_or_else(|| {
+            anyhow::anyhow!("G3PB request to instance {instance_id} returned an empty response")
+        })
+    }
+
+    pub async fn health(&self, instance_id: u64) -> Result<G3pbHealthResponse> {
+        match self.request(instance_id, G3pbRpcRequest::Health).await? {
+            G3pbRpcResponse::Health(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB health response: {other:?}"),
+        }
+    }
+
+    pub async fn put_blocks(&self, instance_id: u64, blocks: Vec<G3pbPutBlock>) -> Result<()> {
+        match self
+            .request(instance_id, G3pbRpcRequest::PutBlocks(blocks))
+            .await?
+        {
+            G3pbRpcResponse::Ack => Ok(()),
+            other => anyhow::bail!("unexpected G3PB put_blocks response: {other:?}"),
+        }
+    }
+
+    pub async fn offer(
+        &self,
+        instance_id: u64,
+        request: G3pbOfferRequest,
+    ) -> Result<G3pbOfferResponse> {
+        match self
+            .request(instance_id, G3pbRpcRequest::Offer(request))
+            .await?
+        {
+            G3pbRpcResponse::Offer(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB offer response: {other:?}"),
+        }
+    }
+
+    pub async fn put_payload(
+        &self,
+        instance_id: u64,
+        request: G3pbPutPayloadRequest,
+    ) -> Result<Vec<G3pbTransferBlock>> {
+        match self
+            .request(instance_id, G3pbRpcRequest::PutPayload(request))
+            .await?
+        {
+            G3pbRpcResponse::PutPayload(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB put_payload response: {other:?}"),
+        }
+    }
+
+    pub async fn query(
+        &self,
+        instance_id: u64,
+        request: G3pbQueryRequest,
+    ) -> Result<Vec<G3pbQueryHit>> {
+        match self
+            .request(instance_id, G3pbRpcRequest::Query(request))
+            .await?
+        {
+            G3pbRpcResponse::Query(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB query response: {other:?}"),
+        }
+    }
+
+    pub async fn fetch(
+        &self,
+        instance_id: u64,
+        request: G3pbFetchRequest,
+    ) -> Result<G3pbFetchBlocksResponse> {
+        match self
+            .request(instance_id, G3pbRpcRequest::Fetch(request))
+            .await?
+        {
+            G3pbRpcResponse::Fetch(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB fetch response: {other:?}"),
+        }
+    }
+
+    pub async fn stage_put(
+        &self,
+        instance_id: u64,
+        request: G3pbStageBlocksRequest,
+    ) -> Result<G3pbStageBlocksResponse> {
+        match self
+            .request(instance_id, G3pbRpcRequest::StagePut(request))
+            .await?
+        {
+            G3pbRpcResponse::StagePut(response) => Ok(response),
+            other => anyhow::bail!("unexpected G3PB stage_put response: {other:?}"),
+        }
+    }
+
+    pub async fn commit_put(&self, instance_id: u64, request: G3pbCommitRequest) -> Result<()> {
+        match self
+            .request(instance_id, G3pbRpcRequest::CommitPut(request))
+            .await?
+        {
+            G3pbRpcResponse::Ack => Ok(()),
+            other => anyhow::bail!("unexpected G3PB commit_put response: {other:?}"),
+        }
+    }
+
+    pub async fn load_remote(
+        &self,
+        instance_id: u64,
+        request: G3pbLoadRemoteRequest,
+    ) -> Result<()> {
+        match self
+            .request(instance_id, G3pbRpcRequest::LoadRemote(request))
+            .await?
+        {
+            G3pbRpcResponse::Ack => Ok(()),
+            other => anyhow::bail!("unexpected G3PB load_remote response: {other:?}"),
+        }
+    }
 }
 
 impl G3pbStorageClient {

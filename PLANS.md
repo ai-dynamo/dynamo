@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-03-31 23:06:30 UTC
+Last updated: 2026-04-01 00:40:12 UTC
 
 ## Active state
 
@@ -41,16 +41,48 @@ Last updated: 2026-03-31 23:06:30 UTC
   - `target/debug/kvbm_nixl_transfer_smoke` (pass)
   - host-only backend smoke using descriptor endpoints (pass)
   - full `target/debug/kvbm_g3pb_worker_smoke` with remote fetch and local onboard (pass)
+- ✅ Migrated backend + smoke metadata/control traffic to Dynamo request-plane + discovery
+  - added shared `G3pbRpcRequest` / `G3pbRpcResponse`
+  - added `G3pbRequestPlaneClient`
+  - added shared endpoint constants:
+    - `G3PB_NAMESPACE=kvbm-g3pb`
+    - `G3PB_COMPONENT_NAME=peer-cache`
+    - `G3PB_ENDPOINT_NAME=g3pb`
+  - `kvbm_g3pb_backend` now serves a Dynamo `Ingress` endpoint instead of Axum HTTP routes
+  - `kvbm_g3pb_worker_smoke` now discovers peers from Dynamo discovery instead of `--backend-url`
+- ✅ Revalidated the migrated request-plane path end-to-end
+  - shared file-backed discovery smoke:
+    - backend 53:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.BBwJzW target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 16`
+    - backend 54:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.BBwJzW target/debug/kvbm_g3pb_backend --worker-id 54 --host-blocks 16`
+    - worker smoke owning to worker 53:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.BBwJzW target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --host-blocks 8 --count 4`
+      - pass
+    - worker smoke owning to worker 54:
+      `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.BBwJzW target/debug/kvbm_g3pb_worker_smoke --worker-id 1001 --host-blocks 8 --count 1 --sequence-start 2025`
+      - pass
+- ✅ Fixed request-plane smoke teardown regression
+  - the first rewrite used `Worker::from_settings()` in `kvbm_g3pb_worker_smoke`
+  - the data path completed successfully but repeated runs could segfault during teardown
+  - switching that binary back to `tokio::main` removed the segfault while preserving the request-plane/discovery refactor
 
 ### Context re-read
 
 - `Agents.md`
 - `PLANS.md`
 - `docs/design-docs/kvbm-g3pb-plan.md`
-- `lib/llm/src/block_manager/distributed.rs`
-- `lib/llm/src/block_manager/distributed/g3pb.rs`
+- `../dynamo/lib/runtime/examples/hello_world/src/bin/server.rs`
+- `../dynamo/lib/runtime/examples/hello_world/src/bin/client.rs`
+- `../dynamo/lib/runtime/src/component.rs`
+- `../dynamo/lib/runtime/src/component/client.rs`
+- `../dynamo/lib/runtime/src/component/endpoint.rs`
+- `../dynamo/lib/runtime/src/distributed.rs`
+- `../dynamo/lib/runtime/src/storage/kv.rs`
 - `lib/llm/src/bin/kvbm_g3pb_backend.rs`
 - `lib/llm/src/bin/kvbm_g3pb_worker_smoke.rs`
+- `lib/llm/src/block_manager/distributed.rs`
+- `lib/llm/src/block_manager/distributed/g3pb.rs`
 - `lib/llm/src/bin/kvbm_nixl_transfer_smoke.rs`
 - `lib/llm/src/block_manager/distributed/transfer.rs`
 - `lib/llm/src/block_manager/distributed/worker.rs`
@@ -58,6 +90,30 @@ Last updated: 2026-03-31 23:06:30 UTC
 
 ### Current findings before edits
 
+- Dynamo already has the request-plane and discovery pieces this slice needs:
+  - `endpoint_builder().handler(...).start()` automatically registers the
+    endpoint in discovery using the active request-plane transport
+  - `component.endpoint(...).client().await?` plus `PushRouter` provides the
+    normal typed request path to discovered peers
+  - `Client::wait_for_instances()` and the underlying discovery watch already
+    provide the peer membership view needed by the worker smoke
+- a cross-process smoke does not require etcd for this slice:
+  - `DistributedConfig` supports `DYN_DISCOVERY_BACKEND=file`
+  - the shared file-backed store root comes from `DYN_FILE_KV`
+  - that is sufficient for multiple backend/worker processes on one machine to
+    discover the same `G3PB` endpoint instances
+- the long-term control-plane direction is therefore clear:
+  - backend should become a normal Dynamo component endpoint instead of an
+    ad hoc Axum HTTP service
+  - worker smoke should discover backend peers from Dynamo discovery instead of
+    taking `--backend-url`
+  - health/metadata RPCs should move onto a typed request-plane protocol while
+    NIXL/UCX remains the bulk transfer path
+- that direction is now implemented and validated with a shared file-backed
+  discovery store
+- the remaining transport cleanup issue is narrower now:
+  repeated request-plane smokes complete their data path and exit successfully,
+  but still log `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` during teardown
 - worktree was not clean at pickup:
   - modified `lib/llm/src/block_manager/distributed/g3pb.rs`
 - the only uncommitted change at pickup replaced
@@ -140,6 +196,27 @@ Last updated: 2026-03-31 23:06:30 UTC
     `createXferReq: no specified or potential backend had the required registrations to be able to do the transfer`
   - additional NIXL warning on teardown:
     `invalidateRemoteMD: error invalidating remote metadata for agent '53Н'`
+- request-plane + discovery migration validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass after each migration milestone
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend`
+    - pass after replacing Axum with the Dynamo endpoint handler
+  - `cargo check --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass after the worker smoke rewrite
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass after shared request-plane protocol/client additions (`13 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke --bin kvbm_nixl_transfer_smoke`
+    - pass
+  - `target/debug/kvbm_nixl_transfer_smoke`
+    - pass
+  - request-plane discovery smoke to worker `53`
+    - pass
+  - request-plane discovery smoke to worker `54`
+    - pass
+  - repeated request-plane smokes after changing `kvbm_g3pb_worker_smoke` back to `tokio::main`
+    - pass without the earlier teardown segfault
 
 ### Decisions confirmed in this run so far
 
@@ -188,6 +265,16 @@ Last updated: 2026-03-31 23:06:30 UTC
 - the remaining follow-up is only the separate teardown warning
   `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`, which is not currently treated
   as evidence of a `nixl-sys` ownership bug
+- discovery/request-plane implementation decision for the next slice:
+  - landed as planned:
+    - typed `G3PB` request protocol in
+      `lib/llm/src/block_manager/distributed/g3pb.rs`
+    - backend served through Dynamo `Ingress`
+    - worker addressed backends by discovered `instance_id`
+    - shared file-backed discovery works cross-process without etcd
+  - keep the old direct-HTTP control plane out of the final path
+  - keep `kvbm_g3pb_backend` on the long-lived `Worker` wrapper
+  - keep `kvbm_g3pb_worker_smoke` on `tokio::main` because it is a short-lived validation binary and that avoids the teardown segfault
 
 ### Remaining work in this run
 
@@ -212,24 +299,36 @@ Last updated: 2026-03-31 23:06:30 UTC
   - keep `G1 -> G3PB` semantics as copy/replication, not ownership transfer
   - implemented in `lib/llm/src/block_manager/offload/g3pb_filter.rs`
   - tests pass (6 passed)
-- refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
+- ✅ refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
   - register `G3PB` as a Dynamo component endpoint and discover remotes via the discovery backend
   - remove manual `--listen` / `--backend-url` control-plane wiring from the long-term path
   - keep bulk data movement on NIXL/UCX; use request-plane only for metadata/handshake RPCs
-  - assume request-plane control traffic should comfortably handle at least ~100 RPS for `offer` / `query` / `stage_put` / `commit_put` / `fetch` metadata calls, then validate with measurement after the refactor
+  - request-plane metadata-RPC throughput measurement is still pending
   - do not add the speculative unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or `disk_block_observer` surface in this slice; keep those deferred unless a concrete requirement appears
+- ✅ next implementation slice, in order:
+  - add shared typed `G3PB` RPC request/response enums plus a small client
+    wrapper in `lib/llm/src/block_manager/distributed/g3pb.rs`
+  - convert `kvbm_g3pb_backend` from Axum handlers to a Dynamo endpoint engine
+  - convert `kvbm_g3pb_worker_smoke` from manual `--backend-url` calls to
+    discovery-driven peer discovery using the new request-plane client
+  - run focused compile/tests after the protocol/client slice before attempting
+    the full smoke rewrite
 - revalidate the next slice in layers:
-  - repeated `kvbm_g3pb_worker_smoke` loop against a stable backend to see
-    whether the `invalidateRemoteMD` warning remains harmless under repetition
-  - multi-backend ownership/routing smoke with multiple `G3PB` peers
-  - larger block-count staged transfer smoke
+  - ✅ repeated `kvbm_g3pb_worker_smoke` loop against a stable backend
+    - data path remains good
+    - the remaining teardown issue is the warning
+      `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+  - ✅ multi-backend ownership/routing smoke with multiple `G3PB` peers
+    - ownership to worker `53` proven
+    - ownership to worker `54` proven with `--sequence-start 2025`
+  - larger block-count staged transfer smoke remains pending
   - backend restart/reload validation across `load_remote` plus subsequent
-    `query` / `fetch`
-  - worker-side compile/tests after the smoke rewrite
-  - `kvbm_nixl_transfer_smoke`
-  - host-only `G3PB` backend smoke with `stage_put` / `commit_put` / descriptor
-    fetch
-  - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
+    `query` / `fetch` remains pending
+  - ✅ worker-side compile/tests after the smoke rewrite
+  - ✅ `kvbm_nixl_transfer_smoke`
+  - host-only backend-only request-plane harness remains pending if we still
+    want a non-worker validation equivalent to the older HTTP curl smoke
+  - ✅ full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
 
 ### Concrete transport gap
 
@@ -258,35 +357,15 @@ Last updated: 2026-03-31 23:06:30 UTC
 - the remaining unresolved question is whether this transport slice needs:
   - `SystemStorage` rather than `PinnedStorage`
   - a different backend/registration mix
-  - or reuse of an existing KVBM transfer-handler path instead of the ad hoc
-    smoke `TransferContext`
 
 ### Exact next step
 
-- ✅ COMPLETED: All immediate validation and G3PB admission policy tasks
-- NEXT MAJOR TASK: Refactor both `kvbm_g3pb_backend` and `kvbm_g3pb_worker_smoke` to use Dynamo request-plane + discovery instead of ad hoc HTTP base URLs:
-  - next file to investigate:
-    - `lib/llm/src/block_manager/distributed.rs` (for Dynamo request-plane + discovery integration)
-    - Look for existing Dynamo request-plane and discovery patterns in the codebase
-  - next commands:
-    - Investigate how Dynamo request-plane and discovery are currently implemented
-    - Register `G3PB` as a Dynamo component endpoint and discover remotes via the discovery backend
-    - Remove manual `--listen` / `--backend-url` control-plane wiring from the long-term path
-    - Keep bulk data movement on NIXL/UCX; use request-plane only for metadata/handshake RPCs
-    - Assume request-plane control traffic should comfortably handle at least ~100 RPS for `offer` / `query` / `stage_put` / `commit_put` / `fetch` metadata calls, then validate with measurement after the refactor
-    - Do not add the speculative unconditional `nixl_agent` path, `(Disk, Host)` transfer arm, or `disk_block_observer` surface in this slice; keep those deferred unless a concrete requirement appears
-  - revalidate the next slice in layers:
-    - repeated `kvbm_g3pb_worker_smoke` loop against a stable backend to see
-      whether the `invalidateRemoteMD` warning remains harmless under repetition
-    - multi-backend ownership/routing smoke with multiple `G3PB` peers
-    - larger block-count staged transfer smoke
-    - backend restart/reload validation across `load_remote` plus subsequent
-      `query` / `fetch`
-    - worker-side compile/tests after the smoke rewrite
-    - `kvbm_nixl_transfer_smoke`
-    - host-only `G3PB` backend smoke with `stage_put` / `commit_put` / descriptor
-      fetch
-    - full `kvbm_g3pb_worker_smoke` with remote fetch and local onboard
+- next follow-up if another run continues from here:
+  - backend restart/reload validation for the request-plane path
+  - larger staged-transfer smoke counts
+  - explicit request-plane metadata-RPC throughput measurement
+  - deeper diagnosis of the still-non-blocking teardown warning
+    `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
 
 ### Handoff for next run
 
@@ -296,11 +375,13 @@ The G3PB implementation is now in a stable, working state:
 - G3PB admission policy has been implemented with configurable behavior
 - All tests pass
 
-The next major task is to integrate G3PB with Dynamo's request-plane and discovery system to replace the ad hoc HTTP URLs. This will require:
-1. Understanding how Dynamo's request-plane and discovery work
-2. Registering G3PB as a component endpoint
-3. Updating both backend and worker binaries to use discovery instead of manual URLs
-4. Validating that the request-plane can handle the expected metadata RPC load
+The request-plane/discovery migration is now landed and validated.
+
+If there is another run, spend it on the remaining validation tail:
+1. backend restart/reload validation across `load_remote` + `query` / `fetch`
+2. larger staged-transfer counts
+3. request-plane metadata-RPC throughput measurement
+4. investigation of the still-non-blocking teardown warning
 
 The `invalidateRemoteMD` warning on teardown is currently treated as a separate non-blocking cleanup issue and should be investigated separately if it becomes problematic.
 
@@ -348,4 +429,4 @@ The `invalidateRemoteMD` warning on teardown is currently treated as a separate 
    constructor path for the standalone peer binary.
 
 
-DO NOT COMMIT.
+Commit is allowed for this state because the end-to-end `G3PB` validation stack is working.
