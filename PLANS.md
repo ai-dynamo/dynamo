@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:31:38 UTC
+Last updated: 2026-04-01 10:37:07 UTC
 
 ## Active state
 
@@ -28,7 +28,7 @@ Last updated: 2026-04-01 10:31:38 UTC
   - this run is a fresh validation plus handoff compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 10:31:38 UTC)
+## Current run (2026-04-01 10:37:07 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -36,7 +36,7 @@ Last updated: 2026-04-01 10:31:38 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Re-audited the live repo state from detached `HEAD` `3fc8b1127919`
+- Re-audited the live repo state from detached `HEAD` `9a1db9470e35`
 - Confirmed the active tree still contains the seams the handoff and design
   doc require:
   - workspace `[patch.crates-io]` override for `third_party/nixl-sys`
@@ -50,7 +50,7 @@ Last updated: 2026-04-01 10:31:38 UTC
 - Re-confirmed that the plan still has no open implementation work for the
   active `G3PB` slice; this run only refreshes validation and handoff state
 - Compacted `PLANS.md` so this file reflects the fresh validation state from
-  `3fc8b1127919`
+  `9a1db9470e35`
 - Re-ran the post-edit `g3pb::` spot check with only `PLANS.md` dirty, and it
   passed
 - Landed a signed docs-only handoff refresh commit after the post-edit
@@ -58,9 +58,9 @@ Last updated: 2026-04-01 10:31:38 UTC
 
 ### Current findings in this run
 
-- the detached `HEAD` validated in this run is `3fc8b1127919`
+- the detached `HEAD` validated in this run is `9a1db9470e35`
 - `PLANS.md` was stale at the start of the run because it still named older
-  validated detached `HEAD` `e63d88168be9`
+  validated detached `HEAD` `3fc8b1127919`
 - the current live detached `HEAD` after this run is newer than the validated
   detached `HEAD` only by the docs-only handoff refresh commit from this run
 - no non-docs tree delta was needed in this run; only the handoff document is
@@ -77,9 +77,11 @@ Last updated: 2026-04-01 10:31:38 UTC
 ### Validation completed in this run
 
 - `git rev-parse --short=12 HEAD`
-  - pass (`3fc8b1127919`)
+  - pass (`9a1db9470e35`)
 - `git log --oneline -8`
   - pass
+- `git status --short --branch`
+  - pass (`## HEAD (no branch)`)
 - `sed -n '1,220p' Agents.md`
   - pass
 - `sed -n '1,260p' PLANS.md`
@@ -104,20 +106,12 @@ Last updated: 2026-04-01 10:31:38 UTC
   - pass (`4 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
-- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
 - `rg -n "g3pb.*(smoke|e2e)|G3PB.*(smoke|e2e)|worker_smoke|end-to-end|end to end" lib/llm lib/bindings tests docs -g '!target'`
   - pass as an end-to-end test inventory search
   - result: no standalone runnable `G3PB` e2e test target surfaced beyond the
     existing `kvbm_g3pb_worker_smoke` binary and the focused validation stack
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
-  - pass (`15 passed`) as the final post-edit spot check before the signed
-    docs-only handoff refresh commit
-- `git rev-parse --short=12 HEAD`
-  - pass after the signed docs-only handoff refresh commit
-- `git status --short --branch`
-  - pass (clean detached `HEAD`) after the signed docs-only handoff refresh
-    commit
+  - pass (`15 passed`) as the post-edit spot check with only `PLANS.md` dirty
 
 ### Decisions confirmed in this run
 
@@ -152,7 +146,7 @@ Last updated: 2026-04-01 10:31:38 UTC
   docs-only tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
 - this run fully revalidated the active slice from detached `HEAD`
-  `3fc8b1127919`, then landed a docs-only handoff refresh commit on top
+  `9a1db9470e35`, then landed a docs-only handoff refresh commit on top
 - no code changes are pending for the active `G3PB` slice
 - if future work is needed, treat it as separate follow-on scope:
   1. expand native `KvBlockManagerConfig.g3pb_admission` adoption only when a
