@@ -489,16 +489,16 @@ class PodStatusDetail:
     restart_count: int = 0
 
     def format(self) -> str:
-        parts = [f"{self.pod_name}/{self.container_name}: {self.state}"]
+        result = f"{self.pod_name}/{self.container_name}: {self.state}"
         if self.reason:
-            parts[0] += f": {self.reason}"
+            result += f": {self.reason}"
         if self.message:
-            parts[0] += f" ({self.message})"
+            result += f" ({self.message})"
         if self.exit_code is not None:
-            parts[0] += f" (exit_code={self.exit_code})"
+            result += f" (exit_code={self.exit_code})"
         if self.restart_count > 0:
-            parts[0] += f" [restarts={self.restart_count}]"
-        return parts[0]
+            result += f" [restarts={self.restart_count}]"
+        return result
 
 
 @dataclass
