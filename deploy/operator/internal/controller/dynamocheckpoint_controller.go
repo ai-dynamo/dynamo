@@ -262,10 +262,22 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		lease = nil
 	}
 
-	observation := snapshotprotocol.ObserveCheckpointJob(job, lease, time.Now())
+	now := time.Now()
+	checkpointWorkerActive := false
+	if lease != nil && lease.Spec.LeaseDurationSeconds != nil {
+		lastRenewal := lease.Spec.RenewTime
+		if lastRenewal == nil {
+			lastRenewal = lease.Spec.AcquireTime
+		}
+		if lastRenewal != nil {
+			checkpointWorkerActive = !now.After(lastRenewal.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
+		}
+	}
+
+	observation := snapshotprotocol.ObserveCheckpointJob(job, checkpointWorkerActive)
 	switch observation.Phase {
-	case snapshotprotocol.CheckpointJobPhaseWaitingForLease:
-		logger.V(1).Info("Checkpoint job is complete but checkpoint lease is still active; waiting for terminal watcher status", "job", job.Name)
+	case snapshotprotocol.CheckpointJobPhaseWaitingForConfirmation:
+		logger.V(1).Info("Checkpoint job is complete but checkpoint worker is still active; waiting for terminal watcher status", "job", job.Name)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	case snapshotprotocol.CheckpointJobPhaseReady:
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)

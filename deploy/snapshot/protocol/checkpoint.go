@@ -5,10 +5,8 @@ package protocol
 
 import (
 	"fmt"
-	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -28,10 +26,10 @@ type CheckpointJobOptions struct {
 type CheckpointJobPhase string
 
 const (
-	CheckpointJobPhaseRunning         CheckpointJobPhase = "running"
-	CheckpointJobPhaseWaitingForLease CheckpointJobPhase = "waiting_for_lease"
-	CheckpointJobPhaseReady           CheckpointJobPhase = "ready"
-	CheckpointJobPhaseFailed          CheckpointJobPhase = "failed"
+	CheckpointJobPhaseRunning                CheckpointJobPhase = "running"
+	CheckpointJobPhaseWaitingForConfirmation CheckpointJobPhase = "waiting_for_confirmation"
+	CheckpointJobPhaseReady                  CheckpointJobPhase = "ready"
+	CheckpointJobPhaseFailed                 CheckpointJobPhase = "failed"
 )
 
 type CheckpointJobObservation struct {
@@ -94,21 +92,7 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	}
 }
 
-func LeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
-	if lease == nil || lease.Spec.LeaseDurationSeconds == nil {
-		return true
-	}
-	last := lease.Spec.RenewTime
-	if last == nil {
-		last = lease.Spec.AcquireTime
-	}
-	if last == nil {
-		return true
-	}
-	return now.After(last.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
-}
-
-func ObserveCheckpointJob(job *batchv1.Job, lease *coordinationv1.Lease, now time.Time) CheckpointJobObservation {
+func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) CheckpointJobObservation {
 	jobComplete := false
 	jobFailed := false
 	for _, condition := range job.Status.Conditions {
@@ -146,8 +130,8 @@ func ObserveCheckpointJob(job *batchv1.Job, lease *coordinationv1.Lease, now tim
 				Message: "Checkpoint job completed successfully",
 			}
 		}
-		if lease != nil && !LeaseExpired(lease, now) {
-			return CheckpointJobObservation{Phase: CheckpointJobPhaseWaitingForLease}
+		if checkpointWorkerActive {
+			return CheckpointJobObservation{Phase: CheckpointJobPhaseWaitingForConfirmation}
 		}
 		return CheckpointJobObservation{
 			Phase:   CheckpointJobPhaseFailed,

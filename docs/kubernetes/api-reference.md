@@ -265,6 +265,7 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed<br />300 second TTL. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointPhase
@@ -319,10 +320,28 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
+| `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
+| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
+
+
+#### DynamoCheckpointStorageType
+
+_Underlying type:_ _string_
+
+Deprecated: StorageType is retained for compatibility with older
+DynamoCheckpoint status consumers. The current checkpoint flow publishes
+PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
+
+_Validation:_
+- Enum: [pvc s3 oci]
+
+_Appears in:_
+- [DynamoCheckpointStatus](#dynamocheckpointstatus)
+
 
 
 #### DynamoComponentDeployment
@@ -1699,6 +1718,81 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
+| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
+
+
+#### CheckpointOCIConfig
+
+
+
+Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
+the current snapshot flow.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the legacy OCI URI (oci://registry/repository). |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy docker config secret name. |  |  |
+
+
+#### CheckpointPVCConfig
+
+
+
+Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
+the current snapshot flow.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvcName` _string_ | PVCName is the legacy PVC name. |  |  |
+| `basePath` _string_ | BasePath is the legacy base directory within the PVC. |  |  |
+
+
+#### CheckpointS3Config
+
+
+
+Deprecated: CheckpointS3Config is retained for compatibility and ignored by
+the current snapshot flow.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
+
+
+#### CheckpointStorageConfiguration
+
+
+
+Deprecated: CheckpointStorageConfiguration is retained for compatibility and
+ignored by the current snapshot flow.
+
+
+
+_Appears in:_
+- [CheckpointConfiguration](#checkpointconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _string_ | Type is the legacy storage backend type: pvc, s3, or oci. |  |  |
+| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for legacy pvc-based settings. |  |  |
+| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration for legacy s3-based settings. |  |  |
+| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
 
 
 #### DiscoveryBackend
