@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 08:57:05 UTC
+Last updated: 2026-04-01 08:58:50 UTC
 
 ## Active state
 
@@ -10,7 +10,8 @@ Last updated: 2026-04-01 08:57:05 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current handoff tip at validation pickup: `8ce32a0a7feb`
+  - always capture the live tip with `git rev-parse --short=12 HEAD` before
+    trusting any previously recorded docs-only handoff commit
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
@@ -27,7 +28,7 @@ Last updated: 2026-04-01 08:57:05 UTC
   - this run is a validation plus handoff-compaction refresh
   - keep `PLANS.md` as the compact execution log and handoff document
 
-## Current run (2026-04-01 08:57:05 UTC)
+## Current run (2026-04-01 08:58:50 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -53,7 +54,8 @@ Last updated: 2026-04-01 08:57:05 UTC
 ### Current findings in this run
 
 - the previous handoff tip recorded in `PLANS.md` (`ed0879ac0faf`) was stale;
-  the live detached `HEAD` for this run is `8ce32a0a7feb`
+  validation in this run started from live detached `HEAD`
+  `8ce32a0a7feb`
 - the current `HEAD` is still a docs-only handoff refresh above the same
   validated non-docs `G3PB` implementation baseline
 - the active `G3PB` implementation slice still appears complete on the live
@@ -111,8 +113,7 @@ Last updated: 2026-04-01 08:57:05 UTC
 
 ### Exact next step
 
-- if another run starts from the resulting `HEAD`, leave the active `G3PB`
-  slice closed unless a new regression or explicitly new scope appears
+- run `git rev-parse --short=12 HEAD && sed -n '1,220p' Agents.md && sed -n '1,260p' PLANS.md && sed -n '1,260p' docs/design-docs/kvbm-g3pb-plan.md`, then leave the active `G3PB` slice closed unless a new regression or explicitly new scope appears
 
 ### Handoff for next run
 
