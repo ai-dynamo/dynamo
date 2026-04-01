@@ -2254,7 +2254,10 @@ mod tests {
     #[tokio::test]
     async fn g3pb_cache_storage_supports_basic_operations() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
-        let config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
+        let mut config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
+        config.g2_capacity_bytes = 4 * 1024;
+        config.foyer_memory_capacity_bytes = 4 * 1024;
+        config.foyer_disk_capacity_bytes = 64 * 1024;
 
         let storage = Arc::new(G3pbCacheStorage::new(config).await?);
         let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());

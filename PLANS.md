@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 07:51:37 UTC
+Last updated: 2026-04-01 07:58:37 UTC
 
 ## Active state
 
@@ -19,9 +19,146 @@ Last updated: 2026-04-01 07:51:37 UTC
   - remote identity is keyed by `sequence_hash` only
   - peer-local persistence stays hidden behind `G3pbPeerStorage`
 - Current follow-on execution focus for this run:
-  - no open implementation work remains for the active `G3PB` slice
+  - no open implementation work remains for the active `G3PB` slice after the
+    current test-stability fix and validation rerun
   - keep `PLANS.md` as the compact validation/handoff record until new scope is
     explicitly chosen
+
+## Current run (2026-04-01 07:55:11 UTC)
+
+### Summary of accomplishments in this run
+
+- ✅ Re-read the required handoff/design context before doing any work:
+  - `Agents.md`
+  - `PLANS.md`
+  - `docs/design-docs/kvbm-g3pb-plan.md`
+- ✅ Re-read `PLANS.md` completely and confirmed the active top-of-file state
+  still marks the current `G3PB` slice complete
+- ✅ Re-audited the live `G3PB` handoff/code surface against the current repo
+  state:
+  - detached `HEAD`
+  - pickup commit: `988246eefd7f`
+  - recent history is still a docs-only `G3PB` completion chain above the same
+    last non-docs implementation commits:
+    - `8ddc2f2e1 llm: reclaim g3pb backend staging`
+    - `c231d60fb build: patch local nixl-sys invalidation`
+- ✅ Re-searched the active handoff/code surface for any remaining concrete
+  implementation, cleanup, docs, follow-up, or validation work
+- ✅ Refreshed `PLANS.md` before rerunning validation so the current audit is
+  written to disk
+- ✅ Began the focused `G3PB` / bindings validation rerun from the refreshed
+  handoff state
+- ✅ Captured the first concrete failure from the rerun and pivoted from a
+  docs-only audit into regression investigation:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - failing test:
+    `block_manager::distributed::g3pb::tests::g3pb_cache_storage_supports_basic_operations`
+  - failure:
+    `Storage allocation failed: Worker timeout after 12 seconds: timed out waiting on channel`
+- ✅ Reproduced the issue as a suite-level flake and isolated the trigger:
+  - the failing basic-operations unit test constructed `G3pbCacheStorage` with
+    the production-default `2 GiB` pinned G2 allocation
+  - under suite load that eager pinned allocation can exceed the NUMA worker
+    timeout even though the test only needs tiny payloads
+- ✅ Tightened the unit test to use explicit small-capacity cache settings
+  instead of production defaults:
+  - `g2_capacity_bytes = 4 KiB`
+  - `foyer_memory_capacity_bytes = 4 KiB`
+  - `foyer_disk_capacity_bytes = 64 KiB`
+- ✅ Reran the focused `G3PB` / bindings validation stack after the test fix
+- ✅ Re-read `PLANS.md` after validation and confirmed there is still no
+  remaining in-scope implementation work for the active slice
+- ✅ Prepared this run for a signed small commit now that focused `G3PB`
+  validation is green again
+
+### Current findings in this run
+
+- the fresh validation rerun surfaced a concrete but test-only regression
+  signal rather than a production `G3PB` storage-path logic bug
+- root cause: the basic-operations unit test eagerly used the production-size
+  pinned-cache defaults, making it vulnerable to NUMA worker allocation timeout
+  under suite load
+- after constraining the test to small explicit capacities, the focused
+  `G3PB` / bindings validation stack returned to green
+- the only currently open `G3PB` items remain the same non-blocking follow-ons:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
+
+### Remaining work in this run
+
+- none
+
+### Exact next step
+
+- if another run starts from the resulting `HEAD`, resume only from the
+  existing non-blocking follow-on backlog
+
+### Validation completed in this run so far
+
+- `git rev-parse --short=12 HEAD`
+  - pass (`988246eefd7f`)
+- `git log --oneline -5`
+  - pass
+  - current recent history:
+    - `988246eef docs: finalize g3pb completion handoff`
+    - `f2da43712 docs: finalize g3pb completion handoff`
+    - `a19b6f8b4 docs: refresh g3pb completion handoff`
+    - `1e04cf61f docs: stabilize g3pb completion handoff`
+    - `ea2e0a545 docs: finalize g3pb completion handoff`
+- `rg -n "G3PB|g3pb|TODO|FIXME|follow-on|remaining work|Handoff for next run|Exact next step" PLANS.md docs/design-docs/kvbm-g3pb-plan.md lib/llm/src lib/bindings/kvbm/src`
+  - pass as an audit search
+  - only the already-recorded non-blocking `G3PB` backlog plus unrelated
+    repo-wide TODO/FIXME markers were found
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - fail
+  - `14 passed; 1 failed`
+  - failing test:
+    `block_manager::distributed::g3pb::tests::g3pb_cache_storage_supports_basic_operations`
+  - failure:
+    `Storage allocation failed: Worker timeout after 12 seconds: timed out waiting on channel`
+- `cargo test --manifest-path lib/llm/Cargo.toml block_manager::distributed::g3pb::tests::g3pb_cache_storage_supports_basic_operations --lib -- --exact --nocapture`
+  - pass (`1 passed`)
+  - finding: the test passes in isolation, so the timeout is a suite-level
+    flake caused by the test's eager production-size cache allocation rather
+    than a deterministic logic failure
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+  - pass after the test-capacity fix (`15 passed`)
+- `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+  - pass (`6 passed`)
+- `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
+  - pass (`4 passed`)
+- `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+  - pass
+
+### Decisions confirmed in this run so far
+
+- keep treating the active `G3PB` slice as complete unless the fresh
+  validation rerun exposes a concrete regression
+- the fresh validation rerun did expose a concrete regression signal, so this
+  run must continue as a code-investigation / fix run rather than another
+  docs-only audit loop
+- fix the regression at the narrowest correct seam: keep production defaults
+  unchanged and make the unit test allocate only the tiny cache it actually
+  needs
+- with the focused validation stack green again, the active `G3PB` slice can
+  return to the prior "complete with non-blocking follow-ons" state
+- do not invent new scope in this run; either validate the already-complete
+  slice again or stop at a precise handoff
+- keep compacting the handoff at the top of `PLANS.md` instead of extending the
+  historical docs-only audit tail with more near-duplicate context
+
+### Handoff for next run
+
+- this run fixed the suite-level `G3PB` cache-storage test flake by shrinking
+  the unit test's local cache capacities to realistic test-sized values
+- this run reran the focused `G3PB` / bindings validation stack and returned it
+  to green
+- if another run continues from here, resume only from the existing
+  non-blocking follow-on backlog:
+  1. upstream or locally patch the `nixl-sys` teardown warning if needed
+  2. decide whether retained committed blocks need backend-side reclamation
+  3. design any future CPU-buffer / `foyer` retention knobs as a separate slice
 
 ## Current run (2026-04-01 07:49:48 UTC)
 
