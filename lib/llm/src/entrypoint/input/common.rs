@@ -131,8 +131,8 @@ pub async fn prepare_engine(
                 local_model.namespace_prefix(),
             );
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj
-                    .watch(discovery_stream, namespace_filter)
+                let _ = inner_watch_obj
+                    .watch(discovery_stream, namespace_filter, None)
                     .await;
             });
             tracing::info!("Waiting for remote model..");

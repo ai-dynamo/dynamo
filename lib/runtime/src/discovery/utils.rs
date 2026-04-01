@@ -92,6 +92,9 @@ where
                         break;
                     }
                 }
+                Ok(DiscoveryEvent::InitialSyncComplete) => {
+                    // The initial snapshot has already been materialized into `state`.
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "Discovery event stream error in watch_and_extract_field");
                     // Continue processing other events

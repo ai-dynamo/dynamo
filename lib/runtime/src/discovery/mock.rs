@@ -195,12 +195,26 @@ impl Discovery for MockDiscovery {
         query: DiscoveryQuery,
         _cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
-        use std::collections::HashSet;
-
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
+            use std::collections::HashSet;
+
+            let initial: Vec<_> = {
+                let instances = registry.instances.lock().unwrap();
+                instances
+                    .iter()
+                    .filter(|instance| matches_query(instance, &query))
+                    .cloned()
+                    .collect()
+            };
+            let mut known_instances: HashSet<DiscoveryInstanceId> =
+                initial.iter().map(|instance| instance.id()).collect();
+
+            for instance in initial {
+                yield Ok(DiscoveryEvent::Added(instance));
+            }
+            yield Ok(DiscoveryEvent::InitialSyncComplete);
 
             loop {
                 let current: Vec<_> = {
@@ -302,6 +316,9 @@ mod tests {
 
         // Start watching
         let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event, DiscoveryEvent::InitialSyncComplete);
 
         // Add first instance
         client1.register(spec.clone()).await.unwrap();

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 
 use anyhow::Context as _;
 use dashmap::DashSet;
@@ -153,11 +154,20 @@ impl ModelWatcher {
         &self,
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
-    ) {
+        mut initial_sync_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+    ) -> anyhow::Result<()> {
+        let mut initial_sync_complete = false;
+        let mut initial_sync_error: Option<anyhow::Error> = None;
+
         while let Some(result) = discovery_stream.next().await {
             let event = match result {
                 Ok(event) => event,
                 Err(err) => {
+                    if !initial_sync_complete && initial_sync_error.is_none() {
+                        initial_sync_error = Some(anyhow::anyhow!(
+                            "discovery stream error before initial sync completed: {err}"
+                        ));
+                    }
                     tracing::error!(%err, "Error in discovery stream");
                     continue;
                 }
@@ -192,6 +202,11 @@ impl ModelWatcher {
                             }
                         }
                         _ => {
+                            if !initial_sync_complete && initial_sync_error.is_none() {
+                                initial_sync_error = Some(anyhow::anyhow!(
+                                    "unexpected non-model discovery instance during model watch"
+                                ));
+                            }
                             tracing::error!(
                                 "Unexpected discovery instance type (expected ModelCard)"
                             );
@@ -216,6 +231,13 @@ impl ModelWatcher {
                     if let Some(model) = self.manager.get_model(card.name())
                         && !model.is_checksum_compatible(&ws_key, card.mdcsum())
                     {
+                        if !initial_sync_complete && initial_sync_error.is_none() {
+                            initial_sync_error = Some(anyhow::anyhow!(
+                                "checksum mismatch while registering model '{}' in namespace '{}'",
+                                card.name(),
+                                mcid.namespace
+                            ));
+                        }
                         tracing::error!(
                             model_name = card.name(),
                             namespace = mcid.namespace,
@@ -243,6 +265,13 @@ impl ModelWatcher {
                             self.notify_on_model.notify_waiters();
                         }
                         Err(err) => {
+                            if !initial_sync_complete && initial_sync_error.is_none() {
+                                initial_sync_error = Some(anyhow::anyhow!(
+                                    "failed to register model '{}' in namespace '{}': {err:#}",
+                                    card.name(),
+                                    mcid.namespace
+                                ));
+                            }
                             tracing::error!(
                                 model_name = card.name(),
                                 namespace = mcid.namespace,
@@ -279,8 +308,28 @@ impl ModelWatcher {
                         }
                     }
                 }
+                DiscoveryEvent::InitialSyncComplete => {
+                    tracing::info!("Initial model discovery replay completed");
+                    initial_sync_complete = true;
+                    if let Some(tx) = initial_sync_tx.take() {
+                        let result = match initial_sync_error.take() {
+                            Some(err) => Err(err),
+                            None => Ok(()),
+                        };
+                        let _ = tx.send(result);
+                    }
+                }
             }
         }
+
+        if let Some(tx) = initial_sync_tx.take() {
+            let err = initial_sync_error.unwrap_or_else(|| {
+                anyhow::anyhow!("discovery stream ended before initial sync completed")
+            });
+            let _ = tx.send(Err(err));
+        }
+
+        anyhow::bail!("discovery stream ended")
     }
 
     /// Handle a worker removal. Cleans up per-namespace WorkerSets and the Model itself
@@ -429,10 +478,6 @@ impl ModelWatcher {
         );
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
-
-        if let Some(tx) = &self.model_update_tx {
-            tx.send(ModelUpdate::Added(card.clone())).await.ok();
-        }
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
@@ -801,6 +846,10 @@ impl ModelWatcher {
                 "Prefill model registered and router activated successfully"
             );
 
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
+
             return Ok(());
         } else {
             // Reject unsupported combinations
@@ -815,6 +864,10 @@ impl ModelWatcher {
         // Add the completed WorkerSet to the Model
         self.manager
             .add_worker_set(card.name(), &ws_key, worker_set);
+
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Added(card.clone())).await.ok();
+        }
 
         Ok(())
     }

@@ -111,6 +111,9 @@ pub async fn spawn_discovery_watcher(
                     tracing::info!(instance_id, "Discovery: removing worker");
                     registry.remove_worker_from_discovery(instance_id).await;
                 }
+                DiscoveryEvent::InitialSyncComplete => {
+                    tracing::debug!("Standalone indexer discovery initial sync completed");
+                }
             }
         }
 

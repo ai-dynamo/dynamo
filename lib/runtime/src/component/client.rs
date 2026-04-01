@@ -345,6 +345,9 @@ impl Client {
                     DiscoveryEvent::Removed(id) => {
                         map.remove(&id.instance_id());
                     }
+                    DiscoveryEvent::InitialSyncComplete => {
+                        // The current state already reflects the initial snapshot.
+                    }
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();

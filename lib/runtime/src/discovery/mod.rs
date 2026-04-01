@@ -678,6 +678,8 @@ pub enum DiscoveryEvent {
     Added(DiscoveryInstance),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+    /// The initial replay for this watch stream has completed.
+    InitialSyncComplete,
 }
 
 /// Stream type for discovery events

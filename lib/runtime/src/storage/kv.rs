@@ -109,6 +109,8 @@ impl KeyValue {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(Key),
+    /// Sent exactly once after the initial point-in-time snapshot has been emitted.
+    InitialSyncComplete,
 }
 
 #[async_trait]
@@ -344,6 +346,13 @@ impl Manager {
                 {
                     tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
                 }
+            }
+
+            if let Err(err) = tx
+                .send_timeout(WatchEvent::InitialSyncComplete, WATCH_SEND_TIMEOUT)
+                .await
+            {
+                tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding initial sync marker to channel");
             }
 
             // Now block waiting for new entries
