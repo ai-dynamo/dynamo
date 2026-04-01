@@ -315,7 +315,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
             # Get the response generator from downstream worker
             response_generator = await self.pd_worker_client.round_robin(
-                request.model_dump_json()
+                request.model_dump_json(), context=context
             )
 
             # Parse PD worker responses and yield as LLMEngineOutput-

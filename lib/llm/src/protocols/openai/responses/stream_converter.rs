@@ -28,12 +28,15 @@ use dynamo_async_openai::types::ChatCompletionMessageContent;
 
 use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::unified::ResponsesContext;
 
 /// State machine that converts a chat completion stream into Responses API events.
 pub struct ResponseStreamConverter {
     response_id: String,
     model: String,
     params: ResponseParams,
+    /// Preserved Responses API-specific request context for faithful response reconstruction.
+    api_context: Option<ResponsesContext>,
     created_at: u64,
     sequence_number: u64,
     // Text message tracking
@@ -72,6 +75,7 @@ impl ResponseStreamConverter {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
             params,
+            api_context: None,
             created_at,
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -82,6 +86,12 @@ impl ResponseStreamConverter {
             next_output_index: 0,
             usage: None,
         }
+    }
+
+    pub fn with_context(model: String, params: ResponseParams, context: ResponsesContext) -> Self {
+        let mut converter = Self::new(model, params);
+        converter.api_context = Some(context);
+        converter
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -116,7 +126,12 @@ impl ResponseStreamConverter {
             parallel_tool_calls: Some(true),
             presence_penalty: Some(0.0),
             // store: false because this branch does not persist responses.
-            store: self.params.store.or(Some(false)),
+            store: self
+                .api_context
+                .as_ref()
+                .map(|ctx| ctx.store)
+                .or(self.params.store)
+                .or(Some(false)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
@@ -144,7 +159,10 @@ impl ResponseStreamConverter {
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
             max_tool_calls: None,
-            previous_response_id: None,
+            previous_response_id: self
+                .api_context
+                .as_ref()
+                .and_then(|ctx| ctx.previous_response_id.clone()),
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
@@ -654,6 +672,7 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::unified::ResponsesContext;
     use dynamo_async_openai::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
@@ -911,5 +930,42 @@ mod tests {
             tool_types.contains(&"response.output_item.done".to_string()),
             "output_item.done inline after text: {tool_types:?}"
         );
+    }
+
+    /// Verify that `with_context` populates `previous_response_id` and `store`
+    /// in the generated Response objects.
+    #[test]
+    fn test_with_context_enriches_response() {
+        let ctx = ResponsesContext {
+            previous_response_id: Some("resp_prev_123".to_string()),
+            store: true,
+            ..Default::default()
+        };
+        let params = ResponseParams::default();
+        let mut conv = ResponseStreamConverter::with_context("test-model".into(), params, ctx);
+
+        // Process one text chunk so there's output
+        let _ = conv.emit_start_events();
+        let _ = conv.process_chunk(&text_chunk("Hello"));
+        let _end_events = conv.emit_end_events();
+
+        // Verify the Response object carries the context values through
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(
+            response.previous_response_id.as_deref(),
+            Some("resp_prev_123")
+        );
+        assert_eq!(response.store, Some(true));
+    }
+
+    /// Without context, previous_response_id is None and store defaults to false.
+    #[test]
+    fn test_without_context_defaults() {
+        let params = ResponseParams::default();
+        let conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(response.previous_response_id, None);
+        assert_eq!(response.store, Some(false));
     }
 }
