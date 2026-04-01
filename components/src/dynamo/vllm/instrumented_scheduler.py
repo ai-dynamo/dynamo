@@ -59,14 +59,13 @@ How metrics are measured
   passes the correct output for the batch being processed, even in
   async mode where multiple batches are in flight).
 * **queued_requests**: computed from ``self.waiting`` at emit time.
-* **wall_time**: measures the schedule-to-update_from_output latency
-  for each batch.  A timestamp is recorded at the end of ``schedule()``
-  and matched with the corresponding ``update_from_output()`` call via
-  a FIFO queue (correct for both sync and async scheduling modes).
-  The interval is dominated by GPU forward pass time; CPU overhead
-  (scheduling + output processing) is typically negligible.
-  ``wall_time`` is ``0.0`` only for heartbeats or when the timestamp
-  queue is empty (should not happen under normal operation).
+* **wall_time**: approximates the GPU forward pass time for each batch.
+  In steady state, measured as the interval between consecutive
+  ``update_from_output()`` calls (accurate because CPU scheduling
+  overlaps with GPU execution).  For the first batch after engine idle
+  (no previous ``update_from_output``), falls back to a per-batch
+  ``schedule()``-to-``update_from_output()`` timestamp recorded via a
+  FIFO queue.  ``wall_time`` is ``0.0`` only for heartbeats.
 
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
@@ -275,6 +274,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._fpm_dp_rank = dp_rank
 
         self._schedule_times: deque[float] = deque()
+        self._last_update_time: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
         self._bench_active: bool = False
         self._bench_phase: _BenchPhase = _BenchPhase.IDLE
@@ -369,10 +369,15 @@ class InstrumentedScheduler(AsyncScheduler):
 
         if scheduler_output.total_num_scheduled_tokens > 0:
             now = time.monotonic()
-            if self._schedule_times:
-                wall_time = now - self._schedule_times.popleft()
+            t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
+
+            if self._last_update_time > 0:
+                wall_time = now - self._last_update_time
+            elif t_sched > 0:
+                wall_time = now - t_sched
             else:
                 wall_time = 0.0
+            self._last_update_time = now
 
             metrics = self._extract_metrics(
                 scheduler_output, self._compute_queued(), wall_time
@@ -383,6 +388,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_current_fpms.append(
                     json.loads(msgspec.json.encode(metrics))
                 )
+        else:
+            self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
         return result
