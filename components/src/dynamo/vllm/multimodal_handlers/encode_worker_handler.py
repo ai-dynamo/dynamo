@@ -98,7 +98,6 @@ class EncodeWorkerHandler:
             logger.info(f"CUDA device count: {torch.cuda.device_count()}")
             logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
 
-        logger.info("=" * 60)
 
         hidden_size = getattr(self.vision_model, "out_hidden_size", None)
         if hidden_size is None:
