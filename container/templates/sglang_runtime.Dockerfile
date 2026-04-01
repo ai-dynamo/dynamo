@@ -120,16 +120,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 {% endif %}
 
-# Install runtime dependencies (common + planner + benchmarks) as root.
+# Install runtime dependencies (common + benchmarks) as root.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
-    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/deps/requirements.planner.txt \
     --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         --requirement /tmp/deps/requirements.common.txt \
-        --requirement /tmp/deps/requirements.planner.txt \
         --requirement /tmp/deps/requirements.benchmark.txt \
         sglang==${SGLANG_VERSION} && \
     #TODO: Temporary change until upstream sglang runtime image is updated

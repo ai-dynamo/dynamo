@@ -9,8 +9,10 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -47,6 +49,16 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 
+
+def _has_aiconfigurator() -> bool:
+    try:
+        return importlib.util.find_spec("aiconfigurator") is not None
+    except ValueError:
+        return "aiconfigurator" in sys.modules
+
+
+HAS_AICONFIGURATOR = _has_aiconfigurator()
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
@@ -60,9 +72,9 @@ BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
 BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
-PLANNER_PROFILE_DATA_DIR = (
+MOCKER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[2]
-    / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
+    / "components/src/dynamo/mocker/tests/data/profiling_results/H200_TP1P_TP1D"
 )
 
 
@@ -661,13 +673,20 @@ class DisaggMockerProcess:
         pytest.param(
             "kv",
             False,
-            {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
-            id="kv-planner",
+            {"planner_profile_data": MOCKER_PROFILE_DATA_DIR},
+            id="kv-profile-data",
         ),
         pytest.param(
             "kv",
             False,
             {"aic_perf_model": True, "aic_system": "h200_sxm"},
+            marks=[
+                pytest.mark.aiconfigurator,
+                pytest.mark.skipif(
+                    not HAS_AICONFIGURATOR,
+                    reason="aiconfigurator is not installed in this test image",
+                ),
+            ],
             id="kv-aic",
         ),
         pytest.param("kv", True, {}, id="kv-durable"),
