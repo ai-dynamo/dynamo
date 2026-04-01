@@ -122,6 +122,8 @@ const (
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
 
+	KubeLabelDynamoFailoverGroup = "nvidia.com/dynamo-failover-group"
+
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 

@@ -1529,6 +1529,9 @@ func GenerateGrovePodCliqueSet(
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
 			clique.Labels = labels
+			if isGMS {
+				clique.Labels[commonconsts.KubeLabelDynamoFailoverGroup] = commonconsts.KubeLabelValueTrue
+			}
 			annotations, err := generateAnnotations(component)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)

@@ -666,6 +666,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if runtimeConfig.GroveEnabled {
+		if err = (&controller.FailoverCascadeReconciler{
+			Client:   mgr.GetClient(),
+			Recorder: mgr.GetEventRecorderFor("gms-failover-cascade"),
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+		}
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }

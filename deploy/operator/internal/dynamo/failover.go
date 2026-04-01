@@ -104,6 +104,7 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.VolumeMounts = append(c.VolumeMounts, mount)
 
 	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
+	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
 	return podSpec
 }
@@ -147,6 +148,7 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	c.VolumeMounts = append(c.VolumeMounts, mount)
 
 	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
+	podSpec.RestartPolicy = corev1.RestartPolicyNever
 }
 
 // gmsSharedVolume returns a hostPath volume and mount with a subPathExpr that
