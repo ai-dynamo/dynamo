@@ -50,6 +50,22 @@ struct DeviceContextCache {
     event_pool: Arc<ze::EventPool>,
 }
 
+// Level-Zero API is thread-safe by specification, so we can safely mark these as Send+Sync
+// even though they contain raw pointers internally
+unsafe impl Send for DeviceContextCache {}
+unsafe impl Sync for DeviceContextCache {}
+
+impl std::fmt::Debug for DeviceContextCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceContextCache")
+            .field("driver", &"<ze::Driver>")
+            .field("device", &"<ze::Device>")
+            .field("context", &"<Arc<ze::Context>>")
+            .field("event_pool", &"<Arc<ze::EventPool>>")
+            .finish()
+    }
+}
+
 /// Global cache of Level-Zero contexts (one per device_id)
 fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
     ensure_ze_initialized()?;
@@ -109,6 +125,10 @@ pub struct ZeContext {
     cache: Arc<DeviceContextCache>,
 }
 
+// ZeContext wraps thread-safe Arc<DeviceContextCache>
+unsafe impl Send for ZeContext {}
+unsafe impl Sync for ZeContext {}
+
 impl ZeContext {
     pub fn new(device_id: u32) -> Result<Self> {
         let cache = get_or_create_ze_context(device_id)?;
@@ -157,10 +177,13 @@ impl DeviceContextOps for ZeContext {
         let buffer = self.cache.context.alloc_device(&self.cache.device, size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero device allocation failed: {:?}", e))?;
 
-        // Store buffer in a global map so it doesn't get dropped
-        store_device_buffer(buffer.as_mut_ptr() as u64, buffer, Arc::clone(&self.cache.context));
+        // Get pointer before moving buffer
+        let ptr = buffer.as_mut_ptr() as u64;
 
-        Ok(buffer.as_mut_ptr() as u64)
+        // Store buffer in a global map so it doesn't get dropped prematurely
+        store_device_buffer(ptr, buffer, Arc::clone(&self.cache.context));
+
+        Ok(ptr)
     }
 
     fn free_device(&self, ptr: u64) -> Result<()> {
@@ -172,10 +195,13 @@ impl DeviceContextOps for ZeContext {
         let buffer = self.cache.context.alloc_host(size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero host allocation failed: {:?}", e))?;
 
-        // Store buffer in a global map so it doesn't get dropped
-        store_host_buffer(buffer.as_mut_ptr() as u64, buffer, Arc::clone(&self.cache.context));
+        // Get pointer before moving buffer
+        let ptr = buffer.as_mut_ptr() as u64;
 
-        Ok(buffer.as_mut_ptr() as u64)
+        // Store buffer in a global map so it doesn't get dropped prematurely
+        store_host_buffer(ptr, buffer, Arc::clone(&self.cache.context));
+
+        Ok(ptr)
     }
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {
@@ -193,15 +219,20 @@ impl DeviceContextOps for ZeContext {
     }
 }
 
-/// Global storage for device buffers (prevents premature Drop)
-static DEVICE_BUFFERS: OnceLock<Mutex<HashMap<u64, (ze::DeviceBuffer, Arc<ze::Context>)>>> = OnceLock::new();
+/// Wrapper for ze::DeviceBuffer to add Send+Sync
+struct SendSyncDeviceBuffer(ze::DeviceBuffer, Arc<ze::Context>);
+unsafe impl Send for SendSyncDeviceBuffer {}
+unsafe impl Sync for SendSyncDeviceBuffer {}
 
-fn store_device_buffer(ptr: u64, buffer: ze::DeviceBuffer, _ctx: Arc<ze::Context>) {
+/// Global storage for device buffers (prevents premature Drop)
+static DEVICE_BUFFERS: OnceLock<Mutex<HashMap<u64, SendSyncDeviceBuffer>>> = OnceLock::new();
+
+fn store_device_buffer(ptr: u64, buffer: ze::DeviceBuffer, ctx: Arc<ze::Context>) {
     let mut map = DEVICE_BUFFERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
-    map.insert(ptr, (buffer, _ctx));
+    map.insert(ptr, SendSyncDeviceBuffer(buffer, ctx));
 }
 
 fn remove_device_buffer(ptr: u64) {
@@ -211,15 +242,20 @@ fn remove_device_buffer(ptr: u64) {
     }
 }
 
-/// Global storage for host buffers (prevents premature Drop)
-static HOST_BUFFERS: OnceLock<Mutex<HashMap<u64, (ze::HostBuffer, Arc<ze::Context>)>>> = OnceLock::new();
+/// Wrapper for ze::HostBuffer to add Send+Sync
+struct SendSyncHostBuffer(ze::HostBuffer, Arc<ze::Context>);
+unsafe impl Send for SendSyncHostBuffer {}
+unsafe impl Sync for SendSyncHostBuffer {}
 
-fn store_host_buffer(ptr: u64, buffer: ze::HostBuffer, _ctx: Arc<ze::Context>) {
+/// Global storage for host buffers (prevents premature Drop)
+static HOST_BUFFERS: OnceLock<Mutex<HashMap<u64, SendSyncHostBuffer>>> = OnceLock::new();
+
+fn store_host_buffer(ptr: u64, buffer: ze::HostBuffer, ctx: Arc<ze::Context>) {
     let mut map = HOST_BUFFERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
-    map.insert(ptr, (buffer, _ctx));
+    map.insert(ptr, SendSyncHostBuffer(buffer, ctx));
 }
 
 fn remove_host_buffer(ptr: u64) {
@@ -236,6 +272,10 @@ struct ZeStreamWrapper {
     event_counter: Arc<std::sync::atomic::AtomicU32>,
     device_id: u32,
 }
+
+// Level-Zero command lists are thread-safe by specification
+unsafe impl Send for ZeStreamWrapper {}
+unsafe impl Sync for ZeStreamWrapper {}
 
 impl std::fmt::Debug for ZeStreamWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
