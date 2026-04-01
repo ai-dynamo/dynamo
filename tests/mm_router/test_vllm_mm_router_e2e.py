@@ -313,7 +313,7 @@ def _send_request_get_overlap(
     return overlap, total, segment
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_text_only_overlap_repeated_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -358,7 +358,7 @@ def test_vllm_text_only_overlap_repeated_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_repeated_three_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -398,7 +398,7 @@ def test_vllm_mm_overlap_repeated_three_images(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_repeated_single_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -438,7 +438,7 @@ def test_vllm_mm_overlap_repeated_single_image(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_repeated_two_identical_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -474,7 +474,7 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -529,7 +529,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_diff_images_less_than_same(
     start_vllm_mm_services, predownload_models
 ):
@@ -583,7 +583,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -643,7 +643,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_swapped_order_less_than_same_order(
     start_vllm_mm_services, predownload_models
 ):
@@ -737,7 +737,7 @@ def http_image_server() -> Generator[list[str], None, None]:
     thread.join(timeout=5)
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_repeated_http_images(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
@@ -778,7 +778,7 @@ def test_vllm_mm_overlap_repeated_http_images(
     )
 
 
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(90)
 def test_vllm_mm_overlap_http_vs_data_uri_same_image(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
