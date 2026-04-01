@@ -222,6 +222,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Tensor => todo!(),
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
+        Endpoint::Audios => todo!(),
     };
 
     let request_type = match request_type {
