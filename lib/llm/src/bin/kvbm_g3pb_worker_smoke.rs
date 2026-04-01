@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use dynamo_llm::block_manager::KvBlockManager;
@@ -52,6 +53,13 @@ struct DemoBlock {
     sequence_hash: u64,
     payload: Vec<u8>,
     size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RpcTiming {
+    label: &'static str,
+    ops: usize,
+    elapsed: Duration,
 }
 
 impl Default for Args {
@@ -146,6 +154,38 @@ impl Args {
 fn demo_tokens(args: &Args, offset: usize) -> Vec<u32> {
     let start = args.sequence_start as u32 + (offset as u32 * args.page_size as u32);
     (0..args.page_size).map(|idx| start + idx as u32).collect()
+}
+
+fn print_rpc_timings(timings: &[RpcTiming]) {
+    println!("request-plane RPC timings:");
+    let mut total_elapsed = Duration::ZERO;
+    let mut total_ops = 0usize;
+
+    for timing in timings {
+        total_elapsed += timing.elapsed;
+        total_ops += timing.ops;
+        let elapsed_secs = timing.elapsed.as_secs_f64();
+        let ops_per_sec = if elapsed_secs > 0.0 {
+            timing.ops as f64 / elapsed_secs
+        } else {
+            f64::INFINITY
+        };
+        println!(
+            "  {}: {} ops in {:.6}s ({:.2} ops/s)",
+            timing.label, timing.ops, elapsed_secs, ops_per_sec
+        );
+    }
+
+    let total_elapsed_secs = total_elapsed.as_secs_f64();
+    let total_ops_per_sec = if total_elapsed_secs > 0.0 {
+        total_ops as f64 / total_elapsed_secs
+    } else {
+        f64::INFINITY
+    };
+    println!(
+        "  total: {} ops in {:.6}s ({:.2} ops/s)",
+        total_ops, total_elapsed_secs, total_ops_per_sec
+    );
 }
 
 fn block_size_bytes<S: Storage>(block: &impl BlockDataProvider<StorageType = S>) -> Result<usize> {
@@ -356,9 +396,11 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(G3PB_NAMESPACE)?
         .component(G3PB_COMPONENT_NAME)?;
     let request_client = G3pbRequestPlaneClient::new(g3pb_component).await?;
+    let mut rpc_timings = Vec::new();
 
     let mut backend_instances_by_worker = HashMap::<u64, u64>::new();
     let mut remote_workers = Vec::new();
+    let health_start = Instant::now();
     for instance_id in request_client.instance_ids() {
         let health = match request_client.health(instance_id).await {
             Ok(health) => health,
@@ -385,12 +427,18 @@ async fn app(runtime: Runtime) -> Result<()> {
             health.worker_id, health.listen, instance_id
         );
     }
+    rpc_timings.push(RpcTiming {
+        label: "health",
+        ops: backend_instances_by_worker.len(),
+        elapsed: health_start.elapsed(),
+    });
 
     anyhow::ensure!(
         !remote_workers.is_empty(),
         "no healthy G3PB backends discovered in {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}"
     );
 
+    let load_remote_start = Instant::now();
     for (worker_id, instance_id) in &backend_instances_by_worker {
         request_client
             .load_remote(
@@ -402,6 +450,11 @@ async fn app(runtime: Runtime) -> Result<()> {
             .await
             .with_context(|| format!("failed to publish local blockset to worker {worker_id}"))?;
     }
+    rpc_timings.push(RpcTiming {
+        label: "load_remote",
+        ops: backend_instances_by_worker.len(),
+        elapsed: load_remote_start.elapsed(),
+    });
 
     let demo_blocks_by_hash: HashMap<u64, &DemoBlock> = demo_blocks
         .iter()
@@ -417,6 +470,8 @@ async fn app(runtime: Runtime) -> Result<()> {
         .collect();
 
     let offered_by_owner = route_g3pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
+    let offer_ops = offered_by_owner.len();
+    let offer_start = Instant::now();
     let offers = join_all(offered_by_owner.into_iter().map(|(worker_id, blocks)| {
         let request_client = request_client.clone();
         let instance_id = backend_instances_by_worker
@@ -432,6 +487,11 @@ async fn app(runtime: Runtime) -> Result<()> {
         }
     }))
     .await;
+    rpc_timings.push(RpcTiming {
+        label: "offer",
+        ops: offer_ops,
+        elapsed: offer_start.elapsed(),
+    });
 
     let mut accepted_by_worker = HashMap::<u64, HashSet<u64>>::new();
     for result in offers {
@@ -455,6 +515,8 @@ async fn app(runtime: Runtime) -> Result<()> {
         .context("local block manager has no host pool for G3pb staging")?;
     let mut imported_workers = HashSet::new();
     let staged_by_owner = route_g3pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
+    let stage_put_ops = staged_by_owner.len();
+    let stage_put_start = Instant::now();
     let staged_responses = join_all(staged_by_owner.into_iter().map(|(worker_id, blocks)| {
         let request_client = request_client.clone();
         let instance_id = backend_instances_by_worker
@@ -475,6 +537,13 @@ async fn app(runtime: Runtime) -> Result<()> {
         }
     }))
     .await;
+    rpc_timings.push(RpcTiming {
+        label: "stage_put",
+        ops: stage_put_ops,
+        elapsed: stage_put_start.elapsed(),
+    });
+    let mut commit_put_elapsed = Duration::ZERO;
+    let mut commit_put_ops = 0usize;
     for result in staged_responses {
         let (worker_id, instance_id, blocks, response) = result?;
         if imported_workers.insert(worker_id) {
@@ -494,6 +563,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         let notify = local_host_blocks.write_to(&mut remote_blocks, transfer_context.clone())?;
         notify.await.context("remote stage_put transfer dropped")?;
 
+        let commit_put_start = Instant::now();
         request_client
             .commit_put(
                 instance_id,
@@ -502,8 +572,15 @@ async fn app(runtime: Runtime) -> Result<()> {
                 },
             )
             .await?;
+        commit_put_elapsed += commit_put_start.elapsed();
+        commit_put_ops += 1;
         println!("uploaded accepted blocks to worker {worker_id} via staged NIXL transfer");
     }
+    rpc_timings.push(RpcTiming {
+        label: "commit_put",
+        ops: commit_put_ops,
+        elapsed: commit_put_elapsed,
+    });
 
     let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks.iter().cloned().collect();
     if !duplicate_offer_blocks.is_empty() {
@@ -547,6 +624,8 @@ async fn app(runtime: Runtime) -> Result<()> {
         .collect();
     let query_routes = route_g3pb_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
     let mut hits = Vec::<G3pbQueryHit>::new();
+    let query_ops = query_routes.len();
+    let query_start = Instant::now();
     for result in join_all(
         query_routes
             .into_iter()
@@ -569,6 +648,11 @@ async fn app(runtime: Runtime) -> Result<()> {
     {
         hits.extend(result?);
     }
+    rpc_timings.push(RpcTiming {
+        label: "query",
+        ops: query_ops,
+        elapsed: query_start.elapsed(),
+    });
 
     let hit_by_sequence_hash: HashMap<u64, G3pbQueryHit> = hits
         .iter()
@@ -594,6 +678,8 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let fetch_routes = route_g3pb_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
     let mut fetched_transfer_count = 0usize;
+    let fetch_ops = fetch_routes.len();
+    let fetch_start = Instant::now();
     let fetch_responses = join_all(
         fetch_routes
             .into_iter()
@@ -618,6 +704,11 @@ async fn app(runtime: Runtime) -> Result<()> {
             }),
     )
     .await;
+    rpc_timings.push(RpcTiming {
+        label: "fetch",
+        ops: fetch_ops,
+        elapsed: fetch_start.elapsed(),
+    });
     for result in fetch_responses {
         let (worker_id, sequence_hashes, fetched) = result?;
         fetched_transfer_count += sequence_hashes.len();
@@ -719,6 +810,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         "transferred {} blocks / {} bytes via staged G3PB NIXL descriptors",
         fetched_transfer_count, transferred_bytes
     );
+    print_rpc_timings(&rpc_timings);
     println!(
         "note: this validates staged remote host writes, remote host reads, local host registration, and device onboard over the G3PB smoke path."
     );

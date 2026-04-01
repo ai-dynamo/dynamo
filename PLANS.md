@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 00:48:24 UTC
+Last updated: 2026-04-01 00:55:16 UTC
 
 ## Active state
 
@@ -446,6 +446,12 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
 - ✅ Revalidated the `G3PB` admission policy suite:
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
     - pass (`6 passed`)
+- ✅ Revalidated the same focused baseline again from the current clean worktree
+  before starting the remaining validation tail:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`13 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
 - ✅ Rebuilt the active request-plane smoke binaries:
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
     - pass
@@ -456,6 +462,28 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - first smoke run passed against worker `53`
   - backend was terminated and restarted against the same discovery + foyer dirs
   - second smoke run also passed against worker `53`
+- ✅ Completed larger staged-transfer validation on the request-plane/discovery path
+  - a `24`-block smoke passed against a backend with `48` host blocks
+  - a follow-up `40`-block smoke on the same backend failed only because the
+    previous committed `24` blocks still occupied host staging capacity, leaving
+    `24` blocks available
+  - restarting onto a fresh backend with `96` host blocks allowed the same
+    `40`-block smoke to pass cleanly
+- ✅ Added explicit metadata-RPC timing output to `kvbm_g3pb_worker_smoke`
+  - the smoke now reports per-RPC and total request-plane timing for:
+    `health`, `load_remote`, `offer`, `stage_put`, `commit_put`, `query`, and `fetch`
+  - this keeps the measurement on the real G3PB validation path rather than
+    creating a separate synthetic harness
+- ✅ Diagnosed the teardown warning root cause
+  - the corrupted remote-agent names in
+    `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND` come from `nixl-sys`, not the
+    repo-local G3PB code
+  - `nixl-sys` uses `remote_agent.as_ptr()` from a Rust `&str` when calling
+    `nixl_capi_invalidate_remote_md`, instead of passing a null-terminated
+    `CString`
+  - relevant dependency paths:
+    - `/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nixl-sys-0.10.1/src/agent.rs`
+    - `/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nixl-sys-0.10.1/wrapper.cpp`
 
 ### Current findings before edits
 
@@ -470,9 +498,8 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - ownership-aware `query`
   - descriptor-based `fetch`
   - local host registration plus device onboard
-- there is currently no explicit timing/throughput output for the metadata-only
-  request-plane RPCs, so that milestone may require a small instrumentation edit
-  unless an external harness is sufficient
+- explicit timing/throughput output is now available directly from
+  `kvbm_g3pb_worker_smoke`
 - `DYN_FILE_KV` for the file discovery backend must be a directory root; using a
   `mktemp` file path fails backend registration with:
   `Unable to register service for discovery ... Internal filesystem error: Not a directory (os error 20)`
@@ -482,6 +509,14 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   discovery namespace
 - the teardown warning still reproduces after each successful worker smoke:
   `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+- `KvBlockManagerState::import_remote_blockset()` currently rejects duplicate
+  worker ids and does not expose any explicit unload/update path for remote NIXL
+  metadata, which is relevant context for the teardown-warning investigation
+- the warning diagnosis is now specific:
+  repo-local remote-blockset lifetime is not the immediate cause of the garbled
+  remote-agent names; the names are already corrupted inside `nixl-sys`
+  invalidation calls because the dependency passes non-null-terminated Rust
+  string pointers to the C API during remote metadata teardown
 
 ### Validation completed in this run so far
 
@@ -489,6 +524,11 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   - pass (`13 passed`)
 - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
   - pass (`6 passed`)
+- repeated focused baseline from the clean worktree before the next milestone:
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`13 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
 - backend restart/reload validation with shared file discovery + persistent foyer dir:
@@ -515,6 +555,53 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
       `query`, remote `fetch`, local host registration, and device onboard
     - both runs still emitted the non-blocking teardown warning
       `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+- larger staged-transfer validation:
+  - rebuilt binaries before the milestone:
+    `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - backend with `48` host blocks:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.large.EKfFBR target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 48 --foyer-dir /tmp/g3pb-foyer.large.2HfqDv`
+    - pass
+  - `24`-block worker smoke:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.large.EKfFBR target/debug/kvbm_g3pb_worker_smoke --worker-id 21 --num-device-blocks 64 --host-blocks 40 --count 24`
+    - pass
+    - transferred `24` blocks / `196608` bytes
+  - same backend, `40`-block worker smoke:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.large.EKfFBR target/debug/kvbm_g3pb_worker_smoke --worker-id 22 --num-device-blocks 96 --host-blocks 56 --count 40 --sequence-start 5000`
+    - fail with:
+      `Not enough blocks available, requested: 40, available: 24`
+    - this was a retained-capacity limit, not a transport failure
+  - fresh backend with `96` host blocks:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.xl.uu9wfv target/debug/kvbm_g3pb_backend --worker-id 53 --host-blocks 96 --foyer-dir /tmp/g3pb-foyer.xl.em2H7Z`
+    - pass
+  - `40`-block worker smoke on the fresh backend:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.xl.uu9wfv target/debug/kvbm_g3pb_worker_smoke --worker-id 22 --num-device-blocks 96 --host-blocks 56 --count 40 --sequence-start 5000`
+    - pass
+    - transferred `40` blocks / `327680` bytes
+- post-instrumentation validation:
+  - `cargo fmt --manifest-path lib/llm/Cargo.toml --all`
+    - pass
+  - `git diff --check`
+    - pass
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
+    - pass (`13 passed`)
+  - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
+    - pass (`6 passed`)
+  - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
+    - pass
+  - timed `40`-block worker smoke with instrumentation:
+    `env DYN_DISCOVERY_BACKEND=file DYN_FILE_KV=/tmp/g3pb-discovery.xl.uu9wfv target/debug/kvbm_g3pb_worker_smoke --worker-id 23 --num-device-blocks 96 --host-blocks 56 --count 40 --sequence-start 9000`
+    - pass
+    - transferred `40` blocks / `327680` bytes
+    - request-plane timings:
+      - `health`: `1` op in `0.002878s` (`347.41 ops/s`)
+      - `load_remote`: `1` op in `0.003572s` (`279.98 ops/s`)
+      - `offer`: `1` op in `0.001408s` (`710.46 ops/s`)
+      - `stage_put`: `1` op in `0.002331s` (`429.05 ops/s`)
+      - `commit_put`: `1` op in `0.001698s` (`589.01 ops/s`)
+      - `query`: `1` op in `0.001343s` (`744.58 ops/s`)
+      - `fetch`: `1` op in `0.001933s` (`517.42 ops/s`)
+      - total metadata RPCs: `7` ops in `0.015162s` (`461.68 ops/s`)
 
 ### Decisions confirmed in this run so far
 
@@ -531,22 +618,29 @@ Commit is allowed for this state because the end-to-end `G3PB` validation stack 
   change is needed for it
 - the restart milestone is complete, so the next effort should stay focused on
   scaling the same smoke path rather than broadening functionality
+- first teardown-warning readback should stay narrow:
+  inspect local remote-metadata ownership/unload behavior before assuming the
+  warning requires transport-path changes
+- keep the request-plane timing output in the worker smoke:
+  it is cheap, uses the real G3PB path, and gives enough throughput visibility
+  for future validation without adding a separate harness
+- treat the teardown warning as an upstream `nixl-sys` cleanup bug rather than a
+  blocker for the landed G3PB slice
 
 ### Remaining work in this run
 
-- larger staged-transfer smoke counts
-- explicit request-plane metadata-RPC throughput measurement
-- deeper diagnosis of the still-non-blocking teardown warning
-  `invalidateRemoteMD ... NIXL_ERR_NOT_FOUND`
+- none for the current G3PB execution slice
 
 ### Exact next step
 
-- run the worker smoke with materially larger block counts against the same
-  request-plane/discovery path, record transfer sizes and any capacity limits,
-  and only then decide whether throughput instrumentation needs a code edit
+- commit the worker-smoke timing instrumentation plus the updated execution log
+  with `--signoff`; no further implementation work remains for this slice
 
 ### Handoff for next run
 
-- in progress; do not stop until the remaining validation tail above is either
-  completed or reduced to a precise blocker with commands, outputs, and next
-  steps recorded here
+- the requested execution slice is complete
+- if a future run picks this up, only pursue follow-on work outside this slice:
+  1. upstream or locally patch `nixl-sys` remote metadata invalidation to use
+     null-terminated `CString` values
+  2. decide whether backend-side eviction/reclamation is needed for long-lived
+     retained committed blocks beyond the current smoke coverage
