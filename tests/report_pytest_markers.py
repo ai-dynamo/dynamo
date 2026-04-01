@@ -146,7 +146,6 @@ STUB_MODULES = [
     "gpu_memory_service.integrations.vllm.worker",
     "gpu_memory_service.server",
     "gpu_memory_service.server.allocations",
-    "gpu_memory_service.server.epochs",
     "gpu_memory_service.server.gms",
     "gpu_memory_service.server.rpc",
     "gpu_memory_service.server.session",
