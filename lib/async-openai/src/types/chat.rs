@@ -823,13 +823,16 @@ pub enum ServiceTierResponse {
     Priority,
 }
 
-#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    None,
     Minimal,
     Low,
+    #[default]
     Medium,
     High,
+    Xhigh,
 }
 
 /// Output types that you would like the model to generate for this request.
@@ -924,10 +927,9 @@ pub struct CreateChatCompletionRequest {
     /// Constrains effort on reasoning for
     /// [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     ///
-    /// Currently supported values are `low`, `medium`, and `high`. Reducing
+    /// Supported values are model-dependent and can include `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
     ///
-    /// reasoning effort can result in faster responses and fewer tokens
-    /// used on reasoning in a response.
+    /// Lower effort favors speed and lower token usage, while higher effort favors more complete reasoning.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
 

@@ -844,9 +844,8 @@ pub struct Billing {
 pub struct Reasoning {
     /// Constrains effort on reasoning for
     /// [reasoning models](https://platform.openai.com/docs/guides/reasoning).
-    /// Currently supported values are `minimal`, `low`, `medium`, and `high`. Reducing
-    /// reasoning effort can result in faster responses and fewer tokens used
-    /// on reasoning in a response.
+    /// Supported values are model-dependent and can include `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+    /// Lower effort favors speed and lower token usage, while higher effort favors more complete reasoning.
     ///
     /// Note: The `gpt-5-pro` model defaults to (and only supports) `high` reasoning effort.
     #[serde(skip_serializing_if = "Option::is_none")]
