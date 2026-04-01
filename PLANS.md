@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 10:42:21 UTC
+Last updated: 2026-04-01 10:44:32 UTC
 
 ## Active state
 
@@ -10,8 +10,8 @@ Last updated: 2026-04-01 10:42:21 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - current live tip is the docs-only handoff refresh commit from the previous
-    run on top of the validated detached `HEAD` from that run
+  - current live tip is the docs-only handoff refresh commit from this run on
+    top of validated detached `HEAD` `e1ebf8cf1b99`
 - Current implementation direction:
   - `G3PB` is the peer-cache replacement for the unlanded `G4` disk-identity
     surface
