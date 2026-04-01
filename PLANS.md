@@ -1,6 +1,6 @@
 # KVBM TensorRT-LLM Integration Execution Plan
 
-Last updated: 2026-04-01 14:15:15 UTC
+Last updated: 2026-04-01 14:22:14 UTC
 
 ## Active state
 
@@ -10,7 +10,7 @@ Last updated: 2026-04-01 14:15:15 UTC
   - `docs/design-docs/kvbm-g3pb-plan.md`
 - Current branch shape:
   - detached `HEAD`
-  - live detached `HEAD`: `6d2e91496bfd`
+  - live detached `HEAD`: `461cab994c3e`
 - Current implementation direction:
   - `G3PB` remains the peer-cache replacement for the unlanded `G4`
     disk-identity surface
@@ -24,13 +24,12 @@ Last updated: 2026-04-01 14:15:15 UTC
   - `c231d60fb` (`build: patch local nixl-sys invalidation`)
 - Scope status:
   - no open implementation work remains for the active first-pass `G3PB` slice
-  - this run has completed a fresh required-doc reread, live-tree seam audit,
-    focused validation rerun, and refreshed pre-commit handoff
-  - remaining execution for this run is docs-only closure:
-    post-edit spot check, signed handoff commit, and final refreshed on-disk
-    handoff
+  - this run completed a fresh required-doc reread, live-tree seam audit,
+    focused validation rerun, and refreshed on-disk handoff
+  - the prior signed docs-only handoff commit remains:
+    - `461cab994c3e` (`docs: refresh g3pb handoff`)
 
-## Current run (2026-04-01 14:15:15 UTC)
+## Current run (2026-04-01 14:22:14 UTC)
 
 ### Summary of accomplishments in this run
 
@@ -38,7 +37,7 @@ Last updated: 2026-04-01 14:15:15 UTC
   - `Agents.md`
   - `PLANS.md`
   - `docs/design-docs/kvbm-g3pb-plan.md`
-- Reconfirmed the live tree from detached `HEAD` `6d2e91496bfd` before making
+- Reconfirmed the live tree from detached `HEAD` `461cab994c3e` before making
   any further changes
 - Re-ran the focused seam audit from the live tree instead of assuming the
   previous docs-only handoff still matched the current checkout
@@ -51,22 +50,22 @@ Last updated: 2026-04-01 14:15:15 UTC
 - Reconfirmed again that no stronger standalone runnable `G3PB` e2e target is
   present in-tree beyond the existing smoke binary and focused validation stack
 - Re-ran the focused `G3PB` validation stack from live detached
-  `HEAD` `6d2e91496bfd`, and it is green
-- Refreshed this on-disk handoff before the final docs-only closure steps so
-  the current run state is preserved precisely on disk
+  `HEAD` `461cab994c3e`, and it is green
+- Refreshed this on-disk handoff again so the next run starts from the current
+  detached `HEAD` rather than the previous validation snapshot
 
 ### Current findings in this run
 
 - the active `G3PB` implementation slice still appears complete on detached
-  `HEAD` `6d2e91496bfd`
+  `HEAD` `461cab994c3e`
 - no new `G3PB` implementation gap was identified by the audit or validation
 - the design doc's listed next milestones remain follow-on scope rather than
   unfinished execution for the active first-pass slice
 - unrelated repo-wide `TODO` and `FIXME` markers still exist, but none surfaced
   as unfinished work for this `G3PB` slice
 - no code changes are pending for the active `G3PB` slice
-- `PLANS.md` is intentionally dirty with this refreshed pre-commit handoff
-  while the final docs-only closure steps are still pending in this run
+- `PLANS.md` is intentionally left dirty only with this refreshed on-disk
+  handoff for the next run
 
 ### Validation completed in this run
 
@@ -79,7 +78,7 @@ Last updated: 2026-04-01 14:15:15 UTC
 - `sed -n '1,320p' docs/design-docs/kvbm-g3pb-plan.md`
   - pass
 - `git rev-parse --short=12 HEAD && git log --oneline -8`
-  - pass (`6d2e91496bfd`; recent history remains docs-only handoff refreshes)
+  - pass (`461cab994c3e`; recent history remains docs-only handoff refreshes)
 - `rg -n "G3pbPeerStorage|delete_blocks|g3pb_admission|G3PB_OFFLOAD_ALL|patch\\.crates-io|nixl-sys|kvbm_g3pb_backend|kvbm_g3pb_worker_smoke" Cargo.toml lib/llm lib/bindings/kvbm third_party/nixl-sys`
   - pass as a seam audit
   - result: the workspace `nixl-sys` patch, backend-side delete/reclaim path,
@@ -103,10 +102,7 @@ Last updated: 2026-04-01 14:15:15 UTC
 - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
   - pass
 - `date -u '+%Y-%m-%d %H:%M:%S UTC'`
-  - pass (`2026-04-01 14:15:15 UTC`) after the focused validation stack
-- `git status --short --branch`
-  - pass (`## HEAD (no branch)` with only `PLANS.md` dirty) before final
-    docs-only closure steps
+  - pass (`2026-04-01 14:22:14 UTC`) after the focused validation stack
 
 ### Decisions confirmed in this run
 
@@ -120,16 +116,12 @@ Last updated: 2026-04-01 14:15:15 UTC
 
 ### Remaining work in this run
 
-- re-run the required post-edit `cargo test --manifest-path lib/llm/Cargo.toml
-  g3pb:: --lib` spot check after this `PLANS.md` refresh
-- if the spot check stays green, land a signed docs-only handoff commit
-- refresh `PLANS.md` one more time from the new detached `HEAD` with the final
-  post-commit handoff
+- none
 
 ### Exact next step
 
-- run `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib` as the
-  required post-edit spot check for this docs refresh
+- leave the active `G3PB` slice closed unless a fresh regression or explicitly
+  new scope appears
 
 ### Handoff for next run
 
@@ -140,13 +132,12 @@ Last updated: 2026-04-01 14:15:15 UTC
 - validate from the live detached `HEAD` rather than assuming this docs-only
   tip remains current
 - the validated non-docs implementation baseline remains `abfc85ffd0a4`
-- detached `HEAD` `6d2e91496bfd` has green focused `G3PB` validation:
+- detached `HEAD` `461cab994c3e` has green focused `G3PB` validation:
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb:: --lib`
   - `cargo test --manifest-path lib/llm/Cargo.toml g3pb_filter --lib`
   - `cargo test --manifest-path lib/bindings/kvbm/Cargo.toml read_g3pb_admission_config`
   - `cargo build --manifest-path lib/llm/Cargo.toml --bin kvbm_g3pb_backend --bin kvbm_g3pb_worker_smoke`
-- this run has not yet landed its docs-only closure commit; the tree is
-  currently dirty only with this refreshed handoff
+- the latest signed docs-only handoff tip remains `461cab994c3e`
 - no stronger standalone runnable `G3PB` e2e target is currently present in the
   tree beyond the smoke binary and focused validation stack
 - the active `G3PB` slice still has no pending code changes
