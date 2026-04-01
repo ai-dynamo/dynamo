@@ -35,6 +35,7 @@ class AggregatedHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         """Generate response, optionally using remote encoder for multimodal."""
+        logging.info("Indrajit auto run claude")
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
         embeddings = None
