@@ -136,8 +136,9 @@ The current landed slice covers the first honest `G3PB` seam:
 
 ## Next milestones
 
-1. Adopt `KvBlockManagerConfig.g3pb_admission` in real non-smoke callers as
-   they opt into `G3PB`.
+1. Expand native `KvBlockManagerConfig.g3pb_admission` adoption beyond the
+   first landed bindings caller as additional real non-smoke callers opt into
+   `G3PB`.
 2. Decide the next shared KVBM config layer for CPU-buffer retention /
    `foyer` retention separately from admission policy.
 3. Investigate or upstream the non-blocking `nixl-sys` remote metadata teardown
