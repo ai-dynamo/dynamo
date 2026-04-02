@@ -230,9 +230,8 @@ def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> Non
             - 50.0 * abs(state.decode_workers - target_state.decode_workers)
             - 10.0 * abs(state.overlap_score_weight - target_state.overlap_score_weight)
         )
-        total_gpus = state.total_gpus_used
         return {
-            "output_throughput_tok_s": desired_score * total_gpus,
+            "output_throughput_tok_s": desired_score,
             "mean_ttft_ms": 100.0,
             "p95_ttft_ms": 120.0,
             "mean_tpot_ms": 10.0,
@@ -291,7 +290,7 @@ def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) ->
             - 10.0 * abs(state.overlap_score_weight - target_state.overlap_score_weight)
         )
         return {
-            "output_throughput_tok_s": desired_score * state.total_gpus_used,
+            "output_throughput_tok_s": desired_score,
             "mean_ttft_ms": 100.0,
             "p95_ttft_ms": 120.0,
             "mean_tpot_ms": 10.0,
