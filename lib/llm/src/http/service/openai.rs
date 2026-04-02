@@ -299,14 +299,21 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 /// The request ID comes from the trace context — `make_inference_request_span()` guarantees it by
 /// generating a UUID when the client doesn't provide one.
 pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
-    // Validate x-dynamo-request-id header if present, warn on invalid values
-    if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+    // Validate x-dynamo-request-id header if present, warn on invalid values.
+    // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
+    // server-generated request IDs instead of supplying their own.
+    let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+        tracing::warn!(
+            "{} header is deprecated (DEP #7812); server-generated request IDs should be used instead",
+            DYNAMO_REQUEST_ID_HEADER
+        );
         match raw.to_str() {
             Err(_) => {
                 tracing::warn!(
                     "{} header must be a valid UTF-8 string",
                     DYNAMO_REQUEST_ID_HEADER
                 );
+                None
             }
             Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
                 tracing::warn!(
@@ -314,10 +321,13 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
                     DYNAMO_REQUEST_ID_HEADER,
                     s
                 );
+                None
             }
-            Ok(_) => {} // Valid header, will be picked up from trace context below
+            Ok(s) => Some(s.to_string()),
         }
-    }
+    } else {
+        None
+    };
 
     // Prefer trace context (set by make_inference_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
@@ -326,8 +336,8 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
         return x_dynamo_request_id;
     }
 
-    // Fallback: generate new UUID
-    uuid::Uuid::new_v4().to_string()
+    // Fallback: use validated header for backwards compat, or generate new UUID
+    validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
 /// OpenAI Completions Request Handler
