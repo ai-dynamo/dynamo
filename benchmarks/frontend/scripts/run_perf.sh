@@ -121,7 +121,7 @@ Service Options:
   --model PATH              Model path (default: nvidia/Llama-3.1-8B-Instruct-FP8)
   --model-name NAME         Served model name (default: same as --model)
   --workers N               Number of mocker workers (default: 2)
-  --speedup-ratio RATIO     Mocker speedup ratio (default: 1.0; 0 = infinite)
+  --speedup-ratio RATIO     Mocker speedup ratio (default: 1.0; use large value for near-instant)
   --data-parallel-size N    Mocker DP workers (default: 1)
   --request-plane PLANE     nats|http|tcp (default: tcp)
   --event-plane PLANE       nats|zmq (default: nats)

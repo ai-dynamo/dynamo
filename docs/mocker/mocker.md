@@ -241,7 +241,7 @@ It also accepts older raw-data directories containing:
 ```bash
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+    --planner-profile-data components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
 ```
 

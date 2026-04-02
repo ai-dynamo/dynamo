@@ -58,21 +58,53 @@ impl PromptFormatter {
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate {
-                    file: checked_file, ..
-                }) = mdc.chat_template_file.as_ref()
-                {
-                    let Some(chat_template_file) = checked_file.path() else {
-                        anyhow::bail!(
-                            "HfChatTemplate for {} is a URL, cannot load",
-                            mdc.display_name
-                        );
-                    };
-                    let chat_template =
-                        std::fs::read_to_string(chat_template_file).with_context(|| {
-                            format!("fs:read_to_string '{}'", chat_template_file.display())
+                match mdc.chat_template_file.as_ref() {
+                    Some(PromptFormatterArtifact::HfChatTemplateJinja {
+                        file: checked_file,
+                        ..
+                    }) => {
+                        let Some(path) = checked_file.path() else {
+                            anyhow::bail!(
+                                "HfChatTemplateJinja for {} is a URL, cannot load",
+                                mdc.display_name
+                            );
+                        };
+                        let chat_template = std::fs::read_to_string(path)
+                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                        config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                    }
+                    Some(PromptFormatterArtifact::HfChatTemplateJson {
+                        file: checked_file,
+                        ..
+                    }) => {
+                        let Some(path) = checked_file.path() else {
+                            anyhow::bail!(
+                                "HfChatTemplateJson for {} is a URL, cannot load",
+                                mdc.display_name
+                            );
+                        };
+                        let raw = std::fs::read_to_string(path)
+                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(&raw).with_context(|| {
+                                format!("Failed to parse '{}' as JSON", path.display())
+                            })?;
+                        let field = wrapper.get("chat_template").ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "'{}' does not contain a 'chat_template' field",
+                                path.display()
+                            )
                         })?;
-                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                        let value = serde_json::from_value::<ChatTemplateValue>(field.clone())
+                            .with_context(|| {
+                                format!(
+                                    "Failed to deserialize 'chat_template' in '{}'",
+                                    path.display()
+                                )
+                            })?;
+                        config.chat_template = Some(value);
+                    }
+                    _ => {}
                 }
                 Self::from_parts(
                     config,
@@ -82,8 +114,9 @@ impl PromptFormatter {
                     mdc.runtime_config.exclude_tools_when_tool_choice_none,
                 )
             }
-            PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
-                "prompt_formatter should not have type HfChatTemplate"
+            PromptFormatterArtifact::HfChatTemplateJinja { .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
+                "prompt_formatter should not have type HfChatTemplate*"
             )),
         }
     }
@@ -135,6 +168,9 @@ struct HfTokenizerConfigJsonFormatter {
     /// When true, strip tool definitions from the chat template when tool_choice is "none".
     /// This prevents models from generating raw XML tool calls in the content field.
     exclude_tools_when_tool_choice_none: bool,
+    /// True if the chat template natively references `reasoning_content`.
+    /// When true, skip injection — the template handles it.
+    template_handles_reasoning: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
