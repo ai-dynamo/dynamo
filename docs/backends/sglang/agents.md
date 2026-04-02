@@ -388,7 +388,7 @@ The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metric
 
 ### Testing with OpenCode
 
-[OpenCode](https://github.com/nicholasgasior/opencode) is an open-source AI coding agent that supports OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) adds `nvext.session_control` support so each coding session maps to a Dynamo streaming session with sticky routing and subagent KV isolation.
+[OpenCode](https://github.com/anomalyco/opencode) is an open-source AI coding agent that supports OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) adds `nvext.session_control` support so each coding session maps to a Dynamo streaming session with sticky routing and subagent KV isolation.
 
 ```bash
 # Terminal 1: launch Dynamo with agent controller
