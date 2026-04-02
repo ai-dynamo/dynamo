@@ -215,6 +215,39 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 }
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
+// kubeEnvelopeFields are standard top-level Kubernetes fields that don't
+// represent the resource's desired state. Everything else (spec, data,
+// rules, roleRef, subjects, etc.) is considered content.
+var kubeEnvelopeFields = map[string]bool{
+	"apiVersion": true,
+	"kind":       true,
+	"metadata":   true,
+	"status":     true,
+}
+
+// getContentFields returns all content fields from an unstructured object,
+// i.e. everything except the Kubernetes envelope (apiVersion, kind, metadata, status).
+// For resources with a "spec" field, it returns the spec directly for
+// backward-compatible hashing. For spec-less resources (ConfigMaps, Secrets,
+// Roles, etc.), it returns a map of all content fields.
+func getContentFields(u *unstructured.Unstructured) (any, bool) {
+	if spec, found, err := unstructured.NestedFieldCopy(u.Object, "spec"); err == nil && found {
+		return spec, true
+	}
+
+	content := make(map[string]interface{})
+	for k, v := range u.Object {
+		if kubeEnvelopeFields[k] {
+			continue
+		}
+		content[k] = v
+	}
+	if len(content) == 0 {
+		return nil, false
+	}
+	return content, true
+}
+
 func CopySpec(source, destination client.Object) error {
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
 	if err != nil {
@@ -228,28 +261,18 @@ func CopySpec(source, destination client.Object) error {
 	}
 	dstU := &unstructured.Unstructured{Object: destMap}
 
-	// Prefer copying "spec" for resources that have it.
-	sourceSpec, found, err := unstructured.NestedFieldCopy(srcU.Object, "spec")
-	if err != nil {
-		return err
-	}
-	if found {
-		if err := unstructured.SetNestedField(dstU.Object, sourceSpec, "spec"); err != nil {
+	if spec, found, err := unstructured.NestedFieldCopy(srcU.Object, "spec"); err == nil && found {
+		if err := unstructured.SetNestedField(dstU.Object, spec, "spec"); err != nil {
 			return err
 		}
 		return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
 	}
 
-	// For resources without spec (ConfigMaps, Secrets, Roles, etc.),
-	// copy all content fields — everything except the standard Kubernetes
-	// envelope (apiVersion, kind, metadata) and controller-managed status.
 	for k, v := range srcU.Object {
-		switch k {
-		case "apiVersion", "kind", "metadata", "status":
+		if kubeEnvelopeFields[k] {
 			continue
-		default:
-			dstU.Object[k] = v
 		}
+		dstU.Object[k] = v
 	}
 
 	return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
@@ -262,28 +285,8 @@ func getSpec(obj client.Object) (any, error) {
 	}
 	u := &unstructured.Unstructured{Object: sourceMap}
 
-	// Prefer "spec" for backward-compatible hashing of resources that have it.
-	spec, found, err := unstructured.NestedFieldCopy(u.Object, "spec")
-	if err != nil {
-		return nil, err
-	}
-	if found {
-		return spec, nil
-	}
-
-	// For resources without a spec (ConfigMaps, Secrets, RoleBindings, etc.),
-	// hash all content fields — everything except the standard Kubernetes
-	// envelope (apiVersion, kind, metadata) and controller-managed status.
-	content := make(map[string]interface{})
-	for k, v := range u.Object {
-		switch k {
-		case "apiVersion", "kind", "metadata", "status":
-			continue
-		default:
-			content[k] = v
-		}
-	}
-	if len(content) == 0 {
+	content, found := getContentFields(u)
+	if !found {
 		return nil, nil
 	}
 	return content, nil
