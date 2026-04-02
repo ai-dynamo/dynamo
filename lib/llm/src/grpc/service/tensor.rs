@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
@@ -14,12 +14,14 @@ use crate::types::Annotated;
 
 use super::kserve;
 
+use validator::Validate;
+
 // [gluo NOTE] These are common utilities that should be shared between frontends
+use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, ResponseMetricCollector},
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
-use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
@@ -58,13 +60,22 @@ pub async fn tensor_response_stream(
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
+    let cancellation_labels = CancellationLabels {
+        model: request.model.clone(),
+        endpoint: Endpoint::Tensor.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
     // [gluo TODO] revisit metrics to properly expose it
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -75,6 +86,8 @@ pub async fn tensor_response_stream(
         .manager()
         .get_tensor_engine(model)
         .map_err(|_| Status::not_found("model not found"))?;
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
     let inflight_guard =
         state
@@ -115,9 +128,15 @@ pub async fn tensor_response_stream(
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
 
-    // Tap on the stream to collect response metrics
+    // Tap on the stream to collect response metrics and handle http_queue_guard
+    let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
-        process_metrics_only(response, &mut response_collector);
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
     });
 
     let stream = grpc_monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
@@ -167,17 +186,6 @@ pub fn grpc_monitor_for_disconnects<T>(
                 }
             }
         }
-    }
-}
-
-fn process_metrics_only<T>(
-    annotated: &Annotated<T>,
-    response_collector: &mut ResponseMetricCollector,
-) {
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
     }
 }
 
@@ -306,6 +314,9 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
                 }
             }
             tensor_request.tensors.push(tensor);
+        }
+        if let Err(validation_error) = tensor_request.validate() {
+            return Err(Status::invalid_argument(validation_error.to_string()));
         }
         Ok(tensor_request)
     }
@@ -533,6 +544,9 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
 
     fn try_from(extended_response: ExtendedNvCreateTensorResponse) -> Result<Self, Self::Error> {
         let response = extended_response.response;
+        if let Err(e) = response.validate() {
+            return Err(anyhow::anyhow!("Invalid NvCreateTensorResponse: {}", e));
+        }
 
         // Convert response-level parameters
         let parameters = convert_dynamo_to_kserve_params(&response.parameters);

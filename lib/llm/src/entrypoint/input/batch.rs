@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::preprocessor::OpenAIPreprocessor;
@@ -7,7 +7,7 @@ use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use anyhow::Context as _;
-use dynamo_async_openai::types::FinishReason;
+use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::{DistributedRuntime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -201,15 +201,15 @@ async fn evaluate(
     entry: &mut Entry,
     template: Option<Arc<RequestTemplate>>,
 ) -> anyhow::Result<String> {
-    let user_message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let user_message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 entry.text.clone(),
             ),
             name: None,
         },
     );
-    let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
         .model(
             template
@@ -229,6 +229,7 @@ async fn evaluate(
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     };
     let mut stream = engine.generate(Context::new(req)).await?;
@@ -237,18 +238,23 @@ async fn evaluate(
         match (item.data.as_ref(), item.event.as_deref()) {
             (Some(data), _) => {
                 // Normal case
-                let choice = data.choices.first();
-                let chat_comp = choice.as_ref().unwrap();
+                let Some(chat_comp) = data.inner.choices.first() else {
+                    continue;
+                };
                 if let Some(c) = &chat_comp.delta.content {
-                    output += c;
+                    match c {
+                        ChatCompletionMessageContent::Text(text) => {
+                            output += text;
+                        }
+                        ChatCompletionMessageContent::Parts(_) => {
+                            // Multimodal content - skip for now in batch processing
+                            // (ayushag) TODO: Handle multimodal content in batch mode
+                        }
+                    }
                 }
                 entry.finish_reason = chat_comp.finish_reason;
-                if chat_comp.finish_reason.is_some() {
-                    tracing::trace!(
-                        request_id,
-                        "finish reason: {:?}",
-                        chat_comp.finish_reason.unwrap()
-                    );
+                if let Some(finish_reason) = chat_comp.finish_reason.as_ref() {
+                    tracing::trace!(request_id, "finish reason: {:?}", finish_reason);
                     break;
                 }
             }

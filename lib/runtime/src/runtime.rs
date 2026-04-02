@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The [Runtime] module is the interface for [crate::component::Component]
@@ -51,6 +51,9 @@ pub struct Runtime {
 
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
+        // Initialise NVTX toggle once from environment (no-op when feature is off)
+        crate::nvtx::init();
+
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -146,6 +149,12 @@ impl Runtime {
         if let (Some(pool), Some(permits)) = (&self.compute_pool, &self.block_in_place_permits) {
             crate::compute::thread_local::initialize_context(Arc::clone(pool), Arc::clone(permits));
         }
+        // Name this worker thread in the Nsight Systems timeline (no-op when nvtx feature is off)
+        let thread_name = std::thread::current()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("tokio-worker-{:?}", std::thread::current().id()));
+        crate::nvtx::name_current_thread_impl(&thread_name);
     }
 
     /// Initialize thread-local compute context on all worker threads using a barrier
@@ -230,7 +239,7 @@ impl Runtime {
         }
 
         let count = thread_ids.lock().len();
-        tracing::debug!("Detected {} worker threads in runtime", count);
+        tracing::debug!("Detected {count} worker threads in runtime");
         count
     }
 
@@ -318,15 +327,15 @@ impl Runtime {
             tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
 
             let count = tracker.get_count();
-            tracing::info!("Active graceful endpoints: {}", count);
+            tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
                 tracker.wait_for_completion().await;
             }
 
-            // Phase 3: Now connections will be disconnected to NATS/ETCD by cancelling the main token
+            // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
+                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
             );
             main_token.cancel();
         });

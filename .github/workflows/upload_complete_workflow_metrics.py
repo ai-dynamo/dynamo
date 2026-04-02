@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
 Enhanced script to upload complete GitHub Actions workflow and job metrics.
@@ -180,21 +180,21 @@ class BuildMetricsReader:
 
         # Fallback to individual file approach for backward compatibility
         # Try framework-specific artifact (direct path)
-        artifact_path = f"build-metrics/metrics-{framework}-{preferred_arch}.json"
+        artifact_path = f"build-metrics/metrics-{framework}-{preferred_arch}-*.json"
         if not os.path.exists(artifact_path):
             # Try the other architecture (direct path)
             other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
-            artifact_path = f"build-metrics/metrics-{framework}-{other_arch}.json"
+            artifact_path = f"build-metrics/metrics-{framework}-{other_arch}-*.json"
         if not os.path.exists(artifact_path):
             # Try artifact subdirectory structure (new format)
-            artifact_path = f"build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}.json"
+            artifact_path = f"build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}-*.json"
         if not os.path.exists(artifact_path):
             # Try other architecture in subdirectory
             other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
-            artifact_path = f"build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}.json"
+            artifact_path = f"build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}-*.json"
         if not os.path.exists(artifact_path):
             # Try old naming convention (backward compatibility)
-            artifact_path = f"build-metrics/metrics-{framework}.json"
+            artifact_path = f"build-metrics/metrics-{framework}-*.json"
         if not os.path.exists(artifact_path):
             # Try alternative path (old format)
             artifact_path = f"build-metrics/build-metrics-{framework}/metrics.json"
@@ -824,11 +824,6 @@ class WorkflowMetricsUploader:
 
         job_name = job_data.get("name", "")
         job_id = str(job_data["id"])
-
-        # Skip deployment test jobs (No pytest metadata files are created)
-        if job_name.lower().startswith("deploy"):
-            print(f"⏭️  Skipping test metrics for deployment job '{job_name}'")
-            return
 
         print(f"🧪 Looking for test results for job '{job_name}'")
 

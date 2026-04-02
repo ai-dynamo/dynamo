@@ -1,29 +1,100 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import enum
 import logging
+import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import Any, Optional
 
-from tensorrt_llm import LLM
+from tensorrt_llm import LLM, MultimodalEncoder
+from tensorrt_llm.llmapi.llm import BaseLLM
+from transformers import AutoConfig
 
-logging.basicConfig(level=logging.DEBUG)
+from dynamo.trtllm.constants import DisaggregationMode
+
+logger = logging.getLogger(__name__)
+
+# Model architectures without standalone encoder support in TRT-LLM
+# (missing @register_vision_encoder). These handle vision encoding
+# inside the main model (prefill/decode) instead.
+_UNSUPPORTED_STANDALONE_ENCODER_ARCHS = {"Llama4ForConditionalGeneration"}
+
+
+class Backend(str, enum.Enum):
+    """Supported TensorRT-LLM backend types."""
+
+    PYTORCH = "pytorch"
+    AUTODEPLOY = "_autodeploy"
 
 
 class TensorRTLLMEngine:
-    def __init__(self, engine_args):
-        self.engine_args = engine_args
+    def __init__(
+        self,
+        engine_args: dict[str, Any],
+        disaggregation_mode: Optional[DisaggregationMode] = None,
+    ) -> None:
         self._llm: Optional[LLM] = None
+        self.disaggregation_mode = (
+            disaggregation_mode
+            if disaggregation_mode is not None
+            else DisaggregationMode.AGGREGATED
+        )
+        # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
+        # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
+        engine_args = dict(engine_args)
+        backend = engine_args.pop("backend", Backend.PYTORCH)
+        if backend == Backend.PYTORCH:
+            self._llm_cls = LLM
+        elif backend == Backend.AUTODEPLOY:
+            from tensorrt_llm._torch.auto_deploy import LLM as AutoDeployLLM
 
-    async def initialize(self):
-        if not self._llm:
-            model = self.engine_args.pop("model")
-            self._llm = LLM(
-                model=model,
-                **self.engine_args,
+            self._llm_cls = AutoDeployLLM
+            self._prune_engine_args_for_autodeploy(engine_args)
+        else:
+            raise ValueError(
+                f"Unsupported {backend=}. Available backends: {[b.value for b in Backend]}."
             )
 
-    async def cleanup(self):
+        self.engine_args = engine_args
+
+    @property
+    def encoder_available(self) -> bool:
+        """Whether the multimodal encoder LLM is initialized."""
+        return self._llm is not None
+
+    async def initialize(self) -> None:
+        if not self._llm:
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                # Initialize the multimodal encoder for full EPD
+                # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
+                # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
+                # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
+                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
+                model = self.engine_args.get("model")
+
+                # Skip MultimodalEncoder for architectures that handle vision
+                # encoding inside the main model (e.g. Llama4).
+                if self._is_unsupported_encoder_arch(model):  # type: ignore
+                    return
+
+                max_batch_size = self.engine_args.get("max_batch_size", 1)
+                logging.info(
+                    f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
+                )
+                # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
+                # so storing either in self._llm is valid.
+                self._llm = MultimodalEncoder(
+                    model=model,
+                    max_batch_size=max_batch_size,
+                )
+            else:
+                # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
+                # (model path, backend settings, KV cache config, disaggregation settings, etc.)
+                self._llm = self._llm_cls(**self.engine_args)
+
+    async def cleanup(self) -> None:
         if self._llm:
             try:
                 self._llm.shutdown()
@@ -33,17 +104,93 @@ class TensorRTLLMEngine:
                 self._llm = None
 
     @property
-    def llm(self):
+    def llm(self) -> BaseLLM:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm
 
+    def get_attention_dp_size(self) -> int:
+        """Return attention_dp_size (tensor_parallel_size if attention DP enabled, else 1).
+        When attention DP is enabled, each attention DP rank becomes a separate routing target.
+        """
+        if not self._llm:
+            return 1
+        enable_attention_dp = getattr(self.llm.args, "enable_attention_dp", False)
+        tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
+        return tensor_parallel_size if enable_attention_dp else 1
+
+    @staticmethod
+    def _prune_engine_args_for_autodeploy(engine_args) -> None:
+        """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
+        # TODO(2ez4bz/lucaslie): consider handling this in AutoDeploy's `LlmArgs` itself.
+        unsupported_fields = [
+            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
+            # llm_args.py#L313
+            "build_config",
+            # https://github.com/NVIDIA/TensorRT-LLM/blob/b51258acdd968599b2c3756d5a5326e7d750e7bf/
+            # tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L384
+            "scheduler_config",
+            # The below all come from:
+            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
+            # llm_args.py#L316
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "context_parallel_size",
+            "moe_cluster_parallel_size",
+            "moe_tensor_parallel_size",
+            "moe_expert_parallel_size",
+            "enable_attention_dp",  # AutoDeploy doesn't support attention DP (only pytorch backend does)
+            "cp_config",
+        ]
+        for field_name in unsupported_fields:
+            if engine_args.pop(field_name, None) is not None:
+                TensorRTLLMEngine._warn_about_unsupported_field(field_name)
+
+    @staticmethod
+    def _warn_about_unsupported_field(field_name: str) -> None:
+        logger.warning(
+            "`%s` cannot be used with the `_autodeploy` backend. Ignoring.",
+            field_name,
+        )
+
+    @staticmethod
+    def _is_unsupported_encoder_arch(model_path: str) -> bool:
+        """Return True if *model_path*'s architecture is not supported by
+        TRT-LLM's standalone MultimodalEncoder."""
+        try:
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            archs = getattr(config, "architectures", None) or []
+            return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
+        except Exception:
+            return False
+
 
 @asynccontextmanager
-async def get_llm_engine(engine_args) -> AsyncGenerator[TensorRTLLMEngine, None]:
-    engine = TensorRTLLMEngine(engine_args)
+async def get_llm_engine(
+    engine_args: dict[str, Any],
+    disaggregation_mode: Optional[DisaggregationMode] = None,
+    component_gauges: Any = None,
+) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    """Get TensorRT-LLM engine instance with load time tracking.
+
+    Args:
+        engine_args: Engine configuration arguments.
+        disaggregation_mode: Optional disaggregation mode configuration.
+        component_gauges: Optional LLMBackendGauges instance for recording load time.
+    """
+    # Time engine initialization
+    start_time = time.time()
+
+    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()
+        load_time = time.time() - start_time
+        logger.debug(f"TensorRT-LLM engine initialized in {load_time:.2f}s")
+
+        # Record model load time immediately after measurement
+        if component_gauges:
+            component_gauges.set_model_load_time(load_time)
+
         yield engine
     except Exception as e:
         logging.error(f"Error in engine context: {e}")

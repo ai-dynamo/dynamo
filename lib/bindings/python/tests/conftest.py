@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -11,14 +11,14 @@ TWO MODES OF OPERATION:
    - Requires: pytest-forked (uv pip install pytest-forked)
    - Tests using 'runtime' fixture MUST have @pytest.mark.forked
    - Safer, enables parallel execution
-   - Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 pytest tests/test_metrics_registry.py -n auto
+   - Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 pytest tests/ -n auto
 
 2. Default Ports Mode (ENABLE_ISOLATED_ETCD_AND_NATS=0, default):
    - All tests share NATS/ETCD on default ports (4222, 2379)
    - No pytest-forked required
    - No @pytest.mark.forked required
    - Faster for sequential runs, but NO parallel execution
-   - Run: pytest tests/test_metrics_registry.py
+   - Run: pytest tests/
 
 Performance comparison (32-core machine, 13 tests):
     Default ports (ENABLE_ISOLATED_ETCD_AND_NATS=0, default): 4.06s (sequential only)
@@ -402,8 +402,34 @@ def temp_file_store():
         yield tmpdir
 
 
+@pytest.fixture
+def discovery_backend(request):
+    """
+    Discovery backend for runtime. Defaults to "file".
+
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
+        async def test_example(runtime):
+            ...
+    """
+    return getattr(request, "param", "file")
+
+
+@pytest.fixture
+def request_plane(request):
+    """
+    Request plane for runtime. Defaults to "nats".
+
+    To iterate over multiple transports in a test:
+        @pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
+        async def test_example(runtime):
+            ...
+    """
+    return getattr(request, "param", "nats")
+
+
 @pytest.fixture(scope="function", autouse=False)
-async def runtime(request):
+async def runtime(request, discovery_backend, request_plane):
     """
     Create a DistributedRuntime for testing.
 
@@ -413,6 +439,14 @@ async def runtime(request):
 
     Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
     errors when multiple tests try to create runtimes in the same process.
+
+    The discovery_backend and request_plane can be customized by overriding their fixtures
+    or using @pytest.mark.parametrize with indirect=True:
+
+        @pytest.mark.forked
+        @pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
+        async def test_with_etcd(runtime):
+            ...
     """
     # Check if the test is marked with @pytest.mark.forked (only in isolated mode)
     if ENABLE_ISOLATED_ETCD_AND_NATS:
@@ -435,6 +469,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
     yield runtime
     runtime.shutdown()

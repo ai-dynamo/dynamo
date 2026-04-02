@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
@@ -98,7 +98,8 @@ pub struct RuntimeConfig {
 
     /// System status server port for health and metrics endpoints
     /// Set to -1 to disable the system status server (default)
-    /// Set to a positive port number (e.g. 8081) to enable it
+    /// Set to 0 to bind to a random available port
+    /// Set to a positive port number (e.g. 8081) to bind to a specific port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -335,11 +336,11 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is enabled when DYN_SYSTEM_PORT is set to a positive value
+    /// System server is enabled when DYN_SYSTEM_PORT is set to 0 or a positive value
+    /// Port 0 binds to a random available port
     /// Negative values disable the server
-    /// TODO: Support port = 0 to bind to a random available port
     pub fn system_server_enabled(&self) -> bool {
-        self.system_port > 0
+        self.system_port >= 0
     }
 
     pub fn single_threaded() -> Self {
@@ -365,14 +366,22 @@ impl RuntimeConfig {
 
     /// Create a new default runtime configuration
     pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder
             .worker_threads(
                 self.num_worker_threads
                     .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get()),
             )
             .max_blocking_threads(self.max_blocking_threads)
-            .enable_all()
-            .build()
+            .enable_all();
+        if env_is_truthy(environment_names::runtime::DYN_ENABLE_POLL_HISTOGRAM) {
+            tracing::info!(
+                "Tokio poll-time histogram enabled (DYN_ENABLE_POLL_HISTOGRAM); \
+                 expect ~2× Instant::now() overhead per task poll"
+            );
+            builder.enable_metrics_poll_time_histogram();
+        }
+        builder.build()
     }
 }
 
@@ -470,6 +479,11 @@ pub fn disable_ansi_logging() -> bool {
 /// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
 pub fn use_local_timezone() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOG_USE_LOCAL_TZ)
+}
+
+/// Returns true if `DYN_LOGGING_SPAN_EVENTS` is set to a truthy value.
+pub fn span_events_enabled() -> bool {
+    env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
 }
 
 #[cfg(test)]

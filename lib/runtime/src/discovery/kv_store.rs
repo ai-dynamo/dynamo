@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
@@ -10,21 +10,24 @@ use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
+    ModelCardInstanceId,
 };
-use crate::storage::key_value_store::{KeyValueStoreManager, WatchEvent};
+use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
+const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 
-/// Discovery implementation backed by a KeyValueStore
+/// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
-    store: Arc<KeyValueStoreManager>,
+    store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
 }
 
 impl KVStoreDiscovery {
-    pub fn new(store: KeyValueStoreManager, cancel_token: CancellationToken) -> Self {
+    pub fn new(store: kv::Manager, cancel_token: CancellationToken) -> Self {
         Self {
             store: Arc::new(store),
             cancel_token,
@@ -39,6 +42,16 @@ impl KVStoreDiscovery {
     /// Build the key path for a model (relative to bucket, not absolute)
     fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    }
+
+    /// Build the key path for an event channel relative to bucket, not absolute)
+    fn event_channel_key(
+        namespace: &str,
+        component: &str,
+        topic: &str,
+        instance_id: u64,
+    ) -> String {
+        format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id)
     }
 
     /// Extract prefix for querying based on discovery query
@@ -80,6 +93,22 @@ impl KVStoreDiscovery {
                 endpoint,
             } => {
                 format!("{}/{}/{}/{}", MODELS_BUCKET, namespace, component, endpoint)
+            }
+            DiscoveryQuery::EventChannels(query) => {
+                let mut path = EVENT_CHANNELS_BUCKET.to_string();
+                if let Some(ns) = &query.namespace {
+                    path.push('/');
+                    path.push_str(ns);
+                    if let Some(comp) = &query.component {
+                        path.push('/');
+                        path.push_str(comp);
+                        if let Some(topic) = &query.topic {
+                            path.push('/');
+                            path.push_str(topic);
+                        }
+                    }
+                }
+                path
             }
         }
     }
@@ -127,7 +156,7 @@ impl Discovery for KVStoreDiscovery {
         self.store.connection_id()
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance_id = self.instance_id();
         let instance = spec.with_instance_id(instance_id);
 
@@ -154,18 +183,64 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 endpoint,
                 instance_id,
+                model_suffix,
                 ..
             } => {
-                let key = Self::model_key(namespace, component, endpoint, *instance_id);
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // If there's a model_suffix (e.g., for LoRA adapters), append it after the instance_id
+                // Key format: {namespace}/{component}/{endpoint}/{instance_id:x}/{model_suffix}
+                if let Some(suffix) = model_suffix
+                    && !suffix.is_empty()
+                {
+                    key = format!("{}/{}", key, suffix);
+                    tracing::debug!(
+                        "KVStoreDiscovery::register: Registering LoRA model with suffix={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        suffix,
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
+                // Log for base models (no suffix or empty suffix)
+                if model_suffix.as_ref().is_none_or(|s| s.is_empty()) {
+                    tracing::debug!(
+                        "KVStoreDiscovery::register: Registering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+                (MODELS_BUCKET, key)
+            }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                instance_id,
+                ..
+            } => {
+                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                // TODO: bis - remove this info log
+                tracing::info!(
+                    "KVStoreDiscovery::register: EventChannel bucket={}, key={}",
+                    EVENT_CHANNELS_BUCKET,
+                    key
+                );
                 tracing::debug!(
-                    "KVStoreDiscovery::register: Registering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    "KVStoreDiscovery::register: Registering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
                     instance_id,
                     namespace,
                     component,
-                    endpoint,
+                    topic,
                     key
                 );
-                (MODELS_BUCKET, key)
+                (EVENT_CHANNELS_BUCKET, key)
             }
         };
 
@@ -184,7 +259,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = kv::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -203,30 +278,140 @@ impl Discovery for KVStoreDiscovery {
         Ok(instance)
     }
 
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                let key = Self::endpoint_key(
+                    &inst.namespace,
+                    &inst.component,
+                    &inst.endpoint,
+                    inst.instance_id,
+                );
+                tracing::debug!(
+                    "Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
+                (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                model_suffix,
+                ..
+            } => {
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // If there's a model_suffix (e.g., for LoRA adapters), append it after the instance_id
+                if let Some(suffix) = model_suffix
+                    && !suffix.is_empty()
+                {
+                    key = format!("{}/{}", key, suffix);
+                    tracing::debug!(
+                        "KVStoreDiscovery::unregister: Unregistering LoRA model with suffix={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        suffix,
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
+                // Log for base models (no suffix or empty suffix)
+                if model_suffix.as_ref().is_none_or(|s| s.is_empty()) {
+                    tracing::debug!(
+                        "Unregistering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+                (MODELS_BUCKET, key)
+            }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                instance_id,
+                ..
+            } => {
+                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    topic,
+                    key
+                );
+                (EVENT_CHANNELS_BUCKET, key)
+            }
+        };
+
+        // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
+        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::warn!(
+                "Bucket {} does not exist, instance already removed",
+                bucket_name
+            );
+            return Ok(());
+        };
+
+        let key = kv::Key::new(key_path.clone());
+
+        // Delete the entry from the bucket
+        bucket.delete(&key).await?;
+
+        Ok(())
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
+            EVENT_CHANNELS_BUCKET
         } else {
             MODELS_BUCKET
         };
 
         // Get bucket - if it doesn't exist, return empty list
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::debug!(
+                "KVStoreDiscovery::list: bucket missing for query={:?}, prefix={}, bucket={}",
+                query,
+                prefix,
+                bucket_name
+            );
             return Ok(Vec::new());
         };
 
         // Get all entries from the bucket
         let entries = bucket.entries().await?;
+        tracing::debug!(
+            "KVStoreDiscovery::list: query={:?}, prefix={}, bucket={}, entries={}",
+            query,
+            prefix,
+            bucket_name,
+            entries.len()
+        );
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
-        for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
+        for (key, value) in entries {
+            if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
-                        tracing::warn!(key = %key_str, error = %e, "Failed to parse discovery instance");
+                        tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
                 }
             }
@@ -243,6 +428,8 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
+            EVENT_CHANNELS_BUCKET
         } else {
             MODELS_BUCKET
         };
@@ -257,7 +444,7 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the KeyValueStoreManager's watch mechanism
+        // Use the kv::Manager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
             None, // No TTL
@@ -268,7 +455,7 @@ impl Discovery for KVStoreDiscovery {
         let stream = async_stream::stream! {
             while let Some(event) = rx.recv().await {
                 let discovery_event = match event {
-                    WatchEvent::Put(kv) => {
+                    kv::WatchEvent::Put(kv) => {
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             continue;
@@ -288,41 +475,112 @@ impl Discovery for KVStoreDiscovery {
                             }
                         }
                     }
-                    WatchEvent::Delete(kv) => {
+                    kv::WatchEvent::Delete(kv) => {
                         let key_str = kv.as_ref();
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(key_str, &prefix, bucket_name) {
                             continue;
                         }
 
-                        // Extract instance_id from the key path, not the value
-                        // Delete events have empty values in etcd, so we parse the instance_id from the key
-                        // Key format: "v1/instances/namespace/component/endpoint/{instance_id:x}"
-                        let key_parts: Vec<&str> = key_str.split('/').collect();
-                        match key_parts.last() {
-                            Some(instance_id_hex) => {
-                                match u64::from_str_radix(instance_id_hex, 16) {
-                                    Ok(instance_id) => {
-                                        Some(DiscoveryEvent::Removed(instance_id))
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            key = %key_str,
-                                            error = %e,
-                                            "Failed to parse instance_id hex from deleted key"
-                                        );
-                                        None
-                                    }
+                        // Extract DiscoveryInstanceId from the key path
+                        // Delete events have empty values in etcd, so we reconstruct the ID from the key
+                        //
+                        // Key format (relative to bucket, after stripping bucket prefix):
+                        // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
+                        // - Models: "namespace/component/endpoint/{instance_id:x}"
+                        // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
+                        // - EventChannels: "namespace/component/{instance_id:x}"
+                        //
+                        // Use strip_bucket_prefix for consistency with matches_prefix().
+                        let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
+                        let key_parts: Vec<&str> = relative_key.split('/').collect();
+
+                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
+                        // Endpoints/Models need at least 4 parts
+                        let min_parts = 4;
+                        if key_parts.len() < min_parts {
+                            tracing::warn!(
+                                key = %key_str,
+                                relative_key = %relative_key,
+                                actual_parts = key_parts.len(),
+                                expected_min = min_parts,
+                                bucket = bucket_name,
+                                "Delete event key doesn't have enough parts"
+                            );
+                            continue;
+                        }
+
+                        let namespace = key_parts[0].to_string();
+                        let component = key_parts[1].to_string();
+
+                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
+                        let id = if bucket_name == EVENT_CHANNELS_BUCKET {
+                            // EventChannel keys: namespace/component/topic/{instance_id:x}
+                            let topic = key_parts[2].to_string();
+                            let instance_id_hex = key_parts[3];
+                            match u64::from_str_radix(instance_id_hex, 16) {
+                                Ok(instance_id) => {
+                                    DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
+                                        namespace,
+                                        component,
+                                        topic,
+                                        instance_id,
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        instance_id_hex = %instance_id_hex,
+                                        "Failed to parse event channel instance_id hex"
+                                    );
+                                    continue;
                                 }
                             }
-                            None => {
-                                tracing::warn!(
-                                    key = %key_str,
-                                    "Delete event key has no path components"
-                                );
-                                None
+                        } else {
+                            let endpoint = key_parts[2].to_string();
+                            let instance_id_hex = key_parts[3];
+
+                            match u64::from_str_radix(instance_id_hex, 16) {
+                                Ok(instance_id) => {
+                                    // Construct the appropriate DiscoveryInstanceId based on bucket type
+                                    if bucket_name == INSTANCES_BUCKET {
+                                        DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+                                            namespace,
+                                            component,
+                                            endpoint,
+                                            instance_id,
+                                        })
+                                    } else {
+                                        // Model - check for LoRA suffix (5th part if present)
+                                        let model_suffix = key_parts.get(4).map(|s| s.to_string());
+                                        DiscoveryInstanceId::Model(ModelCardInstanceId {
+                                            namespace,
+                                            component,
+                                            endpoint,
+                                            instance_id,
+                                            model_suffix,
+                                        })
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        instance_id_hex = %instance_id_hex,
+                                        "Failed to parse instance_id hex from deleted key"
+                                    );
+                                    continue;
+                                }
                             }
-                        }
+                        };
+
+                        tracing::debug!(
+                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
+                            id,
+                            key_str
+                        );
+                        Some(DiscoveryEvent::Removed(id))
                     }
                 };
 
@@ -333,6 +591,10 @@ impl Discovery for KVStoreDiscovery {
         };
         Ok(Box::pin(stream))
     }
+
+    fn shutdown(&self) {
+        self.store.shutdown();
+    }
 }
 
 #[cfg(test)]
@@ -342,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -367,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_list() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -422,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_watch() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 

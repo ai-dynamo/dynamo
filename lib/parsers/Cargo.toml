@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +26,7 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-dynamo-async-openai = { workspace = true }
+dynamo-protocols = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -35,6 +35,8 @@ uuid = { workspace = true }
 
 regex = "1"
 openai-harmony = "0.0.3"
-lazy_static = "1.5.0"
 rustpython-parser = "0.4.0"
 num-traits = "0.2"
+
+[dev-dependencies]
+rstest = "0.25"

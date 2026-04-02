@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
@@ -8,7 +8,7 @@ use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
 use crate::http::service::Metrics;
-use crate::http::service::metrics;
+use crate::http::service::service_v2 as http_service;
 
 use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -21,6 +21,49 @@ use futures::pin_mut;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
+
+/// Optional HTTP/2 window size configuration from environment variables.
+///
+/// # Environment Variables
+///
+/// - `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE`: HTTP/2 connection window size in bytes
+/// - `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE`: HTTP/2 per-stream window size in bytes
+///
+/// If set, these override tonic defaults. If not set, tonic defaults are used.
+#[derive(Debug, Clone, Default)]
+pub struct GrpcTuningConfig {
+    /// HTTP/2 connection-level flow control window size in bytes.
+    /// If None, uses tonic default.
+    pub initial_connection_window_size: Option<u32>,
+
+    /// HTTP/2 stream-level flow control window size in bytes.
+    /// If None, uses tonic default.
+    pub initial_stream_window_size: Option<u32>,
+}
+
+impl GrpcTuningConfig {
+    /// Create configuration from environment variables.
+    ///
+    /// Reads `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE` and `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE`.
+    /// If not set, the values remain None and tonic defaults are used.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_connection_window_size = Some(size);
+        }
+
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_stream_window_size = Some(size);
+        }
+
+        config
+    }
+}
 
 use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
@@ -42,20 +85,29 @@ use inference::{
 
 use prost::Message;
 
-/// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
-/// for it as part of HTTP service. Should we always start HTTP service up
-/// for non-inference?
+/// gRPC service state - shares metrics with HTTP service for unified metrics collection
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
 }
 
+#[derive(Default, Builder)]
+#[builder(
+    pattern = "owned",
+    build_fn(private, name = "build_internal"),
+    name = "StateBuilder",
+    vis = "pub"
+)]
+pub(crate) struct StateConfig {
+    #[builder(default, setter(strip_option))]
+    metrics: Option<Arc<Metrics>>,
+    #[builder(default, setter(strip_option))]
+    manager: Option<Arc<ModelManager>>,
+}
+
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-        }
+    pub fn builder() -> StateBuilder {
+        StateBuilder::default()
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -76,14 +128,35 @@ impl State {
     }
 }
 
+impl StateBuilder {
+    pub fn build(self) -> Result<State, anyhow::Error> {
+        let config = self.build_internal()?;
+
+        Ok(State {
+            manager: config
+                .manager
+                .unwrap_or_else(|| Arc::new(ModelManager::new())),
+            metrics: config
+                .metrics
+                .unwrap_or_else(|| Arc::new(Metrics::default())),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct KserveService {
     // The state we share with every request handler
     state: Arc<State>,
 
+    // HTTP service for metrics endpoint
+    http_service: http_service::HttpService,
+
     port: u16,
     host: String,
     request_template: Option<RequestTemplate>,
+
+    // gRPC server tuning configuration
+    grpc_tuning: GrpcTuningConfig,
 }
 
 #[derive(Clone, Builder)]
@@ -97,6 +170,20 @@ pub struct KserveServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "8788")]
+    http_metrics_port: u16,
+
+    #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
+    http_metrics_host: String,
+
+    #[builder(default = "None")]
+    http_cancel_token: Option<CancellationToken>,
+
+    /// gRPC server tuning configuration.
+    /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
+    #[builder(default = "GrpcTuningConfig::from_env()")]
+    grpc_tuning: GrpcTuningConfig,
 }
 
 impl KserveService {
@@ -116,6 +203,10 @@ impl KserveService {
         self.state().manager()
     }
 
+    pub fn http_service(&self) -> &http_service::HttpService {
+        &self.http_service
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
         let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
@@ -125,8 +216,32 @@ impl KserveService {
         let address = format!("{}:{}", self.host, self.port);
         tracing::info!(address, "Starting KServe gRPC service on: {address}");
 
+        let tuning = &self.grpc_tuning;
+
+        // Log tuning settings if configured via environment variables
+        if tuning.initial_connection_window_size.is_some()
+            || tuning.initial_stream_window_size.is_some()
+        {
+            tracing::info!(
+                "gRPC tuning: connection_window={:?}, stream_window={:?}",
+                tuning.initial_connection_window_size,
+                tuning.initial_stream_window_size
+            );
+        }
+
         let observer = cancel_token.child_token();
-        Server::builder()
+
+        // Build server - only override window sizes if set via env vars
+        let mut builder = Server::builder();
+
+        if let Some(size) = tuning.initial_connection_window_size {
+            builder = builder.initial_connection_window_size(size);
+        }
+        if let Some(size) = tuning.initial_stream_window_size {
+            builder = builder.initial_stream_window_size(size);
+        }
+
+        builder
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
             .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
             .await
@@ -140,18 +255,35 @@ impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
 
-        let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager));
+        // Create HTTP service with only non-inference endpoints (metrics, health, models list)
+        // This provides the metrics endpoint and shared metrics object
+        let http_service = http_service::HttpService::builder()
+            .port(config.http_metrics_port)
+            .host(config.http_metrics_host.clone())
+            .cancel_token(config.http_cancel_token)
+            // Disable all inference endpoints - only use for metrics/health
+            .enable_chat_endpoints(false)
+            .enable_cmpl_endpoints(false)
+            .enable_embeddings_endpoints(false)
+            .enable_responses_endpoints(false)
+            .enable_anthropic_endpoints(false)
+            .build()?;
 
-        // enable prometheus metrics
-        let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        // Share the HTTP service's model manager and metrics object with gRPC state
+        let state = Arc::new(
+            State::builder()
+                .manager(http_service.state().manager_clone())
+                .metrics(http_service.state().metrics_clone())
+                .build()?,
+        );
 
         Ok(KserveService {
             state,
+            http_service,
             port: config.port,
             host: config.host,
             request_template: config.request_template,
+            grpc_tuning: config.grpc_tuning,
         })
     }
 
@@ -245,10 +377,8 @@ impl GrpcInferenceService for KserveService {
             }
         }
 
-        let model = completion_request.inner.model.clone();
-        let parsing_options = self.state.manager.get_parsing_options(&model);
-
-        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+        let (stream, parsing_options) =
+            completion_response_stream(self.state_clone(), completion_request).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -310,7 +440,17 @@ impl GrpcInferenceService for KserveService {
                     let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
 
                     pin_mut!(stream);
-                    while let Some(response) = stream.next().await {
+                    while let Some(delta) = stream.next().await {
+                        let response = match delta.ok() {
+                            Err(e) => {
+                                yield ModelStreamInferResponse {
+                                    error_message: e.to_string(),
+                                    infer_response: None
+                                };
+                                continue;
+                            }
+                            Ok(response) => response,
+                        };
                         match response.data {
                             Some(data) => {
                                 let data = ExtendedNvCreateTensorResponse {response: data,
@@ -319,8 +459,8 @@ impl GrpcInferenceService for KserveService {
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
-                                if reply.infer_response.is_some() {
-                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                if let Some(infer_response) = reply.infer_response.as_mut() {
+                                    infer_response.id = request_id.clone();
                                 }
                                 yield reply;
                             },
@@ -352,23 +492,30 @@ impl GrpcInferenceService for KserveService {
                     }
                 }
 
-                let model = completion_request.inner.model.clone();
-                let parsing_options = state.manager.get_parsing_options(&model);
-
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let stream = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
 
                 if streaming {
                     pin_mut!(stream);
-                    while let Some(response) = stream.next().await {
+                    while let Some(delta) = stream.next().await {
+                        let response = match delta.ok() {
+                            Err(e) => {
+                                yield ModelStreamInferResponse {
+                                    error_message: e.to_string(),
+                                    infer_response: None
+                                };
+                                continue;
+                            }
+                            Ok(response) => response,
+                        };
                         match response.data {
                             Some(data) => {
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
-                                if reply.infer_response.is_some() {
-                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                if let Some(infer_response) = reply.infer_response.as_mut() {
+                                    infer_response.id = request_id.clone();
                                 }
                                 yield reply;
                             },
@@ -391,8 +538,8 @@ impl GrpcInferenceService for KserveService {
                     let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse response: {}", e))
                     })?;
-                    if response.infer_response.is_some() {
-                        response.infer_response.as_mut().unwrap().id = request_id.clone();
+                    if let Some(infer_response) = response.infer_response.as_mut() {
+                        infer_response.id = request_id.clone();
                     }
                     yield response;
                 }
@@ -623,5 +770,39 @@ impl GrpcInferenceService for KserveService {
             "Model '{}' not found",
             request_model_name
         )))
+    }
+
+    async fn server_live(
+        &self,
+        _request: Request<inference::ServerLiveRequest>,
+    ) -> Result<Response<inference::ServerLiveResponse>, Status> {
+        // server is live if we can respond
+        Ok(Response::new(inference::ServerLiveResponse { live: true }))
+    }
+
+    async fn server_ready(
+        &self,
+        _request: Request<inference::ServerReadyRequest>,
+    ) -> Result<Response<inference::ServerReadyResponse>, Status> {
+        let has_models = !self.state.manager().get_model_cards().is_empty();
+        Ok(Response::new(inference::ServerReadyResponse {
+            ready: has_models,
+        }))
+    }
+
+    async fn model_ready(
+        &self,
+        request: Request<inference::ModelReadyRequest>,
+    ) -> Result<Response<inference::ModelReadyResponse>, Status> {
+        let request_model_name = &request.into_inner().name;
+        let is_ready = self
+            .state
+            .manager()
+            .get_model_cards()
+            .into_iter()
+            .any(|card| request_model_name == &card.display_name);
+        Ok(Response::new(inference::ModelReadyResponse {
+            ready: is_ready,
+        }))
     }
 }

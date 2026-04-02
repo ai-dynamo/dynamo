@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
@@ -9,15 +9,20 @@ use super::{
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::types::TokenIdType;
 
+pub mod audios;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
 pub mod embeddings;
+pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;
+pub mod tools;
 pub mod validate;
+pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
@@ -32,7 +37,7 @@ pub struct AnnotatedDelta<R> {
     pub comment: Option<String>,
 }
 
-trait OpenAISamplingOptionsProvider {
+pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_temperature(&self) -> Option<f32>;
 
     fn get_top_p(&self) -> Option<f32>;
@@ -50,7 +55,7 @@ trait OpenAISamplingOptionsProvider {
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
 
-trait OpenAIStopConditionsProvider {
+pub(crate) trait OpenAIStopConditionsProvider {
     fn get_max_tokens(&self) -> Option<u32>;
 
     fn get_min_tokens(&self) -> Option<u32>;
@@ -77,7 +82,7 @@ trait OpenAIStopConditionsProvider {
     }
 }
 
-trait OpenAIOutputOptionsProvider {
+pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_logprobs(&self) -> Option<u32>;
 
     fn get_prompt_logprobs(&self) -> Option<u32>;
@@ -131,7 +136,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
 
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
-            guided_json.cloned(),
+            guided_json,
             guided_regex,
             guided_choice,
             guided_grammar,
@@ -208,6 +213,49 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
     }
 }
 
+/// Converts a token string to its UTF-8 byte representation for OpenAI logprobs responses.
+/// Returns `None` for empty tokens (unknown/unresolved tokens from the backend).
+pub(crate) fn token_to_utf8_bytes(token: &str) -> Option<Vec<u8>> {
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.as_bytes().to_vec())
+    }
+}
+
+/// Converts a list of internal backend `TopLogprob` entries into the OpenAI-compatible
+/// `TopLogprobs` format. Ensures the selected token is present in the list.
+pub(crate) fn convert_backend_top_logprobs(
+    top_lps: &[common::llm_backend::TopLogprob],
+    selected_token: &str,
+    selected_token_id: TokenIdType,
+    selected_logprob: f32,
+) -> Vec<dynamo_protocols::types::TopLogprobs> {
+    let mut found_selected = false;
+    let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
+        .iter()
+        .map(|top_lp| {
+            let tok = top_lp.token.clone().unwrap_or_default();
+            found_selected = found_selected || top_lp.token_id == selected_token_id;
+            let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
+            dynamo_protocols::types::TopLogprobs {
+                token: tok,
+                logprob: top_lp.logprob as f32,
+                bytes,
+            }
+        })
+        .collect();
+
+    if !found_selected {
+        result.push(dynamo_protocols::types::TopLogprobs {
+            token: selected_token.to_string(),
+            logprob: selected_logprob,
+            bytes: token_to_utf8_bytes(selected_token),
+        });
+    }
+    result
+}
+
 pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     Send + 'static
 {
@@ -224,6 +272,17 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Check if usage tracking is enabled.
     fn is_usage_enabled(&self) -> bool;
+
+    /// Check if continuous usage tracking is enabled.
+    fn is_continuous_usage_enabled(&self) -> bool;
+
+    /// Get the current usage statistics with properly calculated total_tokens.
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
+
+    /// Returns the request tracker if available, for accessing worker timing metrics.
+    fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

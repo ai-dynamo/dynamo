@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Requires GitHub variables:
+#   ANNOUNCE_RC: "true" or "false"
+#   RELEASE_VERSIONS: Comma-separated versions, e.g., "0.7.0,0.8.0"
+
+name: Release RC Announcement
+
+on:
+  # Runs every weekday at 9 AM PST (17:00 UTC)
+  # Note: During daylight saving time (PDT), this will be 10 AM local time
+  schedule:
+    - cron: '0 17 * * 1-5'
+
+permissions:
+  contents: read
+
+jobs:
+  announce-rc:
+    name: Announce RC to Slack
+    runs-on: prod-builder-amd-v1
+    if: vars.ANNOUNCE_RC == 'true'
+    steps:
+      - name: Send Slack announcement
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
+          SLACK_GROUP_ID: ${{ secrets.RELEASE_SLACK_GROUP_ID }}
+          RELEASE_VERSIONS: ${{ vars.RELEASE_VERSIONS }}
+        run: |
+          set -euo pipefail
+          [ -n "${SLACK_WEBHOOK_URL:-}" ] || { echo "Error: RELEASE_WEBHOOK_URL not configured"; exit 1; }
+          [ -n "${RELEASE_VERSIONS:-}" ] || { echo "Error: RELEASE_VERSIONS not configured"; exit 1; }
+
+          IFS=',' read -ra VERSIONS <<< "$RELEASE_VERSIONS"
+          for VERSION in "${VERSIONS[@]}"; do
+            VERSION=$(echo "$VERSION" | xargs)  # trim whitespace
+            MSG=":robot_face: *[Automated Reminder]* Next RC for dynamo *${VERSION}* will be started at 3 pm PST today. Ensure the CPs are mergeable and updated in release canvas for QA verification. cc: <!subteam^${SLACK_GROUP_ID}>"
+            if curl -sSf -X POST -H "Content-Type: application/json" \
+              -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$SLACK_WEBHOOK_URL" 2>/dev/null; then
+              echo "Sent announcement for ${VERSION}"
+            else
+              echo "Failed to send announcement for ${VERSION}" >&2; exit 1
+            fi
+          done

@@ -1,10 +1,24 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::error::{BackendError, ErrorType, match_error_chain};
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
 use crate::{
-    component::{Client, Endpoint},
-    engine::{AsyncEngine, Data},
+    component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
+    dynamo_nvtx_range,
+    engine::{AsyncEngine, AsyncEngineContext, Data},
+    metrics::frontend_perf::STAGE_DURATION_SECONDS,
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
@@ -12,21 +26,63 @@ use crate::{
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
 };
-use async_nats::client::{
-    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
-};
 use async_trait::async_trait;
+use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    future::Future,
     marker::PhantomData,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    task::Poll,
+    time::Instant,
 };
 use tokio_stream::StreamExt;
+use tracing::Instrument;
+
+struct OccupancyPermit {
+    state: Arc<RoutingOccupancyState>,
+    instance_id: u64,
+    armed: bool,
+}
+
+impl OccupancyPermit {
+    fn new(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
+        Self {
+            state,
+            instance_id,
+            armed: true,
+        }
+    }
+
+    fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
+        self.armed = false;
+        let engine_ctx = stream.context();
+        ResponseStream::new(
+            Box::pin(OccupancyTrackedStream {
+                inner: stream,
+                state: self.state.clone(),
+                instance_id: self.instance_id,
+            }),
+            engine_ctx,
+        )
+    }
+
+    fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+}
+
+impl Drop for OccupancyPermit {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.decrement(self.instance_id);
+        }
+    }
+}
 
 /// Trait for monitoring worker load and determining busy state.
 /// Implementations can define custom load metrics and busy thresholds.
@@ -66,6 +122,15 @@ where
     /// If None, busy detection is disabled
     busy_threshold: Option<f64>,
 
+    /// When false, `generate_with_fault_detection` skips fault detection logic:
+    /// it won't call `report_instance_down` on errors, and it uses the raw discovery
+    /// instance list instead of the filtered avail list. Use for recovery/query paths
+    /// where transient failures are expected.
+    fault_detection_enabled: bool,
+
+    /// Shared request occupancy state for tracked routing modes.
+    occupancy_state: Option<Arc<RoutingOccupancyState>>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -77,20 +142,51 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    Direct(u64),
-    // Marker value, KV routing itself is in dynamo-llm
+    PowerOfTwoChoices,
     KV,
+    Direct,
+    LeastLoaded,
 }
 
 impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
+
+    pub fn is_direct_routing(&self) -> bool {
+        *self == RouterMode::Direct
+    }
+}
+
+/// Pick the instance with lower in-flight count from two random candidates.
+/// Returns the single instance if only one is available.
+fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]) -> u64 {
+    let count = instance_ids.len();
+    if count == 1 {
+        return instance_ids[0];
+    }
+    let mut rng = rand::rng();
+    let idx1 = rng.random_range(0..count);
+    let idx2 = (idx1 + 1 + rng.random_range(0..count - 1)) % count;
+    let id1 = instance_ids[idx1];
+    let id2 = instance_ids[idx2];
+    let load1 = occupancy_state.load(id1);
+    let load2 = occupancy_state.load(id2);
+    let selected = if load1 <= load2 { id1 } else { id2 };
+    tracing::debug!(
+        candidate_a = id1,
+        candidate_a_load = load1,
+        candidate_b = id2,
+        candidate_b_load = load2,
+        selected = selected,
+        "p2c selection"
+    );
+    selected
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager().await?;
+    let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 
@@ -112,6 +208,38 @@ where
         Self::from_client_with_threshold(client, router_mode, None, None).await
     }
 
+    /// Create a new PushRouter with fault detection disabled.
+    ///
+    /// Unlike `from_client`, this router will not call `report_instance_down` on
+    /// transient errors, and `direct()` uses the raw discovery instance list instead
+    /// of the filtered avail list. Use for recovery/query paths.
+    pub async fn from_client_no_fault_detection(
+        client: Client,
+        router_mode: RouterMode,
+    ) -> anyhow::Result<Self> {
+        let addressed = addressed_router(&client.endpoint).await?;
+
+        let occupancy_state = if matches!(
+            router_mode,
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+        ) {
+            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
+        Ok(PushRouter {
+            client,
+            addressed,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            busy_threshold: None,
+            fault_detection_enabled: false,
+            occupancy_state,
+            _phantom: PhantomData,
+        })
+    }
+
     /// Create a new PushRouter with optional busy threshold and worker load monitor
     pub async fn from_client_with_threshold(
         client: Client,
@@ -126,12 +254,23 @@ where
             monitor.start_monitoring().await?;
         }
 
+        let occupancy_state = if matches!(
+            router_mode,
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+        ) {
+            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
         let router = PushRouter {
-            client: client.clone(),
+            client,
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
+            fault_detection_enabled: true,
+            occupancy_state,
             _phantom: PhantomData,
         };
 
@@ -147,8 +286,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -166,8 +305,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -179,23 +318,164 @@ where
             .await
     }
 
+    /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
+    /// route to the one with fewer in-flight requests.
+    pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let state = self.occupancy_state()?;
+        let instance_id = {
+            let instance_ids = self
+                .client
+                .instance_ids_avail()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            if instance_ids.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
+                ));
+            }
+            p2c_select_from(state.as_ref(), &instance_ids)
+        };
+        state.increment(instance_id);
+        let permit = OccupancyPermit::new(state, instance_id);
+
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
+            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Issue a request to a specific endpoint
     pub async fn direct(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let found = self.client.instance_ids_avail().contains(&instance_id);
+        // When fault detection is disabled, check the raw discovery list
+        // (not filtered by report_instance_down) so transient failures
+        // don't poison the instance for subsequent retries.
+        let found = if self.fault_detection_enabled {
+            self.client.instance_ids_avail().contains(&instance_id)
+        } else {
+            self.client.instance_ids().contains(&instance_id)
+        };
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+    }
+
+    /// Issue a request to the instance with the fewest active connections.
+    pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let state = self.occupancy_state()?;
+        let instance_ids = self
+            .client
+            .instance_ids_avail()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let instance_id = state
+            .select_exact_min_and_increment(&instance_ids)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
+                )
+            })?;
+        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        tracing::trace!(
+            "least loaded router selected {instance_id} (connections: {})",
+            state.load(instance_id)
+        );
+
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
+            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Select the next worker according to the routing mode.
+    /// Increments round-robin counter if applicable.
+    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    pub fn select_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::KV => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
+    /// Peek the next worker according to the routing mode without incrementing the counter.
+    /// Useful for checking if a worker is suitable before committing to it.
+    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    pub fn peek_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                // Just peek at the current counter value without incrementing
+                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                // For random, peeking implies a fresh random selection since it's stateless.
+                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::KV => {
+                panic!(
+                    "peek_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
+    fn occupancy_state(&self) -> anyhow::Result<Arc<RoutingOccupancyState>> {
+        self.occupancy_state.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "routing occupancy state not initialized for endpoint {}",
+                self.client.endpoint.id()
+            )
+        })
     }
 
     /*
@@ -213,13 +493,31 @@ where
         instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
-        // Check if all workers are busy (only if busy threshold is set)
-        if self.busy_threshold.is_some() {
+        let route_start = Instant::now();
+        let request_id = request.id().to_string();
+        let route_span = if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        };
+
+        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
+        if self.fault_detection_enabled && self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
                 let all_instances = self.client.instance_ids();
                 if !all_instances.is_empty() {
+                    tracing::warn!(
+                        instance_id,
+                        total_workers = all_instances.len(),
+                        "Rejecting request: all workers are busy"
+                    );
                     return Err(PipelineError::ServiceOverloaded(
                         "All workers are busy, please retry later".to_string(),
                     )
@@ -229,7 +527,7 @@ where
         }
 
         // Get the address based on discovered transport type
-        let address = {
+        let (address, _transport_kind) = {
             use crate::component::TransportType;
 
             // Get the instance and use its actual transport type
@@ -248,7 +546,7 @@ where
                         http_endpoint = %http_endpoint,
                         "Using HTTP transport for instance"
                     );
-                    http_endpoint.clone()
+                    (http_endpoint.clone(), "transport.http.request")
                 }
                 TransportType::Tcp(tcp_endpoint) => {
                     tracing::debug!(
@@ -256,7 +554,7 @@ where
                         tcp_endpoint = %tcp_endpoint,
                         "Using TCP transport for instance"
                     );
-                    tcp_endpoint.clone()
+                    (tcp_endpoint.clone(), "transport.tcp.request")
                 }
                 TransportType::Nats(subject) => {
                     tracing::debug!(
@@ -264,25 +562,37 @@ where
                         subject = %subject,
                         "Using NATS transport for instance"
                     );
-                    subject.clone()
+                    (subject.clone(), "transport.nats.request")
                 }
             }
         };
 
         let request = request.map(|req| AddressedRequest::new(req, address));
 
-        let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+        STAGE_DURATION_SECONDS
+            .with_label_values(&["route"])
+            .observe(route_start.elapsed().as_secs_f64());
+
+        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
+        let stream: anyhow::Result<ManyOut<U>> = self
+            .addressed
+            .generate(request)
+            .instrument(route_span)
+            .await;
         match stream {
             Ok(stream) => {
+                if !self.fault_detection_enabled {
+                    return Ok(stream);
+                }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    // TODO: Standardize error type to avoid using string matching DIS-364
+                    // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
-                        && format!("{:?}", err) == STREAM_ERR_MSG
+                        && is_inhibited(&err)
                     {
                         tracing::debug!(
-                            "Reporting instance {instance_id} down due to stream error: {err}"
+                            "Reporting instance {instance_id} down due to migratable error: {err}"
                         );
                         client.report_instance_down(instance_id);
                     }
@@ -291,12 +601,8 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
-                    && matches!(req_err.kind(), NatsNoResponders)
-                {
-                    tracing::debug!(
-                        "Reporting instance {instance_id} down due to request error: {req_err}"
-                    );
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)
@@ -312,14 +618,245 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        //InstanceSource::Static => self.r#static(request).await,
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
+            RouterMode::PowerOfTwoChoices => self.power_of_two_choices(request).await,
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
+            }
+            RouterMode::LeastLoaded => self.least_loaded(request).await,
         }
+    }
+}
+
+struct OccupancyTrackedStream<U: Data> {
+    inner: ManyOut<U>,
+    state: Arc<RoutingOccupancyState>,
+    instance_id: u64,
+}
+
+impl<U: Data> Drop for OccupancyTrackedStream<U> {
+    fn drop(&mut self) {
+        self.state.decrement(self.instance_id);
+    }
+}
+
+impl<U: Data> std::fmt::Debug for OccupancyTrackedStream<U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OccupancyTrackedStream")
+            .field("instance_id", &self.instance_id)
+            .finish()
+    }
+}
+
+impl<U: Data> Stream for OccupancyTrackedStream<U> {
+    type Item = U;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl<U: Data> AsyncEngineContextProvider for OccupancyTrackedStream<U> {
+    fn context(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.context()
+    }
+}
+
+impl<U: Data> crate::engine::AsyncEngineStream<U> for OccupancyTrackedStream<U> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        error::DynamoError,
+        pipeline::{ResponseStream, context::Controller},
+    };
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestResponse {
+        error: Option<DynamoError>,
+    }
+
+    impl MaybeError for TestResponse {
+        fn from_err(err: impl std::error::Error + 'static) -> Self {
+            Self {
+                error: Some(DynamoError::from(
+                    Box::new(err) as Box<dyn std::error::Error + 'static>
+                )),
+            }
+        }
+
+        fn err(&self) -> Option<DynamoError> {
+            self.error.clone()
+        }
+    }
+
+    #[test]
+    fn p2c_selects_lower_load_worker() {
+        let state = RoutingOccupancyState::default();
+        for _ in 0..10 {
+            state.increment(1);
+        }
+        state.increment(2);
+
+        // With only two workers, p2c_select_from must pick both and choose id=2 (lower load).
+        let result = p2c_select_from(&state, &[1, 2]);
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn p2c_selects_single_worker() {
+        let state = RoutingOccupancyState::default();
+        assert_eq!(p2c_select_from(&state, &[42]), 42);
+    }
+
+    #[test]
+    fn p2c_treats_missing_counts_as_zero() {
+        let state = RoutingOccupancyState::default();
+        for _ in 0..5 {
+            state.increment(1);
+        }
+        // Worker 2 has no entry — should be treated as 0, so it wins.
+        let result = p2c_select_from(&state, &[1, 2]);
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn p2c_returns_valid_worker_on_tie() {
+        let state = RoutingOccupancyState::default();
+        for _ in 0..3 {
+            state.increment(1);
+            state.increment(2);
+        }
+
+        for _ in 0..100 {
+            let result = p2c_select_from(&state, &[1, 2]);
+            assert!(result == 1 || result == 2);
+        }
+    }
+
+    #[test]
+    fn occupancy_permit_decrements_before_stream_creation() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.increment(42);
+        let permit = OccupancyPermit::new(state.clone(), 42);
+        assert_eq!(state.load(42), 1);
+        drop(permit);
+        assert_eq!(state.load(42), 0);
+    }
+
+    #[test]
+    fn occupancy_tracked_stream_decrements_on_drop() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.increment(7);
+        let permit = OccupancyPermit::new(state.clone(), 7);
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let stream = permit.into_tracked_stream(ResponseStream::new(
+            Box::pin(tokio_stream::iter(vec![1u64])),
+            ctx,
+        ));
+        assert_eq!(state.load(7), 1);
+        drop(stream);
+        assert_eq!(state.load(7), 0);
+    }
+
+    #[test]
+    fn p2c_lifecycle_tracks_inflight_counts_with_shared_tracker() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let mut permits = Vec::new();
+        for _ in 0..5 {
+            let selected = p2c_select_from(&state, &[1, 2]);
+            state.increment(selected);
+            permits.push(OccupancyPermit::new(state.clone(), selected));
+        }
+
+        let total = state.load(1) + state.load(2);
+        assert_eq!(total, 5, "5 in-flight requests should be tracked");
+
+        drop(permits);
+        let total = state.load(1) + state.load(2);
+        assert_eq!(total, 0, "All guards dropped, counts should be 0");
+    }
+
+    #[test]
+    fn p2c_never_selects_dominated_worker() {
+        let state = RoutingOccupancyState::default();
+        for _ in 0..100 {
+            state.increment(3);
+        }
+
+        let mut selected = [0u32; 3];
+        for _ in 0..1000 {
+            let result = p2c_select_from(&state, &[1, 2, 3]);
+            match result {
+                1 => selected[0] += 1,
+                2 => selected[1] += 1,
+                3 => selected[2] += 1,
+                _ => panic!("unexpected worker id"),
+            }
+        }
+        assert_eq!(
+            selected[2], 0,
+            "Worker 3 (load=100) should never be selected against load=0 workers, but got {} times",
+            selected[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn least_loaded_selects_exact_min_and_tracks_counts() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.increment(1);
+        state.increment(1);
+        state.increment(2);
+
+        let selected = state
+            .select_exact_min_and_increment(&[1, 2, 3])
+            .await
+            .unwrap();
+        assert_eq!(selected, 3);
+
+        let permit = OccupancyPermit::new(state.clone(), selected);
+        assert_eq!(state.load(selected), 1);
+        drop(permit);
+        assert_eq!(state.load(selected), 0);
+    }
+
+    #[tokio::test]
+    async fn least_loaded_select_and_peek_return_none_with_available_worker() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_least_loaded_router".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+
+        assert_eq!(router.select_next_worker(), None);
+        assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
     }
 }

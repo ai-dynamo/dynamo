@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -93,6 +93,33 @@ def test_graph_structure():
     check_attributes(G, 8, [], 2, 2, 1)
 
     # Clean up
+    os.unlink(tmp.name)
+
+
+def test_synthesize_requests_normalizes_hash_ids():
+    """Test that synthesize_requests normalizes hash_ids to consecutive integers."""
+    block_size = 64
+
+    # Create input with non-consecutive hash_ids [5, 6]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+        for _ in range(2):
+            data = {
+                "timestamp": 1000,
+                "hash_ids": [5, 6],
+                "input_length": block_size * 2,
+                "output_length": 100,
+            }
+            json.dump(data, tmp)
+            tmp.write("\n")
+
+    synthesizer = Synthesizer(tmp.name, block_size=block_size)
+    requests = synthesizer.synthesize_requests(num_requests=2)
+
+    assert len(requests) == 2
+    # Both requests should have normalized hash_ids [0, 1]
+    for req in requests:
+        assert req["hash_ids"] == [0, 1], f"Expected [0, 1], got {req['hash_ids']}"
+
     os.unlink(tmp.name)
 
 

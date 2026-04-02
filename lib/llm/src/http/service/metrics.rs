@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::{
@@ -14,10 +14,12 @@ use dynamo_runtime::{
         frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
-use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
+use prometheus::{
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+};
 use serde::Serialize;
 use std::{
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -28,6 +30,75 @@ use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 pub use prometheus::Registry;
 
 use super::RouteDoc;
+
+/// Worker type label values for Prometheus timing metrics
+pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+
+/// Global Prometheus gauge for last observed TTFT per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+            ),
+            "Last observed time to first token per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_time_to_first_token gauge")
+});
+
+/// Global Prometheus gauge for last observed input sequence tokens per worker
+/// Labels: worker_id, dp_rank, worker_type
+/// Updated atomically with TTFT - represents the input token count from the same request
+pub static WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS
+            ),
+            "Last observed input sequence tokens per worker",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_input_sequence_tokens gauge")
+});
+
+/// Global Prometheus gauge for last observed ITL per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS
+            ),
+            "Last observed inter-token latency per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_inter_token_latency gauge")
+});
+
+/// Register the global per-worker TTFT/ITL/input-tokens Prometheus metrics with the given registry.
+///
+/// This should be called once during HTTP service setup to expose the metrics
+/// via the `/metrics` endpoint.
+///
+/// # Errors
+/// Returns an error if the metrics are already registered with the registry.
+pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
+    Ok(())
+}
 
 /// Generate log-spaced histogram buckets with values rounded to 2 significant figures.
 ///
@@ -43,7 +114,7 @@ use super::RouteDoc;
 /// # Note
 /// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
 /// Requesting more buckets than can be uniquely represented will result in deduplication.
-fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
+pub fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
     }
@@ -85,7 +156,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Round a number to a specified number of significant figures
-fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
+pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     if value == 0.0 {
         return 0.0;
     }
@@ -152,9 +223,13 @@ fn parse_bucket_config(
     (min, max, count)
 }
 
-/// State for metrics handler with custom backend support
+/// State for metrics handler.
+/// Optionally holds a reference to the DRT's [`MetricsRegistry`] so that
+/// metrics created via `metrics().create*()` anywhere in the process are
+/// automatically included in the `/metrics` response.
 struct MetricsHandlerState {
     registry: Arc<Registry>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
 pub struct Metrics {
@@ -165,6 +240,8 @@ pub struct Metrics {
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
+    cached_tokens: HistogramVec,
+    tokenizer_latency: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
@@ -178,6 +255,8 @@ pub struct Metrics {
     model_context_length: IntGaugeVec,
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
+    model_migration_total: IntCounterVec,
+    model_cancellation_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -202,11 +281,13 @@ pub struct InflightGuard {
     endpoint: Endpoint,
     request_type: RequestType,
     status: Status,
+    error_type: ErrorType,
     timer: Instant,
 }
 
 /// Requests will be logged by the type of endpoint hit
 /// This will include llamastack in the future
+#[derive(Clone, Copy)]
 pub enum Endpoint {
     /// OAI Completions
     Completions,
@@ -217,8 +298,20 @@ pub enum Endpoint {
     /// OAI Embeddings
     Embeddings,
 
+    /// OAI Images
+    Images,
+
+    /// OAI Videos
+    Videos,
+
+    /// OAI Audio Speech
+    Audios,
+
     /// OAI Responses
     Responses,
+
+    /// Anthropic Messages
+    AnthropicMessages,
 
     /// Tensor
     Tensor,
@@ -233,11 +326,37 @@ pub enum RequestType {
     Stream,
 }
 
+/// Labels for cancellation metrics
+pub struct CancellationLabels {
+    pub model: String,
+    pub endpoint: String,
+    pub request_type: String,
+}
+
 /// Status
 #[derive(PartialEq)]
 pub enum Status {
     Success,
     Error,
+}
+
+/// Error type classification for fine-grained observability
+#[derive(PartialEq, Clone, Debug)]
+pub enum ErrorType {
+    /// No error (for successful requests)
+    None,
+    /// Client validation error (4xx with "Validation:" prefix)
+    Validation,
+    /// Model or resource not found (404)
+    NotFound,
+    /// Service overloaded, too many requests (503)
+    Overload,
+    /// Request cancelled by client or timeout
+    Cancelled,
+    /// Internal server error (500 and other unexpected errors)
+    Internal,
+    /// Feature not implemented (501)
+    NotImplemented,
 }
 
 /// Track response-specific metrics
@@ -252,6 +371,23 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
+    // we track if cached_tokens has been observed to ensure we only increment once per request
+    cached_tokens_observed: bool,
+    // we track if tokenize latency has been observed to ensure we only increment once per request
+    tokenize_latency_observed: bool,
+    // latest accumulated detokenize latency and sample count reported by tracker
+    detokenize_latency_total: Duration,
+    detokenize_count_total: u64,
+    // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
+    prefill_worker_id: Option<u64>,
+    prefill_dp_rank: Option<u32>,
+    // Prefill worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    prefill_worker_type: Option<String>,
+    // Decode worker info for ITL attribution (set from LLMMetricAnnotation)
+    decode_worker_id: Option<u64>,
+    decode_dp_rank: Option<u32>,
+    // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    decode_worker_type: Option<String>,
 }
 
 impl Default for Metrics {
@@ -271,6 +407,7 @@ impl Metrics {
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_tokenizer_latency_ms` - HistogramVec for tokenizer latency in milliseconds
     /// - `{prefix}_output_tokens_total` - IntCounterVec for total output tokens generated (real-time updates)
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
@@ -306,6 +443,9 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
+        // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
+        // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
@@ -324,7 +464,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::REQUESTS_TOTAL),
                 "Total number of LLM requests processed",
             ),
-            &["model", "endpoint", "request_type", "status"],
+            &["model", "endpoint", "request_type", "status", "error_type"],
         )
         .unwrap();
 
@@ -378,7 +518,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::INPUT_SEQUENCE_TOKENS),
                 "Input sequence length in tokens",
             )
-            .buckets(input_sequence_buckets),
+            .buckets(input_sequence_buckets.clone()),
             &["model"],
         )
         .unwrap();
@@ -433,6 +573,28 @@ impl Metrics {
             )
             .buckets(inter_token_latency_buckets),
             &["model"],
+        )
+        .unwrap();
+
+        let cached_tokens = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::CACHED_TOKENS),
+                "Number of cached tokens (prefix cache hits) per request",
+            )
+            .buckets(input_sequence_buckets.clone()),
+            &["model"],
+        )
+        .unwrap();
+
+        let tokenizer_latency = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::TOKENIZER_LATENCY_MS),
+                "Tokenizer latency in milliseconds",
+            )
+            .buckets(vec![
+                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
+            ]),
+            &[frontend_service::OPERATION_LABEL],
         )
         .unwrap();
 
@@ -494,6 +656,24 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
+                "Total number of request migrations due to worker unavailability",
+            ),
+            &["model", frontend_service::MIGRATION_TYPE_LABEL],
+        )
+        .unwrap();
+
+        let model_cancellation_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
+                "Total number of request cancellations",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -502,6 +682,8 @@ impl Metrics {
             request_duration,
             input_sequence_length,
             output_sequence_length,
+            cached_tokens,
+            tokenizer_latency,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -511,6 +693,8 @@ impl Metrics {
             model_context_length,
             model_kv_cache_block_size,
             model_migration_limit,
+            model_migration_total,
+            model_cancellation_total,
         }
     }
 
@@ -525,6 +709,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) -> u64 {
         self.request_counter
             .with_label_values(&[
@@ -532,6 +717,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .get()
     }
@@ -547,6 +733,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) {
         self.request_counter
             .with_label_values(&[
@@ -554,6 +741,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .inc()
     }
@@ -597,6 +785,8 @@ impl Metrics {
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.tokenizer_latency.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
@@ -608,6 +798,8 @@ impl Metrics {
         registry.register(Box::new(self.model_context_length.clone()))?;
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
+        registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_cancellation_total.clone()))?;
 
         Ok(())
     }
@@ -661,6 +853,48 @@ impl Metrics {
         );
 
         Ok(())
+    }
+
+    /// Increment the migration counter for a new request migration
+    pub fn inc_migration_new_request(&self, model: &str) {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
+            .inc();
+    }
+
+    /// Increment the migration counter for an ongoing request migration
+    pub fn inc_migration_ongoing_request(&self, model: &str) {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .inc();
+    }
+
+    /// Get the current count of new request migrations for a model
+    pub fn get_migration_new_request_count(&self, model: &str) -> u64 {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
+            .get()
+    }
+
+    /// Get the current count of ongoing request migrations for a model
+    pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the cancellation counter
+    pub fn inc_cancellation(&self, labels: &CancellationLabels) {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .inc();
+    }
+
+    /// Get the current cancellation count
+    pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .get()
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
@@ -745,12 +979,19 @@ impl InflightGuard {
             endpoint,
             request_type,
             status: Status::Error,
+            error_type: ErrorType::Internal,
             timer,
         }
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
+        self.error_type = ErrorType::None;
+    }
+
+    pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
+        self.status = Status::Error;
+        self.error_type = error_type;
     }
 }
 
@@ -769,6 +1010,7 @@ impl Drop for InflightGuard {
             &self.endpoint,
             &self.request_type,
             &self.status,
+            &self.error_type,
         );
 
         // Record the duration of the request
@@ -785,7 +1027,11 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Images => write!(f, "images"),
+            Endpoint::Videos => write!(f, "videos"),
+            Endpoint::Audios => write!(f, "audios"),
             Endpoint::Responses => write!(f, "responses"),
+            Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
         }
     }
@@ -797,7 +1043,11 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Images => "images",
+            Endpoint::Videos => "videos",
+            Endpoint::Audios => "audios",
             Endpoint::Responses => "responses",
+            Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
         }
     }
@@ -821,6 +1071,20 @@ impl Status {
     }
 }
 
+impl ErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorType::None => frontend_service::error_type::NONE,
+            ErrorType::Validation => frontend_service::error_type::VALIDATION,
+            ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
+            ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::Internal => frontend_service::error_type::INTERNAL,
+            ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
+        }
+    }
+}
+
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
         ResponseMetricCollector {
@@ -830,6 +1094,48 @@ impl ResponseMetricCollector {
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
+            cached_tokens_observed: false,
+            tokenize_latency_observed: false,
+            detokenize_latency_total: Duration::ZERO,
+            detokenize_count_total: 0,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+        }
+    }
+
+    /// Set the worker info for per-worker TTFT/ITL metrics.
+    /// In disaggregated mode, TTFT is attributed to prefill worker, ITL to decode worker.
+    /// Worker types are stored at routing time to avoid expensive MDC lookup when updating metrics.
+    pub fn set_worker_info(
+        &mut self,
+        prefill_worker_id: Option<u64>,
+        prefill_dp_rank: Option<u32>,
+        prefill_worker_type: Option<String>,
+        decode_worker_id: Option<u64>,
+        decode_dp_rank: Option<u32>,
+        decode_worker_type: Option<String>,
+    ) {
+        if self.prefill_worker_id.is_none() {
+            self.prefill_worker_id = prefill_worker_id;
+        }
+        if self.prefill_dp_rank.is_none() {
+            self.prefill_dp_rank = prefill_dp_rank;
+        }
+        if self.prefill_worker_type.is_none() {
+            self.prefill_worker_type = prefill_worker_type;
+        }
+        if self.decode_worker_id.is_none() {
+            self.decode_worker_id = decode_worker_id;
+        }
+        if self.decode_dp_rank.is_none() {
+            self.decode_dp_rank = decode_dp_rank;
+        }
+        if self.decode_worker_type.is_none() {
+            self.decode_worker_type = decode_worker_type;
         }
     }
 
@@ -841,6 +1147,45 @@ impl ResponseMetricCollector {
     /// Check if this will be the first token (before calling observe_response)
     pub fn is_first_token(&self) -> bool {
         self.is_first_token
+    }
+
+    /// Observe cached tokens (prefix cache hits), observing only once per request when value is available
+    pub fn observe_cached_tokens(&mut self, cached_tokens: Option<usize>) {
+        if let Some(tokens) = cached_tokens
+            && !self.cached_tokens_observed
+        {
+            self.cached_tokens_observed = true;
+            self.metrics
+                .cached_tokens
+                .with_label_values(&[&self.model])
+                .observe(tokens as f64);
+        }
+    }
+
+    /// Observe tokenize/detokenize latencies in milliseconds.
+    /// Tokenize is observed once per request; detokenize is accumulated and observed at request end.
+    pub fn observe_tokenize_latencies(
+        &mut self,
+        tokenize_latency: Option<Duration>,
+        detokenize_latency: Option<Duration>,
+        detokenize_count: Option<u64>,
+    ) {
+        if let Some(latency) = tokenize_latency
+            && !self.tokenize_latency_observed
+        {
+            self.tokenize_latency_observed = true;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::TOKENIZE])
+                .observe(latency.as_secs_f64() * 1000.0);
+        }
+
+        if let Some(latency) = detokenize_latency {
+            self.detokenize_latency_total = latency;
+        }
+        if let Some(count) = detokenize_count {
+            self.detokenize_count_total = count;
+        }
     }
 
     /// Observe a response with input sequence length and number of new tokens
@@ -867,6 +1212,28 @@ impl ResponseMetricCollector {
                 .with_label_values(&[&self.model])
                 .observe(ttft);
 
+            // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
+            // Both gauges are updated atomically from the same request to correlate latency with input size.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_PREFILL if not available.
+            if let Some(worker_id) = self.prefill_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .prefill_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .prefill_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_PREFILL);
+                let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+                WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                    .with_label_values(labels)
+                    .set(ttft);
+                WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                    .with_label_values(labels)
+                    .set(isl as i64);
+            }
+
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
             self.metrics
@@ -886,6 +1253,23 @@ impl ResponseMetricCollector {
                     .with_label_values(&[&self.model])
                     .observe(itl);
             }
+
+            // Update per-worker ITL gauge - attributed to decode worker.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_DECODE if not available.
+            if let Some(worker_id) = self.decode_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .decode_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .decode_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_DECODE);
+                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
+                    .set(itl);
+            }
         }
 
         self.last_response_time = Some(current_duration);
@@ -894,6 +1278,15 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
+        if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
+            let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
+                / self.detokenize_count_total as f64;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::DETOKENIZE])
+                .observe(avg_detokenize_latency_ms);
+        }
+
         // Publish final OSL when the collector is dropped
         self.metrics
             .output_sequence_length
@@ -917,6 +1310,20 @@ pub fn process_response_and_observe_metrics<T>(
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+            metrics.decode_worker_type,
+        );
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
         if response_collector.is_first_token()
@@ -943,11 +1350,13 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
 ///
 /// This function handles metrics collection, http_queue_guard management, and converts
 /// annotated responses to SSE events for streaming responses.
+///
+/// Returns None for metrics annotation events (events without SSE data payload).
 pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
-) -> Result<Event, axum::Error> {
+) -> Result<Option<Event>, axum::Error> {
     use crate::preprocessor::LLMMetricAnnotation;
 
     let mut annotated = annotated.0;
@@ -955,6 +1364,20 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+            metrics.decode_worker_type,
+        );
 
         // Drop http_queue_guard on first token for streaming
         if response_collector.is_first_token()
@@ -976,11 +1399,11 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     let mut event = Event::default();
 
-    if let Some(data) = annotated.data {
+    if let Some(ref data) = annotated.data {
         event = event.json_data(data)?;
     }
 
-    if let Some(msg) = annotated.event {
+    if let Some(ref msg) = annotated.event {
         if msg == "error" {
             let msgs = annotated
                 .comment
@@ -996,16 +1419,29 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         }
     }
 
-    Ok(event)
+    // Filter out metrics annotation events (events without SSE data payload)
+    if annotated.data.is_none() && annotated.event.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(event))
+    }
 }
 
-/// Create a new router with optional custom backend metrics support
-pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
+/// Create a new router with optional DRT metrics integration.
+///
+/// When `drt_metrics` is provided, the `/metrics` handler will also include
+/// metrics from the DRT's registry tree (anything created via `metrics().create*()`).
+pub fn router(
+    registry: Registry,
+    path: Option<String>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
 
     let metrics_state = MetricsHandlerState {
         registry: Arc::new(registry),
+        drt_metrics,
     };
 
     let route = Router::new()
@@ -1014,11 +1450,11 @@ pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Route
     (vec![doc], route)
 }
 
-/// Unified metrics handler
+/// Unified metrics handler.
+///
+/// Gathers from the local HTTP-service registry first, then appends any
+/// metrics from the DRT's registry tree (if configured).
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    // Gather and encode metrics
-    // Note: If nim_on_demand is enabled, the NimMetricsCollector registered with the registry
-    // will automatically call poll_nim_backend_stats when gather() is invoked
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.registry.gather();
     let mut buffer = vec![];
@@ -1030,7 +1466,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
             .into_response();
     }
 
-    let metrics = match String::from_utf8(buffer) {
+    let mut metrics = match String::from_utf8(buffer) {
         Ok(metrics) => metrics,
         Err(_) => {
             return (
@@ -1040,6 +1476,23 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
                 .into_response();
         }
     };
+
+    // Append DRT registry tree metrics (anything created via metrics().create*()).
+    if let Some(ref drt_metrics) = state.drt_metrics {
+        match drt_metrics.prometheus_expfmt_combined() {
+            Ok(drt_text) => {
+                if !drt_text.is_empty() {
+                    if !metrics.is_empty() && !metrics.ends_with('\n') {
+                        metrics.push('\n');
+                    }
+                    metrics.push_str(&drt_text);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to gather DRT metrics: {}", e);
+            }
+        }
+    }
 
     (StatusCode::OK, metrics).into_response()
 }
@@ -1356,5 +1809,483 @@ mod tests {
                 .get(),
             20
         );
+    }
+
+    #[test]
+    fn test_cached_tokens_once_per_request() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create histogram handle first
+        let _histogram = metrics.cached_tokens.with_label_values(&[model]);
+
+        // First call should observe and record 1 sample
+        collector.observe_cached_tokens(Some(100));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        // Second call with same collector should not observe again (idempotent)
+        collector.observe_cached_tokens(Some(50));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        // Third call with different value should still be idempotent
+        collector.observe_cached_tokens(Some(75));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_metrics_annotation_event_handling() {
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create a metrics annotation event (event without SSE data payload)
+        let mut annotated = Annotated::<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        > {
+            id: None,
+            data: None,
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: None,
+            error: None,
+        };
+
+        // Add metrics annotation with cached_tokens
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
+        };
+
+        let annotation = llm_metrics.to_annotation::<()>().unwrap();
+        annotated.event = annotation.event;
+        annotated.comment = annotation.comment;
+
+        // Process the event
+        let mut http_queue_guard = None;
+        let result = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        );
+
+        // Should return Ok(None) for metrics annotation events
+        assert!(matches!(result, Ok(None)));
+
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
+
+        // Should have observed the cached tokens from the metrics annotation event
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        // 8ms
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
+        );
+    }
+
+    #[test]
+    fn test_non_streaming_path_observes_cached_tokens() {
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create a metrics annotation event
+        let mut annotated = Annotated::<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        > {
+            id: None,
+            data: None,
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: None,
+            error: None,
+        };
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
+        };
+
+        let annotation = llm_metrics.to_annotation::<()>().unwrap();
+        annotated.event = annotation.event;
+        annotated.comment = annotation.comment;
+
+        // Process via the non-streaming metrics hook
+        let mut http_queue_guard = None;
+        process_response_and_observe_metrics(&annotated, &mut collector, &mut http_queue_guard);
+
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
+
+        // Should have observed the cached tokens from the metrics annotation event
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
+        );
+    }
+
+    #[test]
+    fn test_error_type_as_str() {
+        assert_eq!(ErrorType::None.as_str(), "");
+        assert_eq!(ErrorType::Validation.as_str(), "validation");
+        assert_eq!(ErrorType::NotFound.as_str(), "not_found");
+        assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::Internal.as_str(), "internal");
+        assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_success_with_correct_error_type() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_ok();
+        } // guard drops here
+
+        // Verify counter incremented with status=success, error_type=""
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_validation_error() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_error(ErrorType::Validation);
+        } // guard drops here
+
+        // Verify counter incremented with status=error, error_type=validation
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_defaults_to_internal_error_on_drop() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
+        } // guard drops with default error_type=Internal
+
+        // Verify counter incremented with status=error, error_type=internal
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_all_error_types_recorded_correctly() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let endpoint = Endpoint::ChatCompletions;
+
+        // Test each error type
+        let error_types = vec![
+            ErrorType::Validation,
+            ErrorType::NotFound,
+            ErrorType::Overload,
+            ErrorType::Cancelled,
+            ErrorType::Internal,
+            ErrorType::NotImplemented,
+        ];
+
+        for error_type in &error_types {
+            let mut guard = metrics
+                .clone()
+                .create_inflight_guard(model, endpoint, false);
+            guard.mark_error(error_type.clone());
+            drop(guard);
+        }
+
+        // Verify each error type recorded correctly
+        for error_type in &error_types {
+            let counter_value = metrics
+                .request_counter
+                .with_label_values(&[
+                    model,
+                    endpoint.as_str(),
+                    RequestType::Unary.as_str(),
+                    Status::Error.as_str(),
+                    error_type.as_str(),
+                ])
+                .get();
+            assert_eq!(
+                counter_value,
+                1,
+                "Should have 1 request for error_type={}",
+                error_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_requests_different_error_types() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        // Record 2 validation errors, 3 internal errors, 1 success
+        for _ in 0..2 {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_error(ErrorType::Validation);
+            drop(guard);
+        }
+
+        for _ in 0..3 {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Completions, false);
+            guard.mark_error(ErrorType::Internal);
+            drop(guard);
+        }
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Embeddings, false);
+            guard.mark_ok();
+            drop(guard);
+        }
+
+        // Check validation errors (2 from ChatCompletions)
+        let validation_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(validation_count, 2);
+
+        // Check internal errors (3 from Completions)
+        let internal_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Completions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(internal_count, 3);
+
+        // Check success (1 from Embeddings)
+        let success_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Embeddings.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(success_count, 1);
     }
 }

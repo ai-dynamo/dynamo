@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /*
@@ -26,14 +26,21 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::{ChatChoiceStream, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
 
 const DATA_ROOT_PATH: &str = "tests/data/";
+
+fn get_text(content: &ChatCompletionMessageContent) -> &str {
+    match content {
+        ChatCompletionMessageContent::Text(text) => text.as_str(),
+        ChatCompletionMessageContent::Parts(_) => "",
+    }
+}
 
 /// Test data structure containing expected results and stream data
 struct TestData {
@@ -100,14 +107,17 @@ fn load_test_data(file_path: &str) -> TestData {
             .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: id.clone(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: id.clone(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -115,6 +125,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 data: Some(response),
                 event: None,
                 comment: None,
+                error: None,
             }
         })
         .collect();
@@ -143,6 +154,7 @@ async fn parse_response_stream(
             Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
                 stream,
                 reasoning_parser,
+                false,
             ))
         } else {
             Box::pin(stream)
@@ -157,7 +169,9 @@ async fn parse_response_stream(
     > = if tool_parse_enable {
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
-                tool_parser,
+                Some(tool_parser),
+                None, // No tool_choice in this test
+                None, // No tool_definitions in this test
                 stream,
             ))
         } else {
@@ -219,7 +233,7 @@ fn aggregate_content_from_chunks(
 
     for chunk in chunks.iter() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 // Collect reasoning content
                 if let Some(ref reasoning) = choice.delta.reasoning_content {
                     reasoning_content.push_str(reasoning);
@@ -227,7 +241,7 @@ fn aggregate_content_from_chunks(
 
                 // Collect normal content
                 if let Some(ref content) = choice.delta.content {
-                    normal_content.push_str(content);
+                    normal_content.push_str(get_text(content));
                 }
 
                 // Collect tool calls
@@ -267,7 +281,7 @@ fn validate_finish_reason(
     // Count finish_reason occurrences and track position
     for (idx, chunk) in chunks.iter().enumerate() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 if let Some(reason) = choice.finish_reason {
                     finish_reason_count += 1;
                     last_chunk_index = Some(idx);

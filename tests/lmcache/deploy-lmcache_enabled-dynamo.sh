@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # ASSUMPTION: dynamo and its dependencies are properly installed
@@ -23,14 +23,8 @@ echo "🚀 Starting dynamo setup with LMCache:"
 echo "   Model: $MODEL_URL"
 echo "   Port: 8000"
 echo "   !! Remmber to kill the old dynamo processes other wise the port will be busy !! "
-
-# Kill any existing dynamo processes
-echo "🧹 Cleaning up any existing dynamo processes..."
-pkill -f "dynamo-run" || true
-sleep 2
-
 echo "🔧 Starting dynamo worker with LMCache enabled..."
 
 python -m dynamo.frontend &
-ENABLE_LMCACHE=1 \
-  python3 -m dynamo.vllm --model $MODEL_URL
+
+python3 -m dynamo.vllm --model $MODEL_URL --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

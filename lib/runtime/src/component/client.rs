@@ -1,15 +1,20 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::{collections::HashMap, time::Duration};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
-use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
+use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::{
     component::{Endpoint, Instance},
     pipeline::async_trait,
@@ -17,10 +22,76 @@ use crate::{
         AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
         SingleIn,
     },
-    storage::key_value_store::{KeyValueStoreManager, WatchEvent},
     traits::DistributedRuntimeProvider,
     transports::etcd::Client as EtcdClient,
 };
+
+/// Shared occupancy state for routing modes that track per-worker in-flight requests.
+#[derive(Debug, Default)]
+pub(crate) struct RoutingOccupancyState {
+    counts: DashMap<u64, AtomicU64>,
+    exact_selection_lock: tokio::sync::Mutex<()>,
+}
+
+impl RoutingOccupancyState {
+    pub(crate) fn increment(&self, instance_id: u64) {
+        self.counts
+            .entry(instance_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
+        let _guard = self.exact_selection_lock.lock().await;
+        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+        self.increment(id);
+        Some(id)
+    }
+
+    pub(crate) fn decrement(&self, instance_id: u64) {
+        if let Some(count) = self.counts.get(&instance_id) {
+            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            });
+        }
+    }
+
+    pub(crate) fn load(&self, instance_id: u64) -> u64 {
+        self.counts
+            .get(&instance_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn retain(&self, instance_ids: &[u64]) {
+        let live: HashSet<u64> = instance_ids.iter().copied().collect();
+        self.counts.retain(|id, _| live.contains(id));
+    }
+}
+
+/// Get or create the shared routing occupancy state for an endpoint.
+pub(crate) async fn get_or_create_routing_occupancy_state(
+    endpoint: &Endpoint,
+) -> Arc<RoutingOccupancyState> {
+    let drt = endpoint.drt();
+    let registry = drt.routing_occupancy_states();
+    let mut registry = registry.lock().await;
+
+    if let Some(weak) = registry.get(endpoint) {
+        if let Some(state) = weak.upgrade() {
+            return state;
+        } else {
+            registry.remove(endpoint);
+        }
+    }
+
+    let state = Arc::new(RoutingOccupancyState::default());
+    registry.insert(endpoint.clone(), Arc::downgrade(&state));
+    state
+}
+
+/// Default interval for periodic reconciliation of instance_avail with instance_source
+const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -36,37 +107,51 @@ pub struct Client {
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
     instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+    /// Interval for periodic reconciliation of instance_avail with instance_source.
+    /// This ensures instances removed via `report_instance_down` are eventually restored.
+    reconcile_interval: Duration,
 }
 
 impl Client {
     // Client with auto-discover instances using key-value store
     pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
+        Self::with_reconcile_interval(endpoint, DEFAULT_RECONCILE_INTERVAL).await
+    }
+
+    /// Create a client with a custom reconcile interval.
+    /// The reconcile interval controls how often `instance_avail` is reset to match
+    /// `instance_source`, restoring any instances removed via `report_instance_down`.
+    pub(crate) async fn with_reconcile_interval(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+    ) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
-            endpoint.path()
+            endpoint.id()
         );
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
-        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
+        // Seed instance_avail from the current instance_source snapshot so that
+        // callers who proceed immediately after wait_for_instances (which reads
+        // instance_source directly) will also find instances in instance_avail
+        // (which is read by the routing methods like random/round_robin).
+        let initial_ids: Vec<u64> = instance_source
+            .borrow()
+            .iter()
+            .map(|instance| instance.id())
+            .collect();
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
+            reconcile_interval,
         };
         client.monitor_instance_source();
         Ok(client)
-    }
-
-    pub fn path(&self) -> String {
-        self.endpoint.path()
-    }
-
-    /// The root etcd path we watch in etcd to discover new instances to route to.
-    pub fn etcd_root(&self) -> String {
-        self.endpoint.etcd_root()
     }
 
     /// Instances available from watching key-value store
@@ -95,7 +180,7 @@ impl Client {
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         tracing::trace!(
             "wait_for_instances: Starting wait for endpoint: {}",
-            self.endpoint.path()
+            self.endpoint.id()
         );
         let mut rx = self.instance_source.as_ref().clone();
         // wait for there to be 1 or more endpoints
@@ -108,7 +193,7 @@ impl Client {
                 tracing::info!(
                     "wait_for_instances: Found {} instance(s) for endpoint: {}",
                     instances.len(),
-                    self.endpoint.path()
+                    self.endpoint.id()
                 );
                 break;
             }
@@ -142,10 +227,16 @@ impl Client {
     }
 
     /// Monitor the key-value instance source and update instance_avail.
+    ///
+    /// This function also performs periodic reconciliation: if `instance_source` hasn't
+    /// changed for `reconcile_interval`, we reset `instance_avail` to match
+    /// `instance_source`. This ensures instances removed via `report_instance_down`
+    /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
+        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
-        let endpoint_path = self.endpoint.path();
+        let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
             let mut rx = client.instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
@@ -159,16 +250,32 @@ impl Client {
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
 
+                // Clean up stale occupancy counters for instances that no longer exist.
+                let registry = client.endpoint.drt().routing_occupancy_states();
+                if let Ok(registry) = registry.try_lock()
+                    && let Some(weak) = registry.get(&client.endpoint)
+                    && let Some(state) = weak.upgrade()
+                {
+                    state.retain(&instance_ids);
+                }
+
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);
 
-                if let Err(err) = rx.changed().await {
-                    tracing::error!(
-                        "monitor_instance_source: The Sender is dropped: {}, endpoint={}",
-                        err,
-                        endpoint_path
-                    );
-                    cancel_token.cancel();
+                tokio::select! {
+                    result = rx.changed() => {
+                        if let Err(err) = result {
+                            tracing::error!(
+                                "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                            );
+                            cancel_token.cancel();
+                        }
+                    }
+                    _ = tokio::time::sleep(reconcile_interval) => {
+                        tracing::trace!(
+                            "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
+                        );
+                    }
                 }
             }
         });
@@ -235,8 +342,8 @@ impl Client {
                                 map.insert(instance.instance_id, instance);
                         }
                     }
-                    DiscoveryEvent::Removed(instance_id) => {
-                        map.remove(&instance_id);
+                    DiscoveryEvent::Removed(id) => {
+                        map.remove(&id.instance_id());
                     }
                 }
 
@@ -251,5 +358,239 @@ impl Client {
         let instance_source = Arc::new(watch_rx);
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    /// Test that instances removed via report_instance_down are restored after
+    /// the reconciliation interval elapses.
+    #[tokio::test]
+    async fn test_instance_reconciliation() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
+
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_reconciliation".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        // Use a short reconcile interval for faster tests
+        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        // Initially, instance_avail should be empty (no registered instances)
+        assert!(client.instance_ids_avail().is_empty());
+
+        // For this test, we'll directly manipulate instance_avail and verify reconciliation
+        // Store some test IDs
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Simulate report_instance_down removing instance 2
+        client.report_instance_down(2);
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 3]);
+
+        // Wait for reconciliation interval + buffer
+        // The monitor_instance_source will reset instance_avail to match instance_source
+        // Since instance_source is empty, after reconciliation instance_avail should be empty
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        // After reconciliation, instance_avail should match instance_source (which is empty)
+        assert!(
+            client.instance_ids_avail().is_empty(),
+            "After reconciliation, instance_avail should match instance_source"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Test that report_instance_down correctly removes an instance from instance_avail.
+    #[tokio::test]
+    async fn test_report_instance_down() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_report_down".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+
+        // Manually set up instance_avail with test instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Report instance 2 as down
+        client.report_instance_down(2);
+
+        // Verify instance 2 is removed
+        let avail = client.instance_ids_avail();
+        assert!(avail.contains(&1), "Instance 1 should still be available");
+        assert!(
+            !avail.contains(&2),
+            "Instance 2 should be removed after report_instance_down"
+        );
+        assert!(avail.contains(&3), "Instance 3 should still be available");
+
+        rt.shutdown();
+    }
+
+    /// Test that instance_avail_watcher receives updates when instances change.
+    #[tokio::test]
+    async fn test_instance_avail_watcher() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_watcher".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+        let watcher = client.instance_avail_watcher();
+
+        // Set initial instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        // Report instance down - this should notify the watcher
+        client.report_instance_down(2);
+
+        // The watcher should receive the update
+        // Note: We need to check if changed() was signaled
+        let current = watcher.borrow().clone();
+        assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    /// Test that concurrent select_and_increment distributes load correctly.
+    #[tokio::test]
+    async fn test_concurrent_select_and_increment() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let instance_ids: Vec<u64> = vec![100, 200, 300];
+        let num_requests = 90;
+
+        let mut handles = Vec::new();
+        for _ in 0..num_requests {
+            let state = state.clone();
+            let ids = instance_ids.clone();
+            handles.push(tokio::spawn(async move {
+                state.select_exact_min_and_increment(&ids).await
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(state.load(100), 30);
+        assert_eq!(state.load(200), 30);
+        assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_connection_counts() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_ll_counts".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
+        let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
+
+        let picked1 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
+        assert_eq!(state1.load(picked1), 1);
+
+        let picked2 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
+        assert_ne!(picked1, picked2);
+
+        // state2 should see the same counts (same underlying Arc)
+        assert_eq!(state2.load(10), state1.load(10));
+        assert_eq!(state2.load(20), state1.load(20));
+        assert_eq!(state2.load(30), state1.load(30));
+
+        state2.decrement(picked1);
+        assert_eq!(state1.load(picked1), if picked1 == picked2 { 1 } else { 0 });
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_state_retain() {
+        let state = RoutingOccupancyState::default();
+
+        // Add some connections
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        // Each instance should have 1 connection
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 1);
+        assert_eq!(state.load(3), 1);
+
+        // Retain only instances 1 and 3 (instance 2 was removed)
+        state.retain(&[1, 3]);
+
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 0);
+        assert_eq!(state.load(3), 1);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_instance_source_cleans_up_removed_worker_counts() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_occupancy_cleanup".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let worker_id = client.instance_ids_avail()[0];
+        let state = get_or_create_routing_occupancy_state(&endpoint).await;
+        state.increment(worker_id);
+        assert_eq!(state.load(worker_id), 1);
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+
+        for _ in 0..10 {
+            if state.load(worker_id) == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(state.load(worker_id), 0);
+
+        rt.shutdown();
     }
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
@@ -81,13 +81,13 @@ pub const MAX_BEST_OF: u8 = 20;
 /// Allowed range of values for `best_of`
 pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 
-/// Maximum allowed number of stop sequences
-pub const MAX_STOP_SEQUENCES: usize = 4;
-/// Maximum allowed number of tools
-pub const MAX_TOOLS: usize = 128;
+/// Maximum allowed number of stop sequences.
+pub const MAX_STOP_SEQUENCES: usize = 32;
+/// Maximum allowed number of tools.
+pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -109,6 +109,42 @@ pub fn validate_no_unsupported_fields(
         anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
     }
     Ok(())
+}
+
+/// Validates response_format for chat completions.
+///
+/// Dynamo currently supports translating:
+/// - `{"type":"json_object"}` -> guided decoding JSON object schema
+/// - `{"type":"json_schema","json_schema":{"schema": ...}}` -> guided decoding JSON schema
+///
+/// `{"type":"text"}` is accepted and means no structured constraint.
+pub fn validate_response_format(
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ResponseFormat;
+
+    let Some(fmt) = response_format else {
+        return Ok(());
+    };
+
+    match fmt {
+        ResponseFormat::Text => Ok(()),
+        ResponseFormat::JsonObject => Ok(()),
+        ResponseFormat::JsonSchema { json_schema } => {
+            // Validate name field format
+            if json_schema.name.is_empty() {
+                anyhow::bail!("`response_format.json_schema.name` cannot be empty");
+            }
+
+            // Validate schema presence
+            if json_schema.schema.is_none() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Validates the temperature parameter
@@ -319,15 +355,15 @@ pub fn validate_user(user: Option<&str>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates stop sequences
-pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<(), anyhow::Error> {
+pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(), anyhow::Error> {
     if let Some(stop_value) = stop {
         match stop_value {
-            dynamo_async_openai::types::Stop::String(s) => {
+            dynamo_protocols::types::Stop::String(s) => {
                 if s.is_empty() {
                     anyhow::bail!("Stop sequence cannot be empty");
                 }
             }
-            dynamo_async_openai::types::Stop::StringArray(sequences) => {
+            dynamo_protocols::types::Stop::StringArray(sequences) => {
                 if sequences.is_empty() {
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
@@ -355,7 +391,7 @@ pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<
 
 /// Validates messages array
 pub fn validate_messages(
-    messages: &[dynamo_async_openai::types::ChatCompletionRequestMessage],
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
 ) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
@@ -379,7 +415,7 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 
 /// Validates tools array
 pub fn validate_tools(
-    tools: &Option<&[dynamo_async_openai::types::ChatCompletionTool]>,
+    tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
     let tools = match tools {
         Some(val) => val,
@@ -412,7 +448,7 @@ pub fn validate_tools(
 
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
-    _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
+    _reasoning_effort: &Option<dynamo_protocols::types::ReasoningEffort>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ReasoningEffort is an enum, so if it exists, it's valid by definition
@@ -422,7 +458,7 @@ pub fn validate_reasoning_effort(
 
 /// Validates service tier parameter
 pub fn validate_service_tier(
-    _service_tier: &Option<dynamo_async_openai::types::ServiceTier>,
+    _service_tier: &Option<dynamo_protocols::types::ServiceTier>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ServiceTier is an enum, so if it exists, it's valid by definition
@@ -435,14 +471,14 @@ pub fn validate_service_tier(
 //
 
 /// Validates prompt
-pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<(), anyhow::Error> {
+pub fn validate_prompt(prompt: &dynamo_protocols::types::Prompt) -> Result<(), anyhow::Error> {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => {
+        dynamo_protocols::types::Prompt::String(s) => {
             if s.is_empty() {
                 anyhow::bail!("Prompt string cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+        dynamo_protocols::types::Prompt::StringArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt string array cannot be empty");
             }
@@ -452,12 +488,12 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 }
             }
         }
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt array of integer arrays cannot be empty");
             }
@@ -467,6 +503,75 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Validates prompt and prompt_embeds fields together.
+///
+/// This function consolidates all prompt-related validation:
+/// - Ensures at least one of prompt or prompt_embeds is provided
+/// - If prompt_embeds is provided, validates its format (base64, size limits)
+/// - If prompt_embeds is NOT provided, validates that prompt is non-empty
+///
+/// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_or_embeds(
+    prompt: Option<&dynamo_protocols::types::Prompt>,
+    prompt_embeds: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Check that at least one is provided
+    if prompt.is_none() && prompt_embeds.is_none() {
+        anyhow::bail!("At least one of 'prompt' or 'prompt_embeds' must be provided");
+    }
+
+    // If prompt_embeds is provided, validate it
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
+    } else if let Some(p) = prompt {
+        // Only validate prompt content if prompt_embeds is NOT provided
+        // When embeddings are present, prompt can be empty/placeholder
+        validate_prompt(p)?;
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds format (internal helper)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+fn validate_prompt_embeds_format(embeds: &str) -> Result<(), anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    // Validate base64 encoding first
+    let decoded = general_purpose::STANDARD
+        .decode(embeds)
+        .map_err(|_| anyhow::anyhow!("prompt_embeds must be valid base64-encoded data"))?;
+
+    // Check minimum size on decoded bytes (100 bytes)
+    const MIN_SIZE: usize = 100;
+    if decoded.len() < MIN_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data must be at least {MIN_SIZE} bytes, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    // Check maximum size on decoded bytes (10MB)
+    const MAX_SIZE: usize = 10 * 1024 * 1024;
+    if decoded.len() > MAX_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data exceeds maximum size of 10MB, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds field (public wrapper for standalone validation)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow::Error> {
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
     }
     Ok(())
 }

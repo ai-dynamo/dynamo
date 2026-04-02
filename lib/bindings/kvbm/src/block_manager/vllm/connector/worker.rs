@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::block_manager::connector::protocol::TransferType;
@@ -25,6 +25,7 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -251,9 +252,17 @@ impl Worker for KvConnectorWorker {
         // - for each action in the metadata, add the action to the request slot
         // - send the list of actions to the engine to track completion
 
-        for slot in metadata.new_slots {
-            debug_assert!(!self.connector.has_slot(&slot), "slot already exists");
-            self.connector.create_slot(slot)?;
+        for slot_info in &metadata.new_slots {
+            debug_assert!(
+                !self.connector.has_slot(&slot_info.request_id),
+                "slot already exists"
+            );
+            // Create slot with expected immediate ops count BEFORE any operations arrive.
+            // This ensures proper completion tracking and avoids race conditions in TP>1.
+            self.connector.create_slot_with_immediate_ops(
+                slot_info.request_id.clone(),
+                slot_info.expected_immediate_ops,
+            )?;
         }
 
         let mut onboarding_operations = Vec::new();
@@ -278,11 +287,6 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_onboarding.insert(request_id);
         }
 
-        // delay offloading operations until the end of the forward pass
-        debug_assert!(
-            self.offloading_operations.is_empty(),
-            "offloading operations should be empty"
-        );
         self.offloading_operations = offloading_operations;
 
         Ok(())
@@ -304,15 +308,34 @@ impl Worker for KvConnectorWorker {
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
         self.layers_complete += 1;
+        tracing::debug!(
+            iteration = self.iteration,
+            layers_complete = self.layers_complete,
+            total_layers = self.kv_cache_layers.len(),
+            pending_offload_ops = self.offloading_operations.len(),
+            "save_kv_layer called"
+        );
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
+
+            tracing::trace!(
+                iteration = self.iteration,
+                num_operations = offloading_operations.len(),
+                "All layers complete, enqueuing {} offload operations",
+                offloading_operations.len()
+            );
 
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
             event_sync_blocking(self.layer_events[self.layers_complete - 1]);
-            for operation in offloading_operations {
-                self.connector.enqueue_request(operation);
+            for operation in &offloading_operations {
+                tracing::debug!(
+                    request_id = %operation.request_id,
+                    operation_id = %operation.uuid,
+                    "Enqueuing offload operation to scheduler"
+                );
+                self.connector.enqueue_request(operation.clone());
             }
         }
         Ok(())
@@ -461,6 +484,7 @@ impl PyKvConnectorWorker {
         Ok(Self { connector_worker })
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,

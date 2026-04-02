@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::block_manager::{DiskStorage, PinnedStorage};
@@ -719,7 +719,7 @@ mod tests {
             // Prefill count should remain unchanged
             assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
 
-            if expected_total % BLOCK_SIZE == 0 {
+            if expected_total.is_multiple_of(BLOCK_SIZE) {
                 assert_eq!(slot.mutable.len(), 0);
                 assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
             } else {

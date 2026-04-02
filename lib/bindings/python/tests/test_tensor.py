@@ -1,24 +1,28 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
 import os
 
+import pytest
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
-@dynamo_worker()
+
+@pytest.mark.asyncio
 async def test_register(runtime: DistributedRuntime):
-    component = runtime.namespace("test").component("tensor")
-    await component.create_service()
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("test.tensor.generate")
 
     model_config = {
         "name": "tensor",
@@ -34,15 +38,12 @@ async def test_register(runtime: DistributedRuntime):
 
     assert model_config == runtime_config.get_tensor_model_config()
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
-    await register_llm(
+    # Use register_model for tensor-based backends (skips HuggingFace downloads)
+    await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
-        "tensor",
+        "tensor",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
     )
 

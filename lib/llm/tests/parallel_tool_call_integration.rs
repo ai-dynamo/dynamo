@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test for parallel tool calling functionality
@@ -23,17 +23,17 @@ use serde_json::json;
 /// Creates a mock NvCreateChatCompletionRequest based on the curl request
 fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
     let messages = vec![
-        dynamo_async_openai::types::ChatCompletionRequestMessage::System(
-            dynamo_async_openai::types::ChatCompletionRequestSystemMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestSystemMessageContent::Text(
+        dynamo_protocols::types::ChatCompletionRequestMessage::System(
+            dynamo_protocols::types::ChatCompletionRequestSystemMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestSystemMessageContent::Text(
                     "You MUST use two tools in parallel to resolve the user request: call get_current_weather for each city AND call is_holiday_today to check if today is a holiday. Do not answer without using both tools.".to_string()
                 ),
                 name: None,
             }
         ),
-        dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "What is the weather in Dallas, Texas? Is today a holiday?".to_string()
                 ),
                 name: None,
@@ -42,9 +42,9 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
     ];
 
     let tools = vec![
-        dynamo_async_openai::types::ChatCompletionTool {
-            r#type: dynamo_async_openai::types::ChatCompletionToolType::Function,
-            function: dynamo_async_openai::types::FunctionObject {
+        dynamo_protocols::types::ChatCompletionTool {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: dynamo_protocols::types::FunctionObject {
                 name: "get_current_weather".to_string(),
                 description: Some("Get weather for a city/state in specified units".to_string()),
                 parameters: Some(json!({
@@ -60,9 +60,9 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                 strict: None,
             },
         },
-        dynamo_async_openai::types::ChatCompletionTool {
-            r#type: dynamo_async_openai::types::ChatCompletionToolType::Function,
-            function: dynamo_async_openai::types::FunctionObject {
+        dynamo_protocols::types::ChatCompletionTool {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: dynamo_protocols::types::FunctionObject {
                 name: "is_holiday_today".to_string(),
                 description: Some("Return whether today is a public holiday".to_string()),
                 parameters: Some(json!({
@@ -75,14 +75,14 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         },
     ];
 
-    let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("Qwen/Qwen3-0.6B")
         .temperature(0.0)
         .max_tokens(3000u32)
         .stream(false)
         .messages(messages)
         .tools(tools)
-        .tool_choice(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Required)
+        .tool_choice(dynamo_protocols::types::ChatCompletionToolChoiceOption::Required)
         .build()
         .expect("Failed to build chat completion request");
 
@@ -91,6 +91,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         common: CommonExt::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -174,7 +175,7 @@ async fn test_parallel_tool_call_integration() {
 
     // Verify tool choice is required
     match request.inner.tool_choice.as_ref().unwrap() {
-        dynamo_async_openai::types::ChatCompletionToolChoiceOption::Required => {
+        dynamo_protocols::types::ChatCompletionToolChoiceOption::Required => {
             // This is expected
         }
         _ => panic!("Tool choice should be Required"),
@@ -197,7 +198,7 @@ async fn test_parallel_tool_call_parsing() {
 
     // Parse the tool calls using the hermes parser (works well with <tool_call> format)
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(&response_content, Some("hermes"))
+        detect_and_parse_tool_call(&response_content, Some("hermes"), None)
             .await
             .expect("Should successfully parse tool calls");
 
@@ -239,7 +240,7 @@ async fn test_parallel_tool_call_with_explicit_parser() {
 
     for parser in parsers_to_test {
         let (tool_calls, remaining_content) =
-            detect_and_parse_tool_call(&response_content, Some(parser))
+            detect_and_parse_tool_call(&response_content, Some(parser), None)
                 .await
                 .unwrap_or_else(|e| panic!("Should successfully parse with {parser} parser: {e}"));
 
@@ -267,7 +268,7 @@ async fn test_parallel_tool_call_with_explicit_parser() {
 async fn test_tool_call_json_structure() {
     let response_content = get_mock_response_content();
 
-    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"))
+    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"), None)
         .await
         .expect("Should parse tool calls");
 
@@ -288,7 +289,7 @@ async fn test_tool_call_json_structure() {
 async fn test_openai_compatibility_structure() {
     let response_content = get_mock_response_content();
 
-    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"))
+    let (tool_calls, _) = detect_and_parse_tool_call(&response_content, Some("hermes"), None)
         .await
         .expect("Should parse tool calls");
 
@@ -335,7 +336,7 @@ async fn test_parallel_tool_call_error_handling() {
 {"invalid_json": }
 </tool_call>"#;
 
-    let result = detect_and_parse_tool_call(malformed_content, Some("hermes")).await;
+    let result = detect_and_parse_tool_call(malformed_content, Some("hermes"), None).await;
 
     // Should handle partial parsing gracefully
     match result {
@@ -368,7 +369,7 @@ async fn test_empty_tool_calls() {
     let content_without_tools = "This is just a regular response without any tool calls.";
 
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(content_without_tools, Some("hermes"))
+        detect_and_parse_tool_call(content_without_tools, Some("hermes"), None)
             .await
             .expect("Should handle content without tool calls");
 
@@ -412,7 +413,7 @@ async fn test_deepseek_v3_1_tool_call_parsing() {
 
     // Parse the tool calls using the deepseek_v3_1 parser
     let (tool_calls, remaining_content) =
-        detect_and_parse_tool_call(response_content, Some("deepseek_v3_1"))
+        detect_and_parse_tool_call(response_content, Some("deepseek_v3_1"), None)
             .await
             .expect("Should successfully parse deepseek_v3_1 tool calls");
 

@@ -1,24 +1,27 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 __all__ = [
     "PlannerConnector",
     "KubernetesConnector",
     "VirtualConnector",
-    "LoadPlannerDefaults",
+    "GlobalPlannerConnector",
     "SLAPlannerDefaults",
     "TargetReplica",
     "SubComponentType",
+    "WorkerInfo",
 ]
-# Import the classes
-from dynamo.planner.defaults import (
-    LoadPlannerDefaults,
+
+from dynamo.planner.config.defaults import (
     SLAPlannerDefaults,
     SubComponentType,
+    TargetReplica,
 )
-from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
-from dynamo.planner.planner_connector import PlannerConnector
-from dynamo.planner.virtual_connector import VirtualConnector
+from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.connectors.virtual import VirtualConnector
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 try:
     from ._version import __version__

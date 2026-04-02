@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
@@ -11,7 +11,7 @@ async fn test_model_info_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
     let info = mdc.model_info.unwrap().get_model_info().unwrap();
     assert_eq!(info.model_type(), "llama");
-    assert_eq!(info.bos_token_id(), 1);
+    assert_eq!(info.bos_token_id(), Some(1));
     assert_eq!(info.eos_token_ids(), vec![2]);
     assert_eq!(info.max_position_embeddings(), Some(2048));
     assert_eq!(info.vocab_size(), Some(32000));
@@ -30,6 +30,7 @@ async fn test_tokenizer_from_hf_like_local_repo() {
     // Verify tokenizer file was found
     match mdc.tokenizer.unwrap() {
         TokenizerKind::HfTokenizerJson(_) => (),
+        TokenizerKind::TikTokenModel(_) => panic!("Expected HfTokenizerJson, got TikTokenModel"),
     }
 }
 
@@ -52,4 +53,20 @@ async fn test_missing_required_files() {
     let err = result.unwrap_err().to_string();
     // Should fail because config.json is missing
     assert!(err.contains("unable to extract"));
+}
+
+/// Models without tokenizer.json (e.g. Qwen3-Omni which ships vocab.json + merges.txt)
+/// should load successfully with tokenizer set to None. The frontend must use a
+/// non-Rust chat processor for these models (e.g. --dyn-chat-processor vllm).
+#[tokio::test]
+async fn test_model_loads_without_tokenizer_json() {
+    let path = "tests/data/sample-models/mock-no-tokenizer-json";
+    let mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+    assert!(
+        mdc.tokenizer.is_none(),
+        "Expected tokenizer to be None for model without tokenizer.json"
+    );
+    assert!(!mdc.has_tokenizer(), "has_tokenizer() should be false");
+    // Model info should still be loaded
+    assert!(mdc.model_info.is_some());
 }

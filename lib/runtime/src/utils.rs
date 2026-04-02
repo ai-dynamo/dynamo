@@ -1,11 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 pub use tokio::time::{Duration, Instant};
 
 pub mod graceful_shutdown;
 pub mod ip_resolver;
-pub mod leader_worker_barrier;
 pub mod pool;
 pub mod stream;
 pub mod task;

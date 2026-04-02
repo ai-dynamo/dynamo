@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +46,7 @@ RUNTIME=nvidia
 WORKDIR=/workspace
 NETWORK=host
 USER=
+GROUP_ADD_STRING=
 
 get_options() {
     while :; do
@@ -263,10 +264,6 @@ get_options() {
             HF_HOME=$DEFAULT_HF_HOME
         fi
 
-        if [ -z "${PRIVILEGED}" ]; then
-            PRIVILEGED="TRUE"
-        fi
-
         ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
     fi
 
@@ -327,6 +324,18 @@ get_options() {
         USER_STRING="--user ${USER}"
     fi
 
+    # If we override the user, Docker drops supplementary groups from the image.
+    # Add root group (GID 0) back so group-writable directories owned by root remain writable,
+    # avoiding expensive `chown -R ...` fixes on large mounted workspaces.
+    GROUP_ADD_STRING=""
+    if [[ -n "${USER}" ]]; then
+        # Extract just the UID part (before any colon)
+        USER_UID="${USER%%:*}"
+        if [[ "${USER_UID}" != "root" && "${USER_UID}" != "0" ]]; then
+            GROUP_ADD_STRING="--group-add 0"
+        fi
+    fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -335,7 +344,7 @@ show_help() {
     echo "  [--image image]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--name name for launched container, default NONE]"
-    echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
+    echo "  [--privileged whether to launch in privileged mode, default FALSE]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
@@ -393,6 +402,7 @@ ${RUN_PREFIX} docker run \
     --ipc host \
     ${PRIVILEGED_STRING} \
     ${USER_STRING} \
+    ${GROUP_ADD_STRING} \
     ${NAME_STRING} \
     ${ENTRYPOINT_STRING} \
     ${IMAGE} \

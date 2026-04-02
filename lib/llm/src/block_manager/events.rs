@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -223,7 +223,7 @@ impl DynamoEventManager {
                             tokens,
                             parent_hash,
                             block_size,
-                            None, // lora_id
+                            None, // lora_name
                             None, // tier
                             None, // data_parallel_rank
                         )

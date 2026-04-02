@@ -4,9 +4,9 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 ## Prerequisites
 
-**Before using these utilities, you must first set up Dynamo Cloud following the main installation guide:**
+**Before using these utilities, you must first set up Dynamo Kubernetes Platform following the main installation guide:**
 
-👉 **[Follow the Dynamo Cloud installation guide](/docs/kubernetes/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Kubernetes Platform installation guide](/docs/kubernetes/installation-guide.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
@@ -27,18 +27,20 @@ This includes:
 
 ### Benchmarking Resource Setup
 
-After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
+After setting up Dynamo Kubernetes Platform, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
-The setup script creates a `dynamo-pvc` with `ReadWriteMany` (RWX). If your cluster's default `storageClassName` does not support RWX, set `storageClassName` in `deploy/utils/manifests/pvc.yaml` to an RWX-capable class before running the script.
+The setup script creates a `dynamo-pvc` with `ReadWriteOnce` (RWO) access mode using your cluster's default storage class. This is sufficient for profiling workflows where only one job writes at a time.
 
-Example (add under `spec` in `deploy/utils/manifests/pvc.yaml`):
+If you want to use `ReadWriteMany` (RWX) for concurrent access, modify `deploy/utils/manifests/pvc.yaml` before running the script:
+
 ```yaml
-...
 spec:
   accessModes:
   - ReadWriteMany
-  storageClassName: <your-rwx-storageclass>
-...
+  storageClassName: <your-rwx-capable-storageclass>  # e.g., NFS-based storage
+  resources:
+    requests:
+      storage: 50Gi
 ```
 
 > [!TIP]
@@ -143,7 +145,7 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 For complete benchmarking and profiling workflows:
 - **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/benchmarks/sla_driven_profiling.md](../../docs/benchmarks/sla_driven_profiling.md) for optimizing configurations before deployment
+- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler-guide.md](../../docs/components/profiler/profiler-guide.md) for optimizing configurations before deployment
 
 ## Notes
 

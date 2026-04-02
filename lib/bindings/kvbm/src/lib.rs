@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::types::{PyCapsule, PyCapsuleMethods};
@@ -9,14 +9,13 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{
+    self as rs, RuntimeConfig, config, logging, traits::DistributedRuntimeProvider,
+};
 
 use dynamo_llm::{self as llm_rs};
 
-#[cfg(feature = "block-manager")]
 mod block_manager;
-#[cfg(feature = "block-manager")]
-mod kernels;
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
@@ -26,10 +25,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
 
-    if std::env::var("OTEL_EXPORT_ENABLED")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if config::env_is_truthy("OTEL_EXPORT_ENABLED") {
         // OTLP batch exporter needs runtime context to spawn background tasks
         let handle = get_current_tokio_handle();
         let _guard = handle.enter();
@@ -41,13 +37,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
-
-    #[cfg(feature = "block-manager")]
-    {
-        let kernels = PyModule::new(m.py(), "kernels")?;
-        kernels::add_to_module(&kernels)?;
-        m.add_submodule(&kernels)?;
-    }
 
     Ok(())
 }

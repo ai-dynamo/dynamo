@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
-};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 #[cfg(test)]
@@ -16,6 +16,15 @@ mod tests {
     // Test utilities module - shared test infrastructure
     pub(crate) mod test_utils {
         use super::*;
+        use dynamo_protocols::types::ChatCompletionMessageContent;
+
+        /// Helper to extract text from ChatCompletionMessageContent
+        pub fn extract_text(content: &ChatCompletionMessageContent) -> &str {
+            match content {
+                ChatCompletionMessageContent::Text(text) => text.as_str(),
+                ChatCompletionMessageContent::Parts(_) => "",
+            }
+        }
 
         /// Helper function to create a mock chat response chunk
         pub fn create_mock_response_chunk(
@@ -27,25 +36,29 @@ mod tests {
                 index,
                 delta: ChatCompletionStreamResponseDelta {
                     role: Some(Role::Assistant),
-                    content: Some(content),
+                    content: Some(ChatCompletionMessageContent::Text(content)),
                     tool_calls: None,
                     function_call: None,
                     refusal: None,
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -53,6 +66,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -72,18 +86,22 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -91,6 +109,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -107,25 +126,29 @@ mod tests {
                 index,
                 delta: ChatCompletionStreamResponseDelta {
                     role: Some(Role::Assistant),
-                    content: Some(content),
+                    content: Some(ChatCompletionMessageContent::Text(content)),
                     tool_calls: None,
                     function_call: None,
                     refusal: None,
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -133,6 +156,7 @@ mod tests {
                 id,
                 event,
                 comment,
+                error: None,
             }
         }
 
@@ -148,27 +172,31 @@ mod tests {
                         index,
                         delta: ChatCompletionStreamResponseDelta {
                             role: Some(Role::Assistant),
-                            content: Some(content),
+                            content: Some(ChatCompletionMessageContent::Text(content)),
                             tool_calls: None,
                             function_call: None,
                             refusal: None,
                             reasoning_content: None,
                         },
                         finish_reason: None,
+                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -176,6 +204,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -198,20 +227,24 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
+                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
             };
 
             Annotated {
@@ -219,6 +252,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -230,14 +264,16 @@ mod tests {
             let content = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .expect("Expected content in result");
 
             assert_eq!(
-                content, expected,
+                extract_text(content),
+                expected,
                 "Content mismatch: expected '{}', got '{}'",
-                expected, content
+                expected,
+                extract_text(content)
             );
         }
 
@@ -250,7 +286,7 @@ mod tests {
             let tool_calls = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .expect("Expected tool calls in result");
 
@@ -287,11 +323,15 @@ mod tests {
         #[allow(dead_code)]
         pub fn assert_empty_emission(result: &Annotated<NvCreateChatCompletionStreamResponse>) {
             if let Some(data) = &result.data
-                && let Some(choice) = data.choices.first()
+                && let Some(choice) = data.inner.choices.first()
             {
                 assert!(
                     choice.delta.content.is_none()
-                        || choice.delta.content.as_ref().unwrap().is_empty(),
+                        || choice.delta.content.as_ref().is_none_or(|c| match c {
+                            dynamo_protocols::types::ChatCompletionMessageContent::Text(t) =>
+                                t.is_empty(),
+                            _ => false,
+                        }),
                     "Expected no content but got: {:?}",
                     choice.delta.content
                 );
@@ -313,10 +353,10 @@ mod tests {
                 .filter_map(|r| {
                     r.data
                         .as_ref()
-                        .and_then(|d| d.choices.first())
+                        .and_then(|d| d.inner.choices.first())
                         .and_then(|c| c.delta.content.as_ref())
                 })
-                .cloned()
+                .map(extract_text)
                 .collect::<Vec<_>>()
                 .join("")
         }
@@ -326,9 +366,12 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .cloned()
+                .and_then(|content| match content {
+                    ChatCompletionMessageContent::Text(text) => Some(text.clone()),
+                    ChatCompletionMessageContent::Parts(_) => None,
+                })
                 .unwrap_or_default()
         }
 
@@ -337,7 +380,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .map(|tc| !tc.is_empty())
                 .unwrap_or(false)
@@ -349,9 +392,9 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .map(|content| !content.is_empty())
+                .map(|content| !extract_text(content).is_empty())
                 .unwrap_or(false)
         }
     }
@@ -389,29 +432,31 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some("Hello ")
         );
 
         // When jail ends, accumulated content should be released
-        let unjailed_content = &results[1].data.as_ref().unwrap().choices[0].delta.content;
+        let unjailed_content = &results[1].data.as_ref().unwrap().inner.choices[0]
+            .delta
+            .content;
         assert!(unjailed_content.is_some());
         assert!(
-            unjailed_content
-                .as_ref()
-                .unwrap()
+            extract_text(unjailed_content.as_ref().unwrap())
                 .contains("<jail>This is jailed content</jail>")
         );
 
         // Last chunk should pass through normally
         assert_eq!(
-            results[2].data.as_ref().unwrap().choices[0]
+            results[2].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some(" World")
         );
     }
@@ -443,7 +488,7 @@ mod tests {
         // Check if tool calls were parsed
         if let Some(last_result) = results.last()
             && let Some(ref response_data) = last_result.data
-            && let Some(ref tool_calls) = response_data.choices[0].delta.tool_calls
+            && let Some(ref tool_calls) = response_data.inner.choices[0].delta.tool_calls
         {
             assert!(!tool_calls.as_slice().is_empty());
             assert_eq!(
@@ -481,20 +526,21 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some("Normal text ")
         );
 
         // Second chunk should contain the accumulated jailed content
-        let jailed = results[1].data.as_ref().unwrap().choices[0]
+        let jailed = results[1].data.as_ref().unwrap().inner.choices[0]
             .delta
             .content
             .as_ref()
             .expect("Expected accumulated jailed content");
-        assert!(jailed.contains("<jail><TOOLCALL>Jailed content</jail>"));
+        assert!(extract_text(jailed).contains("<jail><TOOLCALL>Jailed content</jail>"));
     }
 
     #[tokio::test]
@@ -1192,7 +1238,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1213,7 +1259,7 @@ mod tests {
         );
 
         // Verify tool call was parsed correctly
-        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().choices[0]
+        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().inner.choices[0]
             .delta
             .tool_calls;
         assert!(tool_calls.is_some(), "Should have tool calls");
@@ -1281,18 +1327,31 @@ mod tests {
             "Comment should be preserved when stream ends while jailed"
         );
 
+        // Verify inner response metadata carries forward real stream values (not placeholders)
+        let inner = accumulated_chunk.data.as_ref().unwrap();
+        assert_eq!(
+            inner.inner.id, "test-id",
+            "Inner response id should carry forward from real stream chunks, not be 'stream-end'"
+        );
+        assert_eq!(
+            inner.inner.model, "test-model",
+            "Inner response model should carry forward from real stream chunks, not be 'unknown'"
+        );
+        assert_eq!(
+            inner.inner.created, 1234567890,
+            "Inner response created should carry forward from real stream chunks, not be 0"
+        );
+
         // Verify accumulated content is returned
-        let content = &accumulated_chunk.data.as_ref().unwrap().choices[0]
-            .delta
-            .content;
+        let content = &inner.inner.choices[0].delta.content;
         assert!(content.is_some(), "Should have accumulated content");
         let content = content.as_ref().unwrap();
         assert!(
-            content.contains("<tool_call>"),
+            test_utils::extract_text(content).contains("<tool_call>"),
             "Should contain jail start marker in accumulated content"
         );
         assert!(
-            content.contains("incomplete_call"),
+            test_utils::extract_text(content).contains("incomplete_call"),
             "Should contain accumulated incomplete content"
         );
     }
@@ -1332,7 +1391,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1497,7 +1556,7 @@ mod tests {
         let choice_1_chunks: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 1 && c.delta.content.is_some())
             .collect();
 
@@ -1511,7 +1570,7 @@ mod tests {
         let choice_0_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 0 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1524,7 +1583,7 @@ mod tests {
         let choice_2_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 2 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1567,7 +1626,7 @@ mod tests {
         let mut tool_call_responses: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1612,7 +1671,7 @@ mod tests {
             let run_responses: Vec<_> = run_results
                 .iter()
                 .filter_map(|r| r.data.as_ref())
-                .flat_map(|d| &d.choices)
+                .flat_map(|d| &d.inner.choices)
                 .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
                 .collect();
 
@@ -1626,6 +1685,63 @@ mod tests {
                 run
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_usage_chunk_preserved() {
+        // Create one chunk with choices (content) and one chunk with only usage/no choices.
+        let content_chunk = create_mock_response_chunk("Hello, world!".to_string(), 0);
+        let mut usage_chunk = content_chunk.clone();
+
+        // Modify the inner data to be a usage-only chunk
+        if let Some(ref mut data) = usage_chunk.data {
+            data.inner.choices.clear();
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
+                total_tokens: 14,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+
+        let input_chunks = vec![content_chunk, usage_chunk];
+        let input_stream = stream::iter(input_chunks);
+        let jail = JailedStream::builder().build();
+
+        let results: Vec<_> = jail.apply(input_stream).collect().await;
+
+        // Validate we have exactly 2 chunks
+        assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
+
+        // First chunk should be content chunk
+        let content = results[0].data.as_ref().unwrap().inner.choices[0]
+            .delta
+            .content
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            extract_text(content),
+            "Hello, world!",
+            "Content chunk should have 'Hello, world!'"
+        );
+
+        // Second chunk should be usage-only chunk
+        assert!(
+            results[1].data.as_ref().unwrap().inner.choices.is_empty(),
+            "Usage chunk should have no choices"
+        );
+        let usage = results[1]
+            .data
+            .as_ref()
+            .unwrap()
+            .inner
+            .usage
+            .as_ref()
+            .unwrap();
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 14);
     }
 
     #[tokio::test]
@@ -1799,9 +1915,12 @@ mod tests {
         let has_analysis_text = results.iter().any(|r| {
             r.data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .map(|content| content.contains("Need to use function get_current_weather."))
+                .map(|content| {
+                    test_utils::extract_text(content)
+                        .contains("Need to use function get_current_weather.")
+                })
                 .unwrap_or(false)
         });
         assert!(has_analysis_text, "Should contain extracted analysis text");
@@ -1850,10 +1969,10 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !content.contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
@@ -1924,15 +2043,268 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !content.contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_qwen3_coder_parser() {
+        // Input:
+        // "I'll call a function. "
+        // + "<tool_call><function=get_weather><parameter=location>San Francisco</parameter><parameter=unit>celsius</parameter></function></tool_call>"
+        // + " Done."
+        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        let chunks = vec![
+            create_mock_response_chunk("I'll call a function. ".to_string(), 0),
+            create_mock_response_chunk("<tool_call>".to_string(), 0),
+            create_mock_response_chunk("<function=get_weather>".to_string(), 0),
+            create_mock_response_chunk(
+                "<parameter=location>San Francisco</parameter>".to_string(),
+                0,
+            ),
+            create_mock_response_chunk("<parameter=unit>celsius</parameter>".to_string(), 0),
+            create_mock_response_chunk("</function>".to_string(), 0),
+            create_mock_response_chunk("</tool_call>".to_string(), 0),
+            create_mock_response_chunk(" Done.".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert_eq!(
+            results.len(),
+            3,
+            "Should have content, tool call, and trailing content"
+        );
+
+        // Verify exact output structure: [Content(), ToolCall(), Content()].
+        test_utils::assert_content(&results[0], "I'll call a function. ");
+        test_utils::assert_tool_call(
+            &results[1],
+            "get_weather",
+            serde_json::json!({"location": "San Francisco", "unit": "celsius"}),
+        );
+        test_utils::assert_content(&results[2], " Done.");
+
+        // Verify content reconstruction excludes tool calls.
+        let reconstructed = test_utils::reconstruct_content(&results);
+        assert_eq!(reconstructed, "I'll call a function.  Done.");
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_qwen3_coder_multiple_params() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let chunks = vec![
+            create_mock_response_chunk("Let me search for that. ".to_string(), 0),
+            create_mock_response_chunk(
+                "<tool_call><function=web_search><parameter=query>Rust programming</parameter><parameter=max_results>10</parameter><parameter=filter>recent</parameter></function></tool_call>".to_string(),
+                0,
+            ),
+            create_mock_response_chunk(" Searching now.".to_string(), 0),
+        ];
+
+        // Define the web_search tool with its parameters
+        let tool_defs = vec![ToolDefinition {
+            name: "web_search".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                    "filter": {"type": "string"},
+                },
+            })),
+        }];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .tool_definitions(tool_defs)
+            .build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert_eq!(results.len(), 3, "Should have 3 chunks");
+
+        test_utils::assert_content(&results[0], "Let me search for that. ");
+        test_utils::assert_tool_call(
+            &results[1],
+            "web_search",
+            serde_json::json!({
+                "query": "Rust programming",
+                "max_results": 10,
+                "filter": "recent"
+            }),
+        );
+        test_utils::assert_content(&results[2], " Searching now.");
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_xml_parser_config_tokens_auto_population() {
+        // Tests that parser config tokens are auto-populated when using `.tool_call_parser()`.
+        // This verifies the jail system reads `tool_call_start_token` and `tool_call_end_token`
+        // from the `qwen3_coder` parser config.
+        let chunks = vec![
+            create_mock_response_chunk("Before tool call. ".to_string(), 0),
+            create_mock_response_chunk("<tool_call>".to_string(), 0), // Default qwen3_coder token
+            create_mock_response_chunk("<function=get_weather>".to_string(), 0),
+            create_mock_response_chunk("<parameter=city>Seattle</parameter>".to_string(), 0),
+            create_mock_response_chunk("</function>".to_string(), 0),
+            create_mock_response_chunk("</tool_call>".to_string(), 0), // Default qwen3_coder token
+            create_mock_response_chunk(" After tool call.".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+
+        // Create JailedStream using ONLY `.tool_call_parser()`.
+        // This should auto-populate jail sequences from the qwen3_coder config
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert_eq!(
+            results.len(),
+            3,
+            "Should have content, tool call, and trailing content"
+        );
+
+        test_utils::assert_content(&results[0], "Before tool call. ");
+        test_utils::assert_tool_call(
+            &results[1],
+            "get_weather",
+            serde_json::json!({"city": "Seattle"}),
+        );
+        test_utils::assert_content(&results[2], " After tool call.");
+
+        let reconstructed = test_utils::reconstruct_content(&results);
+        assert_eq!(reconstructed, "Before tool call.  After tool call.");
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_xml_manual_sequences_prevent_auto_population() {
+        // Tests that manually setting jail sequences prevents auto-population.
+        // This verifies the builder respects manual configuration over auto-population.
+        //
+        // When custom sequences are set, the default parser tokens (<tool_call>) should
+        // NOT trigger jailing and should pass through as regular content.
+        let chunks = vec![
+            create_mock_response_chunk("Text with ".to_string(), 0),
+            // Default qwen3_coder token - should NOT trigger jailing.
+            create_mock_response_chunk("<tool_call>".to_string(), 0),
+            create_mock_response_chunk("should not jail".to_string(), 0),
+            create_mock_response_chunk("</tool_call>".to_string(), 0),
+            create_mock_response_chunk(" because custom ".to_string(), 0),
+            // Custom marker - this SHOULD trigger jailing since we register it below.
+            create_mock_response_chunk("[[START]]".to_string(), 0),
+            create_mock_response_chunk("jailed content".to_string(), 0),
+            create_mock_response_chunk("[[END]]".to_string(), 0),
+            create_mock_response_chunk(" text.".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+
+        // Set custom jail sequences - this should prevent auto-population.
+        // The default <tool_call> tokens should NOT trigger jailing.
+        let jail = JailedStream::builder()
+            .jail_start_sequence("[[START]]")
+            .jail_end_sequence("[[END]]")
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        // The exact number of chunks depends on emission mode (packed vs single-choice-per-chunk)
+        // but we can verify the key behaviors:
+        // 1. Default <tool_call> tokens pass through as content (not jailed)
+        // 2. Custom [[START]]/[[END]] markers trigger jailing
+        // 3. No tool calls are extracted (because jailed content isn't valid XML)
+
+        // Find chunk(s) containing the default tokens that passed through.
+        let default_token_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.content.as_ref())
+            })
+            .filter(|content| {
+                test_utils::extract_text(content).contains("<tool_call>")
+                    || test_utils::extract_text(content).contains("should not jail")
+            })
+            .collect();
+
+        assert!(
+            !default_token_chunks.is_empty(),
+            "Default <tool_call> should pass through as content when manual sequences are set"
+        );
+
+        // Find chunk containing the jailed content that was released.
+        let jailed_chunk = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.content.as_ref())
+            })
+            .find(|content| {
+                test_utils::extract_text(content).contains("[[START]]")
+                    && test_utils::extract_text(content).contains("jailed content")
+            });
+
+        assert!(
+            jailed_chunk.is_some(),
+            "Custom markers should trigger jailing and accumulated content should be released"
+        );
+
+        // Since the custom markers include non-XML content, the parser should not extract tool calls.
+        // The accumulated content "[[START]]jailed content[[END]]", although compatible with the
+        // way we configured `jail` above, is not consistent with what `qwen_coder` expects, and
+        // there is (at time of writing) no way to pass a parser instance - only a string that
+        // internally gets mapped to default way of instantiating a particular parser.
+        let tool_call_count = results
+            .iter()
+            .filter(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.tool_calls.as_ref())
+                    .map(|tc| !tc.is_empty())
+                    .unwrap_or(false)
+            })
+            .count();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "Should have 0 tool calls because jailed content doesn't match XML format"
+        );
+
+        // Verify content reconstruction - all original content should be preserved.
+        let reconstructed = test_utils::reconstruct_content(&results);
+        assert!(
+            reconstructed.contains("<tool_call>") && reconstructed.contains("should not jail"),
+            "Reconstructed content should include default tokens that passed through"
+        );
+        assert!(
+            reconstructed.contains("[[START]]") && reconstructed.contains("jailed content"),
+            "Reconstructed content should include jailed content with custom markers"
+        );
     }
 
     #[tokio::test]
@@ -2012,6 +2384,7 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
+    use dynamo_protocols::types::ChatCompletionMessageContent;
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
@@ -2029,27 +2402,31 @@ mod parallel_jail_tests {
                     index: i as u32,
                     delta: ChatCompletionStreamResponseDelta {
                         role: Some(Role::Assistant),
-                        content: Some(content),
+                        content: Some(ChatCompletionMessageContent::Text(content)),
                         tool_calls: None,
                         function_call: None,
                         refusal: None,
                         reasoning_content: None,
                     },
                     finish_reason: None,
+                    stop_reason: None,
                     logprobs: None,
                 }
             })
             .collect();
 
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices,
-            created: 1234567890,
-            model: "test-model".to_string(),
-            system_fingerprint: Some("test-fingerprint".to_string()),
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
         };
 
         Annotated {
@@ -2057,6 +2434,7 @@ mod parallel_jail_tests {
             id: None,
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -2071,7 +2449,7 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
@@ -2084,7 +2462,7 @@ mod parallel_jail_tests {
         let mut all_tool_calls = Vec::new();
         for result in &tool_call_results {
             if let Some(ref data) = result.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref tool_calls) = choice.delta.tool_calls {
                         all_tool_calls.extend(tool_calls.iter());
                     }
@@ -2104,9 +2482,16 @@ mod parallel_jail_tests {
         for (i, (expected_name, expected_args)) in expected_tool_calls.iter().enumerate() {
             let tool_call = &all_tool_calls[i];
             assert!(tool_call.id.is_some(), "Tool call {} should have an ID", i);
+
+            assert_eq!(
+                tool_call.index, i as u32,
+                "Tool call {} should have index {}, got {}",
+                i, i, tool_call.index
+            );
+
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::ChatCompletionToolType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
@@ -2271,11 +2656,10 @@ mod parallel_jail_tests {
         // Should have normal text before tool calls
         let normal_text_before = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
-                    c.delta
-                        .content
-                        .as_ref()
-                        .is_some_and(|content| content.contains("I'll check the weather"))
+                d.inner.choices.iter().any(|c| {
+                    c.delta.content.as_ref().is_some_and(|content| {
+                        test_utils::extract_text(content).contains("I'll check the weather")
+                    })
                 })
             })
         });
@@ -2301,11 +2685,10 @@ mod parallel_jail_tests {
         // Should have normal text after tool calls
         let normal_text_after = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
-                    c.delta
-                        .content
-                        .as_ref()
-                        .is_some_and(|content| content.contains("Let me get that information"))
+                d.inner.choices.iter().any(|c| {
+                    c.delta.content.as_ref().is_some_and(|content| {
+                        test_utils::extract_text(content).contains("Let me get that information")
+                    })
                 })
             })
         });
@@ -2343,7 +2726,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2433,7 +2817,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2503,7 +2888,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2519,14 +2905,14 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
         if let Some(result) = tool_call_results.first()
             && let Some(ref data) = result.data
         {
-            for choice in &data.choices {
+            for choice in &data.inner.choices {
                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                     for tool_call in tool_calls {
                         if let Some(ref function) = tool_call.function
@@ -2581,7 +2967,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2628,7 +3015,8 @@ mod parallel_jail_tests {
         // Should try to parse whatever content was accumulated
         let has_some_content = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices
+                d.inner
+                    .choices
                     .iter()
                     .any(|c| c.delta.content.is_some() || c.delta.tool_calls.is_some())
             })
@@ -2663,10 +3051,10 @@ mod parallel_jail_tests {
         // Should have normal text content but no tool calls
         let has_normal_text = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
-                        content.contains("I'll help you")
-                            || content.contains("don't need any tools")
+                        test_utils::extract_text(content).contains("I'll help you")
+                            || test_utils::extract_text(content).contains("don't need any tools")
                     })
                 })
             })
@@ -2678,7 +3066,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()

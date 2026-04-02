@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # ASSUMPTION: dynamo and its dependencies are properly installed
@@ -22,16 +22,7 @@ fi
 echo "🚀 Starting dynamo setup without LMCache:"
 echo "   Model: $MODEL_URL"
 echo "   Port: 8000"
-
-# Kill any existing dynamo processes
-echo "🧹 Cleaning up any existing dynamo processes..."
-pkill -f "dynamo-run" || true
-sleep 2
-
-# Disable LMCache
-export ENABLE_LMCACHE=0
 echo "🔧 Starting dynamo worker without LMCache..."
-
 
 python -m dynamo.frontend &
 python3 -m dynamo.vllm --model $MODEL_URL

@@ -1,10 +1,19 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+use std::sync::Arc;
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
-    protocols::common::{self},
+    protocols::{
+        common::{self, timing::RequestTracker},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+            token_to_utf8_bytes,
+        },
+    },
     types::TokenIdType,
 };
 
@@ -23,8 +32,9 @@ impl NvCreateChatCompletionRequest {
             // For non-streaming requests (stream=false), enable usage by default
             if self.inner.stream_options.is_none() {
                 self.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                         include_usage: true,
+                        continuous_usage_stats: false,
                     });
             } else if let Some(ref mut opts) = self.inner.stream_options {
                 // If stream_options exists, ensure include_usage is true for non-streaming
@@ -41,6 +51,21 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
+        // Enable tracking if:
+        // 1. Client requested timing in extra_fields, OR
+        // 2. query_instance_id annotation is present (needs worker_id tracking for response)
+        let enable_tracking = self
+            .nvext()
+            .map(|nv| {
+                nv.extra_fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|f| f == "timing"))
+                    || nv.annotations.as_ref().is_some_and(|annots| {
+                        annots.iter().any(|a| a.starts_with("query_instance_id"))
+                    })
+            })
+            .unwrap_or(false);
+
         let options = DeltaGeneratorOptions {
             enable_usage: self
                 .inner
@@ -48,8 +73,15 @@ impl NvCreateChatCompletionRequest {
                 .as_ref()
                 .map(|opts| opts.include_usage)
                 .unwrap_or(false),
+            continuous_usage_stats: self
+                .inner
+                .stream_options
+                .as_ref()
+                .map(|opts| opts.continuous_usage_stats)
+                .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            enable_tracking,
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -62,14 +94,17 @@ impl NvCreateChatCompletionRequest {
 pub struct DeltaGeneratorOptions {
     /// Determines whether token usage statistics should be included in the response.
     pub enable_usage: bool,
+    /// Determines whether continuous usage statistics should be included in the response.
+    pub continuous_usage_stats: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+    /// Determines whether request tracking (timing, KV hit rate) should be enabled.
+    pub enable_tracking: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
-#[derive(Debug)]
 pub struct DeltaGenerator {
     /// Unique identifier for the chat completion session.
     id: String,
@@ -81,13 +116,15 @@ pub struct DeltaGenerator {
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
-    usage: dynamo_async_openai::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
     /// Counter tracking the number of messages issued.
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
+    /// Optional request tracker for per-request metrics (shared with PreprocessedRequest).
+    tracker: Option<Arc<RequestTracker>>,
 }
 
 impl DeltaGenerator {
@@ -110,7 +147,7 @@ impl DeltaGenerator {
         // but this will not be an issue until 2106.
         let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
 
-        let usage = dynamo_async_openai::types::CompletionUsage {
+        let usage = dynamo_protocols::types::CompletionUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -119,6 +156,10 @@ impl DeltaGenerator {
         };
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
+
+        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
+        // The enable_tracking option only controls whether timing info is included in the response.
+        let tracker = Some(Arc::new(RequestTracker::new()));
 
         Self {
             id: chatcmpl_id,
@@ -130,7 +171,13 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
+            tracker,
         }
+    }
+
+    /// Returns the request tracker if tracking is enabled, for sharing with PreprocessedRequest.
+    pub fn tracker(&self) -> Option<Arc<RequestTracker>> {
+        self.tracker.clone()
     }
 
     /// Updates the prompt token usage count.
@@ -147,7 +194,7 @@ impl DeltaGenerator {
         token_ids: &[TokenIdType],
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
+    ) -> Option<dynamo_protocols::types::ChatChoiceLogprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -168,39 +215,18 @@ impl DeltaGenerator {
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
-                    let mut found_selected_token = false;
-                    let mut converted_top_lps = top_lps
-                        .iter()
-                        .map(|top_lp| {
-                            let top_t = top_lp.token.clone().unwrap_or_default();
-                            let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == *tid;
-                            dynamo_async_openai::types::TopLogprobs {
-                                token: top_t,
-                                logprob: top_lp.logprob as f32,
-                                bytes: None,
-                            }
-                        })
-                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
-                    if !found_selected_token {
-                        // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
-                            token: t.clone(),
-                            logprob: lp,
-                            bytes: None,
-                        });
-                    }
-                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
+                    dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
-                        bytes: None,
-                        top_logprobs: converted_top_lps,
+                        bytes: token_to_utf8_bytes(t),
+                        top_logprobs: converted,
                     }
                 })
                 .collect()
         });
 
-        Some(dynamo_async_openai::types::ChatChoiceLogprobs {
+        Some(dynamo_protocols::types::ChatChoiceLogprobs {
             content,
             refusal: None,
         })
@@ -213,23 +239,25 @@ impl DeltaGenerator {
     /// * `text` - The text content for the response.
     /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
     /// * `logprobs` - Optional log probabilities of the generated tokens.
+    /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
-    /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
     #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-        logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
+        logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text,
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
-                Some(dynamo_async_openai::types::Role::Assistant)
+                Some(dynamo_protocols::types::Role::Assistant)
             } else {
                 None
             },
@@ -237,10 +265,11 @@ impl DeltaGenerator {
             reasoning_content: None,
         };
 
-        let choice = dynamo_async_openai::types::ChatChoiceStream {
+        let choice = dynamo_protocols::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
+            stop_reason,
             logprobs,
         };
 
@@ -249,15 +278,22 @@ impl DeltaGenerator {
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices,
-            usage: None, // Always None for chunks with content/choices
-            service_tier: self.service_tier.clone(),
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices,
+                usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                    Some(self.get_usage())
+                } else {
+                    None
+                },
+                service_tier: self.service_tier.clone(),
+            },
+            nvext: None, // Will be populated by router layer if needed
         }
     }
 
@@ -267,24 +303,37 @@ impl DeltaGenerator {
     /// # Returns
     /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
-        let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        let usage = self.get_usage();
 
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![], // Empty choices for usage-only chunk
-            usage: Some(usage),
-            service_tier: self.service_tier.clone(),
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices: vec![], // Empty choices for usage-only chunk
+                usage: Some(usage),
+                service_tier: self.service_tier.clone(),
+            },
+            nvext: None,
         }
     }
 
     /// Check if usage tracking is enabled
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
+    }
+
+    /// Check if continuous usage tracking is enabled
+    pub fn is_continuous_usage_enabled(&self) -> bool {
+        self.options.continuous_usage_stats
+    }
+
+    pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        usage
     }
 }
 
@@ -305,25 +354,26 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateChatCompletionStreamResponse> {
-        // Aggregate token usage if enabled.
-        if self.options.enable_usage {
-            // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
-            // but this will not be an issue until context lengths exceed 4_294_967_295.
-            let token_length: u32 = delta
-                .token_ids
-                .len()
-                .try_into()
-                .expect("token_ids length exceeds u32::MAX");
+        // Aggregate token usage even if usage tracking is disabled for metrics tracking
+        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until context lengths exceed 4_294_967_295.
+        let token_length: u32 = delta
+            .token_ids
+            .len()
+            .try_into()
+            .expect("token_ids length exceeds u32::MAX");
 
-            self.usage.completion_tokens += token_length;
+        self.usage.completion_tokens += token_length;
 
-            // If backend provides completion_usage with prompt token details,
-            // propagate the entire details struct to usage tracking
-            if let Some(prompt_details) = delta
-                .completion_usage
-                .as_ref()
-                .and_then(|usage| usage.prompt_tokens_details.as_ref())
-            {
+        // If backend provides completion_usage, use it to update usage stats
+        // This is critical for prompt embeddings where prompt_tokens comes from
+        // the embedding sequence length computed by the worker
+        if let Some(completion_usage) = delta.completion_usage.as_ref() {
+            // Update prompt_tokens from worker if provided (e.g., for embeddings)
+            self.usage.prompt_tokens = completion_usage.prompt_tokens;
+
+            // Propagate prompt token details if provided
+            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
             }
         }
@@ -337,18 +387,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Map backend finish reasons to OpenAI's finish reasons.
         let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some(dynamo_async_openai::types::FinishReason::Stop),
-            Some(common::FinishReason::Stop) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
-            }
+            Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => {
-                Some(dynamo_async_openai::types::FinishReason::Length)
+                Some(dynamo_protocols::types::FinishReason::Length)
             }
             Some(common::FinishReason::Cancelled) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
+                Some(dynamo_protocols::types::FinishReason::Stop)
             }
             Some(common::FinishReason::ContentFilter) => {
-                Some(dynamo_async_openai::types::FinishReason::ContentFilter)
+                Some(dynamo_protocols::types::FinishReason::ContentFilter)
             }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
@@ -358,7 +406,68 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let mut stream_response = self.create_choice(
+            index,
+            delta.text,
+            finish_reason,
+            logprobs,
+            delta.stop_reason,
+        );
+
+        // Get worker_id info from tracker (set by KvPushRouter based on phase)
+        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
+
+        let token_ids = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("token_ids"))
+            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+        let routed_experts = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("routed_experts"))
+            .cloned();
+
+        // Get timing info if this is the final response (has finish_reason)
+        let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
+            self.tracker.as_ref().map(|tracker| {
+                tracker.record_finish();
+                tracker.get_timing_info()
+            })
+        } else {
+            None
+        };
+
+        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        if worker_id_info.is_some()
+            || token_ids.is_some()
+            || timing_info.is_some()
+            || routed_experts.is_some()
+        {
+            let nvext_response = NvExtResponse {
+                worker_id: worker_id_info.clone(),
+                timing: timing_info,
+                token_ids: token_ids.clone(),
+                routed_experts,
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                if let Some(ref info) = worker_id_info {
+                    tracing::debug!(
+                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                        info.prefill_worker_id,
+                        info.decode_worker_id
+                    );
+                }
+                if let Some(ref tokens) = token_ids {
+                    tracing::debug!(
+                        "Injected token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
+                    );
+                }
+            }
+        }
 
         Ok(stream_response)
     }
@@ -374,12 +483,24 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
     }
+
+    fn is_continuous_usage_enabled(&self) -> bool {
+        DeltaGenerator::is_continuous_usage_enabled(self)
+    }
+
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
+        DeltaGenerator::get_usage(self)
+    }
+
+    fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
+        self.tracker.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
@@ -403,6 +524,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -422,6 +544,10 @@ mod tests {
         assert!(
             request.inner.stream_options.unwrap().include_usage,
             "Non-streaming request should have include_usage=true for OpenAI compliance"
+        );
+        assert!(
+            !request.inner.stream_options.unwrap().continuous_usage_stats,
+            "Non-streaming request should have continuous_usage_stats=false for OpenAI compliance"
         );
     }
 

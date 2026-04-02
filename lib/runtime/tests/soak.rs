@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // cargo test --test soak integration::main --features integration
@@ -120,8 +120,7 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        let mut component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
-        component.add_stats_service().await?;
+        let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
         component
             .endpoint("generate")
             .endpoint_builder()

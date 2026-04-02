@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -6,11 +6,52 @@ use serde::{Deserialize, Serialize};
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
-use dynamo_async_openai::types::CompletionUsage;
+use dynamo_protocols::types::CompletionUsage;
+use dynamo_protocols::types::StopReason;
+use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
+
+/// Output type discriminator for different modalities
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputType {
+    #[default]
+    Text,
+    Image,
+    Video,
+    Audio,
+}
+
+/// Image URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ImageUrlData {
+    pub url: String,
+}
+
+/// Video URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VideoUrlData {
+    pub url: String,
+}
+
+/// Audio URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AudioUrlData {
+    pub url: String,
+}
+
+/// Content part for multimodal outputs (internal representation)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlData },
+    VideoUrl { video_url: VideoUrlData },
+    AudioUrl { audio_url: AudioUrlData },
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TopLogprob {
@@ -18,6 +59,8 @@ pub struct TopLogprob {
     pub token_id: TokenIdType,
     pub token: TokenType,
     pub logprob: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
 }
 pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 
@@ -44,6 +87,12 @@ pub struct BackendOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
     // Model Deployment Card checksum
     //pub mdcsum: String,
 
@@ -53,6 +102,10 @@ pub struct BackendOutput {
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -63,7 +116,7 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
     pub token_ids: Vec<TokenIdType>,
@@ -74,6 +127,14 @@ pub struct LLMEngineOutput {
 
     // decoded text -
     pub text: Option<String>,
+
+    /// Output type discriminator (text, image, video, audio)
+    #[serde(default)]
+    pub output_type: OutputType,
+
+    /// Multimodal content parts (for non-text outputs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
 
     /// cumulative log probabilities
     pub cum_log_probs: Option<f64>,
@@ -86,6 +147,11 @@ pub struct LLMEngineOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
@@ -109,10 +175,13 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Cancelled),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,
@@ -125,9 +194,12 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
@@ -141,10 +213,13 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Length),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,
@@ -157,10 +232,13 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,
@@ -170,13 +248,13 @@ impl LLMEngineOutput {
 }
 
 impl MaybeError for LLMEngineOutput {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        LLMEngineOutput::error(format!("{:?}", err))
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        LLMEngineOutput::error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
-            Some(anyhow::Error::msg(err_msg.clone()))
+            Some(DynamoError::msg(err_msg.clone()))
         } else {
             None
         }
@@ -206,7 +284,7 @@ mod tests {
         assert!(!output.is_err());
 
         let output = LLMEngineOutput::error("Test error".to_string());
-        assert_eq!(format!("{}", output.err().unwrap()), "Test error");
+        assert!(format!("{}", output.err().unwrap()).contains("Test error"));
         assert!(!output.is_ok());
         assert!(output.is_err());
     }

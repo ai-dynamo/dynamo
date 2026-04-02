@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -33,11 +33,8 @@ async def main():
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, "file", "nats")
 
-    # Create server component
-    component = runtime.namespace("demo").component("server")
-    await component.create_service()
-
-    endpoint = component.endpoint("generate")
+    # Create server endpoint
+    endpoint = runtime.endpoint("demo.server.generate")
     handler = DemoServer()
 
     print("Demo server started")

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -10,7 +10,12 @@ from unittest.mock import Mock
 import pytest
 
 # Mark all tests in this module to run only in TensorRT-LLM container
-pytestmark = pytest.mark.trtllm
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
 
 
 def test_tensorrt_llm_metrics_collector_import():
@@ -66,8 +71,7 @@ def test_prometheus_metrics_integration():
         register_engine_metrics_callback(
             endpoint=mock_endpoint,
             registry=REGISTRY,
-            exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm_",
+            metric_prefix_filters=["trtllm_"],
         )
 
         print("✅ Prometheus metrics integration test passed")

@@ -1,6 +1,7 @@
 name: 'Docker Build'
 description: 'Build Dynamo container images'
 inputs:
+  # --- Common Docker Inputs
   framework:
     description: 'Framework to build'
     required: true
@@ -13,12 +14,14 @@ inputs:
     description: 'Docker platform to build on, ie. linux/amd64'
     required: false
     default: 'linux/amd64'
+  cuda_version:
+    description: 'CUDA version to use'
+    required: true
   image_tag:
     description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
-  ngc_ci_access_token:
-    description: 'NGC CI Access Token'
-    required: false
+
+  # --- Secret Inputs
   ci_token:
     description: 'CI Token'
     required: false
@@ -37,18 +40,6 @@ inputs:
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
     required: false
-  base_image_tag:
-    description: 'Optional override for base image tag passed to build.sh'
-    required: false
-  runtime_image_tag:
-    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
-    required: false
-  cuda_version:
-    description: 'Optional override for CUDA_VERSION build-arg'
-    required: false
-  torch_backend:
-    description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
-    required: false
 
 outputs:
   image_tag:
@@ -61,23 +52,53 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
-        driver: docker
-    - name: Login to ECR
-      shell: bash
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-    - name: Login to NGC
-      if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-      shell: bash
-      run: |
-        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+        driver: docker-container
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
+        version: v0.14.1
     - name: Cleanup
       if: always()
       shell: bash
       run: |
         docker system prune -af
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+      with:
+        python-version: '3.12'
+        pip-install: jinja2 pyyaml
+    - name: Generate Dockerfile
+      shell: bash
+      run: |
+        echo "::group::Generating Dockerfile"
+        echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+        python ./container/render.py \
+            --target=${{ inputs.target }} \
+            --framework=${{ inputs.framework }} \
+            --platform=${{ inputs.platform }} \
+            --cuda-version=${{ inputs.cuda_version }} \
+            --show-result \
+            --output-short-filename
+        echo "::endgroup::"
+    - name: Build EPP image
+      if: ${{ inputs.target == 'frontend' }}
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
+        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        . "$HOME/.cargo/env"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        cargo install cbindgen
+
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        pushd deploy/inference-gateway/epp
+        make all DOCKER_PROXY=${DOCKER_PROXY}
+        popd
+
+        EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+        EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
+        echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
     - name: Build image
       id: build
       shell: bash
@@ -88,7 +109,13 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_JOB: ${{ github.job }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
+        set -x
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
@@ -96,44 +123,82 @@ runs:
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
 
+        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build started at: ${BUILD_START_TIME}"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-        # Collect optional overrides provided by the workflow
-        EXTRA_ARGS=""
-        if [ -n "${{ inputs.base_image_tag }}" ]; then
-          EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
-        fi
-        if [ -n "${{ inputs.runtime_image_tag }}" ]; then
-          EXTRA_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }}"
-        fi
-        if [ -n "${{ inputs.cuda_version }}" ]; then
-          EXTRA_ARGS+=" --build-arg CUDA_VERSION=${{ inputs.cuda_version }}"
-        fi
-        if [ -n "${{ inputs.torch_backend }}" ]; then
-          EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+
+        # Create build logs directory
+        mkdir -p build-logs
+        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-$(echo '${{ inputs.platform }}' | sed 's/linux\///').log"
+        echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
+        echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
+
+        # Set base cache args and set --cache-to if this is a main commit
+        # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
+        CACHE_ARGS=""
+        if [[ "${{ inputs.target }}" != "frontend" ]]; then
+          CACHE_ARGS="--cache-to type=inline "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            # Release branches also use release cache
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+          fi
         fi
 
-        ./container/build.sh --tag "$IMAGE_TAG" \
-          --target ${{ inputs.target }} \
-          --vllm-max-jobs 10 \
-          --framework ${{ inputs.framework }} \
-          --platform ${{ inputs.platform }} \
-          --use-sccache \
-          --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
+        EPP_IMAGE_ARG=""
+        if [[ ${{ inputs.target }} == "frontend" ]]; then
+          EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
+        fi
+
+        docker buildx build \
+          --progress=plain \
+          --tag "$IMAGE_TAG" \
+          --load \
+          -f ./container/rendered.Dockerfile \
+          $CACHE_ARGS \
+          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
+
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build ended at: ${BUILD_END_TIME}"
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
+
+        # Exit with the build's exit code
+        exit ${BUILD_EXIT_CODE}
+
+    - name: Run Sanity Check on Runtime Image
+      if: inputs.target == 'runtime'
+      shell: bash
+      run: |
+        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+        echo "Running sanity check on image: $IMAGE_TAG"
+
+        # Run the sanity check script inside the container
+        # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+        export WORKSPACE=/workspace
+
+        set +e
+        docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+        SANITY_CHECK_EXIT_CODE=$?
+        set -e
+        if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+          echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+          exit ${SANITY_CHECK_EXIT_CODE}
+        else
+          echo "✅ Sanity check passed"
+        fi
 
     - name: Capture Build Metrics
       id: metrics
       shell: bash
       run: |
-        echo "📊 Capturing build metrics for ${{ inputs.framework }}..."
 
         # Create metrics directory
         mkdir -p build-metrics
@@ -162,27 +227,42 @@ runs:
           echo "⚠️  No image tag available"
         fi
 
-        echo "📊 Final metrics captured"
-
-        # Create consolidated metrics JSON file
-        echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
-        echo "🔍 Debug: PLATFORM_ARCH = '${PLATFORM_ARCH}'"
+        echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
-        echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
+        echo "  Job Key: ${JOB_KEY}"
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
-        # Create the job metrics file directly
+        # Extract additional metadata from the built image
+        if [ -n "$IMAGE_TAG" ]; then
+          PYTHON_VERSION=$(docker run --rm "$IMAGE_TAG" python3 --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+          if [ -z "$PYTHON_VERSION" ]; then
+            PYTHON_VERSION="unknown"
+          fi
+          BASE_IMAGE=$(docker image inspect "$IMAGE_TAG" --format='{{index .Config.Labels "org.opencontainers.image.base.name"}}' 2>/dev/null || echo "unknown")
+          if [ -z "$BASE_IMAGE" ] || [ "$BASE_IMAGE" = "<no value>" ]; then
+            BASE_IMAGE="unknown"
+          fi
+        else
+          PYTHON_VERSION="unknown"
+          BASE_IMAGE="unknown"
+        fi
+
+        # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
           "target": "${{ inputs.target }}",
           "platform": "${{ inputs.platform }}",
           "platform_arch": "${PLATFORM_ARCH}",
+          "cuda_version": "${{ inputs.cuda_version }}",
+          "image_tag": "${IMAGE_TAG}",
+          "python_version": "${PYTHON_VERSION}",
+          "base_image": "${BASE_IMAGE}",
           "image_size_bytes": ${IMAGE_SIZE_BYTES},
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",
@@ -190,15 +270,87 @@ runs:
         }
         EOF
 
-        echo "📁 Created build metrics file for ${JOB_KEY}:"
         cat "$METRICS_FILE"
 
-        # Metrics captured and saved to JSON file
+    - name: Generate Comprehensive Build Metrics
+      id: comprehensive-metrics
+      if: always()
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
+        echo "=========================================="
 
-    # Upload job-specific build metrics as artifact
-    - name: Upload Build Metrics
+        # Create metrics directory
+        mkdir -p build-metrics
+
+        PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
+        WORKFLOW_ID="${{ github.run_id }}"
+        JOB_ID="${{ job.check_run_id }}"
+        FRAMEWORK_LOWER=$(echo "${{ inputs.framework }}" | tr '[:upper:]' '[:lower:]')
+
+        # Make parser executable
+        chmod +x .github/scripts/parse_buildkit_output.py
+
+        # Check for build logs and build stage arguments dynamically
+        BUILD_LOG="build-logs/single-stage-build.log"
+
+        # Path to container metadata created in previous step
+        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+
+        # Output single comprehensive JSON with all build stages
+        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+
+        echo "🚀 Parsing BuildKit outputs and merging with container metrics..."
+
+        # Build stage arguments dynamically based on which logs exist
+        STAGE_ARGS=()
+
+        if [ -f "$BUILD_LOG" ]; then
+          echo "  ✓ Found base image log: ${BUILD_LOG}"
+          STAGE_ARGS+=("runtime:${BUILD_LOG}")
+        else
+          echo "  ℹ️  No image log found"
+        fi
+
+        # Check for any additional stage logs (e.g., build-logs/stage3-*.log)
+        for extra_log in build-logs/stage*.log; do
+          if [ -f "$extra_log" ]; then
+            stage_name=$(basename "$extra_log" .log)
+            echo "  ✓ Found additional stage log: ${extra_log} (${stage_name})"
+            STAGE_ARGS+=("${stage_name}:${extra_log}")
+          fi
+        done
+
+        echo "Container Metadata: ${CONTAINER_METADATA}"
+        echo "Output: ${COMPREHENSIVE_JSON}"
+        echo ""
+
+        # Run parser with all discovered stages
+        # Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<file>]
+        set +e
+        python3 .github/scripts/parse_buildkit_output.py \
+          "$COMPREHENSIVE_JSON" \
+          "${STAGE_ARGS[@]}" \
+          "--metadata=${CONTAINER_METADATA}"
+        PARSER_EXIT_CODE=$?
+        set -e
+
+        echo ""
+        echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
+
+        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then
+          echo "✅ Comprehensive build metrics generated successfully"
+          echo "📄 Output file: ${COMPREHENSIVE_JSON}"
+        else
+          echo "⚠️  Metrics generation had issues but continuing..."
+        fi
+
+    # Upload comprehensive build metrics as artifact
+    - name: Upload Comprehensive Build Metrics
       uses: actions/upload-artifact@v4
+      if: always()
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7

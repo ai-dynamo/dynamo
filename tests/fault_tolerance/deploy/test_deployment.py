@@ -1,25 +1,90 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 import multiprocessing
+import os
 import re
-import time
+import signal
 from contextlib import contextmanager
+from multiprocessing.context import SpawnProcess
+from typing import Any, Optional
 
 import pytest
 
+from tests.fault_tolerance.deploy.base_checker import ValidationContext
 from tests.fault_tolerance.deploy.client_factory import get_client_function
 from tests.fault_tolerance.deploy.parse_factory import parse_test_results
 from tests.fault_tolerance.deploy.parse_results import process_overflow_recovery_test
 from tests.fault_tolerance.deploy.scenarios import (
     OVERFLOW_SUFFIX,
     RECOVERY_SUFFIX,
+    Failure,
     Load,
-    TokenOverflowFailure,
+    Scenario,
     scenarios,
 )
-from tests.utils.managed_deployment import ManagedDeployment
+from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.test_output import resolve_test_output_path
+
+
+def get_model_from_deployment(
+    deployment_spec: DeploymentSpec,
+    scenario: Optional[Scenario] = None,
+    service_name: Optional[str] = None,
+) -> str:
+    """Get model name from deployment spec.
+
+    Args:
+        deployment_spec: Deployment specification
+        scenario: Optional Scenario object with backend and model info
+        service_name: Optional specific service to get model from
+
+    Returns:
+        Model name (never None, falls back to default)
+    """
+    # If scenario specifies a model, use that
+    if scenario and scenario.model:
+        return scenario.model
+
+    # Try to get model from specified service
+    if service_name:
+        try:
+            service_spec = deployment_spec[service_name]
+            if service_spec and service_spec.model:
+                return service_spec.model
+        except (KeyError, AttributeError):
+            pass
+
+    # Get model from backend-specific worker (if scenario provided)
+    if scenario:
+        try:
+            model: Optional[str] = None
+            if scenario.backend == "vllm":
+                model = deployment_spec["VllmDecodeWorker"].model
+            elif scenario.backend == "sglang":
+                model = deployment_spec["decode"].model
+            elif scenario.backend == "trtllm":
+                # Determine deployment type from scenario deployment name
+                if (
+                    "agg" in deployment_spec.name
+                    and "disagg" not in deployment_spec.name
+                ):
+                    model = deployment_spec["TRTLLMWorker"].model
+                else:
+                    model = deployment_spec["TRTLLMDecodeWorker"].model
+            if model:
+                return model
+        except (KeyError, AttributeError) as e:
+            logging.warning(
+                f"Could not get model from backend-specific worker "
+                f"(backend={scenario.backend}): {e}"
+            )
+
+    # Fallback to default
+    logging.info("Using default model: Qwen/Qwen3-0.6B")
+    return "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture
@@ -53,18 +118,18 @@ def scenario(scenario_name, client_type):
 
 @contextmanager
 def _clients(
-    logger,
-    request,
-    deployment_spec,
-    namespace,
-    model,
+    logger: logging.Logger,
+    log_dir: str,
+    deployment_spec: DeploymentSpec,
+    namespace: str,
+    model: str,
     load_config: Load,
 ):
     """Start client processes using factory pattern for client selection.
 
     Args:
         logger: Logger instance
-        request: Pytest request fixture
+        log_dir: Log directory for output logs and client logs/artifacts
         deployment_spec: Deployment specification
         namespace: Kubernetes namespace
         model: Model name to test
@@ -77,16 +142,14 @@ def _clients(
         f"Starting {load_config.clients} clients using '{load_config.client_type}' client"
     )
 
-    procs = []
+    procs: list[SpawnProcess] = []
     ctx = multiprocessing.get_context("spawn")
 
-    # Determine retry_delay_or_rate based on client type
-    if load_config.client_type == "legacy":
-        # Legacy client uses max_request_rate for rate limiting
-        retry_delay_or_rate = load_config.max_request_rate
-    else:
-        # AI-Perf client uses retry_delay between attempts (default 5s)
-        retry_delay_or_rate = 5
+    # Both client types use max_request_rate for rate limiting (requests/sec)
+    max_request_rate = load_config.max_request_rate
+
+    # Check if this is a continuous load test (rolling upgrade scenarios)
+    continuous_load = getattr(load_config, "continuous_load", False)
 
     # Check if this is a mixed token test (overflow + recovery)
     # If mixed_token_test is True, run two phases; otherwise run normally
@@ -106,13 +169,14 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    request.node.name + OVERFLOW_SUFFIX,
+                    f"{log_dir}{OVERFLOW_SUFFIX}",
                     i,
                     load_config.overflow_request_count,  # 15 overflow requests
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
+                    continuous_load,
                 ),
             )
             proc_overflow.start()
@@ -126,7 +190,7 @@ def _clients(
         logger.info("Overflow requests completed. Starting recovery phase...")
 
         # Second phase: Send normal requests to test recovery
-        procs_recovery = []
+        procs_recovery: list[SpawnProcess] = []
         for i in range(load_config.clients):
             proc_normal = ctx.Process(
                 target=client_func,
@@ -134,13 +198,13 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    request.node.name + RECOVERY_SUFFIX,
+                    f"{log_dir}{RECOVERY_SUFFIX}",
                     i,
                     load_config.normal_request_count,  # 15 normal requests
                     load_config.input_token_length,  # Normal token count
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                 ),
             )
             proc_normal.start()
@@ -159,13 +223,14 @@ def _clients(
                         deployment_spec,
                         namespace,
                         model,
-                        request.node.name,
+                        log_dir,
                         i,
                         load_config.requests_per_client,
                         load_config.input_token_length,
                         load_config.output_token_length,
                         load_config.max_retries,
-                        retry_delay_or_rate,
+                        max_request_rate,
+                        continuous_load,  # Pass continuous_load flag
                     ),
                 )
             )
@@ -180,65 +245,90 @@ def _clients(
         logger.debug(f"{proc} joined")
 
 
-def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: F811
+def _terminate_client_processes(
+    client_procs: list[SpawnProcess],
+    logger: logging.Logger,
+):
+    """
+    Terminate client processes.
+    """
+    # Send SIGINT to client processes to stop continuous load
+    if client_procs:
+        logger.info(f"Sending SIGINT to {len(client_procs)} client processes...")
+        for proc in client_procs:
+            if proc.is_alive():
+                try:
+                    if proc.pid is not None:
+                        logger.debug(f"Sending SIGINT to client process {proc.pid}")
+                        os.kill(proc.pid, signal.SIGINT)
+                    else:
+                        raise ValueError(f"Process {proc} has no PID")
+                except ProcessLookupError:
+                    logger.debug(f"Process {proc.pid} already terminated")
+                except Exception as e:
+                    logger.warning(f"Failed to send SIGINT to process {proc.pid}: {e}")
+        logger.info(
+            "SIGINT sent to all client processes, waiting for graceful shutdown..."
+        )
+    else:
+        logger.warning("No client processes provided to terminate")
+
+
+async def _inject_failures(
+    failures: list[Failure],
+    logger: logging.Logger,
+    deployment: ManagedDeployment,
+) -> dict[str, list]:  # noqa: F811
+    affected_pods: dict[str, list] = {}
+
     for failure in failures:
-        time.sleep(failure.time)
-
-        # Handle TokenOverflowFailure differently - it's a client-side injection
-        if isinstance(failure, TokenOverflowFailure):
-            # The actual overflow is handled by the client configuration
-            # which uses the input_token_length from the Load config
-            # This is just logging for visibility
-            continue
-
-        pods = deployment.get_pods(failure.pod_name)[failure.pod_name]
-
-        num_pods = len(pods)
-
-        if not pods:
-            continue
-
-        replicas = failure.replicas
-
-        if not replicas:
-            replicas = num_pods
+        await asyncio.sleep(failure.time)
 
         logger.info(f"Injecting failure for: {failure}")
 
-        for x in range(replicas):
-            pod = pods[x % num_pods]
+        affected_pods[failure.get_failure_key()] = await failure.execute(
+            deployment, logger
+        )
 
-            if failure.command == "delete_pod":
-                deployment.get_pod_logs(failure.pod_name, pod, ".before_delete")
-                pod.delete(force=True)
-            else:
-                processes = deployment.get_processes(pod)
-                for process in processes:
-                    if failure.command in process.command:
-                        logger.info(
-                            f"Terminating {failure.pod_name} Pid {process.pid} Command {process.command}"
-                        )
-                        process.kill(failure.signal)
+    return affected_pods
 
+
+# TODO: These globals might not work in parallel testing. FIXME
 
 global_result_list = []
+# Global storage for test results (used by validation fixture)
+test_results_cache = {}
 
 
 @pytest.fixture(autouse=True)
-def results_table(request, scenario):  # noqa: F811
-    """Parse and display results for individual test using factory pattern.
+def validation_context(request, scenario):  # noqa: F811
+    """Provides shared context between test execution and validation.
+
+    This fixture creates a shared dictionary that the test populates during
+    execution (deployment, namespace, affected_pods), then uses that data
+    in teardown to parse results and run checkers.
 
     Automatically detects result type (AI-Perf or legacy) and uses
-    the appropriate parser.
+    the appropriate parser. After parsing, immediately runs validation checkers.
     """
-    yield
+    # Shared context that test will populate during execution
+    context: dict[str, Any] = {
+        "deployment": None,
+        "namespace": None,
+        "affected_pods": {},
+    }
+
+    yield context  # Test receives this and populates it
 
     # Determine log paths based on whether this is a mixed token test
     log_paths = []
+    test_name = request.node.name
+    logger = logging.getLogger(test_name)
+
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
-        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
+        overflow_dir = resolve_test_output_path(f"{request.node.name}{OVERFLOW_SUFFIX}")
+        recovery_dir = resolve_test_output_path(f"{request.node.name}{RECOVERY_SUFFIX}")
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -246,11 +336,11 @@ def results_table(request, scenario):  # noqa: F811
         logging.info(f"  - Recovery phase: {recovery_dir}")
     else:
         # Standard test with single directory
-        log_paths = [request.node.name]
+        log_paths = [resolve_test_output_path(request.node.name)]
 
     # Use factory to auto-detect and parse results
     try:
-        parse_test_results(
+        results = parse_test_results(
             log_dir=None,
             log_paths=log_paths,
             tablefmt="fancy_grid",
@@ -260,8 +350,67 @@ def results_table(request, scenario):  # noqa: F811
             # force_parser can be set based on client_type if needed
             # force_parser=scenario.load.client_type,
         )
+        # Store results for reference
+        if results:
+            logging.info(f"Results parsed: {type(results)}")
+            test_results_cache[test_name] = results
+
+            # IMMEDIATELY run validation now that we have results
+            try:
+                logger.info("\n" + "=" * 60)
+                logger.info("Running validation checks...")
+                logger.info("=" * 60)
+
+                # Extract metrics and recovery time from parsed results
+                if isinstance(results, list) and len(results) > 0:
+                    result = results[0]
+                elif isinstance(results, dict):
+                    result = results
+                else:
+                    logger.warning(f"Unexpected result format: {type(results)}")
+                    result = None
+
+                if result:
+                    metrics = result.get("metrics", {})
+                    recovery_time = result.get("recovery_time")
+
+                    # Create ValidationContext for all checkers
+                    validation_ctx = ValidationContext(
+                        scenario=scenario,
+                        log_dir=resolve_test_output_path(test_name),
+                        metrics=metrics,
+                        deployment=context.get("deployment"),
+                        namespace=context.get("namespace"),
+                        recovery_time=recovery_time,
+                        affected_pods=context.get("affected_pods", {}),
+                    )
+
+                    # Use pre-generated checkers from scenario
+                    # Checkers were already determined during scenario creation
+                    checkers = scenario.checkers or []
+
+                    # Run all checkers
+                    for checker in checkers:
+                        logger.info(f"\nRunning checker: {checker.name}")
+                        checker.check(validation_ctx)
+
+                    logger.info("=" * 60)
+                    logger.info("✓ All validation checks passed")
+                    logger.info("=" * 60 + "\n")
+
+            except AssertionError as e:
+                logger.error("=" * 60)
+                logger.error(f"✗ Validation failed: {e}")
+                logger.error("=" * 60 + "\n")
+                # Re-raise to fail the test
+                raise
+            except Exception as e:
+                logger.error(f"Validation error: {e}")
+                # Don't fail test on validation errors (non-assertion exceptions)
+                logger.warning("Skipping validation due to error")
+
     except Exception:
-        logging.exception("Failed to parse results for %s", request.node.name)
+        logging.exception("Failed to parse results for %s", test_name)
 
     # Add all directories to global list for session summary
     global_result_list.extend(log_paths)
@@ -342,17 +491,27 @@ def results_summary():
 
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
+@pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.gpu_0
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_fault_scenario(
-    scenario,  # noqa: F811
+    scenario: Scenario,  # noqa: F811
     request,
-    image,
-    namespace,
+    image: str,
+    namespace: str,
+    validation_context,  # noqa: F811  # Shared context for passing data to validation
+    skip_service_restart: bool,
 ):
     """
     Test dynamo serve deployments with injected failures
+
+    Flow:
+    1. validation_context fixture creates empty dict: {"deployment": None, "namespace": None, "affected_pods": {}}
+    2. This test populates it: validation_context["deployment"] = deployment, etc.
+    3. After test completes, fixture reads validation_context and runs validation checkers
+    4. Checkers use the populated ValidationContext to verify test results and K8s events
     """
 
     logger = logging.getLogger(request.node.name)
@@ -362,31 +521,9 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
-    if scenario.model:
-        scenario.deployment.set_model(scenario.model)
-        model = scenario.model
-    else:
-        # Get model from the appropriate worker based on backend
-        try:
-            if scenario.backend == "vllm":
-                model = scenario.deployment["VllmDecodeWorker"].model
-            elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model
-            elif scenario.backend == "trtllm":
-                # Determine deployment type from scenario deployment name
-                if (
-                    "agg" in scenario.deployment.name
-                    and "disagg" not in scenario.deployment.name
-                ):
-                    model = scenario.deployment["TRTLLMWorker"].model
-                else:
-                    model = scenario.deployment["TRTLLMDecodeWorker"].model
-            else:
-                model = None
-        except (KeyError, AttributeError):
-            model = None
-    # Fallback to default if still None
-    model = model or "Qwen/Qwen3-0.6B"
+    # Get model using helper function and ensure it's set on all services
+    model = get_model_from_deployment(scenario.deployment, scenario)
+    scenario.deployment.set_model(model)  # Set model on all services including Frontend
 
     scenario.deployment.set_logging(True, "info")
 
@@ -394,13 +531,25 @@ async def test_fault_scenario(
         namespace=namespace,
         log_dir=request.node.name,
         deployment_spec=scenario.deployment,
+        skip_service_restart=skip_service_restart,
     ) as deployment:
+        # Populate shared context for validation
+        validation_context["deployment"] = deployment
+        validation_context["namespace"] = namespace
+
         with _clients(
             logger,
-            request,
+            resolve_test_output_path(request.node.name),
             scenario.deployment,
             namespace,
             model,
             scenario.load,  # Pass entire Load config object
-        ):
-            _inject_failures(scenario.failures, logger, deployment)
+        ) as client_procs:
+            # Inject failures and capture which pods were affected
+            affected_pods = await _inject_failures(
+                scenario.failures, logger, deployment
+            )
+            logger.info(f"Affected pods during test: {affected_pods}")
+
+            if scenario.load.continuous_load:
+                _terminate_client_processes(client_procs, logger)

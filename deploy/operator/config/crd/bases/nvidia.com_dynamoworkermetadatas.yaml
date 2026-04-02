@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dynamoworkermetadatas.nvidia.com
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  group: nvidia.com
+  names:
+    kind: DynamoWorkerMetadata
+    listKind: DynamoWorkerMetadataList
+    plural: dynamoworkermetadatas
+    singular: dynamoworkermetadata
+    shortNames:
+      - dwm
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: DynamoWorkerMetadata stores discovery metadata for a Dynamo worker pod
+          properties:
+            apiVersion:
+              type: string
+              description: APIVersion defines the versioned schema of this representation
+            kind:
+              type: string
+              description: Kind is a string value representing the REST resource
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Spec contains the worker metadata
+              required:
+                - data
+              properties:
+                data:
+                  type: object
+                  description: Raw JSON blob containing DiscoveryMetadata
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

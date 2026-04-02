@@ -1,25 +1,27 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.sglang.args import DynamoArgs
+from dynamo.common.utils.output_modalities import get_output_modalities
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
+from dynamo.sglang.args import DynamoConfig
 
 
-async def _register_llm_with_runtime_config(
+async def _register_model_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    dynamo_args: DynamoConfig,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -35,7 +37,6 @@ async def _register_llm_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
-    input_type = input_type
 
     if not server_args.skip_tokenizer_init:
         logging.warning(
@@ -47,14 +48,14 @@ async def _register_llm_with_runtime_config(
             output_type = ModelType.Chat
 
     try:
-        await register_llm(
+        await register_model(
             input_type,
             output_type,
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
+            context_length=server_args.context_length,
             kv_cache_block_size=server_args.page_size,
-            migration_limit=dynamo_args.migration_limit,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
         )
@@ -65,8 +66,57 @@ async def _register_llm_with_runtime_config(
         return False
 
 
+def _get_bootstrap_info_for_config(
+    engine: sgl.Engine,
+) -> tuple[Optional[str], Optional[int]]:
+    """Extract bootstrap host and port from SGLang engine for config registration.
+
+    Args:
+        engine: The SGLang engine instance.
+
+    Returns:
+        Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
+    """
+    try:
+        inner_tm = engine.tokenizer_manager
+        bootstrap_port = getattr(
+            inner_tm.server_args, "disaggregation_bootstrap_port", None
+        )
+
+        if bootstrap_port is None:
+            return None, None
+
+        if inner_tm.server_args.dist_init_addr:
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            resolved = dist_init.resolved()
+            bootstrap_host = (
+                NetworkAddress(resolved.host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
+            logging.info(
+                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
+                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
+            )
+        else:
+            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
+            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
+            local_ip = get_local_ip_auto()
+            local_addr = NetworkAddress(local_ip, bootstrap_port)
+            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
+            logging.info(
+                f"Using auto-detected local IP: {local_ip} "
+                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
+            )
+
+        return bootstrap_host, bootstrap_port
+    except Exception as e:
+        logging.warning(f"Failed to get bootstrap info: {e}")
+        return None, None
+
+
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
+    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -80,9 +130,32 @@ async def _get_runtime_config(
     """
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
-    runtime_config.reasoning_parser = dynamo_args.reasoning_parser
-    runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
+    runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        dynamo_args.exclude_tools_when_tool_choice_none
+    )
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    is_decode_worker = server_args.disaggregation_mode == "decode"
+    runtime_config.enable_local_indexer = (
+        dynamo_args.enable_local_indexer and not is_decode_worker
+    )
 
+    # Set data_parallel_size for DP attention mode
+    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    runtime_config.data_parallel_size = dp_size
+    if dp_size > 1:
+        logging.info(f"Registering with data_parallel_size={dp_size}")
+
+    # Set bootstrap endpoint for disaggregated serving (prefill workers)
+    bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
+    if bootstrap_host and bootstrap_port:
+        runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
+        logging.info(
+            f"Publishing disaggregated endpoint to discovery: "
+            f"{bootstrap_host}:{bootstrap_port}"
+        )
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
@@ -93,6 +166,9 @@ async def _get_runtime_config(
     max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
+
+    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+        runtime_config.enable_eagle = True
 
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
@@ -133,13 +209,13 @@ async def _get_runtime_config(
         return runtime_config
 
 
-async def register_llm_with_readiness_gate(
+async def register_model_with_readiness_gate(
     engine: sgl.Engine,
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    dynamo_args: DynamoConfig,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
@@ -156,7 +232,7 @@ async def register_llm_with_readiness_gate(
     Raises:
         RuntimeError: If model registration fails.
     """
-    registration_success = await _register_llm_with_runtime_config(
+    registration_success = await _register_model_with_runtime_config(
         engine,
         generate_endpoint,
         server_args,
@@ -174,3 +250,103 @@ async def register_llm_with_readiness_gate(
         readiness_gate.set()
 
     logging.info("Model registration succeeded; processing queued requests")
+
+
+async def register_image_diffusion_model(
+    generator: Any,  # DiffGenerator
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    output_modalities: Optional[List[str]] = None,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register diffusion model with Dynamo runtime.
+
+    Args:
+        generator: The SGLang DiffGenerator instance.
+        endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        output_modalities: Optional list of output modality names to override
+            the default ModelType.Images registration.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Note:
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images
+        by default. When output_modalities is provided, the ModelType is derived
+        from the given modality names instead.
+    """
+    # Use model_path as the model name (diffusion workers don't have served_model_name)
+    model_name = server_args.model_path
+
+    model_type = ModelType.Images
+    if output_modalities:
+        resolved = get_output_modalities(output_modalities, model_name)
+        if resolved is not None:
+            model_type = resolved
+            logging.info(
+                "Using output modalities %s for diffusion model registration",
+                output_modalities,
+            )
+        else:
+            logging.warning(
+                "No recognized output modalities from %s, defaulting to ModelType.Images",
+                output_modalities,
+            )
+
+    try:
+        await register_model(
+            ModelInput.Text,
+            model_type,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(f"Successfully registered diffusion model: {model_name}")
+    except Exception as e:
+        logging.error(f"Failed to register diffusion model: {e}")
+        raise RuntimeError("Image diffusion model registration failed")
+
+    # Signal readiness
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info(f"Image diffusion model ready: {model_name}")
+
+
+async def register_video_generation_model(
+    generator: Any,  # DiffGenerator
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register video generation model with Dynamo runtime.
+
+    Args:
+        generator: The SGLang DiffGenerator instance (used for video generation).
+        endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Note:
+        Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
+    """
+    # Use model_path as the model name (video workers don't have served_model_name)
+    model_name = server_args.model_path
+
+    try:
+        await register_model(
+            ModelInput.Text,
+            ModelType.Videos,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(f"Successfully registered video generation model: {model_name}")
+    except Exception as e:
+        logging.error(f"Failed to register video generation model: {e}")
+        raise RuntimeError("Video generation model registration failed")
+
+    # Signal readiness
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info(f"Video generation model ready: {model_name}")

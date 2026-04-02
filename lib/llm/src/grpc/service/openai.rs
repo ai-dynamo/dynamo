@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
@@ -20,9 +21,9 @@ use super::kserve::inference;
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, InflightGuard, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
+use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::Status;
 
@@ -43,18 +44,32 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
-) -> Result<impl Stream<Item = Annotated<NvCreateCompletionResponse>>, Status> {
+) -> Result<
+    (
+        impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
+        ParsingOptions,
+    ),
+    Status,
+> {
     // create the context for the request
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone(),
+        endpoint: "grpc_completions".to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
-
-    let streaming = request.inner.stream.unwrap_or(false);
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
     // update the request to always stream
     let request = request.map(|mut req| {
         req.inner.stream = Some(true);
@@ -66,9 +81,9 @@ pub async fn completion_response_stream(
     let model = &request.inner.model;
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(model)
+        .get_completions_engine_with_parsing(model)
         .map_err(|_| Status::not_found("model not found"))?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
@@ -130,7 +145,7 @@ pub async fn completion_response_stream(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    Ok(stream)
+    Ok((stream, parsing_options))
 }
 
 /// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.

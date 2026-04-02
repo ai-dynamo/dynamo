@@ -1,0 +1,401 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Git commit SHA whose post-merge CI images to publish (full 40-char SHA).'
+        required: true
+        type: string
+      rc_number:
+        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
+        required: false
+        type: string
+
+# Note: workflow_dispatch can only be triggered from release/* branches
+# This is enforced in the prepare-release job via branch validation
+
+permissions:
+  contents: write
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+
+jobs:
+  # ============================================================================
+  # GATE: Version Extraction
+  # ============================================================================
+
+  prepare-release:
+    name: Prepare Release
+    runs-on: prod-default-small-v2
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      commit_sha: ${{ steps.extract.outputs.commit_sha }}
+    steps:
+      - name: Extract version and validate inputs
+        id: extract
+        env:
+          COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Error: commit_sha must be a full 40-character hex SHA (got: '${COMMIT_SHA}')"
+            exit 1
+          fi
+
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Error: workflow_dispatch must be triggered from a release/* branch"
+            echo "Current branch: $BRANCH_NAME"
+            exit 1
+          fi
+          VERSION="${BRANCH_NAME#release/}"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+          echo "Source commit SHA: ${COMMIT_SHA}"
+
+  # ============================================================================
+  # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
+  # Sources images from ECR using SHA-based tags produced by post-merge CI.
+  # ============================================================================
+
+  release-publish:
+    name: Tag RC & Publish to NGC
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
+    runs-on: prod-builder-amd-v1
+    environment: automated-release
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      REGISTRY_IMAGE: ai-dynamo/dynamo
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.RC_GITHUB_PAT }}
+
+      - name: Determine next RC tag
+        id: rc_tag
+        env:
+          INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_RC_NUMBER}" ]; then
+            if ! [[ "${INPUT_RC_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo "Error: rc_number must be a non-negative integer (got: ${INPUT_RC_NUMBER})"
+              exit 1
+            fi
+            NEXT_RC="${INPUT_RC_NUMBER}"
+            echo "Using provided RC number: ${NEXT_RC}"
+          else
+            echo "No RC number provided. Auto-incrementing..."
+            RC_PATTERN="v${VERSION}-rc"
+            EXISTING_RCS=$(git tag -l "${RC_PATTERN}*" | grep -E "^v${VERSION}-rc[0-9]+$" | sort -V || true)
+
+            if [ -z "$EXISTING_RCS" ]; then
+              NEXT_RC=0
+              echo "No existing RC tags found. Starting with rc0."
+            else
+              LAST_RC=$(echo "$EXISTING_RCS" | tail -1)
+              LAST_RC_NUM=${LAST_RC#v${VERSION}-rc}
+              NEXT_RC=$((LAST_RC_NUM + 1))
+              echo "Found existing RC tags:"
+              echo "$EXISTING_RCS"
+              echo "Last RC: ${LAST_RC}, Next RC number: ${NEXT_RC}"
+            fi
+          fi
+
+          RC_TAG="v${VERSION}-rc${NEXT_RC}"
+
+          # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
+          SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+          HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
+
+          echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
+          echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
+          echo "Will create tag: ${RC_TAG}"
+          echo "Helm chart version: ${HELM_CHART_VERSION}"
+
+      - name: Create RC tag
+        env:
+          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
+          git push origin "${RC_TAG}"
+          echo "Created and pushed tag: ${RC_TAG}"
+
+      - name: Setup crane
+        env:
+          CRANE_VERSION: v0.20.2
+        run: |
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          sudo mv crane /usr/local/bin/
+          crane version
+
+      - name: Login to ECR
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+
+      - name: Login to NGC
+        env:
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
+        run: |
+          echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
+          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u "${NGC_USERNAME}" --password-stdin
+
+      - name: Copy images to NGC
+        id: copy_images
+        env:
+          NGC_REGISTRY: nvcr.io
+          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+        run: |
+          set -euo pipefail
+
+          SUCCESSFUL_COPIES=()
+          FAILED_COPIES=()
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+          ARCHITECTURES=("amd64" "arm64")
+
+          echo "========================================"
+          echo "Copying images from ECR to NGC (registry-to-registry)"
+          echo "Source commit SHA: ${COMMIT_SHA}"
+          echo "NGC Version Tag: ${NGC_VERSION_TAG}"
+          echo "========================================"
+
+          copy_image() {
+            local SRC="$1" DST="$2" LABEL="$3" PLATFORM="${4:-}"
+            local PLATFORM_ARG=""
+            if [ -n "${PLATFORM}" ]; then
+              PLATFORM_ARG="--platform ${PLATFORM}"
+            fi
+            echo "----------------------------------------"
+            echo "Copying: ${LABEL}"
+            if crane copy ${PLATFORM_ARG} "${SRC}" "${DST}"; then
+              echo "  Copied: ${LABEL}"
+              SUCCESSFUL_COPIES+=("${LABEL}")
+              return 0
+            else
+              echo "  Warning: Failed to copy ${LABEL}, skipping..."
+              FAILED_COPIES+=("${LABEL}")
+              return 1
+            fi
+          }
+
+          create_manifest() {
+            local MANIFEST="$1" AMD64_IMG="$2" ARM64_IMG="$3" LABEL="$4"
+            echo "Creating manifest: ${MANIFEST}"
+            docker manifest create "${MANIFEST}" "${AMD64_IMG}" "${ARM64_IMG}" || true
+            if docker manifest push "${MANIFEST}"; then
+              echo "  Created multi-arch: ${LABEL}"
+              SUCCESSFUL_COPIES+=("${LABEL} (multi-arch)")
+            else
+              echo "  Failed to create multi-arch: ${LABEL}"
+              FAILED_COPIES+=("${LABEL} (multi-arch)")
+            fi
+          }
+
+          # ---- CUDA 12 runtime images (vllm and sglang) ----
+          echo ""
+          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
+          CUDA12_FRAMEWORKS=("vllm" "sglang")
+          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
+            NGC_NAME="${FRAMEWORK}-runtime"
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}" "linux/${ARCH}"
+            done
+
+            create_manifest \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-amd64" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-arm64" \
+              "${NGC_NAME}:${NGC_VERSION_TAG}"
+          done
+
+          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
+          echo ""
+          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
+          CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
+          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
+            if [ "${FRAMEWORK}" = "trtllm" ]; then
+              NGC_NAME="tensorrtllm-runtime"
+            else
+              NGC_NAME="${FRAMEWORK}-runtime"
+            fi
+
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}" "linux/${ARCH}"
+            done
+
+            create_manifest \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-amd64" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-arm64" \
+              "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+          done
+
+          # ---- EFA runtime images (amd64 only, no multi-arch manifest needed) ----
+          echo ""
+          echo "=== EFA Runtime Images ==="
+
+          # vllm EFA (CUDA 12, amd64 only)
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+
+          # trtllm EFA (CUDA 13, amd64 only)
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+
+          # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
+          echo ""
+          echo "=== Frontend Image ==="
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+          copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+
+          # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
+          echo ""
+          echo "=== Operator Image ==="
+          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+          OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
+          copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+
+          # ---- Summary ----
+          echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
+          echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
+
+          printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
+          printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
+
+          echo "========================================"
+          echo "NGC Publishing Summary:"
+          echo "  Successful: ${#SUCCESSFUL_COPIES[@]}"
+          echo "  Failed: ${#FAILED_COPIES[@]}"
+          echo "========================================"
+
+          if [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
+            echo "ERROR: No images were successfully copied to NGC!"
+            exit 1
+          fi
+
+      - name: Package and push Helm charts to NGC
+        env:
+          NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
+        run: |
+          set -euo pipefail
+
+          REPO_ALIAS="ngc-staging-dynamo"
+
+          helm plugin install https://github.com/chartmuseum/helm-push || true
+
+          echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
+            --username="${NGC_USERNAME}" \
+            --password-stdin \
+            "${NGC_HELM_REPO}" > /dev/null 2>&1
+
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
+          helm repo add bitnami https://charts.bitnami.com/bitnami || true
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
+
+          PLATFORM_CHART_DIR="deploy/helm/charts/platform"
+          CHART_NAME=$(awk '/^name:/ {print $2}' "${PLATFORM_CHART_DIR}/Chart.yaml")
+          pushd "${PLATFORM_CHART_DIR}"
+          helm dep build .
+          popd
+
+          echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+          helm package \
+            --version "${HELM_CHART_VERSION}" \
+            --app-version "${HELM_CHART_VERSION}" \
+            "${PLATFORM_CHART_DIR}"
+
+          CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+          echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+          helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+
+          helm repo remove "${REPO_ALIAS}"
+
+      - name: Create release summary
+        env:
+          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
+          SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
+          FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Commit SHA | ${COMMIT_SHA} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Operator image:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
+

@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::preprocessor::prompt::PromptFormatter;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::{Deserialize, Serialize};
@@ -14,14 +15,11 @@ use rstest::rstest;
 
 use std::path::PathBuf;
 
-/// ----------------- NOTE ---------------
-/// Currently ModelDeploymentCard does support downloading models using nim-hub.
-/// As a temporary workaround, we will download the models from Hugging Face to a local cache
-/// directory in `tests/data/sample-models`. These tests require a Hugging Face token to be
-/// set in the environment variable `HF_TOKEN`.
-/// The model is downloaded and cached in `tests/data/sample-models` directory.
-/// make sure the token has access to `meta-llama/Llama-3.1-70B-Instruct` model
 /// Gets the HF_TOKEN environment variable if it exists and is not empty.
+///
+/// These tests require a Hugging Face token to be set in the environment variable `HF_TOKEN`.
+/// The model is downloaded and cached in `tests/data/sample-models` directory.
+/// Make sure the token has access to `meta-llama/Llama-3.1-70B-Instruct` model.
 ///
 /// This function checks for the presence of the `HF_TOKEN` environment variable
 /// and validates that it's not empty or whitespace-only. The token is used for
@@ -56,7 +54,6 @@ async fn make_mdc_from_repo(
     hf_revision: &str,
     mixins: Option<Vec<PromptContextMixin>>,
 ) -> ModelDeploymentCard {
-    //TODO: remove this once we have nim-hub support. See the NOTE above.
     let downloaded_path = maybe_download_model(local_path, hf_repo, hf_revision).await;
     let display_name = format!("{}--{}", hf_repo, hf_revision);
     let mut mdc = ModelDeploymentCard::load_from_disk(downloaded_path, None).unwrap();
@@ -79,11 +76,20 @@ async fn maybe_download_model(local_path: &str, model: &str, revision: &str) -> 
     let repo = Repo::with_revision(String::from(model), RepoType::Model, String::from(revision));
 
     let files_to_download = vec!["config.json", "tokenizer.json", "tokenizer_config.json"];
+    let optional_files = vec!["generation_config.json", "chat_template.jinja"];
     let repo_builder = api.repo(repo);
 
     let mut downloaded_path = PathBuf::new();
     for file in &files_to_download {
         downloaded_path = repo_builder.get(file).await.unwrap();
+    }
+    for file in &optional_files {
+        if let Err(e) = repo_builder.get(file).await {
+            println!(
+                "Failed to download optional file {} for model {}: {}",
+                file, model, e
+            );
+        }
     }
     downloaded_path.parent().unwrap().display().to_string()
 }
@@ -99,30 +105,6 @@ async fn make_mdcs() -> Vec<ModelDeploymentCard> {
         .await,
     ]
 }
-
-// fn load_nim_mdcs() -> Vec<ModelDeploymentCard> {
-//     // get all .json files from test/data/model_deployment_cards/nim
-//     std::fs::read_dir("tests/data/model_deployment_cards/nim")
-//         .unwrap()
-//         .map(|res| res.map(|e| e.path()).unwrap().clone())
-//         .filter(|path| path.extension().unwrap() == "json")
-//         .map(|path| ModelDeploymentCard::load_from_json_file(path).unwrap())
-//         .collect::<Vec<_>>()
-// }
-
-// #[ignore]
-// #[tokio::test]
-// async fn create_mdc_from_repo() {
-//     for repo in NGC_MODEL_REPOS.iter() {
-//         println!("Creating MDC for {}", repo);
-//         let mdc = make_mdc_from_repo(repo).await;
-//         mdc.save_to_json_file(&format!(
-//             "tests/data/model_deployment_cards/nim/{}.json",
-//             Slug::slugify(repo)
-//         ))
-//         .unwrap();
-//     }
-// }
 
 const SINGLE_CHAT_MESSAGE: &str = r#"
 [
@@ -233,31 +215,31 @@ const TOOLS: &str = r#"
 "#;
 
 // Notes:
-// protocols::openai::chat_completions::ChatCompletionMessage -> dynamo_async_openai::types::ChatCompletionRequestMessage
-// protocols::openai::chat_completions::Tool -> dynamo_async_openai::types::ChatCompletionTool
-// protocols::openai::chat_completions::ToolChoiceType -> dynamo_async_openai::types::ChatCompletionToolChoiceOption
+// protocols::openai::chat_completions::ChatCompletionMessage -> dynamo_protocols::types::ChatCompletionRequestMessage
+// protocols::openai::chat_completions::Tool -> dynamo_protocols::types::ChatCompletionTool
+// protocols::openai::chat_completions::ToolChoiceType -> dynamo_protocols::types::ChatCompletionToolChoiceOption
 #[derive(Serialize, Deserialize)]
 struct Request {
-    messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage>,
-    tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>>,
-    tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+    messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage>,
+    tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>>,
+    tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
 }
 
 impl Request {
     fn from(
         messages: &str,
         tools: Option<&str>,
-        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         model: String,
     ) -> NvCreateChatCompletionRequest {
-        let messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage> =
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
             serde_json::from_str(messages).unwrap();
-        let tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>> =
+        let tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>> =
             tools.map(|x| serde_json::from_str(x).unwrap());
         //let tools = tools.unwrap();
         //let tool_choice = tool_choice.unwrap();
 
-        let mut inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default();
+        let mut inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default();
         inner.model(model);
         inner.messages(messages);
         if let Some(tools) = tools {
@@ -273,6 +255,7 @@ impl Request {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -330,7 +313,7 @@ async fn test_single_turn_with_tools() {
         let request = Request::from(
             SINGLE_CHAT_MESSAGE,
             Some(TOOLS),
-            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();
@@ -437,7 +420,7 @@ async fn test_multi_turn_with_system_with_tools() {
         let request = Request::from(
             THREE_TURN_CHAT_MESSAGE_WITH_SYSTEM,
             Some(TOOLS),
-            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();
@@ -494,6 +477,53 @@ async fn test_multi_turn_with_continuation() {
     }, {
       insta::assert_snapshot!(formatted_prompt);
     });
+}
+
+pub mod openai_preprocessor_tests {
+    // re-export all the tests from the parent module
+    pub use super::*;
+    use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn test_stop_condition() {
+        if let Err(e) = get_hf_token() {
+            println!("HF_TOKEN is not set, skipping test: {}", e);
+            return;
+        }
+        let mdc = make_mdc_from_repo(
+            "tests/data/sample-models",
+            "openai/gpt-oss-120b",
+            "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+            Some(vec![PromptContextMixin::OaiChat]),
+        )
+        .await;
+
+        let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
+        let preprocessed_request = oai_preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            preprocessed_request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .is_some()
+        );
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = preprocessed_request
+            .stop_conditions
+            .stop_token_ids_hidden
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            eos_token_id_set,
+            vec![200002, 199999, 200012].into_iter().collect()
+        );
+    }
 }
 
 // Helper to build message with media chunks (single or mixed types)
@@ -553,7 +583,10 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await.unwrap();
+        let (preprocessed, _annotations, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
 
         // Verify multimodal data handling
         if media_chunks.is_empty() {
@@ -587,5 +620,117 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
                 );
             }
         }
+    }
+}
+
+mod context_length_validation {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_runtime::error::{DynamoError, ErrorType};
+
+    // mock-llama has a chat_template in tokenizer_config.json (required for preprocessing)
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    fn make_chat_request(message: &str, model: &str) -> NvCreateChatCompletionRequest {
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_str(message).unwrap();
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+            .model(model)
+            .messages(messages)
+            .build()
+            .unwrap();
+        NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            media_io_kwargs: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prompt_exceeding_context_length_returns_400() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // Set a very small context length so even a short prompt exceeds it
+        mdc.context_length = 5;
+
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+
+        // Should fail with a DynamoError with InvalidArgument type
+        let err = result.expect_err("should reject prompt exceeding context_length");
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should be DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_err
+                .message()
+                .contains("maximum context length is 5 tokens"),
+            "error message should state the context limit, got: {}",
+            dynamo_err.message()
+        );
+        assert!(
+            dynamo_err.message().contains("Please reduce the length"),
+            "error message should tell user what to do, got: {}",
+            dynamo_err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_exactly_at_context_length_returns_400() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // First, preprocess with a large context_length to discover the token count
+        mdc.context_length = 131072;
+        let preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        let token_count = preprocessed.token_ids.len() as u32;
+
+        // Now set context_length to exactly the token count — no room for output
+        mdc.context_length = token_count;
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+
+        // Should reject: prompt fills entire context, no room for output
+        let err = result.expect_err("should reject prompt that fills entire context_length");
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should be DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_context_length_zero_skips_validation() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // context_length = 0 means unconfigured, should skip validation
+        mdc.context_length = 0;
+
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+        assert!(result.is_ok(), "context_length=0 should skip validation");
     }
 }

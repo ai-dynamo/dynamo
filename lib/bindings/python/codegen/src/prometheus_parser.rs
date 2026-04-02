@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Parser for prometheus_names.rs to extract constants and modules
@@ -76,23 +76,27 @@ impl PrometheusParser {
                         macro_prefix = Some(prefix);
                     }
                 }
+                // TODO: Handle nested `pub mod` (e.g. `transport::tcp`, `transport::nats`)
+                // by recursing into sub-modules and emitting nested Python classes.
+                // Currently these are silently skipped, producing empty Python classes.
                 _ => {}
             }
         }
 
         // Apply macro prefix to constants if needed
-        if is_macro_generated && macro_prefix.is_some() {
-            let prefix = macro_prefix.as_ref().unwrap();
-            for constant in &mut constants {
-                // Only apply if the constant doesn't already have the prefix
-                if constant.name == "PREFIX" {
-                    // PREFIX constant should be just the prefix with trailing underscore
-                    continue;
-                }
-                // Check if value looks like it should have prefix applied
-                // (doesn't already start with the prefix)
-                if !constant.value.starts_with(prefix) {
-                    constant.value = format!("{}_{}", prefix, constant.value);
+        if is_macro_generated {
+            if let Some(prefix) = macro_prefix.as_ref() {
+                for constant in &mut constants {
+                    // Only apply if the constant doesn't already have the prefix
+                    if constant.name == "PREFIX" {
+                        // PREFIX constant should be just the prefix with trailing underscore
+                        continue;
+                    }
+                    // Check if value looks like it should have prefix applied
+                    // (doesn't already start with the prefix)
+                    if !constant.value.starts_with(prefix) {
+                        constant.value = format!("{}_{}", prefix, constant.value);
+                    }
                 }
             }
         }

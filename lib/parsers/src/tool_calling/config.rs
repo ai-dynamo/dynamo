@@ -1,21 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::json::JsonParserType;
-
-/// Represents the format type for tool calls
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum ToolCallParserType {
-    /// JSON format: `{"name": "function", "arguments": {...}}`
-    Json,
-    Pythonic,
-    Harmony,
-    /// <function_call>```typescript
-    /// functions.get_current_weather({"location": "Shanghai"})
-    /// ```
-    Typescript,
-    Xml,
-}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
@@ -54,20 +40,204 @@ impl Default for JsonParserConfig {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct XmlParserConfig {
+    /// Start token for individual tool calls (e.g., "<tool_call>")
+    pub tool_call_start_token: String,
+    /// End token for individual tool calls (e.g., "</tool_call>")
+    pub tool_call_end_token: String,
+    /// Start token for function name (e.g., "<function=")
+    pub function_start_token: String,
+    /// End token for function (e.g., "</function>")
+    pub function_end_token: String,
+    /// Start token for parameter (e.g., "<parameter=")
+    pub parameter_start_token: String,
+    /// End token for parameter (e.g., "</parameter>")
+    pub parameter_end_token: String,
+}
+
+impl Default for XmlParserConfig {
+    fn default() -> Self {
+        Self {
+            tool_call_start_token: "<tool_call>".to_string(),
+            tool_call_end_token: "</tool_call>".to_string(),
+            function_start_token: "<function=".to_string(),
+            function_end_token: "</function>".to_string(),
+            parameter_start_token: "<parameter=".to_string(),
+            parameter_end_token: "</parameter>".to_string(),
+        }
+    }
+}
+
+/// Configuration for DSML-style tool call parser (DeepSeek V3.2+)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DsmlParserConfig {
+    /// Start token for function_calls block (e.g., "<｜DSML｜function_calls>")
+    pub function_calls_start: String,
+    /// End token for function_calls block (e.g., "</｜DSML｜function_calls>")
+    pub function_calls_end: String,
+    /// Start prefix for invoke (e.g., "<｜DSML｜invoke name=")
+    pub invoke_start_prefix: String,
+    /// End token for invoke (e.g., "</｜DSML｜invoke>")
+    pub invoke_end: String,
+    /// Start prefix for parameter (e.g., "<｜DSML｜parameter name=")
+    pub parameter_prefix: String,
+    /// End token for parameter (e.g., "</｜DSML｜parameter>")
+    pub parameter_end: String,
+}
+
+impl Default for DsmlParserConfig {
+    fn default() -> Self {
+        Self {
+            function_calls_start: "<｜DSML｜function_calls>".to_string(),
+            function_calls_end: "</｜DSML｜function_calls>".to_string(),
+            invoke_start_prefix: "<｜DSML｜invoke name=".to_string(),
+            invoke_end: "</｜DSML｜invoke>".to_string(),
+            parameter_prefix: "<｜DSML｜parameter name=".to_string(),
+            parameter_end: "</｜DSML｜parameter>".to_string(),
+        }
+    }
+}
+
+/// Configuration for GLM-4.7 style tool call parser
+/// Format: <tool_call>function_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Glm47ParserConfig {
+    /// Start token for tool call block (e.g., "<tool_call>")
+    pub tool_call_start: String,
+    /// End token for tool call block (e.g., "</tool_call>")
+    pub tool_call_end: String,
+    /// Start token for argument key (e.g., "<arg_key>")
+    pub arg_key_start: String,
+    /// End token for argument key (e.g., "</arg_key>")
+    pub arg_key_end: String,
+    /// Start token for argument value (e.g., "<arg_value>")
+    pub arg_value_start: String,
+    /// End token for argument value (e.g., "</arg_value>")
+    pub arg_value_end: String,
+}
+
+impl Default for Glm47ParserConfig {
+    fn default() -> Self {
+        Self {
+            tool_call_start: "<tool_call>".to_string(),
+            tool_call_end: "</tool_call>".to_string(),
+            arg_key_start: "<arg_key>".to_string(),
+            arg_key_end: "</arg_key>".to_string(),
+            arg_value_start: "<arg_value>".to_string(),
+            arg_value_end: "</arg_value>".to_string(),
+        }
+    }
+}
+
+/// Configuration for Kimi K2 tool call parser
+///
+/// Format:
+/// ```text
+/// <|tool_calls_section_begin|>
+/// <|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
+/// <|tool_calls_section_end|>
+/// ```
+///
+/// The model may emit either plural or singular forms of section tokens
+/// (e.g., `<|tool_calls_section_begin|>` or `<|tool_call_section_begin|>`).
+/// Both forms are supported via the `section_start_variants` and `section_end_variants` fields.
+/// See vllm `kimi_k2_tool_parser.py` for reference.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KimiK2ParserConfig {
+    /// Primary start token for the tool calls section
+    pub section_start: String,
+    /// Primary end token for the tool calls section
+    pub section_end: String,
+    /// All recognized start tokens for the tool calls section (includes singular variants)
+    pub section_start_variants: Vec<String>,
+    /// All recognized end tokens for the tool calls section (includes singular variants)
+    pub section_end_variants: Vec<String>,
+    /// Start token for an individual tool call (e.g., "<|tool_call_begin|>")
+    pub call_start: String,
+    /// End token for an individual tool call (e.g., "<|tool_call_end|>")
+    pub call_end: String,
+    /// Token separating function ID from JSON arguments (e.g., "<|tool_call_argument_begin|>")
+    pub argument_begin: String,
+}
+
+impl Default for KimiK2ParserConfig {
+    fn default() -> Self {
+        Self {
+            section_start: "<|tool_calls_section_begin|>".to_string(),
+            section_end: "<|tool_calls_section_end|>".to_string(),
+            section_start_variants: vec![
+                "<|tool_calls_section_begin|>".to_string(),
+                "<|tool_call_section_begin|>".to_string(),
+            ],
+            section_end_variants: vec![
+                "<|tool_calls_section_end|>".to_string(),
+                "<|tool_call_section_end|>".to_string(),
+            ],
+            call_start: "<|tool_call_begin|>".to_string(),
+            call_end: "<|tool_call_end|>".to_string(),
+            argument_begin: "<|tool_call_argument_begin|>".to_string(),
+        }
+    }
+}
+
+/// Parser-specific configuration
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ParserConfig {
+    Json(JsonParserConfig),
+    Xml(XmlParserConfig),
+    Pythonic,
+    Harmony(JsonParserConfig),
+    Typescript,
+    Dsml(DsmlParserConfig),
+    KimiK2(KimiK2ParserConfig),
+    Glm47(Glm47ParserConfig),
+}
+
+impl ParserConfig {
+    /// Get the tool call start tokens for this parser configuration
+    /// Returns a vector of start tokens that indicate the beginning of a tool call
+    pub fn tool_call_start_tokens(&self) -> Vec<String> {
+        match self {
+            ParserConfig::Json(config) => config.tool_call_start_tokens.clone(),
+            ParserConfig::Harmony(config) => config.tool_call_start_tokens.clone(),
+            ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
+            ParserConfig::Pythonic => vec![],
+            ParserConfig::Typescript => vec![],
+            ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
+            ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
+            ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+        }
+    }
+
+    /// Get the tool call end tokens for this parser configuration
+    /// Returns a vector of end tokens that indicate the end of a tool call
+    pub fn tool_call_end_tokens(&self) -> Vec<String> {
+        match self {
+            ParserConfig::Json(config) => config.tool_call_end_tokens.clone(),
+            ParserConfig::Harmony(config) => config.tool_call_end_tokens.clone(),
+            ParserConfig::Xml(config) => vec![config.tool_call_end_token.clone()],
+            ParserConfig::Pythonic => vec![],
+            ParserConfig::Typescript => vec![],
+            ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
+            ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
+            ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+        }
+    }
+}
+
 /// Configuration for parsing tool calls with different formats
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallConfig {
-    /// The format type for tool calls
-    pub format: ToolCallParserType,
-    /// The config for the JSON parser
-    pub json: JsonParserConfig,
+    /// Parser-specific configuration.
+    pub parser_config: ParserConfig,
 }
 
 impl Default for ToolCallConfig {
     fn default() -> Self {
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig::default(),
+            parser_config: ParserConfig::Json(JsonParserConfig::default()),
         }
     }
 }
@@ -77,12 +247,11 @@ impl ToolCallConfig {
     /// <tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}\n</tool_call>
     pub fn hermes() -> Self {
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
                 tool_call_end_tokens: vec!["</tool_call>".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
@@ -90,12 +259,11 @@ impl ToolCallConfig {
     /// <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>
     pub fn nemotron_deci() -> Self {
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
                 tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
@@ -103,52 +271,47 @@ impl ToolCallConfig {
         // <|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
         // or { "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
                 tool_call_end_tokens: vec!["".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
     pub fn mistral() -> Self {
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
                 tool_call_end_tokens: vec!["[/TOOL_CALLS]".to_string(), "".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
     pub fn phi4() -> Self {
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["functools".to_string()],
                 tool_call_end_tokens: vec!["".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
     pub fn pythonic() -> Self {
         Self {
-            format: ToolCallParserType::Pythonic,
-            json: JsonParserConfig::default(), // This is noop here, but we keep it for consistency
+            parser_config: ParserConfig::Pythonic,
         }
     }
 
     pub fn harmony() -> Self {
         Self {
-            format: ToolCallParserType::Harmony,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Harmony(JsonParserConfig {
                 tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
                 tool_call_end_tokens: vec!["<|call|>".to_string()],
                 ..Default::default()
-            },
+            }),
         }
     }
 
@@ -160,8 +323,7 @@ impl ToolCallConfig {
         // so the tool parser can properly consume all tool call tokens.
         // https://huggingface.co/deepseek-ai/DeepSeek-V3.1#toolcall
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec![
                     "<｜tool▁calls▁begin｜>".to_string(),
                     // "<｜tool▁call▁begin｜>".to_string(),
@@ -173,7 +335,7 @@ impl ToolCallConfig {
                 tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
                 parser_type: JsonParserType::DeepseekV31,
                 ..Default::default()
-            },
+            }),
         }
     }
 
@@ -182,14 +344,82 @@ impl ToolCallConfig {
         // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
         // There are some differences between DeepSeek V3 and DeepSeek V3.1
         Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
                 tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
                 tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
                 parser_type: JsonParserType::DeepseekV3,
                 ..Default::default()
-            },
+            }),
+        }
+    }
+
+    pub fn qwen3_coder() -> Self {
+        // <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+        Self {
+            parser_config: ParserConfig::Xml(XmlParserConfig::default()),
+        }
+    }
+
+    pub fn jamba() -> Self {
+        Self {
+            parser_config: ParserConfig::Json(JsonParserConfig {
+                tool_call_start_tokens: vec!["<tool_calls>".to_string()],
+                tool_call_end_tokens: vec!["</tool_calls>".to_string()],
+                ..Default::default()
+            }),
+        }
+    }
+
+    pub fn deepseek_v3_2() -> Self {
+        // DeepSeek V3.2 format (DSML):
+        // <｜DSML｜function_calls>
+        // <｜DSML｜invoke name="function_name">
+        // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+        // </｜DSML｜invoke>
+        // </｜DSML｜function_calls>
+        Self {
+            parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
+        }
+    }
+
+    pub fn minimax_m2() -> Self {
+        // MiniMax-M2.1 format:
+        // <minimax:tool_call>
+        // <invoke name="function_name">
+        // <parameter name="param_name">value</parameter>
+        // </invoke>
+        // </minimax:tool_call>
+        // Reference: https://huggingface.co/MiniMaxAI/MiniMax-M2.1/blob/main/docs/tool_calling_guide.md
+        Self {
+            parser_config: ParserConfig::Xml(XmlParserConfig {
+                tool_call_start_token: "<minimax:tool_call>".to_string(),
+                tool_call_end_token: "</minimax:tool_call>".to_string(),
+                function_start_token: "<invoke name=".to_string(),
+                function_end_token: "</invoke>".to_string(),
+                parameter_start_token: "<parameter name=".to_string(),
+                parameter_end_token: "</parameter>".to_string(),
+            }),
+        }
+    }
+
+    pub fn glm47() -> Self {
+        // GLM-4.7 format:
+        // <tool_call>function_name<arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>
+        // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
+        Self {
+            parser_config: ParserConfig::Glm47(Glm47ParserConfig::default()),
+        }
+    }
+
+    pub fn kimi_k2() -> Self {
+        // Kimi K2 format:
+        // <|tool_calls_section_begin|>
+        // <|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
+        // <|tool_calls_section_end|>
+        // Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
+        Self {
+            parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
         }
     }
 }

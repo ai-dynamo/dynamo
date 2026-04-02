@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -6,7 +6,7 @@ use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
-use dynamo_llm::block_manager::kv_consolidator::KvEventConsolidatorConfig;
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use dynamo_runtime::DistributedRuntime;
@@ -15,6 +15,7 @@ use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+mod cache_stats;
 mod controller;
 mod distributed;
 
@@ -248,7 +249,7 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
-    consolidator_config: Option<(String, String)>, // (vllm_endpoint, output_endpoint)
+    consolidator_config: Option<(String, Option<String>, EventSource)>, // (engine_endpoint, output_endpoint (optional), engine_source)
 }
 
 impl BlockManagerBuilder {
@@ -284,8 +285,13 @@ impl BlockManagerBuilder {
         self
     }
 
-    pub fn consolidator_config(mut self, vllm_endpoint: String, output_endpoint: String) -> Self {
-        self.consolidator_config = Some((vllm_endpoint, output_endpoint));
+    pub fn consolidator_config(
+        mut self,
+        engine_endpoint: String,
+        output_endpoint: Option<String>,
+        engine_source: EventSource,
+    ) -> Self {
+        self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source));
         self
     }
 
@@ -359,9 +365,9 @@ impl BlockManagerBuilder {
             config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
         }
 
-        if let Some((vllm_ep, output_ep)) = self.consolidator_config {
-            let consolidator_config = KvEventConsolidatorConfig::new(vllm_ep, output_ep);
-            config_builder = config_builder.consolidator_config(consolidator_config);
+        if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
+            config_builder =
+                config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
         let config = config_builder.build()?;

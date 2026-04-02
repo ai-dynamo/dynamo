@@ -1,15 +1,15 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated serving with KV-aware routing: 2 prefill + 2 decode workers.
+# GPUs: 4
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID $PREFILL_ROUTER_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID $PREFILL_ROUTER_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Parse command line arguments
 ENABLE_OTEL=false
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports:"
-            echo "  8081 (router), 8082-8083 (prefill workers), 8084-8085 (decode workers)"
+            echo "  8081-8082 (prefill workers), 8083-8084 (decode workers)"
             exit 0
             ;;
         *)
@@ -38,35 +38,32 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Enable tracing if requested
+TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
-# run ingress
+MODEL="Qwen/Qwen3-0.6B"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT"
+
+# Start frontend with KV routing
+# The frontend will automatically detect prefill workers and activate an internal prefill router
+# No standalone prefill router needed - the frontend handles prefill routing internally
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
- --http-port=8000 \
- --router-mode kv \
- --kv-overlap-score-weight 0 \
- --router-reset-states &
-DYNAMO_PID=$!
-
-# run prefill router
-OTEL_SERVICE_NAME=dynamo-router-prefill DYN_SYSTEM_PORT=8081 \
-python3 -m dynamo.router \
-  --endpoint dynamo.prefill.generate \
-  --block-size 64 \
-  --router-reset-states \
-  --no-track-active-blocks &
-PREFILL_ROUTER_PID=$!
+    --router-mode kv \
+    --router-reset-states &
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=8082 \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -74,14 +71,14 @@ python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics &
-PREFILL_PID=$!
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=8083 \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -89,14 +86,14 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics &
-PREFILL_PID=$!
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=8084 \
+OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -104,14 +101,14 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics &
-PREFILL_PID=$!
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=8085 \
+OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 64 \
   --tp 1 \
   --trust-remote-code \
@@ -119,4 +116,9 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
+
+# Wait for any worker to exit (keeps script running)
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

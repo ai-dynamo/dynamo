@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -23,10 +23,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
 # from kvbm.vllm_integration.kv_cache_utils import KvbmCacheBlocks
+from kvbm.utils import nvtx_annotate
 from kvbm.vllm_integration.connector_leader import KvConnectorLeader
 from kvbm.vllm_integration.connector_worker import KvConnectorWorker
 
@@ -40,8 +42,15 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
 
 
 class DynamoConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
@@ -60,6 +69,7 @@ class DynamoConnector(KVConnectorBase_V1):
 
     # Scheduler/Leader
 
+    @nvtx_annotate(category="scheduler")
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -67,17 +77,20 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[int, bool]:
         return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
+    @nvtx_annotate(category="scheduler")
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         self._scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
+    @nvtx_annotate(category="scheduler")
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         data = self._scheduler.build_connector_meta(scheduler_output)
         return DynamoConnectorMetadata(data)
 
+    @nvtx_annotate(category="scheduler")
     def request_finished(
         self,
         request: "Request",
@@ -87,26 +100,38 @@ class DynamoConnector(KVConnectorBase_V1):
 
     # Worker
 
+    @nvtx_annotate(category="worker")
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._worker.register_kv_caches(kv_caches)
 
+    @nvtx_annotate(category="worker")
+    @override
     def bind_connector_metadata(
         self, connector_metadata: DynamoConnectorMetadata
     ) -> None:
+        # Must call super() to set _connector_metadata so has_connector_metadata() returns True
+        # This is required for save_kv_layer to be called during the forward pass
+        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata.metadata, bytes)
         self._worker.bind_connector_metadata(connector_metadata.metadata)
 
+    @nvtx_annotate(category="worker")
+    @override
     def clear_connector_metadata(self) -> None:
+        super().clear_connector_metadata()
         self._worker.clear_connector_metadata()
 
+    @nvtx_annotate(category="worker")
     @override
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self._worker.start_load_kv(forward_context, **kwargs)
 
+    @nvtx_annotate(category="worker")
     @override
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
 
+    @nvtx_annotate(category="worker")
     @override
     def save_kv_layer(
         self,
@@ -117,6 +142,7 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> None:
         self._worker.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
+    @nvtx_annotate(category="worker")
     @override
     def wait_for_save(self):
         pass

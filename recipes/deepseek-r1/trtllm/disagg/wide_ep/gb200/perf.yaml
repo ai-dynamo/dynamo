@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: batch/v1
 kind: Job
@@ -13,6 +13,7 @@ spec:
       labels:
         app: deepseek-r1-bench
     spec:
+      tolerations: []
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -150,5 +151,5 @@ spec:
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache-pvc
+          claimName: model-cache
 

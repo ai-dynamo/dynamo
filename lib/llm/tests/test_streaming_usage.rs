@@ -1,16 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
-    CreateChatCompletionRequest,
-};
-use dynamo_async_openai::types::{
-    CompletionUsage as AoaiCompletionUsage, CreateCompletionRequestArgs, Prompt,
-    PromptTokensDetails,
-};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
@@ -18,6 +9,15 @@ use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
 use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
+    CreateChatCompletionRequest,
+};
+use dynamo_protocols::types::{
+    CompletionUsage as AoaiCompletionUsage, CreateCompletionRequestArgs, Prompt,
+    PromptTokensDetails,
+};
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
@@ -106,8 +106,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
+            disaggregated_params: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -117,8 +119,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
+            disaggregated_params: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -128,6 +132,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             index: Some(0),
             completion_usage: cached_tokens.map(|ct| AoaiCompletionUsage {
                 prompt_tokens: 0,
@@ -139,6 +144,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 }),
                 completion_tokens_details: None,
             }),
+            disaggregated_params: None,
         },
     ]
 }
@@ -155,7 +161,10 @@ fn create_backend_stream_with_cached_tokens(
 }
 
 /// Helper to create a chat completion request with optional stream_options
-fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionRequest {
+fn create_chat_request(
+    include_usage: Option<bool>,
+    continuous_usage: Option<bool>,
+) -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
         ChatCompletionRequestUserMessage {
             content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
@@ -165,6 +174,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
 
     let stream_options = include_usage.map(|include| ChatCompletionStreamOptions {
         include_usage: include,
+        continuous_usage_stats: continuous_usage.unwrap_or(false),
     });
 
     let inner = CreateChatCompletionRequest {
@@ -180,6 +190,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -187,7 +198,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
 #[tokio::test]
 async fn test_streaming_without_usage() {
     // Create request without stream_options (usage should not be included)
-    let request = create_chat_request(None);
+    let request = create_chat_request(None, None);
     let request_id = "test-123".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -205,19 +216,37 @@ async fn test_streaming_without_usage() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
-    // Verify we got exactly 3 chunks (no extra usage chunk)
-    assert_eq!(chunks.len(), 3, "Should have exactly 3 content chunks");
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
+    // Verify we got exactly 3 content chunks (no extra usage chunk)
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "Should have exactly 3 content chunks"
+    );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Chunk {} should have usage: None when stream_options not set",
                 i
             );
             assert!(
-                !response.choices.is_empty(),
+                !response.inner.choices.is_empty(),
                 "Chunk {} should have choices",
                 i
             );
@@ -228,7 +257,7 @@ async fn test_streaming_without_usage() {
 #[tokio::test]
 async fn test_streaming_with_usage_compliance() {
     // Create request with stream_options.include_usage = true
-    let request = create_chat_request(Some(true));
+    let request = create_chat_request(Some(true), None);
     let request_id = "test-456".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -257,12 +286,12 @@ async fn test_streaming_with_usage_compliance() {
     for (i, chunk) in chunks.iter().take(3).enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Content chunk {} should have usage: None",
                 i
             );
             assert!(
-                !response.choices.is_empty(),
+                !response.inner.choices.is_empty(),
                 "Content chunk {} should have choices",
                 i
             );
@@ -272,15 +301,106 @@ async fn test_streaming_with_usage_compliance() {
     // Verify the final chunk is the usage-only chunk
     if let Some(final_response) = &chunks[3].data {
         assert!(
-            final_response.choices.is_empty(),
+            final_response.inner.choices.is_empty(),
             "Final usage chunk should have empty choices array"
         );
         assert!(
-            final_response.usage.is_some(),
+            final_response.inner.usage.is_some(),
             "Final usage chunk should have usage statistics"
         );
 
-        let usage = final_response.usage.as_ref().unwrap();
+        let usage = final_response.inner.usage.as_ref().unwrap();
+        assert_eq!(
+            usage.completion_tokens, 3,
+            "Should have 3 completion tokens"
+        );
+        assert_eq!(
+            usage.prompt_tokens, 0,
+            "Should have 0 prompt tokens (not set in test)"
+        );
+        assert_eq!(
+            usage.total_tokens, 3,
+            "Total tokens should be prompt + completion"
+        );
+    } else {
+        panic!("Final chunk should be a valid response");
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_with_continuous_usage() {
+    // Create request with stream_options.include_usage = true, stream_options.continuous_usage_stats = true
+    let request = create_chat_request(Some(true), Some(true));
+    let request_id = "test-456".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    // Create mock backend stream
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_mock_backend_stream(ctx.clone());
+
+    // Transform the stream
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+
+    // Collect all chunks
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // Verify we got 4 chunks (3 content + 1 usage)
+    assert_eq!(
+        chunks.len(),
+        4,
+        "Should have 3 content chunks + 1 usage chunk"
+    );
+
+    // Verify first 3 chunks have usage: None and non-empty choices
+    for (i, chunk) in chunks.iter().take(3).enumerate() {
+        if let Some(response) = &chunk.data {
+            assert!(
+                response.inner.usage.is_some(),
+                "Content chunk {} should have usage: Some",
+                i
+            );
+            assert!(
+                !response.inner.choices.is_empty(),
+                "Content chunk {} should have choices",
+                i
+            );
+
+            // Verify usage counts are properly accumulated for each chunk
+            let usage = response.inner.usage.as_ref().unwrap();
+            assert_eq!(
+                usage.completion_tokens,
+                i as u32 + 1,
+                "Should have {} completion tokens",
+                i + 1
+            );
+            assert_eq!(
+                usage.prompt_tokens, 0,
+                "Should have 0 prompt tokens (not set in test)"
+            );
+            assert_eq!(
+                usage.total_tokens,
+                i as u32 + 1,
+                "Total tokens should be prompt + completion"
+            );
+        }
+    }
+
+    // Verify the final chunk is the usage-only chunk
+    if let Some(final_response) = &chunks[3].data {
+        assert!(
+            final_response.inner.choices.is_empty(),
+            "Final usage chunk should have empty choices array"
+        );
+        assert!(
+            final_response.inner.usage.is_some(),
+            "Final usage chunk should have usage statistics"
+        );
+
+        let usage = final_response.inner.usage.as_ref().unwrap();
         assert_eq!(
             usage.completion_tokens, 3,
             "Should have 3 completion tokens"
@@ -301,7 +421,7 @@ async fn test_streaming_with_usage_compliance() {
 #[tokio::test]
 async fn test_streaming_with_usage_false() {
     // Create request with stream_options.include_usage = false (explicitly disabled)
-    let request = create_chat_request(Some(false));
+    let request = create_chat_request(Some(false), None);
     let request_id = "test-789".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -319,18 +439,32 @@ async fn test_streaming_with_usage_false() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
     // Verify we got exactly 3 chunks (no extra usage chunk when explicitly false)
     assert_eq!(
-        chunks.len(),
+        content_chunks.len(),
         3,
         "Should have exactly 3 content chunks when include_usage is false"
     );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
-                response.usage.is_none(),
+                response.inner.usage.is_none(),
                 "Chunk {} should have usage: None when include_usage is false",
                 i
             );
@@ -347,8 +481,9 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
             .prompt(Prompt::String("Hello".to_string()))
             .stream(stream);
         if let Some(include) = include_usage {
-            builder.stream_options(dynamo_async_openai::types::ChatCompletionStreamOptions {
+            builder.stream_options(dynamo_protocols::types::ChatCompletionStreamOptions {
                 include_usage: include,
+                continuous_usage_stats: false,
             });
         }
         builder.build().unwrap()
@@ -385,6 +520,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -424,7 +560,7 @@ async fn test_nonstreaming_has_usage_field() {
 
     // Aggregate the streaming chunks into a single non-streaming response
     // This simulates what the HTTP service does for non-streaming requests
-    let result = dynamo_async_openai::types::CreateChatCompletionResponse::from_annotated_stream(
+    let result = dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionResponse::from_annotated_stream(
         transformed_stream,
         ParsingOptions::default(),
     )
@@ -434,12 +570,12 @@ async fn test_nonstreaming_has_usage_field() {
     let response = result.unwrap();
 
     assert!(
-        response.usage.is_some(),
+        response.inner.usage.is_some(),
         "Non-streaming chat completion response MUST have a usage field populated. \
          This is required for OpenAI API compliance."
     );
 
-    let usage = response.usage.unwrap();
+    let usage = response.inner.usage.unwrap();
 
     // Verify usage contains valid token counts
     // In our mock, we generated 3 tokens (from the 3 backend outputs)
@@ -570,7 +706,7 @@ async fn test_cmpl_streaming_with_cached_tokens_propagation() {
 #[tokio::test]
 async fn test_chat_streaming_with_cached_tokens_propagation() {
     // Chat Completions: include_usage=true, backend provides cached_tokens -> must propagate
-    let request = create_chat_request(Some(true));
+    let request = create_chat_request(Some(true), Some(true));
     let request_id = "chat-usage-cached-1".to_string();
     let mut response_generator = Box::new(request.response_generator(request_id));
 
@@ -589,7 +725,11 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
 
     assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
     if let Some(final_resp) = &chunks[3].data {
-        let usage = final_resp.usage.as_ref().expect("Usage must be present");
+        let usage = final_resp
+            .inner
+            .usage
+            .as_ref()
+            .expect("Usage must be present");
         let cached = usage
             .prompt_tokens_details
             .as_ref()

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! TCP Transport Module
@@ -19,6 +19,8 @@
 
 pub mod client;
 pub mod server;
+
+pub mod test_utils;
 
 use super::ControlMessage;
 use serde::{Deserialize, Serialize};
@@ -122,10 +124,13 @@ mod tests {
         let context_rank1 = Context::with_id((), context_rank0.id().to_string());
 
         // connect to the server socket
-        let mut send_stream =
-            client::TcpClient::create_response_stream(context_rank1.context(), connection_info)
-                .await
-                .unwrap();
+        let mut send_stream = client::TcpClient::create_response_stream(
+            context_rank1.context(),
+            connection_info,
+            None,
+        )
+        .await
+        .unwrap();
         println!("Client connected");
 
         // the client can now setup it's end of the stream and if it errors, it can send a message

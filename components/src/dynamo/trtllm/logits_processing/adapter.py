@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import torch
 from tensorrt_llm.sampling_params import LogitsProcessor
@@ -31,9 +31,9 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
         req_ids: int,
         logits: torch.Tensor,
         ids: List[List[int]],
-        stream_ptr,
+        stream_ptr: Optional[int],
         client_id: Optional[int] = None,
-    ):
+    ) -> None:
         """
         TensorRT-LLM logits processor interface.
 
@@ -70,7 +70,7 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
 
 
 def create_trtllm_adapters(
-    processors: List[BaseLogitsProcessor],
+    processors: Sequence[BaseLogitsProcessor],
 ) -> List[TrtllmDynamoLogitsAdapter]:
     """
     Create TensorRT-LLM compatible adapters from Dynamo logits processors.

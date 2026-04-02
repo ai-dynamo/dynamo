@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dynamo EPP Configuration
+
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+# This config uses the same disagg-profile-handler as disaggregated deployments.
+# With no "prefill" profile defined, the handler runs only the "decode" profile
+# and the decode scorer receives isDisaggregated=false, enabling full KV cache
+# overlap scoring for aggregated mode. Adding prefill workers and a prefill
+# profile would automatically switch to disaggregated routing.
+plugins:
+  - type: disagg-profile-handler
+
+  # Label filter: restricts pods to decode workers
+  - name: decode-filter
+    type: label-filter
+    parameters:
+      label: "nvidia.com/dynamo-sub-component-type"
+      validValues:
+        - "decode"
+      allowsNoLabel: true
+
+  # Picker: chooses the final endpoint after scoring
+  - name: picker
+    type: max-score-picker
+
+  # Dynamo decode scorer: calls Dynamo FFI decode router, handles request lifecycle
+  - name: dyn-decode
+    type: dyn-decode-scorer
+
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: decode-filter
+        weight: 1
+      - pluginRef: dyn-decode
+        weight: 1
+      - pluginRef: picker
+        weight: 1

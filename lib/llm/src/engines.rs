@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
@@ -143,9 +143,9 @@ impl
         };
 
         let prompt = match req {
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(user_msg) => {
                 match user_msg.content {
-                    dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                    dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                         prompt,
                     ) => prompt,
                     _ => anyhow::bail!("Invalid request content field, expected Content::Text"),
@@ -159,13 +159,13 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
                 id += 1;
             }
 
-            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::FinishReason::Stop), None, None);
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
@@ -193,11 +193,11 @@ impl
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::CompletionFinishReason::Stop), None);
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::CompletionFinishReason::Stop), None);
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
 
         };
 

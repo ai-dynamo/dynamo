@@ -1,21 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
-# Disaggregation and Performance Tuning
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Tuning Disaggregated Performance
+---
 
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two.
 However, performant disaggregation requires careful tuning of the inference parameters.
@@ -73,6 +60,24 @@ If the block size is too large, it leads to low prefix cache hit ratio.
 For most dense models, we find block size 128 is a good choice.
 
 
+### GPU Memory Fraction
+
+Each engine backend has its own CLI flag to control what fraction of GPU memory is reserved for the KV cache (after model weights and activation buffers are allocated):
+
+| Engine  | CLI flag                         | Engine-specific env var                    | Default
+|---------|----------------------------------|--------------------------------------------|--------
+| vLLM    | `--gpu-memory-utilization`       | —                                          | 0.9
+| SGLang  | `--mem-fraction-static`          | —                                          | 0.88
+| TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9
+
+Dynamo launch scripts recognize a generic env var, `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (float 0.0-1.0), and translate it to the engine-specific flag. This is used by `tests/utils/profile_pytest.py` to binary-search the minimum VRAM a test needs. Currently implemented for vLLM launch scripts; SGLang and TRT-LLM support is planned.
+
+Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
+
+> [!Important]
+> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This means `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` has no effect on actual VRAM usage for scripts that set `--kv-cache-memory-bytes`. For example, `disagg_multimodal_epd.sh` uses `--kv-cache-memory-bytes=512MB` for its prefill/decode workers, so their VRAM consumption is fixed regardless of the memory fraction.
+
+
 ## Disaggregated Router
 
 Disaggregated router decides whether to prefill a request in the remote prefill engine or locally in the decode engine using chunked prefill.
@@ -89,7 +94,7 @@ For most frameworks, when chunked prefill is enabled and one forward iteration g
 In the prefill engine, the best strategy is to operate at the smallest batch size that saturates the GPUs so that the average time to first token (TTFT) is minimized.
 For example, for Llama3.3-70b NVFP4 quantization on B200 TP1 in vLLM, the below figure shows the prefill time with different isl (prefix caching is turned off):
 
-![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../images/prefill_time.png)
+![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../assets/img/prefill-time.png)
 
 For isl less than 1000, the prefill efficiency is low because the GPU is not fully saturated.
 For isl larger than 4000, the prefill time per token increases because the attention takes longer to compute with a longer history.

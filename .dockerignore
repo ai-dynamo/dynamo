@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 **/*.onnx
 **/*.plan
@@ -19,6 +7,8 @@
 **/*.plan
 **/*.etcd
 **/.cache/*
+**/__pycache__
+**/*.pyc
 **/*onnx*
 # Engine must be allowed because code contains dynamo_engine.py
 **/*tensorrtllm_engines*
@@ -40,5 +30,48 @@
 **/target/*
 **/*safetensors
 container/Dockerfile*
+container/**/*.Dockerfile
+container/render.py
+container/context.yaml
+container/compliance/
 .venv
 .venv-docs
+
+# GPU Memory Service build artifacts
+lib/gpu_memory_service/build/
+lib/gpu_memory_service/*.egg-info/
+lib/gpu_memory_service/**/*.so
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Rust
+target/
+
+# IDE/Editor
+.idea/
+*.swp
+*.swo
+.vscode/
+.build/
+
+# Tests & Linters
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.ruff_cache/
+.mypy_cache/
+
+# Docs
+docs/_build/
+
+# AI
+.cursor/
+.claude/

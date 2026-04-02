@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -22,6 +22,11 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.trtllm,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TRT-LLM backend and ETCD HA support"""
@@ -40,9 +45,6 @@ class DynamoWorkerProcess(ManagedProcess):
             etcd_endpoints: List of ETCD endpoints for HA
             mode: One of "prefill_and_decode", "prefill", "decode"
         """
-        # Prefill workers require migration_limit=0 (no KV cache migration support)
-        migration_limit = "0" if mode == "prefill" else "3"
-
         command = [
             "python3",
             "-m",
@@ -55,8 +57,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-seq-len",
             "8192",
-            "--migration-limit",
-            migration_limit,
         ]
 
         # Add disaggregation-specific configuration
@@ -107,7 +107,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
         )
 
@@ -130,10 +130,11 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
     """
     Test ETCD High Availability with repeated node failures and recoveries for TRT-LLM in aggregated mode.
@@ -202,10 +203,11 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
@@ -281,10 +283,11 @@ def test_etcd_ha_failover_trtllm_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
     """
     Test that frontend and worker shut down when single ETCD node is terminated for TRT-LLM in aggregated mode.
@@ -340,10 +343,11 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
