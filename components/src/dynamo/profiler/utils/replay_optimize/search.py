@@ -1,6 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Heuristic replay search over dense aggregated and disaggregated configs.
+
+This module intentionally assumes the optimizer should try to consume as much of
+`max_total_gpus` as possible once a TP family is under consideration.
+Accordingly, the search prunes to near-budget-edge states instead of treating
+throughput-per-GPU as the primary objective.
+
+The descent dimensions are:
+- Disaggregated replay:
+  1. TP shape: `(prefill_tp, decode_tp)` probed at equal worker counts that fit
+     the budget.
+  2. Worker split: `(prefill_workers, decode_workers)` probed only among states
+     that maximize GPU usage for the current TP shape.
+  3. Router settings: `(router_mode, overlap_score_weight)`.
+- Aggregated replay:
+  1. TP size: `tp` probed at the maximum worker count that fits the budget.
+  2. Worker count: `workers` for the incumbent `tp`.
+  3. Router settings: `(router_mode, overlap_score_weight)`.
+
+This is a budget-focused heuristic, not an exact optimizer over all feasible
+replay states.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -16,6 +39,7 @@ from .constants import (
     AIC_BACKEND_VERSIONS,
     DEFAULT_MAX_PARALLEL_EVALS,
     DEFAULT_OVERLAP_SCORE_WEIGHTS,
+    DEFAULT_SEARCH_ROUNDS,
     SUPPORTED_CONSTRAINTS,
 )
 from .models import (
@@ -285,7 +309,14 @@ def optimize_dense_disagg_with_replay(
 ) -> DenseReplayOptimizationResult:
     """Run a heuristic block search over dense disaggregated offline replay configs.
 
-    This routine evaluates a pruned set of TP, worker-ratio, and router candidates.
+    This routine assumes we want to use as much of `max_total_gpus` as possible,
+    then ranks visited states by raw output throughput subject to replay
+    constraints. The descended dimensions are:
+    1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
+    2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
+       shape.
+    3. `(router_mode, overlap_score_weight)`.
+
     Returned "best" records are best among visited states, not a global optimum.
     """
     backend = _validate_backend(backend)
@@ -318,7 +349,7 @@ def optimize_dense_disagg_with_replay(
         else None
     )
     try:
-        for _ in range(2):
+        for _ in range(DEFAULT_SEARCH_ROUNDS):
             round_start = incumbent
 
             tp_states = _iter_tp_states_with_equal_workers(
@@ -460,7 +491,13 @@ def optimize_dense_agg_with_replay(
 ) -> DenseReplayOptimizationResult:
     """Run a heuristic block search over dense aggregated offline replay configs.
 
-    This routine evaluates a pruned set of TP, worker-count, and router candidates.
+    This routine assumes we want to use as much of `max_total_gpus` as possible,
+    then ranks visited states by raw output throughput subject to replay
+    constraints. The descended dimensions are:
+    1. `tp` at the maximum worker count that fits the budget.
+    2. `workers` for the incumbent `tp`.
+    3. `(router_mode, overlap_score_weight)`.
+
     Returned "best" records are best among visited states, not a global optimum.
     """
     backend = _validate_backend(backend)
@@ -488,7 +525,7 @@ def optimize_dense_agg_with_replay(
         else None
     )
     try:
-        for _ in range(2):
+        for _ in range(DEFAULT_SEARCH_ROUNDS):
             round_start = incumbent
 
             tp_states = _iter_agg_tp_states_with_max_workers(

@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Replay evaluation helpers for the budget-focused dense search heuristic.
+
+The search in `search.py` assumes we prefer to consume the available GPU budget
+and therefore ranks visited states by raw output throughput, subject to replay
+constraints, rather than by throughput normalized per GPU.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -151,7 +158,7 @@ def _evaluate_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput / float(total_gpus_used)
+    score = throughput
     penalty = _violation_penalty(report, constraints, total_gpus_used)
     feasible = penalty == 0.0
     record = {
@@ -204,7 +211,7 @@ def _evaluate_agg_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput / float(total_gpus_used)
+    score = throughput
     penalty = _violation_penalty(report, constraints, total_gpus_used)
     feasible = penalty == 0.0
     record = {

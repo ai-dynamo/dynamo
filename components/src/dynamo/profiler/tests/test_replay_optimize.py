@@ -708,7 +708,7 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
         )
 
     assert record["output_throughput_tok_s"] == 11.0
-    assert record["score"] == 5.5
+    assert record["score"] == 11.0
     assert record["feasible"] is True
     assert record["violation_penalty"] == 0.0
 
@@ -750,7 +750,7 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
         )
 
     assert record["output_throughput_tok_s"] == 24.0
-    assert record["score"] == 6.0
+    assert record["score"] == 24.0
     assert record["feasible"] is True
     assert record["violation_penalty"] == 0.0
 

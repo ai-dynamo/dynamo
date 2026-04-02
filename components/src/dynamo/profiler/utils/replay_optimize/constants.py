@@ -12,6 +12,7 @@ AIC_BACKEND_VERSIONS = {
 
 DEFAULT_OVERLAP_SCORE_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
 DEFAULT_MAX_PARALLEL_EVALS = min(4, os.cpu_count() or 1)
+DEFAULT_SEARCH_ROUNDS = 3
 SUPPORTED_CONSTRAINTS = frozenset(
     {
         "mean_ttft_ms",
