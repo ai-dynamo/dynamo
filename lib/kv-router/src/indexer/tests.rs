@@ -305,6 +305,14 @@ mod interface_tests {
         let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
         let prefix_remove = make_remove_event(0, &[1, 2, 3]);
 
+        // TODO: The radix-family implementations still have a broader tree-size
+        // accounting gap after mid-chain removes because descendant lookup entries
+        // are cleaned up lazily. That means "store -> partial remove -> restore
+        // continuation" can still miscount restored coverage in single, sharded,
+        // concurrent, and concurrent_compressed. This test is intentionally scoped
+        // to duplicate store/remove replay, which was the concrete compressed-tree
+        // regression fixed on this branch.
+
         index.apply_event(prefix_event.clone()).await;
         flush_and_settle(index.as_ref()).await;
 
