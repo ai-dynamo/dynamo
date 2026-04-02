@@ -122,29 +122,20 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	return false
 }
 
-// operatorPrincipal holds the full Kubernetes username
-// (system:serviceaccount:<namespace>:<name>) of the operator's own service account.
-// Set at startup from the Downward API. This replaces the previous suffix-based
-// matching which was fragile when the Helm fullname helper collapsed the
-// release/chart name (#7656).
-var operatorPrincipal string
-
-// SetOperatorPrincipal configures the operator's own SA principal.
-// This should be called from main.go before starting the webhook server.
-func SetOperatorPrincipal(principal string) {
-	operatorPrincipal = principal
-}
-
 // CanModifyDGDReplicas checks if the request comes from a service account authorized
 // to modify DGD replicas when scaling adapter is enabled.
 //
+// operatorPrincipal is the full Kubernetes username
+// (system:serviceaccount:<namespace>:<name>) of the operator's own service account,
+// auto-detected at startup via the Kubernetes Downward API. It may be empty if
+// the Downward API env vars were not set.
+//
 // Authorization is checked in two ways:
-//  1. Exact match against the operator's own principal, auto-detected at startup
-//     via the Kubernetes Downward API (POD_NAMESPACE + POD_SERVICE_ACCOUNT).
+//  1. Exact match against operatorPrincipal.
 //  2. Name-only match for the planner SA, which the operator creates in every DGD
 //     namespace with a well-known constant name. Because the namespace is only known
 //     at runtime, it cannot be enumerated statically.
-func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
+func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.UserInfo) bool {
 	username := userInfo.Username
 
 	if !strings.HasPrefix(username, "system:serviceaccount:") {

@@ -686,10 +686,10 @@ func registerWebhooks(
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
+	var operatorPrincipal string
 	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
-		principal := fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
-		internalwebhook.SetOperatorPrincipal(principal)
-		setupLog.Info("Configured operator principal from downward API", "principal", principal)
+		operatorPrincipal = fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
+		setupLog.Info("Detected operator principal from downward API", "principal", operatorPrincipal)
 	} else {
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
@@ -701,7 +701,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

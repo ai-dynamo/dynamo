@@ -88,13 +88,8 @@ func TestCanModifyDGDReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prev := operatorPrincipal
-			t.Cleanup(func() { operatorPrincipal = prev })
-
-			SetOperatorPrincipal(tt.principal)
-
 			userInfo := authenticationv1.UserInfo{Username: tt.username}
-			got := CanModifyDGDReplicas(userInfo)
+			got := CanModifyDGDReplicas(tt.principal, userInfo)
 			if got != tt.expectAllowed {
 				t.Errorf("CanModifyDGDReplicas() = %v, want %v", got, tt.expectAllowed)
 			}
