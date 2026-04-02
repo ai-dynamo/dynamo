@@ -167,9 +167,8 @@ impl DiskOpenStrategy for MkostempDirectIo {
             nix::libc::O_CLOEXEC | nix::libc::O_DIRECT
         };
 
-        let raw_fd = unsafe {
-            nix::libc::mkostemp(template_bytes.as_mut_ptr() as *mut c_char, flags)
-        };
+        let raw_fd =
+            unsafe { nix::libc::mkostemp(template_bytes.as_mut_ptr() as *mut c_char, flags) };
 
         if raw_fd < 0 {
             let file_name = CStr::from_bytes_with_nul(template_bytes)
@@ -184,10 +183,7 @@ impl DiskOpenStrategy for MkostempDirectIo {
         }
 
         if !disable_o_direct {
-            tracing::debug!(
-                "O_DIRECT enabled via mkostemp at open time (fd={})",
-                raw_fd
-            );
+            tracing::debug!("O_DIRECT enabled via mkostemp at open time (fd={})", raw_fd);
         }
 
         Ok(raw_fd)
@@ -821,8 +817,7 @@ mod tests {
     #[test]
     fn test_strategy_from_env_default() {
         temp_env::with_var_unset(DISK_ALLOCATOR_TYPE_KEY, || {
-            let strategy =
-                disk_open_strategy_from_env().expect("default strategy should succeed");
+            let strategy = disk_open_strategy_from_env().expect("default strategy should succeed");
             assert_eq!(strategy.name(), "default");
         });
     }
@@ -831,8 +826,7 @@ mod tests {
     #[test]
     fn test_strategy_from_env_fcntl() {
         temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("default"), || {
-            let strategy =
-                disk_open_strategy_from_env().expect("fcntl strategy should succeed");
+            let strategy = disk_open_strategy_from_env().expect("fcntl strategy should succeed");
             assert_eq!(strategy.name(), "default");
         });
     }
@@ -850,13 +844,9 @@ mod tests {
     /// Test that disk_open_strategy_from_env rejects unknown values.
     #[test]
     fn test_strategy_from_env_unknown() {
-        temp_env::with_var(
-            DISK_ALLOCATOR_TYPE_KEY,
-            Some("not-a-real-backend"),
-            || {
-                let result = disk_open_strategy_from_env();
-                assert!(result.is_err(), "unknown strategy should fail");
-            },
-        );
+        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("not-a-real-backend"), || {
+            let result = disk_open_strategy_from_env();
+            assert!(result.is_err(), "unknown strategy should fail");
+        });
     }
 }
