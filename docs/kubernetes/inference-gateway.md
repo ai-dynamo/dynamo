@@ -15,7 +15,7 @@ EPP's default kv-routing approach is not token-aware because the prompt is not t
 Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
 If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-Currently, these setups are only supported with the kGateway based Inference Gateway.
+These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
 
 ## Prerequisites
 
@@ -31,23 +31,23 @@ If you are installing from the source tree rather than a release chart, follow [
 
 ### 2. Deploy Inference Gateway ###
 
-First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
+First, deploy an inference gateway service. In this example, we'll install agentgateway with the inference extension enabled.
 
 ```bash
 cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
-./scripts/install_gaie_crd_kgateway.sh
+./scripts/install_gaie_crd_agentgateway.sh
 ```
-**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
+This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
 #### f. Verify the Gateway is running
 
 ```bash
-kubectl get gateway inference-gateway
+kubectl get gateway inference-gateway -n ${NAMESPACE}
 
 # Sample output
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway             True         1m
+# inference-gateway   agentgateway   <none>   True         1m
 ```
 
 
@@ -109,8 +109,8 @@ Note that when deploying Dynamo with the Inference Gateway Extension each worker
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
-You have to deploy the Dynamo Graph and the HttpRoute service.
-For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+You have to deploy the Dynamo Graph and the `HTTPRoute`.
+For the `HTTPRoute`, make sure `parentRefs.namespace` matches the namespace where your `Gateway` is deployed as shown below.
 ```bash
   parentRefs:
     - group: gateway.networking.k8s.io
@@ -121,7 +121,7 @@ For the HttpRoute service make sure to specify the namespace where your gateway 
 
 ```bash
 cd <dynamo-source-root>
-# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HTTPRoute running, delete if so.
 # Choose disagg or agg example
 kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
 # or
@@ -150,7 +150,7 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
+# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point to the namespace where your Gateway is deployed.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -186,9 +186,8 @@ extraPodSpec:
 ```
 
 **Gateway Namespace**
-Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
-
+Note that this assumes your `Gateway` is installed into `NAMESPACE=my-model`. If you installed it into a
+different namespace, update your `http-route.yaml`.
 
 #### 5.b. Deploy as a standalone pod
 
@@ -270,10 +269,10 @@ Stand-Alone installation only:
 Check that all resources are properly deployed:
 
 ```bash
-kubectl get inferencepool
-kubectl get httproute
-kubectl get service
-kubectl get gateway
+kubectl get inferencepool -n ${NAMESPACE}
+kubectl get httproute -n ${NAMESPACE}
+kubectl get service -n ${NAMESPACE}
+kubectl get gateway -n ${NAMESPACE}
 ```
 
 Sample output:
@@ -312,7 +311,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE use the namespace where the Gateway service was created, for example my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -419,8 +418,8 @@ Sample inference output:
 }
 ```
 
-***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header
+***If you have more than one HTTPRoute running on the cluster***
+Add the host to your `http-route.yaml` and add the header
 `curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
 
 ```bash
@@ -441,20 +440,19 @@ helm uninstall dynamo-gaie -n my-model
 # 1. Delete the inference-gateway
 kubectl delete gateway inference-gateway --ignore-not-found
 
-# 2. Uninstall kgateway helm releases
-helm uninstall kgateway -n kgateway-system
-helm uninstall kgateway-crds -n kgateway-system
+# 2. Uninstall agentgateway helm releases
+helm uninstall agentgateway -n agentgateway-system
+helm uninstall agentgateway-crds -n agentgateway-system
 
-# 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
-helm uninstall kgateway --namespace kgateway-system
-kubectl delete namespace kgateway-system --ignore-not-found
+# 3. Delete the agentgateway-system namespace (optional, cleans up everything in it)
+kubectl delete namespace agentgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
 IGW_LATEST_RELEASE=v1.2.1
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
-GATEWAY_API_VERSION=v1.4.1
+GATEWAY_API_VERSION=v1.5.1
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
 
