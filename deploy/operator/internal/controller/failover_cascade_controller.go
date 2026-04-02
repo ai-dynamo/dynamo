@@ -180,6 +180,9 @@ func failoverCascadePredicate() predicate.Predicate {
 			if !hasLabel(e.ObjectNew.GetLabels()) {
 				return false
 			}
+			if e.ObjectNew.GetDeletionTimestamp() != nil {
+				return false
+			}
 			newPod, ok := e.ObjectNew.(*corev1.Pod)
 			if !ok {
 				return false
