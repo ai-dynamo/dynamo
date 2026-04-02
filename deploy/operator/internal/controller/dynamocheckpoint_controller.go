@@ -42,7 +42,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 // CheckpointReconciler reconciles a DynamoCheckpoint object
@@ -277,12 +276,12 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		}
 	}
 
-	observation := snapshotprotocol.ObserveCheckpointJob(job, checkpointWorkerActive)
+	observation := checkpointjob.Observe(job, checkpointWorkerActive)
 	switch observation.Phase {
-	case snapshotprotocol.CheckpointJobPhaseWaitingForConfirmation:
+	case checkpointjob.ObservationPhaseWaitingForConfirmation:
 		logger.V(1).Info("Checkpoint job is complete but checkpoint worker is still active; waiting for terminal watcher status", "job", job.Name)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
-	case snapshotprotocol.CheckpointJobPhaseReady:
+	case checkpointjob.ObservationPhaseReady:
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", observation.Message)
 
@@ -301,7 +300,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
-	case snapshotprotocol.CheckpointJobPhaseFailed:
+	case checkpointjob.ObservationPhaseFailed:
 		logger.Info("Checkpoint Job failed", "job", job.Name, "message", observation.Message)
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", observation.Message)
 
