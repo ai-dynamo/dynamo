@@ -312,9 +312,6 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
 
-        // Extract cache_control TTL from either nvext or top-level field
-        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
-
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -333,16 +330,13 @@ impl OpenAIPreprocessor {
                 }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
-                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() || cache_control_ttl.is_some() {
-            // Ensure routing hints exist when we have LoRA or cache_control,
-            // even when nvext is absent (e.g. Anthropic endpoint requests).
+        } else if lora_name.is_some() {
+            // Ensure routing hints exist when we have LoRA.
             builder.routing(Some(RoutingHints {
                 lora_name,
-                cache_control_ttl,
                 ..Default::default()
             }));
         }
