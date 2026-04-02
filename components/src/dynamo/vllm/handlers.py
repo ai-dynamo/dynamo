@@ -27,6 +27,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
@@ -65,6 +66,7 @@ from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
 VIDEO_URL_KEY: Final = "video_url"
+AUDIO_URL_KEY: Final = "audio_url"
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
@@ -394,6 +396,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks_guard = threading.Lock()
 
         self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.audio_loader = AudioLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
         self.video_loader = VideoLoader(
@@ -1236,6 +1241,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
                 logger.debug(
                     f"Extracted {len(videos)} video(s) for multimodal processing"
+                )
+
+        # Handle audio_url entries
+        audio_mm_items = mm_map.get(AUDIO_URL_KEY, [])
+        if audio_mm_items:
+            audios = await self.audio_loader.load_audio_batch(audio_mm_items)
+            if audios:
+                vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
+                logger.debug(
+                    f"Extracted {len(audios)} audio item(s) for multimodal processing"
                 )
 
         return vllm_mm_data if vllm_mm_data else None
