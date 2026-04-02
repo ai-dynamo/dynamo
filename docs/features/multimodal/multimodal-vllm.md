@@ -228,12 +228,12 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
 | Setting                   | Implementation                                                 | Launch Script               |
 | ------------------------- | -------------------------------------------------------------- | --------------------------- |
-| **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.18+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
+| **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.17+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
 | **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
 
 ### Aggregated Worker
 
-A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Supported natively with vLLM 0.18+.
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Supported natively with vLLM 0.17+.
 
 ```mermaid
 ---
@@ -262,7 +262,7 @@ vllm serve $model \
     }"
 ```
 
-This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector`. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled). No patches required — `ec_both` is supported natively in vLLM 0.18+.
+This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector`. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled). No patches required — `ec_both` is supported natively in vLLM 0.17+.
 
 See `examples/backends/vllm/launch/vllm_serve_embedding_cache.sh` for a ready-to-run script.
 

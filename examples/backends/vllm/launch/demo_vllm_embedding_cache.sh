@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Demo: vLLM serve with Dynamo aggregated embedding cache (vLLM 0.18+)
+# Demo: vLLM serve with Dynamo aggregated embedding cache (vLLM 0.17+)
 #
 # This script launches a vLLM server with Dynamo's CPU-side LRU embedding
 # cache enabled, then sends sample requests to demonstrate cache hits.
