@@ -323,8 +323,7 @@ class GMSClientMemoryManager:
 
         Access is set based on current lock_type. Returns the CUDA handle.
         """
-        if self._granted_lock_type is None:
-            raise RuntimeError("Memory manager is not connected")
+        assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
         handle = cumem_import_from_shareable_handle_close_fd(fd)
         cumem_map(va, aligned_size, handle)
@@ -477,8 +476,7 @@ class GMSClientMemoryManager:
                 f"Layout changed: {self._last_memory_layout_hash[:16]}... -> {current_hash[:16]}..."
             )
 
-        if self._granted_lock_type is None:
-            raise RuntimeError("Memory manager is not connected")
+        assert self._granted_lock_type is not None
 
         allocations_by_slot = {
             int(info.layout_slot): info for info in self.list_handles()

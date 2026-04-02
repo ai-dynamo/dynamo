@@ -80,8 +80,7 @@ def _ensure_callbacks_initialized() -> None:
 def _create_mem_pool() -> "MemPool":
     from torch.cuda.memory import MemPool
 
-    if _pluggable_alloc is None:
-        raise RuntimeError("GMS pluggable allocator is not initialized")
+    assert _pluggable_alloc is not None
     return MemPool(allocator=_pluggable_alloc.allocator())
 
 
@@ -111,7 +110,8 @@ def get_or_create_gms_client_memory_manager(
                     f"GMS allocator tag={tag} is disconnected but still owns "
                     "preserved state; recreate the process instead of reusing it"
                 )
-            manager.abort()
+            manager._client = None
+            manager._granted_lock_type = None
             _tag_states.pop(tag, None)
             state = None
 
