@@ -644,8 +644,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
             req.num_computed_tokens = ctx_len
             req.status = RequestStatus.RUNNING
-            req._output_token_ids.append(0)
-            req._all_token_ids.append(0)
+            req.append_output_token_ids(0)
 
             self.requests[req_id] = req
             self.running.append(req)  # type: ignore[has-type]
