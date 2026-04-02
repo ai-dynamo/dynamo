@@ -291,30 +291,39 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
     }
 }
 
-/// Validate the `x-dynamo-request-id` header and return the request ID.
+/// Return the request ID for the current request.
 ///
-/// Returns `Err(message)` if the header is present but invalid (not UTF-8 or not a UUID).
-/// The caller is responsible for converting the error message into the appropriate HTTP
-/// error format (OpenAI vs Anthropic).
+/// The canonical request ID is set by `make_inference_request_span()` and stored
+/// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
+/// retrieves it, falling back to a validated `x-dynamo-request-id` header value
+/// (deprecated, DEP #7812) or a new UUID.
 ///
-/// The request ID comes from the trace context — `make_inference_request_span()` guarantees it by
-/// generating a UUID when the client doesn't provide one.
-pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> Result<String, String> {
-    // Validate and extract x-dynamo-request-id header if present.
-    // Returns error for non-UTF-8 or non-UUID values.
+/// **Deprecation (DEP #7812):** The `x-dynamo-request-id` header is deprecated.
+/// Clients should rely on server-generated request IDs instead of supplying their own.
+pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
+    // Validate x-dynamo-request-id header if present, warn on invalid values.
+    // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
+    // server-generated request IDs instead of supplying their own.
     let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+        tracing::warn!(
+            "{} header is deprecated (DEP #7812); server-generated request IDs should be used instead",
+            DYNAMO_REQUEST_ID_HEADER
+        );
         match raw.to_str() {
             Err(_) => {
-                return Err(format!(
-                    "{}{} header must be a valid UTF-8 string",
-                    VALIDATION_PREFIX, DYNAMO_REQUEST_ID_HEADER
-                ));
+                tracing::warn!(
+                    "{} header must be a valid UTF-8 string",
+                    DYNAMO_REQUEST_ID_HEADER
+                );
+                None
             }
             Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
-                return Err(format!(
-                    "{}{} header must be a valid UUID, got: {}",
-                    VALIDATION_PREFIX, DYNAMO_REQUEST_ID_HEADER, s
-                ));
+                tracing::warn!(
+                    "{} header must be a valid UUID, got: {}",
+                    DYNAMO_REQUEST_ID_HEADER,
+                    s
+                );
+                None
             }
             Ok(s) => Some(s.to_string()),
         }
@@ -324,13 +333,13 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> Result<String, St
 
     // Prefer trace context (set by make_inference_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
-        && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
+        && let Some(request_id) = trace_context.request_id
     {
-        return Ok(x_dynamo_request_id);
+        return request_id;
     }
 
-    // Fallback: use validated header value, or generate new UUID
-    Ok(validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
+    // Fallback: use validated header for backwards compat, or generate new UUID
+    validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
 /// OpenAI Completions Request Handler
@@ -352,12 +361,7 @@ async fn handler_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -737,12 +741,7 @@ async fn embeddings(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -820,12 +819,7 @@ async fn handler_chat_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -1434,12 +1428,7 @@ async fn handler_responses(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone().unwrap_or_default(),
@@ -1931,12 +1920,7 @@ async fn images(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -2029,12 +2013,7 @@ async fn videos(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -2105,12 +2084,7 @@ async fn video_stream(
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let model = request.model.clone();
 
@@ -2264,12 +2238,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let response_format = request.response_format.clone();
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
