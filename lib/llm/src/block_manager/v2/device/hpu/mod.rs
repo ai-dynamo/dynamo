@@ -349,7 +349,12 @@ impl DeviceEventOps for HpuEventWrapper {
 
 /// Check if HPU backend is available on this system
 pub fn is_available() -> bool {
-    // Try to initialize synapse runtime and acquire a device
+    // First ensure Synapse runtime is initialized
+    if ensure_synapse_initialized().is_err() {
+        return false;
+    }
+
+    // Try to acquire a device
     // This will fail if no HPU hardware is present or driver isn't loaded
     match Device::acquire_first() {
         Ok(_device) => {
