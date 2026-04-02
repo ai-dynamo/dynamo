@@ -119,23 +119,20 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Serve session_control as a discoverable endpoint so the router's
-    # AgentController can find it via component.endpoint("session_control").
-    session_control_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
-    )
-    shutdown_endpoints.append(session_control_endpoint)
+    # Only serve session_control when streaming sessions are enabled.
+    if server_args.enable_streaming_session:
+        session_control_endpoint = runtime.endpoint(
+            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
+        )
+        shutdown_endpoints.append(session_control_endpoint)
 
     try:
-        await asyncio.gather(
+        gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
-            ),
-            session_control_endpoint.serve_endpoint(
-                handler.session_control,
             ),
             register_model_with_readiness_gate(
                 engine,
@@ -145,7 +142,12 @@ async def init_decode(
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
-        )
+        ]
+        if server_args.enable_streaming_session:
+            gather_tasks.append(
+                session_control_endpoint.serve_endpoint(handler.session_control)
+            )
+        await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
