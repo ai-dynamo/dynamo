@@ -9,6 +9,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -20,7 +21,9 @@ const (
 	dataParallelSizeFlag     = "--data-parallel-size"
 )
 
-type VLLMBackend struct{}
+type VLLMBackend struct {
+	ParentGraphDeploymentName string
+}
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	if component.IsGMSEnabled() {
@@ -82,22 +85,21 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(component.Annotations) {
-		return
-	}
+const (
+	waitLeaderConfigMapSuffix = "wait-leader-script"
+	waitLeaderScriptKey       = "wait-for-leader.py"
+	waitLeaderVolumeName      = "wait-leader-script"
+	waitLeaderMountPath       = "/scripts"
+)
 
-	if len(podSpec.Containers) == 0 {
-		return
-	}
-
-	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mainImage := podSpec.Containers[0].Image
-
-	waitScript := fmt.Sprintf(`import socket, time, json, ssl, urllib.request
+// WaitLeaderScript is the Python script that verifies leader pod health via
+// the K8s API before attempting a TCP connection. It reads LEADER_HOST and
+// LEADER_PORT from environment variables so the script content is generic.
+const WaitLeaderScript = `import socket, time, json, ssl, urllib.request, os
 
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
-host, port = "%s", %s
+host = os.environ["LEADER_HOST"]
+port = int(os.environ["LEADER_PORT"])
 
 def _k8s_ctx():
     return ssl.create_default_context(cafile=f"{SA}/ca.crt")
@@ -136,6 +138,7 @@ def leader_pod_is_healthy():
         return False, f"K8s API error: {e}"
 
 print(f"Waiting for leader master port at {host}:{port}...", flush=True)
+time.sleep(5)
 start = time.monotonic()
 last_status = start
 last_err = ""
@@ -156,13 +159,70 @@ while True:
     if now - last_status >= 30:
         print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})", flush=True)
         last_status = now
-    time.sleep(2)
-`, leaderHostname, commonconsts.VLLMMpMasterPort)
+    time.sleep(5)
+`
+
+// GetWaitLeaderConfigMapName returns the ConfigMap name for a given DGD.
+func GetWaitLeaderConfigMapName(dgdName string) string {
+	return fmt.Sprintf("%s-%s", dgdName, waitLeaderConfigMapSuffix)
+}
+
+// GenerateWaitLeaderConfigMap creates a ConfigMap containing the wait-for-leader
+// Python script. One ConfigMap is created per DGD and owned by the DGD.
+func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GetWaitLeaderConfigMapName(dgdName),
+			Namespace: namespace,
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
+			},
+		},
+		Data: map[string]string{
+			waitLeaderScriptKey: WaitLeaderScript,
+		},
+	}
+}
+
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(component.Annotations) {
+		return
+	}
+
+	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
+		return
+	}
+
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	mainImage := podSpec.Containers[0].Image
+	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
+
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: waitLeaderVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: cmName,
+				},
+			},
+		},
+	})
 
 	initContainer := corev1.Container{
 		Name:    "wait-for-leader-mp",
 		Image:   mainImage,
-		Command: []string{"python3", "-c", waitScript},
+		Command: []string{"python3", fmt.Sprintf("%s/%s", waitLeaderMountPath, waitLeaderScriptKey)},
+		Env: []corev1.EnvVar{
+			{Name: "LEADER_HOST", Value: leaderHostname},
+			{Name: "LEADER_PORT", Value: commonconsts.VLLMMpMasterPort},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      waitLeaderVolumeName,
+				MountPath: waitLeaderMountPath,
+				ReadOnly:  true,
+			},
+		},
 	}
 
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
