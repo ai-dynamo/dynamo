@@ -396,7 +396,7 @@ impl MockEngine {
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
         for dp_rank in 0..args.dp_size {
-            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
             let (kv_event_publishers, relay_publisher): (
                 KvEventPublishers,
@@ -499,12 +499,14 @@ impl MockEngine {
                 loop {
                     tokio::select! {
                         signal_result = output_rx.recv() => {
-                            let Some(signal) = signal_result else {
+                            let Some(output_batch) = signal_result else {
                                 break; // Channel closed
                             };
 
-                            if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
-                                let _ = request_tx.send(signal);
+                            for signal in output_batch {
+                                if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
+                                    let _ = request_tx.send(signal);
+                                }
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {

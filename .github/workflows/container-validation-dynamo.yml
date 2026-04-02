@@ -29,6 +29,9 @@ jobs:
       core: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
       planner: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
       frontend: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
+      sglang: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.sglang == 'true' }}
+      vllm: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.vllm == 'true' }}
+      trtllm: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.trtllm == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -56,7 +59,13 @@ jobs:
 
   build:
     needs: changed-files
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
+    if: >-
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true'
     runs-on: prod-builder-v3
     name: Build
     timeout-minutes: 60
@@ -188,7 +197,13 @@ jobs:
 
   mypy:
     needs: [changed-files, build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
+    if: >-
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true'
     runs-on: prod-builder-amd-v1
     name: Mypy
     timeout-minutes: 15
@@ -211,7 +226,23 @@ jobs:
           docker run --rm -w /workspace \
             --name mypy_${{ github.run_id }}_${{ github.run_attempt }} \
             ${{ env.IMAGE_TAG }} \
-            bash -c 'MYPYPATH=components/src:lib/bindings/python/src mypy --explicit-package-bases components/src/dynamo && MYPYPATH=lib/bindings/python/src mypy -p dynamo'
+            bash -c '
+              MYPYPATH=components/src:lib/bindings/python/src
+
+              # Always check shared (non-backend) code
+              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm | sort | tr "\n" " ")
+
+              # Add only the backends that changed
+              ${{ needs.changed-files.outputs.sglang == 'true' && 'TARGETS="$TARGETS components/src/dynamo/sglang"' || ':' }}
+              ${{ needs.changed-files.outputs.vllm == 'true' && 'TARGETS="$TARGETS components/src/dynamo/vllm"' || ':' }}
+              ${{ needs.changed-files.outputs.trtllm == 'true' && 'TARGETS="$TARGETS components/src/dynamo/trtllm"' || ':' }}
+
+              MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
+            '
+          docker run --rm -w /workspace \
+            --name mypy_bindings_${{ github.run_id }}_${{ github.run_attempt }} \
+            ${{ env.IMAGE_TAG }} \
+            bash -c 'MYPYPATH=lib/bindings/python/src mypy -p dynamo'
 
   test-parallel:
     needs: [changed-files, build, mypy]

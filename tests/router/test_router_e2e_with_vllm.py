@@ -46,6 +46,13 @@ VLLM_ARGS: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
+    "model": MODEL_NAME,
+    "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
+    "max_model_len": 1024,  # Limit context length to reduce KV cache size
+    "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
+}
+
 
 class VLLMProcess(ManagedEngineProcessMixin):
     """Manages vLLM workers using dynamo.vllm (HTTP API + KV events).
@@ -73,7 +80,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
         Args:
             request: pytest request fixture for log directory
             vllm_args: Configuration dict with keys:
-                - block_size: KV cache block size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
@@ -110,7 +116,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
         if vllm_args is None:
             vllm_args = {}
 
-        block_size = vllm_args.get("block_size", BLOCK_SIZE)
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
@@ -144,15 +149,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 # No DP; worker sees one GPU
                 gpu_device = str(worker_idx)
 
-            command = [
-                "python3",
-                "-m",
-                "dynamo.vllm",
-                "--model",
-                model,
-                "--block-size",
-                str(block_size),
-            ]
+            command = ["python3", "-m", "dynamo.vllm", "--model", model]
+
+            if "block_size" in vllm_args:
+                command.extend(["--block-size", str(vllm_args["block_size"])])
 
             # Disable CUDA graphs for faster startup & lower memory
             if enforce_eager:
@@ -268,6 +268,30 @@ def test_vllm_kv_router_basic(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
         engine_args=VLLM_ARGS,
+        num_workers=2,
+        single_gpu=True,
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_basic_router_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS_NO_BLOCK_SIZE,
         num_workers=2,
         single_gpu=True,
         request=request,

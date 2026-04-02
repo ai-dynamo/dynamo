@@ -61,7 +61,8 @@ BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 PLANNER_PROFILE_DATA_DIR = (
-    Path(__file__).resolve().parents[1] / "planner/profiling_results/H200_TP1P_TP1D"
+    Path(__file__).resolve().parents[2]
+    / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
 
 
@@ -652,7 +653,7 @@ class DisaggMockerProcess:
             self._bootstrap_ports = []
 
 
-@pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
+@pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
 @pytest.mark.parametrize(
     "router_mode,durable_kv_events,mocker_args_override",
     [
@@ -728,6 +729,7 @@ def test_mocker_router(
             num_requests=NUM_REQUESTS,
             request_plane=request_plane,
             router_mode=router_mode,
+            min_initial_workers=mockers.num_workers,
         )
 
 
@@ -801,7 +803,7 @@ def test_mocker_kv_router_overload_503(
     logger.info("Starting mocker KV router overload test for 503 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
-        "speedup_ratio": 10,
+        "speedup_ratio": 0.01,
         "block_size": 4,  # Smaller block size
         "num_gpu_blocks": 64,  # Limited GPU blocks to exhaust quickly
         "durable_kv_events": durable_kv_events,

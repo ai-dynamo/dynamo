@@ -18,7 +18,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 `offline/mod.rs` chooses between three implementations:
 
 - `lib/mocker/src/replay/offline/single.rs` for the special case `num_workers == 1` with the vLLM engine
-- `lib/mocker/src/replay/offline/multi.rs` for everything else, including multi-worker replay and `kv_router` replay
+- `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
 - `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
 
 ## File Map
@@ -27,7 +27,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
   Chooses single-worker fast path vs multi-worker harness.
 - `lib/mocker/src/replay/offline/single.rs`
   Minimal replay loop for one vLLM worker.
-- `lib/mocker/src/replay/offline/multi.rs`
+- `lib/mocker/src/replay/offline/agg.rs`
   General offline cluster simulator for multi-worker replay and KV-router replay.
 - `lib/mocker/src/replay/offline/disagg.rs`
   Offline two-stage replay harness with separate prefill and decode pools.
@@ -75,7 +75,7 @@ Important details:
 
 ## Multi-Worker Harness
 
-The general harness lives in `lib/mocker/src/replay/offline/multi.rs`. It models a cluster with:
+The general aggregated harness lives in `lib/mocker/src/replay/offline/agg.rs`. It models a cluster with:
 
 - a logical clock `now_ms`
 - a pending request queue
@@ -85,7 +85,7 @@ The general harness lives in `lib/mocker/src/replay/offline/multi.rs`. It models
 
 ### Main Loop
 
-The harness is event-driven. It does not sleep. Instead, `OfflineRuntime` repeatedly:
+The aggregated harness is event-driven. It does not sleep. Instead, `AggRuntime` repeatedly:
 
 1. picks the next meaningful timestamp
 2. advances `now_ms`
@@ -164,7 +164,7 @@ flowchart LR
     F -->|yes| G["dispatch to worker"]
     F -->|no| H["store in router_pending"]
 
-    I["worker pass emits RouterEvent + OutputSignal"] --> J["OfflineRuntime::process_completed_pass"]
+    I["worker pass emits RouterEvent + OutputSignal"] --> J["AggRuntime::process_completed_pass"]
     J --> K["apply router events to sync indexer"]
     J --> L["mark_prefill_completed / free"]
     L --> M["drain queued admissions"]
