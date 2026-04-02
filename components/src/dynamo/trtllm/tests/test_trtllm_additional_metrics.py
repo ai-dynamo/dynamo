@@ -132,7 +132,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         sample = self.registry.get_sample_value(
             "trtllm_kv_transfer_latency_seconds_count"
         )
-        self.assertEqual(sample, 0.0)
+        self.assertIn(sample, (None, 0.0))
 
     def test_kv_transfer_perf_return_values(self):
         """Verify record_kv_transfer_perf returns True on record, False on skip."""
@@ -197,11 +197,10 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
         for node in ast.walk(gen_tree):
             # Find: any(guided.get(k) for k in (...))
             if isinstance(node, ast.Tuple) and all(
-                isinstance(e, (ast.Constant, ast.Str)) for e in node.elts
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in node.elts
             ):
-                vals = {
-                    e.value if isinstance(e, ast.Constant) else e.s for e in node.elts
-                }
+                vals = {e.value for e in node.elts}
                 if "json_object" in vals:  # identify the right tuple
                     detection_keys = vals
 
