@@ -165,6 +165,21 @@ def _set_optional_arg(
         )
 
 
+def _register_memory_routes(runtime, handler) -> None:
+    runtime.register_engine_route(
+        "release_memory_occupation",
+        handler.release_memory_occupation,
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation",
+        handler.resume_memory_occupation,
+    )
+    logging.info(
+        "Registered engine routes: "
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
+
+
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -665,18 +680,7 @@ async def init_llm_worker(
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 if config.enable_sleep:
-                    runtime.register_engine_route(
-                        "release_memory_occupation",
-                        handler.release_memory_occupation,
-                    )
-                    runtime.register_engine_route(
-                        "resume_memory_occupation",
-                        handler.resume_memory_occupation,
-                    )
-                    logging.info(
-                        "Registered engine routes: "
-                        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
-                    )
+                    _register_memory_routes(runtime, handler)
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
@@ -689,18 +693,7 @@ async def init_llm_worker(
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.enable_sleep:
-                runtime.register_engine_route(
-                    "release_memory_occupation",
-                    handler.release_memory_occupation,
-                )
-                runtime.register_engine_route(
-                    "resume_memory_occupation",
-                    handler.resume_memory_occupation,
-                )
-                logging.info(
-                    "Registered engine routes: "
-                    "/engine/release_memory_occupation, /engine/resume_memory_occupation"
-                )
+                _register_memory_routes(runtime, handler)
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )

@@ -6,14 +6,22 @@
 import logging
 import os
 import shutil
+import time
 
 import requests
+from gpu_memory_service.common.types import ServerState
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 
-from .runtime import DYNAMO_BIN
+from .gms import GMSServerProcess
+from .runtime import (
+    DYNAMO_BIN,
+    get_gpu_memory_used,
+    send_completion,
+    wait_for_memory_drop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,3 +147,62 @@ class TRTLLMWithGMSProcess(ManagedProcess):
         result = r.json()
         logger.info("%s wake: %s", self.engine_id, result)
         return result
+
+
+def _sleep_engine(
+    engine: ManagedProcess,
+    weights_gms: GMSServerProcess,
+    frontend_port: int,
+    *,
+    expected_weights_hash: str | None = None,
+) -> tuple[str, int, int]:
+    """Run inference, verify GMS state, call sleep, return (hash, released_bytes, mem_after)."""
+    result = send_completion(frontend_port, model=TRTLLM_GMS_MODEL_NAME)
+    assert result["choices"], "Inference failed before sleep"
+
+    deadline = time.monotonic() + 60.0
+    while True:
+        state = weights_gms.get_runtime_state()
+        if (
+            state.state == ServerState.RO
+            and state.allocation_count > 0
+            and state.memory_layout_hash
+        ):
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError("weights GMS did not reach committed state before sleep")
+        time.sleep(0.1)
+
+    if expected_weights_hash is not None:
+        assert state.memory_layout_hash == expected_weights_hash
+
+    mem_before = get_gpu_memory_used()
+    sleep_result = engine.sleep()
+    assert sleep_result["status"] == "ok"
+
+    mem_after = wait_for_memory_drop(mem_before, timeout_s=30.0)
+    released_bytes = mem_before - mem_after
+    logger.info(
+        "%s sleep: %.2f → %.2f GiB (freed %.0f MB)",
+        getattr(engine, "engine_id", "engine"),
+        mem_before / (1 << 30),
+        mem_after / (1 << 30),
+        released_bytes / (1 << 20),
+    )
+    assert mem_after < mem_before, "Sleep should reduce GPU memory"
+    assert released_bytes > 0
+
+    # After sleep, weights must still be committed and unchanged.
+    deadline = time.monotonic() + 30.0
+    while True:
+        state_after = weights_gms.get_runtime_state()
+        if state_after.state == ServerState.COMMITTED:
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError("weights GMS did not reach COMMITTED state after sleep")
+        time.sleep(0.1)
+
+    assert state_after.allocation_count == state.allocation_count
+    assert state_after.memory_layout_hash == state.memory_layout_hash
+
+    return state.memory_layout_hash, released_bytes, mem_after

@@ -257,5 +257,7 @@ def _storage_nbytes(tensor: torch.Tensor) -> int:
     stride = list(tensor.stride())
     if not shape:
         return element_size
-    max_offset = sum(int(s) * (int(d) - 1) for s, d in zip(stride, shape) if int(d) > 1)
+    max_offset = sum(
+        int(s) * (int(d) - 1) for s, d in zip(stride, shape, strict=True) if int(d) > 1
+    )
     return int((max_offset + 1) * element_size)

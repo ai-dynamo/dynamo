@@ -19,31 +19,32 @@ DYNAMO_BIN = REPO_ROOT / "dynamo" / "bin"
 MIN_EXPECTED_MEMORY_RETURN_FRACTION = 0.6
 
 
-def _default_nvml_device() -> int:
-    """Return the NVML physical device index for CUDA device 0.
+def _resolve_nvml_handle():
+    """Resolve the NVML device handle for CUDA device 0 at call-time.
 
-    With CUDA_VISIBLE_DEVICES set (e.g. "1,2"), CUDA device 0 maps to the
-    first entry, which is NVML physical device 1.  NVML always uses physical
-    indices, so we parse the first entry from CUDA_VISIBLE_DEVICES to get the
-    correct NVML index.
+    Reads CUDA_VISIBLE_DEVICES each time so runtime changes and UUID/MIG
+    entries are honoured.  Raises ValueError if the entry cannot be resolved
+    rather than silently falling back to index 0.
     """
     cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if cuda_vis:
-        first = cuda_vis.split(",")[0].strip()
+    first = cuda_vis.split(",")[0].strip() if cuda_vis else ""
+    if first.startswith("GPU-") or first.startswith("MIG-"):
+        return pynvml.nvmlDeviceGetHandleByUUID(first)
+    if first:
         try:
-            return int(first)
+            index = int(first)
         except ValueError:
-            pass
-    return 0
+            raise ValueError(
+                f"Cannot parse CUDA_VISIBLE_DEVICES entry {first!r} as an integer or UUID"
+            )
+        return pynvml.nvmlDeviceGetHandleByIndex(index)
+    return pynvml.nvmlDeviceGetHandleByIndex(0)
 
 
-_GMS_NVML_DEVICE: int = _default_nvml_device()
-
-
-def get_gpu_memory_used(device: int = _GMS_NVML_DEVICE) -> int:
+def get_gpu_memory_used() -> int:
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        handle = _resolve_nvml_handle()
         return pynvml.nvmlDeviceGetMemoryInfo(handle).used
     finally:
         pynvml.nvmlShutdown()
@@ -93,17 +94,16 @@ def wait_for_memory_drop(
     *,
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.5,
-    device: int = _GMS_NVML_DEVICE,
 ) -> int:
     """Poll until GPU memory drops below *baseline_bytes*, then return current usage.
 
     Returns the last observed usage (which may still be >= baseline if timeout fired).
     """
     deadline = time.monotonic() + timeout_s
-    current = get_gpu_memory_used(device)
+    current = get_gpu_memory_used()
     while time.monotonic() < deadline:
         if current < baseline_bytes:
             return current
         time.sleep(poll_interval_s)
-        current = get_gpu_memory_used(device)
+        current = get_gpu_memory_used()
     return current

@@ -4,10 +4,13 @@
 """GPU Memory Service integration for TensorRT-LLM.
 
 Usage:
+    import json
     from gpu_memory_service.integrations.trtllm import setup_gms
 
     if config.load_format == "gms":
-        setup_gms(config.model_loader_extra_config)
+        raw = config.model_loader_extra_config
+        extra = json.loads(raw) if isinstance(raw, str) else (raw or None)
+        setup_gms(extra)
 """
 
 from __future__ import annotations
