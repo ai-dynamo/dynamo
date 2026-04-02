@@ -387,8 +387,9 @@ func generateSingleDCD(
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
 	deployment.Labels = labels
 
-	// only label worker DCDs with their hash for cleanup during rolling updates
-	if IsWorkerComponent(string(component.ComponentType)) {
+// Label worker DCDs and local router DCDs with current worker hash.
+	// Routers use this to resolve worker endpoints across rolling updates.
+	if IsWorkerComponent(string(component.ComponentType)) || IsRouterComponent(component) {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
 		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
 		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
@@ -1397,6 +1398,15 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
+func IsRouterComponent(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil || component.ExtraPodSpec == nil || component.ExtraPodSpec.MainContainer == nil {
+		return false
+	}
+	main := component.ExtraPodSpec.MainContainer
+	joined := strings.Join(append(main.Command, main.Args...), " ")
+	return strings.Contains(joined, "dynamo.router")
+}
+
 // AddStandardEnvVars adds the standard environment variables that are common to
 // both checkpoint jobs and generated worker pods.
 func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
@@ -1817,8 +1827,8 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) ComponentContext {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
-	labels := GetPodTemplateLabels(component)
-	if IsWorkerComponent(string(component.ComponentType)) && labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
+labels := GetPodTemplateLabels(component)
+	if (IsWorkerComponent(string(component.ComponentType)) || IsRouterComponent(component)) && labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
 		workerHashSuffix = labels[commonconsts.KubeLabelDynamoWorkerHash]
 	}
 
