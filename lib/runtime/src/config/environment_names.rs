@@ -261,6 +261,46 @@ pub mod kvbm {
         /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
+
+    /// Remote disk transfer configuration
+    pub mod remote_disk {
+        /// Enable O_DIRECT for POSIX disk transfers (set to "1" or "true")
+        pub const DYN_KVBM_REMOTE_DISK_O_DIRECT: &str = "DYN_KVBM_REMOTE_DISK_O_DIRECT";
+
+        /// Validate that host buffer addresses are aligned to the O_DIRECT quantum
+        /// before submitting a transfer (set to "1" or "true"; default off)
+        pub const DYN_KVBM_REMOTE_DISK_VALIDATE_ALIGNMENT: &str =
+            "DYN_KVBM_REMOTE_DISK_VALIDATE_ALIGNMENT";
+
+        /// Override the O_DIRECT alignment quantum in bytes (default: page size)
+        pub const DYN_KVBM_REMOTE_DISK_ALIGNMENT_BYTES: &str =
+            "DYN_KVBM_REMOTE_DISK_ALIGNMENT_BYTES";
+
+        /// Maximum number of cached file descriptors in the remote disk fd cache
+        /// (default: 131072)
+        pub const DYN_KVBM_REMOTE_DISK_FD_CACHE_MAX_ENTRIES: &str =
+            "DYN_KVBM_REMOTE_DISK_FD_CACHE_MAX_ENTRIES";
+
+        /// Enable NIXL-path bounce buffer for misaligned O_DIRECT reads
+        /// (set to "1" or "true"; default off)
+        pub const DYN_KVBM_NIXL_BOUNCE_BUFFER: &str = "DYN_KVBM_NIXL_BOUNCE_BUFFER";
+
+    }
+
+    /// KVBM test-only environment variables
+    pub mod testing {
+        /// S3 bucket name used by KVBM integration tests
+        pub const KVBM_TEST_S3_BUCKET: &str = "KVBM_TEST_S3_BUCKET";
+
+        /// S3 endpoint URL used by KVBM integration tests (e.g. "http://minio:9000")
+        pub const KVBM_TEST_S3_ENDPOINT: &str = "KVBM_TEST_S3_ENDPOINT";
+
+        /// Local filesystem path used by KVBM disk integration tests
+        pub const KVBM_TEST_DISK_PATH: &str = "KVBM_TEST_DISK_PATH";
+
+        /// S3 bucket name used by NIXL CUDA integration tests
+        pub const NIXL_TEST_BUCKET: &str = "NIXL_TEST_BUCKET";
+    }
 }
 
 /// LLM (Language Model) inference environment variables
@@ -475,6 +515,15 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            kvbm::remote_disk::DYN_KVBM_REMOTE_DISK_O_DIRECT,
+            kvbm::remote_disk::DYN_KVBM_REMOTE_DISK_VALIDATE_ALIGNMENT,
+            kvbm::remote_disk::DYN_KVBM_REMOTE_DISK_ALIGNMENT_BYTES,
+            kvbm::remote_disk::DYN_KVBM_REMOTE_DISK_FD_CACHE_MAX_ENTRIES,
+            kvbm::remote_disk::DYN_KVBM_NIXL_BOUNCE_BUFFER,
+            kvbm::testing::KVBM_TEST_S3_BUCKET,
+            kvbm::testing::KVBM_TEST_S3_ENDPOINT,
+            kvbm::testing::KVBM_TEST_DISK_PATH,
+            kvbm::testing::NIXL_TEST_BUCKET,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

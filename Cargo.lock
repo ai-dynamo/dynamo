@@ -1987,6 +1987,7 @@ dependencies = [
  "nixl-sys",
  "object_store",
  "offset-allocator",
+ "once_cell",
  "oneshot",
  "parking_lot",
  "prometheus",

@@ -172,7 +172,9 @@ pub struct PoolConfig {
 
 pub struct TransferContext {
     nixl_agent: Arc<Option<NixlAgent>>,
-    stream: Arc<CudaStream>,
+    /// `None` when constructed via [`TransferContext::without_cuda`] (POSIX/OBJ
+    /// remote-transfer tests that run without a GPU).
+    stream: Option<Arc<CudaStream>>,
     async_rt_handle: Handle,
 
     // NEW: CUDA memory pool for stream-ordered host memory allocation
@@ -247,7 +249,7 @@ impl TransferContext {
 
         Ok(Self {
             nixl_agent,
-            stream,
+            stream: Some(stream),
             async_rt_handle,
             cuda_mem_pool,
             pinned_buffer_pool: pool,
@@ -255,6 +257,36 @@ impl TransferContext {
             cuda_event_worker: Some(cuda_event_worker),
             cancel_token,
         })
+    }
+
+    /// Construct a `TransferContext` for NIXL remote-storage transfers only.
+    ///
+    /// Omits the CUDA stream; suitable for POSIX (disk) and OBJ (S3) transfer
+    /// paths that never touch GPU memory.  Calling `stream()` or `cuda_event()`
+    /// on a context built this way will panic / return an error — those methods
+    /// are only reachable from the GPU-to-GPU copy path, which is not exercised
+    /// by remote-storage transfers.
+    pub fn without_cuda(
+        nixl_agent: Arc<Option<NixlAgent>>,
+        async_rt_handle: Handle,
+    ) -> Self {
+        let (cuda_event_tx, cuda_event_rx) =
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
+
+        let cancel_token = CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+        let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
+
+        Self {
+            nixl_agent,
+            stream: None,
+            async_rt_handle,
+            cuda_mem_pool: None,
+            pinned_buffer_pool: None,
+            cuda_event_tx,
+            cuda_event_worker: Some(cuda_event_worker),
+            cancel_token,
+        }
     }
 
     fn setup_cuda_event_worker(
@@ -289,8 +321,12 @@ impl TransferContext {
         self.nixl_agent.clone()
     }
 
+    /// Returns the CUDA stream, or panics if this context was created via
+    /// [`Self::without_cuda()`].  Only call from code paths that require a GPU.
     pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
+        self.stream
+            .as_ref()
+            .expect("stream() called on a no-CUDA TransferContext")
     }
 
     pub fn async_rt_handle(&self) -> &Handle {
@@ -303,8 +339,12 @@ impl TransferContext {
     }
 
     pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
-        let event = self
-            .stream
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            TransferError::ExecutionError(
+                "cuda_event() called on a no-CUDA TransferContext".to_string(),
+            )
+        })?;
+        let event = stream
             .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
             .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
 
@@ -378,7 +418,7 @@ pub mod v2 {
     #[derive(Clone)]
     pub struct TransferContext {
         nixl_agent: Arc<Option<NixlAgent>>,
-        stream: Arc<CudaStream>,
+        stream: Option<Arc<CudaStream>>,
         async_rt_handle: Handle,
     }
 
@@ -395,7 +435,19 @@ pub mod v2 {
         ) -> Self {
             Self {
                 nixl_agent,
-                stream,
+                stream: Some(stream),
+                async_rt_handle,
+            }
+        }
+
+        /// Constructor for NIXL POSIX/OBJ remote-transfer paths; omits the CUDA stream.
+        pub fn without_cuda(
+            nixl_agent: Arc<Option<NixlAgent>>,
+            async_rt_handle: Handle,
+        ) -> Self {
+            Self {
+                nixl_agent,
+                stream: None,
                 async_rt_handle,
             }
         }
@@ -404,8 +456,11 @@ pub mod v2 {
             self.nixl_agent.clone()
         }
 
+        /// Returns the CUDA stream, or panics if constructed via [`Self::without_cuda()`].
         pub fn stream(&self) -> &Arc<CudaStream> {
-            &self.stream
+            self.stream
+                .as_ref()
+                .expect("stream() called on a no-CUDA TransferContext")
         }
 
         pub fn async_rt_handle(&self) -> &Handle {
@@ -413,8 +468,12 @@ pub mod v2 {
         }
 
         pub fn record_event(&self) -> Result<EventSynchronizer, TransferError> {
-            let event = self
-                .stream
+            let stream = self.stream.as_ref().ok_or_else(|| {
+                TransferError::ExecutionError(
+                    "record_event() called on a no-CUDA TransferContext".to_string(),
+                )
+            })?;
+            let event = stream
                 .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
                 .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
 
