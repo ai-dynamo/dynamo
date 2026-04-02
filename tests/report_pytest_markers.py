@@ -22,6 +22,7 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, Optional, Set
@@ -153,6 +154,126 @@ STUB_MODULES = [
     "prometheus_client.parser",
     "sklearn",
     "sklearn.linear_model",
+    "torch",
+    "torch.cuda",
+    "torch.distributed",
+    "torch.nn",
+    "torch.nn.functional",
+    "torch.multiprocessing",
+    "sglang",
+    "sglang.srt",
+    "sglang.srt.entrypoints",
+    "sglang.srt.entrypoints.openai",
+    "sglang.srt.entrypoints.openai.protocol",
+    "sglang.srt.managers",
+    "sglang.srt.managers.io_struct",
+    "sglang.srt.openai_api",
+    "sglang.srt.openai_api.protocol",
+    "sglang.srt.utils",
+    "sglang.srt.utils.hf_transformers_utils",
+    "vllm",
+    "vllm.entrypoints",
+    "vllm.entrypoints.chat_utils",
+    "vllm.entrypoints.openai",
+    "vllm.entrypoints.openai.protocol",
+    "vllm.sampling_params",
+    "pydantic",
+    "pydantic.fields",
+    "pydantic.functional_validators",
+    "fsspec",
+    "fsspec.spec",
+    "msgpack",
+    "sglang.srt.disaggregation",
+    "sglang.srt.disaggregation.decode",
+    "sglang.srt.function_call",
+    "sglang.srt.function_call.function_call_parser",
+    "sglang.srt.server_args",
+    "vllm.config",
+    "vllm.distributed",
+    "vllm.distributed.parallel_state",
+    "vllm.entrypoints.openai.chat_completion",
+    "vllm.v1",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.stats",
+    "aiconfigurator.generator",
+    "aiconfigurator.generator.config",
+    "aiconfigurator.generator.api",
+    "aiconfigurator.generator.api.dynamo",
+    "fsspec.implementations",
+    "fsspec.implementations.local",
+    "nixl",
+    "sglang.srt.disaggregation.utils",
+    "sglang.srt.parser",
+    "sglang.srt.server_args_config_parser",
+    "vllm.distributed.kv_events",
+    "vllm.entrypoints.openai.chat_completion.protocol",
+    "vllm.inputs",
+    "vllm.v1.engine",
+    "vllm.v1.engine.core",
+    "vllm.v1.engine.async_llm",
+    "vllm.engine",
+    "vllm.engine.arg_utils",
+    "vllm.entrypoints.openai.engine",
+    "vllm.entrypoints.openai.engine.async_llm_engine",
+    "vllm.lora",
+    "vllm.lora.request",
+    "vllm.inputs",
+    "nixl._api",
+    "fsspec.implementations.dirfs",
+    "sglang.srt.parser.reasoning_parser",
+    "aiconfigurator.generator.module_bridge",
+    "aiconfigurator.generator.naive",
+    "safetensors",
+    "safetensors.torch",
+    "vllm.entrypoints.openai.engine.protocol",
+    "vllm.outputs",
+    "vllm.utils",
+    "vllm.v1.engine.exceptions",
+    "vllm.inputs.data",
+    "vllm.reasoning",
+    "vllm.reasoning.reasoner",
+    "nixl._bindings",
+    "aiconfigurator.sdk",
+    "aiconfigurator.sdk.inference_client",
+    "aiconfigurator.sdk.task",
+    "aiconfigurator.sdk.task.config",
+    "msgspec",
+    "vllm.renderers",
+    "vllm.renderers.base",
+    "vllm.tool_parsers",
+    "vllm.tool_parsers.abstract_tool_parser",
+    "zmq",
+    "zmq.asyncio",
+    "pydantic_core",
+    "sglang.srt.disaggregation.kv_events",
+    "vllm.tokenizers",
+    "vllm.v1.engine.input_processor",
+    "pybase64",
+    "typing_extensions",
+    "vllm.utils.async_utils",
+    "vllm.v1.engine.output_processor",
+    "sglang.srt.parser.conversation",
+    "vllm.logprobs",
+    "vllm.logprobs.logprobs",
+    "vllm.multimodal",
+    "vllm.multimodal.inputs",
+    "vllm.entrypoints.openai.chat_completion.serving",
+    "vllm.entrypoints.openai.serving_chat",
+    "vllm.entrypoints.openai.completion",
+    "vllm.entrypoints.openai.completion.protocol",
+    "vllm.entrypoints.openai.serving_completion",
+    "vllm.entrypoints.openai.serving_models",
+    "vllm.utils.system_utils",
+    "blake3",
+    "vllm.distributed.ec_transfer",
+    "vllm.distributed.ec_transfer.ec_connector",
+    "vllm.distributed.ec_transfer.ec_connector.base",
+    "vllm.v1.core",
+    "vllm.v1.core.sched",
+    "vllm.v1.core.sched.output",
+    "vllm.v1.metrics.loggers",
+    "aiconfigurator.cli",
+    "aiconfigurator.cli.main",
 ]
 
 # Project paths for local imports
@@ -198,9 +319,15 @@ class DependencyStubber:
         stub.__path__ = []
         stub.__name__ = name
         stub.__loader__ = None
-        stub.__spec__ = None
+        stub.__spec__ = ModuleSpec(name, None)
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
+
+    def force_stub(self, module_name: str) -> None:
+        """Force-replace a module with a stub, even if already loaded."""
+        stub = self._create_module_stub(module_name)
+        sys.modules[module_name] = stub
+        self.stubbed.add(module_name)
 
     def ensure_available(self, module_name: str) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
@@ -408,6 +535,12 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
     """Run pytest collection and return exit code and report."""
     if use_stubbing:
         stubber = DependencyStubber()
+
+        # Force-stub modules where the real .so/.pyd may be present but
+        # incomplete (e.g. stale native extension missing newer symbols).
+        stubber.force_stub("dynamo._core")
+        stubber.force_stub("nixl._api")
+
         for module in STUB_MODULES:
             stubber.ensure_available(module)
 
@@ -418,6 +551,32 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
             )
         except (KeyError, AttributeError):
             pass
+
+        # Special case: pydantic's BaseModel must be a real class so that
+        # class Foo(BaseModel) and type annotations don't explode.
+        if "pydantic" in sys.modules and "pydantic" in stubber.stubbed:
+            _pydantic = sys.modules["pydantic"]
+
+            class _FakeBaseModel:
+                model_config: dict = {}
+
+                def __init__(self, **kwargs: object) -> None:
+                    for k, v in kwargs.items():
+                        setattr(self, k, v)
+
+                def __init_subclass__(cls, **kwargs: object) -> None:
+                    super().__init_subclass__(**kwargs)
+
+            _pydantic.BaseModel = _FakeBaseModel  # type: ignore[attr-defined]
+            _pydantic.Field = lambda *a, **kw: None  # type: ignore[attr-defined]
+            _pydantic.model_validator = lambda *a, **kw: lambda f: f  # type: ignore[attr-defined]
+            _pydantic.field_validator = lambda *a, **kw: lambda f: f  # type: ignore[attr-defined]
+            _pydantic.ConfigDict = lambda **kw: {}  # type: ignore[attr-defined]
+            _pydantic.ValidationError = type("ValidationError", (Exception,), {})  # type: ignore[attr-defined]
+
+        # Special case: vllm needs __version__
+        if "vllm" in sys.modules and "vllm" in stubber.stubbed:
+            sys.modules["vllm"].__version__ = "0.0.0"  # type: ignore[attr-defined]
 
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
