@@ -706,9 +706,18 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				g.Expect(len(injected.Command)).To(gomega.Equal(tt.expectedInitCommandLen))
 				g.Expect(injected.Command[0]).To(gomega.Equal("python3"))
 				g.Expect(injected.Command[1]).To(gomega.Equal("-c"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(tt.expectWaitScriptContent))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring("socket.create_connection"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(commonconsts.VLLMMpMasterPort))
+
+				script := injected.Command[2]
+				g.Expect(script).To(gomega.ContainSubstring(tt.expectWaitScriptContent))
+				g.Expect(script).To(gomega.ContainSubstring("socket.create_connection"))
+				g.Expect(script).To(gomega.ContainSubstring(commonconsts.VLLMMpMasterPort))
+
+				g.Expect(script).To(gomega.ContainSubstring("leader_pod_is_healthy"))
+				g.Expect(script).To(gomega.ContainSubstring("kubernetes.default.svc"))
+				g.Expect(script).To(gomega.ContainSubstring("fieldSelector=status.podIP="))
+				g.Expect(script).To(gomega.ContainSubstring("deletionTimestamp"))
+				g.Expect(script).To(gomega.ContainSubstring(`phase != "Running"`))
+				g.Expect(script).To(gomega.ContainSubstring("/var/run/secrets/kubernetes.io/serviceaccount"))
 			} else {
 				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount))
 			}

@@ -94,24 +94,67 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mainImage := podSpec.Containers[0].Image
 
-	waitScript := fmt.Sprintf(`import socket, time
+	waitScript := fmt.Sprintf(`import socket, time, json, ssl, urllib.request
+
+SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 host, port = "%s", %s
+
+def _k8s_ctx():
+    return ssl.create_default_context(cafile=f"{SA}/ca.crt")
+
+def _k8s_headers():
+    token = open(f"{SA}/token").read()
+    return {"Authorization": f"Bearer {token}"}
+
+def _k8s_api():
+    ns = open(f"{SA}/namespace").read()
+    return f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
+
+def leader_pod_is_healthy():
+    try:
+        ip = socket.gethostbyname(host)
+    except socket.gaierror:
+        return False, "DNS resolution failed"
+    try:
+        req = urllib.request.Request(
+            f"{_k8s_api()}?fieldSelector=status.podIP={ip}",
+            headers=_k8s_headers(),
+        )
+        resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(), timeout=5).read())
+        pods = resp.get("items", [])
+        if not pods:
+            return False, f"no pod found with IP {ip}"
+        pod = pods[0]
+        name = pod["metadata"].get("name", "unknown")
+        phase = pod.get("status", {}).get("phase")
+        if pod["metadata"].get("deletionTimestamp"):
+            return False, f"pod {name} is terminating"
+        if phase != "Running":
+            return False, f"pod {name} phase is {phase}"
+        return True, ""
+    except Exception as e:
+        return False, f"K8s API error: {e}"
+
 print(f"Waiting for leader master port at {host}:{port}...", flush=True)
 start = time.monotonic()
 last_status = start
 last_err = ""
 while True:
-    try:
-        s = socket.create_connection((host, port), timeout=2)
-        s.close()
-        elapsed = time.monotonic() - start
-        print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
-        break
-    except Exception as e:
-        last_err = f"{type(e).__name__}: {e}"
+    healthy, reason = leader_pod_is_healthy()
+    if healthy:
+        try:
+            s = socket.create_connection((host, port), timeout=2)
+            s.close()
+            elapsed = time.monotonic() - start
+            print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
+            break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    else:
+        last_err = reason
     now = time.monotonic()
     if now - last_status >= 30:
-        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last error: {last_err})", flush=True)
+        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})", flush=True)
         last_status = now
     time.sleep(2)
 `, leaderHostname, commonconsts.VLLMMpMasterPort)
