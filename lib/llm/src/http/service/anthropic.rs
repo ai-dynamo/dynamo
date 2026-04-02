@@ -124,7 +124,8 @@ async fn handler_anthropic_messages(
     }
 
     // Create request context
-    let request_id = get_or_create_request_id(None, &headers);
+    let request_id = get_or_create_request_id(&headers)
+        .map_err(|msg| anthropic_error(StatusCode::BAD_REQUEST, "invalid_request_error", &msg))?;
     let streaming = request.stream;
     let cancellation_labels = CancellationLabels {
         model: request.model.clone(),

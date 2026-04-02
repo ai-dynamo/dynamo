@@ -28,7 +28,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 use crate::protocols::openai::common_ext::CommonExt;
-use crate::protocols::openai::nvext::NvExt;
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -119,44 +119,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: {
-                // Lossy: collapse all per-block cache_control into a single
-                // last-one-wins value. Sufficient for backends with a single
-                // prefix cache boundary. Full per-block breakpoints are
-                // preserved in AnthropicContext::cache_breakpoints via UnifiedRequest.
-                let mut last_block_cc: Option<CacheControl> = None;
-                for msg in &req.messages {
-                    if let AnthropicMessageContent::Blocks { content } = &msg.content {
-                        for block in content {
-                            let block_cc = match block {
-                                AnthropicContentBlock::Text { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolUse { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolResult { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::Thinking { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                _ => None,
-                            };
-                            if let Some(cc) = block_cc {
-                                last_block_cc = Some(cc.clone());
-                            }
-                        }
-                    }
-                }
-                // Merge: top-level > per-block > system block cache_control
-                let system_cc = req.system.as_ref().and_then(|s| s.cache_control.clone());
-                let effective_cc = req.cache_control.clone().or(last_block_cc).or(system_cc);
-                effective_cc.map(|cc| NvExt {
-                    cache_control: Some(cc),
-                    ..Default::default()
-                })
-            },
+            nvext: None,
             // chat_template_args may be augmented by the Anthropic handler
             // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
             // when a reasoning parser is configured. The conversion layer only
@@ -1419,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_cache_control_passthrough() {
-        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+        use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1450,18 +1413,11 @@ mod tests {
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 300);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
     fn test_cache_control_1h_ttl_passthrough() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1472,12 +1428,7 @@ mod tests {
         assert!(req.cache_control.is_some());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
@@ -1546,8 +1497,6 @@ mod tests {
 
     #[test]
     fn test_per_block_cache_control_last_wins() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1563,10 +1512,7 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600); // Last block's 1h TTL wins
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
@@ -1586,16 +1532,11 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        // Top-level (no TTL = 300s default) takes precedence over per-block (1h)
-        assert_eq!(cc.ttl_seconds(), 300);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
     fn test_system_block_array_with_cache_control() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1612,11 +1553,7 @@ mod tests {
         assert!(system.cache_control.is_some());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req
-            .nvext
-            .expect("nvext should be set from system cache_control");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]

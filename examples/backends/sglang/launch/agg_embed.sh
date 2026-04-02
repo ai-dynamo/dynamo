@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" 2>/dev/null || true)
+GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Embedding Worker" "$MODEL" "$HTTP_PORT"
@@ -68,8 +68,8 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --use-sglang-tokenizer \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
