@@ -70,6 +70,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.model(SWA_MODEL),
 ]
 
 
