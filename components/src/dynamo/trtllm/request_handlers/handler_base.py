@@ -275,6 +275,18 @@ class HandlerBase(BaseGenerativeHandler):
             raise RuntimeError("GMS weights manager is not initialized")
         return manager
 
+    @staticmethod
+    def _get_trtllm_gms_lock_mode():
+        try:
+            from gpu_memory_service.integrations.trtllm.model_loader import (
+                get_gms_lock_mode,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "gpu-memory-service is not installed; cannot use GMS sleep/wake"
+            ) from exc
+        return get_gms_lock_mode()
+
     # ------------------------------------------------------------------
     # Sleep / wake public API
     # ------------------------------------------------------------------
@@ -381,11 +393,7 @@ class HandlerBase(BaseGenerativeHandler):
                 if handle_weights:
                     manager = self._get_gms_manager()
                     if manager.is_unmapped:
-                        from gpu_memory_service.integrations.trtllm.model_loader import (
-                            get_gms_lock_mode,
-                        )
-
-                        manager.connect(get_gms_lock_mode())
+                        manager.connect(self._get_trtllm_gms_lock_mode())
                         manager.remap_all_vas()
 
                 # Restore KV cache via TRTLLM's collective RPC (or local VMM fallback)

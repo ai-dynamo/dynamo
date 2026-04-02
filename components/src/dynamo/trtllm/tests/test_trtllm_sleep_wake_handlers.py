@@ -242,7 +242,7 @@ async def test_resume_weights_via_gms_manager():
             return_value=mock_manager,
         ),
         patch(
-            "gpu_memory_service.integrations.trtllm.model_loader.get_gms_lock_mode",
+            "dynamo.trtllm.request_handlers.handler_base.HandlerBase._get_trtllm_gms_lock_mode",
             return_value=MagicMock(),
         ),
     ):

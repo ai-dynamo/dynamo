@@ -59,9 +59,9 @@ def _sleep_engine(
     weights_gms: GMSServerProcess,
     frontend_port: int,
     *,
-    expected_weights_epoch_id: int | None = None,
-) -> tuple[int, int, int]:
-    """Run inference, verify GMS state, call sleep, return (epoch_id, released_bytes, mem_after)."""
+    expected_weights_hash: str | None = None,
+) -> tuple[str, int, int]:
+    """Run inference, verify GMS state, call sleep, return (hash, released_bytes, mem_after)."""
     result = send_completion(frontend_port, model=TRTLLM_GMS_MODEL_NAME)
     assert result["choices"], "Inference failed before sleep"
 
@@ -69,20 +69,17 @@ def _sleep_engine(
     while True:
         state = weights_gms.get_runtime_state()
         if (
-            state.committed_epoch_id is not None
-            and state.active_rw_epoch_id is None
+            state.state == ServerState.RO
             and state.allocation_count > 0
+            and state.memory_layout_hash
         ):
             break
         if time.monotonic() > deadline:
             raise TimeoutError("weights GMS did not reach committed state before sleep")
         time.sleep(0.1)
 
-    if expected_weights_epoch_id is not None:
-        assert state.committed_epoch_id == expected_weights_epoch_id, (
-            f"Expected weights epoch {expected_weights_epoch_id}, "
-            f"got {state.committed_epoch_id}"
-        )
+    if expected_weights_hash is not None:
+        assert state.memory_layout_hash == expected_weights_hash
 
     mem_before = get_gpu_memory_used()
     sleep_result = engine.sleep()
@@ -110,12 +107,10 @@ def _sleep_engine(
             raise TimeoutError("weights GMS did not reach COMMITTED state after sleep")
         time.sleep(0.1)
 
-    assert state_after.committed_epoch_id == state.committed_epoch_id
-    assert state_after.active_rw_epoch_id is None
     assert state_after.allocation_count == state.allocation_count
     assert state_after.memory_layout_hash == state.memory_layout_hash
 
-    return state.committed_epoch_id, released_bytes, mem_after
+    return state.memory_layout_hash, released_bytes, mem_after
 
 
 @pytest.mark.trtllm
@@ -146,7 +141,7 @@ def test_gms_shadow_engine_failover_trtllm(
         with TRTLLMWithGMSProcess(
             request, "shadow-a", ports["shadow_system"], ports["frontend"]
         ) as shadow_a:
-            weights_epoch_id, shadow_a_released, sleeping_mem = _sleep_engine(
+            weights_hash, shadow_a_released, sleeping_mem = _sleep_engine(
                 shadow_a, weights_gms, ports["frontend"]
             )
 
@@ -157,23 +152,15 @@ def test_gms_shadow_engine_failover_trtllm(
                     shadow_b,
                     weights_gms,
                     ports["frontend"],
-                    expected_weights_epoch_id=weights_epoch_id,
+                    expected_weights_hash=weights_hash,
                 )
 
-                # Weights event history: a single RW connect + commit for epoch.
+                # Weights event history: a single RW connect + commit for the published layout.
                 weights_events_sleeping = weights_gms.get_event_history().events
-                weights_pairs_sleeping = [
-                    (e.kind, e.epoch_id) for e in weights_events_sleeping
+                assert [event.kind for event in weights_events_sleeping] == [
+                    "rw_connected",
+                    "committed",
                 ]
-                assert ("rw_connected", weights_epoch_id) in weights_pairs_sleeping
-                assert ("committed", weights_epoch_id) in weights_pairs_sleeping
-                assert (
-                    weights_pairs_sleeping.count(("rw_connected", weights_epoch_id))
-                    == 1
-                )
-                assert (
-                    weights_pairs_sleeping.count(("committed", weights_epoch_id)) == 1
-                )
 
                 with TRTLLMWithGMSProcess(
                     request, "primary", ports["primary_system"], ports["frontend"]
@@ -184,20 +171,20 @@ def test_gms_shadow_engine_failover_trtllm(
                     assert result["choices"], "Primary inference failed"
                     logger.info("Primary inference OK: %s", result)
 
-                    # Primary uses the same committed weights epoch (as RO).
+                    # Primary uses the same committed weights layout (as RO).
                     deadline = time.monotonic() + 30.0
                     while True:
                         state_with_primary = weights_gms.get_runtime_state()
                         if (
                             state_with_primary.state == ServerState.RO
-                            and state_with_primary.committed_epoch_id
-                            == weights_epoch_id
                             and state_with_primary.ro_session_count >= 1
+                            and state_with_primary.allocation_count > 0
+                            and state_with_primary.memory_layout_hash == weights_hash
                         ):
                             break
                         if time.monotonic() > deadline:
                             raise TimeoutError(
-                                "primary did not connect to committed weights epoch"
+                                "primary did not connect to committed weights layout"
                             )
                         time.sleep(0.1)
 
@@ -232,20 +219,19 @@ def test_gms_shadow_engine_failover_trtllm(
                     >= shadow_a_released * MIN_EXPECTED_MEMORY_RETURN_FRACTION
                 )
 
-                # Weights server must be back in RO state with the same committed epoch.
+                # Weights server must be back in RO state with the same committed layout.
                 deadline = time.monotonic() + 30.0
                 while True:
                     weights_after_wake = weights_gms.get_runtime_state()
                     if (
                         weights_after_wake.state == ServerState.RO
-                        and weights_after_wake.committed_epoch_id == weights_epoch_id
-                        and weights_after_wake.active_rw_epoch_id is None
                         and weights_after_wake.allocation_count > 0
+                        and weights_after_wake.memory_layout_hash == weights_hash
                     ):
                         break
                     if time.monotonic() > deadline:
                         raise TimeoutError(
-                            "shadow A did not reconnect to committed weights epoch"
+                            "shadow A did not reconnect to committed weights layout"
                         )
                     time.sleep(0.1)
 
