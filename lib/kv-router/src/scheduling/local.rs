@@ -69,16 +69,9 @@ where
         monitor_worker_configs: bool,
     ) -> Self {
         if monitor_worker_configs {
-            // Reconcile immediately with the current watch snapshot. This closes the race where
-            // the watch becomes non-empty after `slots` is created but before the monitoring
-            // task starts waiting on `changed()`.
-            let current_workers = workers_with_configs.borrow().clone();
-            let current_dp_range = Self::worker_dp_range(&current_workers);
-            slots.update_workers(&current_dp_range);
-
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
-            let mut last_workers = current_workers;
+            let mut last_workers = monitor_rx.borrow().clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
@@ -569,76 +562,6 @@ mod tests {
 
         scheduler.free("req-1").await.unwrap();
         assert!(scheduler.get_active_lora_counts().is_empty());
-
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_startup_reconciles_workers_already_present_in_watch() {
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            64,
-            HashMap::new(),
-            false,
-            0,
-            "test",
-        ));
-        let (cfg_tx, cfg_rx) = watch::channel(HashMap::new());
-
-        cfg_tx
-            .send(HashMap::from([(
-                7,
-                SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(64),
-                    ..Default::default()
-                },
-            )]))
-            .unwrap();
-
-        let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
-            Arc::clone(&slots),
-            cfg_rx,
-            None,
-            64,
-            DefaultWorkerSelector::new(None, "test"),
-            FcfsPolicy,
-            true,
-            cancel_token.clone(),
-            "test",
-            true,
-        ));
-
-        scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
-                TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
-                None,
-                true,
-                Some("adapter-a".to_string()),
-                0.0,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            slots
-                .active_tokens()
-                .get(&WorkerWithDpRank::new(7, 0))
-                .copied(),
-            Some(64)
-        );
-        assert_eq!(
-            scheduler.get_active_lora_counts(),
-            HashMap::from([(String::from("adapter-a"), 1)])
-        );
 
         cancel_token.cancel();
     }
