@@ -216,37 +216,43 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
 func CopySpec(source, destination client.Object) error {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
 	if err != nil {
 		return err
 	}
-	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
+	srcU := &unstructured.Unstructured{Object: sourceMap}
 
-	// Convert destination to unstructured
 	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
 	if err != nil {
 		return err
 	}
-	destUnstructured := &unstructured.Unstructured{Object: destMap}
+	dstU := &unstructured.Unstructured{Object: destMap}
 
-	// Extract only the spec from source
-	sourceSpec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
+	// Prefer copying "spec" for resources that have it.
+	sourceSpec, found, err := unstructured.NestedFieldCopy(srcU.Object, "spec")
 	if err != nil {
 		return err
 	}
-	if !found {
-		return fmt.Errorf("spec not found in source object")
+	if found {
+		if err := unstructured.SetNestedField(dstU.Object, sourceSpec, "spec"); err != nil {
+			return err
+		}
+		return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
 	}
 
-	// Set the spec in the destination
-	err = unstructured.SetNestedField(destUnstructured.Object, sourceSpec, "spec")
-	if err != nil {
-		return err
+	// For resources without spec (ConfigMaps, Secrets, Roles, etc.),
+	// copy all content fields — everything except the standard Kubernetes
+	// envelope (apiVersion, kind, metadata) and controller-managed status.
+	for k, v := range srcU.Object {
+		switch k {
+		case "apiVersion", "kind", "metadata", "status":
+			continue
+		default:
+			dstU.Object[k] = v
+		}
 	}
 
-	// Convert back to the original object
-	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
 }
 
 func getSpec(obj client.Object) (any, error) {
