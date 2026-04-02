@@ -172,6 +172,12 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
 
+        // Fire deferred session close if finish() was never called
+        // (e.g., client disconnect mid-stream).
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
+        }
+
         if !self.freed {
             let chooser = self.chooser.clone();
             let context_id = self.context_id.clone();

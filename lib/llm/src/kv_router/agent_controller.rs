@@ -176,9 +176,10 @@ impl AgentController {
                 )
                 .await;
 
-                if let Some(resp) = resp {
-                    ensure_session_open_succeeded(&resp, &sc.session_id)?;
-                }
+                let resp = resp.ok_or_else(|| {
+                    anyhow!("open_session RPC failed for session {}", sc.session_id)
+                })?;
+                ensure_session_open_succeeded(&resp, &sc.session_id)?;
 
                 // Bind affinity only after the worker confirms the
                 // session exists, otherwise retries can get pinned to a
