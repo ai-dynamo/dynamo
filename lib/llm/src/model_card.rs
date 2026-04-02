@@ -104,7 +104,7 @@ impl TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    #[serde(alias = "hf_chat_template")]
+    #[serde(rename = "hf_chat_template", alias = "hf_chat_template_jinja")]
     HfChatTemplateJinja {
         is_custom: bool,
         file: CheckedFile,
