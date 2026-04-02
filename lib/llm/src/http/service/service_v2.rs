@@ -506,24 +506,8 @@ impl HttpServiceConfigBuilder {
 
         let mut all_docs = Vec::new();
 
-        // on_response callback for system routes (health, metrics, models)
-        let on_response_system = |response: &Response<Body>,
-                                  latency: Duration,
-                                  _span: &tracing::Span| {
-            let status = response.status();
-            let latency_ms = latency.as_millis();
-            if status.is_server_error() {
-                tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
-            } else if status.is_client_error() {
-                tracing::warn!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
-            } else {
-                tracing::debug!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
-            }
-        };
-        // on_response callback for inference routes (completions, chat, embeddings, etc.)
-        let on_response_inference = |response: &Response<Body>,
-                                     latency: Duration,
-                                     _span: &tracing::Span| {
+        // Shared on_response callback for both system and inference routes
+        let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
             let status = response.status();
             let latency_ms = latency.as_millis();
             if status.is_server_error() || status.is_client_error() {
@@ -553,7 +537,7 @@ impl HttpServiceConfigBuilder {
         system_router = system_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_system_request_span)
-                .on_response(on_response_system),
+                .on_response(on_response),
         );
 
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
@@ -567,7 +551,7 @@ impl HttpServiceConfigBuilder {
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
-                .on_response(on_response_inference),
+                .on_response(on_response),
         );
 
         // OpenAPI documentation routes (system)
