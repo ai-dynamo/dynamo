@@ -555,11 +555,13 @@ class SglangEngineFactory:
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
-        tool_call_parser_name = self.tool_call_parser_name or _runtime_config_parser_name(
-            mdc, "tool_call_parser"
+        tool_call_parser_name = (
+            self.tool_call_parser_name
+            or _runtime_config_parser_name(mdc, "tool_call_parser")
         )
-        reasoning_parser_name = self.reasoning_parser_name or _runtime_config_parser_name(
-            mdc, "reasoning_parser"
+        reasoning_parser_name = (
+            self.reasoning_parser_name
+            or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
 
         if tool_call_parser_name:
