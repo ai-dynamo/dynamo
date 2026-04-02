@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+from collections import defaultdict
 from typing import Any, Dict, List
 
 import torch
@@ -32,6 +33,37 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+# Scheduler mode: "per_request" keeps all images from one request on same encoder,
+# "per_image" (default/legacy) distributes images within a request across encoders
+ENCODER_SCHEDULER_MODE = os.getenv("DYN_ENCODER_SCHEDULER", "per_request")
+
+# Encoder split ratio: controls request distribution between encoders
+# Format: "N:M" where N requests go to first encoder, M to second encoder
+# Examples: "1:1" (equal split, default), "7:3" (70% to first, 30% to second)
+ENCODER_SPLIT_RATIO_STR = os.getenv("DYN_ENCODER_SPLIT_RATIO", "1:1")
+
+
+def _parse_split_ratio(ratio_str: str) -> tuple[int, int]:
+    """Parse split ratio string like '7:3' into tuple (7, 3)."""
+    try:
+        parts = ratio_str.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid format: {ratio_str}")
+        ratio1, ratio2 = int(parts[0]), int(parts[1])
+        if ratio1 <= 0 or ratio2 <= 0:
+            raise ValueError(f"Ratios must be positive: {ratio_str}")
+        return (ratio1, ratio2)
+    except Exception as e:
+        logger.warning(
+            f"Failed to parse DYN_ENCODER_SPLIT_RATIO='{ratio_str}': {e}. Using default 1:1"
+        )
+        return (1, 1)
+
+
+ENCODER_SPLIT_RATIO = _parse_split_ratio(ENCODER_SPLIT_RATIO_STR)
+
+# Round-robin counter for per-request scheduling (thread-safe via GIL for single event loop)
+_encoder_round_robin_index = 0
 
 
 # ── Internal helpers (all underscore-prefixed) ───────────────────────
@@ -91,32 +123,32 @@ def _accumulate_embeddings(
         image_grid_thw=image_grid_thw,
     )
 
-    if "image" not in multi_modal_data:
-        multi_modal_data["image"] = mm_data["image"]
-        return
-
     if isinstance(mm_data["image"], dict):
         # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
-        multi_modal_data["image"]["image_embeds"] = torch.cat(
-            (
-                multi_modal_data["image"]["image_embeds"],
-                mm_data["image"]["image_embeds"],
+        if multi_modal_data["image"] == []:
+            multi_modal_data["image"] = mm_data["image"]
+        else:
+            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
+            multi_modal_data["image"]["image_embeds"] = torch.cat(
+                (
+                    multi_modal_data["image"]["image_embeds"],
+                    mm_data["image"]["image_embeds"],
+                )
             )
-        )
-        multi_modal_data["image"]["image_grid_thw"] = torch.cat(
-            (
-                multi_modal_data["image"]["image_grid_thw"],
-                mm_data["image"]["image_grid_thw"],
+            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+                (
+                    multi_modal_data["image"]["image_grid_thw"],
+                    mm_data["image"]["image_grid_thw"],
+                )
             )
-        )
-    elif isinstance(mm_data["image"], torch.Tensor):
-        multi_modal_data["image"] = torch.cat(
-            (multi_modal_data["image"], mm_data["image"])
-        )
     else:
-        raise ValueError(
-            f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
-        )
+        # [gluo FIXME] embedding with multiple images?
+        if multi_modal_data["image"] == []:
+            multi_modal_data["image"] = mm_data["image"]
+        else:
+            multi_modal_data["image"] = torch.cat(
+                (multi_modal_data["image"], mm_data["image"])
+            )
 
 
 def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
@@ -140,6 +172,7 @@ async def _fetch_from_encode_workers(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     context=None,
+    encoder_device_mapping: dict | None = None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image URLs to encode workers, load embeddings, and return ready groups.
 
@@ -167,25 +200,133 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
         batch: List[MultiModalGroup] = []
         encode_response_streams = []
-        for url in image_urls:
-            multimodal_input = MultiModalInput()
-            multimodal_input.image_url = url
-            batch.append(MultiModalGroup(multimodal_input=multimodal_input))
 
-            if len(batch) >= encode_batch_size:
+        # Select encoder based on scheduling mode
+        if ENCODER_SCHEDULER_MODE == "per_request":
+            # Per-request mode: pick one encoder for entire request, rotate across requests
+            global _encoder_round_robin_index
+            instance_ids = encode_worker_client.instance_ids()
+
+            logger.debug(
+                f"[ENCODER_SELECTION] Available instance_ids (original): {instance_ids}, "
+                f"Split ratio: {ENCODER_SPLIT_RATIO}"
+            )
+            if not instance_ids:
+                raise RuntimeError("No encoder instances available")
+
+            # Reorder instance_ids so XPU is always first, based on encoder_device_mapping
+            if encoder_device_mapping and len(instance_ids) == 2:
+                # Sort: XPU/auto first, then CPU
+                sorted_ids = []
+                for iid in instance_ids:
+                    device = encoder_device_mapping.get(iid, "").lower()
+                    # XPU/auto goes first (priority 0), CPU goes second (priority 1)
+                    priority = 1 if device == "cpu" else 0
+                    sorted_ids.append((priority, iid))
+                sorted_ids.sort()
+                instance_ids = [iid for _, iid in sorted_ids]
+                logger.info(
+                    f"[ENCODER_SELECTION] Reordered instance_ids (XPU first): {instance_ids}"
+                )
+
+            # Apply weighted round-robin based on split ratio
+            if len(instance_ids) == 2:
+                # Weighted selection for dual encoder setup
+                # instance_ids has been reordered: [0]=XPU, [1]=CPU
+                ratio1, ratio2 = ENCODER_SPLIT_RATIO
+                total_ratio = ratio1 + ratio2
+                position = _encoder_round_robin_index % total_ratio
+
+                # Select first encoder (XPU) if position < ratio1, else second encoder (CPU)
+                encoder_index = 0 if position < ratio1 else 1
+                selected_instance_id = instance_ids[encoder_index]
+
+                # Look up actual device type from mapping
+                if encoder_device_mapping:
+                    encoder_type = encoder_device_mapping.get(
+                        selected_instance_id, "unknown"
+                    ).upper()
+                else:
+                    encoder_type = "UNKNOWN (no mapping)"
+
+                logger.warning(
+                    f"========== ENCODER SELECTION ==========\n"
+                    f"Request ID: {request_id}\n"
+                    f"Round-robin index: {_encoder_round_robin_index}\n"
+                    f"Position in cycle: {position}/{total_ratio}\n"
+                    f"Instance IDs (ordered: XPU first): {instance_ids}\n"
+                    f"Selected index: {encoder_index} (instance_id={selected_instance_id})\n"
+                    f"Device type (from mapping): {encoder_type}\n"
+                    f"Split ratio XPU:CPU = {ratio1}:{ratio2}\n"
+                    f"Images: {len(image_urls)}\n"
+                    f"========================================"
+                )
+
+                logger.info(
+                    f"[PREFILL] request: {request_id} assigned to {encoder_type} encoder instance {selected_instance_id} "
+                    f"(mode=per_request, split_ratio={ratio1}:{ratio2}, position={position}/{total_ratio}, {len(image_urls)} images)"
+                )
+            else:
+                # Simple round-robin for single or 3+ encoders
+                selected_instance_id = instance_ids[
+                    _encoder_round_robin_index % len(instance_ids)
+                ]
+                logger.info(
+                    f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
+                    f"(mode=per_request, {len(image_urls)} images)"
+                )
+
+            _encoder_round_robin_index += 1
+
+            # Send all batches to the same encoder using direct()
+            for url in image_urls:
+                multimodal_input = MultiModalInput()
+                multimodal_input.image_url = url
+                batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+
+                if len(batch) >= encode_batch_size:
+                    encode_request.multimodal_inputs = batch
+                    payload = encode_request.model_dump_json()
+                    encode_response_streams.append(
+                        await encode_worker_client.direct(
+                            payload, selected_instance_id, context=context  # type: ignore[arg-type]
+                        )
+                    )
+                    batch = []
+
+            if batch:
+                encode_request.multimodal_inputs = batch
+                payload = encode_request.model_dump_json()
+                encode_response_streams.append(
+                    await encode_worker_client.direct(
+                        payload, selected_instance_id, context=context  # type: ignore[arg-type]
+                    )
+                )
+        else:
+            # Per-image mode (legacy): round-robin per batch, images distributed across encoders
+            logger.debug(
+                f"[PREFILL] request: {request_id} using per_image scheduler "
+                f"(mode=per_image, {len(image_urls)} images)"
+            )
+            for url in image_urls:
+                multimodal_input = MultiModalInput()
+                multimodal_input.image_url = url
+                batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+
+                if len(batch) >= encode_batch_size:
+                    encode_request.multimodal_inputs = batch
+                    payload = encode_request.model_dump_json()
+                    encode_response_streams.append(
+                        await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
+                    )
+                    batch = []
+
+            if batch:
                 encode_request.multimodal_inputs = batch
                 payload = encode_request.model_dump_json()
                 encode_response_streams.append(
                     await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
                 )
-                batch = []
-
-        if batch:
-            encode_request.multimodal_inputs = batch
-            payload = encode_request.model_dump_json()
-            encode_response_streams.append(
-                await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
-            )
 
     with time_and_log_code_section(
         f"[PREFILL] request: {request_id} receive encode responses"
@@ -225,6 +366,7 @@ async def _fetch_embeddings(
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
     context=None,
+    encoder_device_mapping: dict | None = None,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
@@ -265,6 +407,7 @@ async def _fetch_embeddings(
             request_id,
             receiver,
             context=context,
+            encoder_device_mapping=encoder_device_mapping,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
@@ -295,10 +438,12 @@ class MultiModalEmbeddingLoader:
         encode_worker_client: Client,
         receiver: AbstractEmbeddingReceiver,
         embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None,
+        encoder_device_mapping: dict | None = None,
     ):
         self._encode_worker_client = encode_worker_client
         self._receiver = receiver
         self._embedding_cache_manager = embedding_cache_manager
+        self._encoder_device_mapping = encoder_device_mapping
 
     async def load_multimodal_embeddings(
         self,
@@ -325,9 +470,10 @@ class MultiModalEmbeddingLoader:
             self._receiver,
             cache=self._embedding_cache_manager,
             context=context,
+            encoder_device_mapping=self._encoder_device_mapping,
         )
 
-        multi_modal_data: Dict[str, Any] = {}
+        multi_modal_data: Dict[str, Any] = defaultdict(list)
         with time_and_log_code_section(
             f"[PREFILL] request: {request_id} accumulate embeddings"
         ):

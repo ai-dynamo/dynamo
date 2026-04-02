@@ -155,7 +155,7 @@ def update_dynamo_config_with_engine(
 
     # Multi-modal related component/endpoint resolution
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
-        dynamo_config.component = "encode"
+        dynamo_config.component = "encoder"
         dynamo_config.endpoint = "generate"
     # Standard component/endpoint resolution
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:

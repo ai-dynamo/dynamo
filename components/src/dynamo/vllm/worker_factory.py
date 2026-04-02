@@ -161,21 +161,39 @@ class WorkerFactory:
         shutdown_endpoints: list,  # mutated in place
     ) -> None:
         """Initialize standalone multimodal encode worker."""
+
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        shutdown_endpoints[:] = [generate_endpoint]
+        device_info_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.device_info"
+        )
+        shutdown_endpoints[:] = [generate_endpoint, device_info_endpoint]
 
         handler = EncodeWorkerHandler(
             config.engine_args, config.embedding_transfer_mode  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
+
         logger.info("Starting to serve the encode worker endpoint...")
+
+        # Background task to log registration after endpoint is ready
+        async def log_after_registration():
+            await asyncio.sleep(1.0)  # Wait for endpoint to register
+            handler.log_registration(
+                generate_endpoint, config.namespace, config.component, config.endpoint
+            )
+
+        # Start logging task in background
+        asyncio.create_task(log_after_registration())
 
         try:
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate, metrics_labels=[("model", config.model)]
+                ),
+                device_info_endpoint.serve_endpoint(
+                    handler.get_device_info, metrics_labels=[("model", config.model)]
                 ),
             )
         except Exception as e:
@@ -266,9 +284,10 @@ class WorkerFactory:
         # Currently routing to worker is still controlled by the worker
         # as the worker has logic to determine whether remote encode should be
         # performed
-        encode_worker_client = await self._maybe_get_encode_worker_client(
-            runtime, config
-        )
+        (
+            encode_worker_client,
+            encoder_device_mapping,
+        ) = await self._maybe_get_encode_worker_client(runtime, config)
 
         handler = DecodeWorkerHandler(
             runtime,
@@ -282,6 +301,7 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
+            encoder_device_mapping=encoder_device_mapping,
         )
         handler.add_temp_dir(prometheus_temp_dir)
 
@@ -490,9 +510,10 @@ class WorkerFactory:
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
 
-        encode_worker_client = await self._maybe_get_encode_worker_client(
-            runtime, config
-        )
+        (
+            encode_worker_client,
+            encoder_device_mapping,
+        ) = await self._maybe_get_encode_worker_client(runtime, config)
 
         handler = PrefillWorkerHandler(
             runtime,
@@ -506,6 +527,7 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
+            encoder_device_mapping=encoder_device_mapping,
         )
         handler.add_temp_dir(prometheus_temp_dir)
 
@@ -617,15 +639,82 @@ class WorkerFactory:
 
     async def _maybe_get_encode_worker_client(
         self, runtime: DistributedRuntime, config: Config
-    ) -> Optional[Any]:
-        """Helper function to get encode worker client if routing to encoder is enabled."""
+    ) -> tuple[Optional[Any], dict[int, str]]:
+        """Helper function to get encode worker client if routing to encoder is enabled.
+
+        Returns:
+            tuple: (encode_worker_client, encoder_device_mapping)
+                   encoder_device_mapping is dict[instance_id] = device_type
+        """
         if config.route_to_encoder:
-            # [gluo NOTE] hardcoded component name
+            import json
+
             encode_worker_client = await runtime.endpoint(
-                f"{config.namespace}.encode.generate"
+                f"{config.namespace}.encoder.generate"
             ).client()
             logger.info("Waiting for Encoder Worker Instances ...")
             await encode_worker_client.wait_for_instances()
-            logger.info("Connected to encode workers")
-            return encode_worker_client
-        return None
+
+            # Log discovered encoder instances
+            instance_ids = encode_worker_client.instance_ids()
+            logger.warning(
+                f"========== PREFILL WORKER: DISCOVERED ENCODERS ==========\n"
+                f"Number of encoders: {len(instance_ids)}\n"
+                f"Instance IDs: {instance_ids}\n"
+                f"========================================================"
+            )
+
+            # Query each encoder for its device type to build mapping
+            # Note: device_info endpoint has different instance_ids than generate endpoint
+            # So we query device_info and it returns its generate endpoint's instance_id
+            encoder_device_mapping = {}
+            device_info_client = await runtime.endpoint(
+                f"{config.namespace}.encoder.device_info"
+            ).client()
+
+            await device_info_client.wait_for_instances()
+            device_info_instances = device_info_client.instance_ids()
+            logger.info(
+                f"Found {len(device_info_instances)} device_info endpoint instances"
+            )
+
+            for device_info_instance_id in device_info_instances:
+                try:
+                    logger.info(
+                        f"Querying device_info instance {device_info_instance_id}..."
+                    )
+                    response_stream = await device_info_client.direct(
+                        "", device_info_instance_id
+                    )
+                    async for response in response_stream:
+                        device_info = json.loads(response.data())
+                        device_type = device_info.get("device_type", "unknown")
+                        generate_instance_id = device_info.get("generate_instance_id")
+
+                        if generate_instance_id is not None:
+                            encoder_device_mapping[generate_instance_id] = device_type
+                            logger.warning(
+                                f"========== ENCODER DEVICE MAPPING ==========\n"
+                                f"Generate Instance ID: {generate_instance_id}\n"
+                                f"Device Type: {device_type}\n"
+                                f"==========================================="
+                            )
+                        else:
+                            logger.error(
+                                f"device_info response missing generate_instance_id: {device_info}"
+                            )
+                        break  # Only need first response
+                except Exception as e:
+                    logger.error(
+                        f"Failed to query device_info instance {device_info_instance_id}: {e}"
+                    )
+
+            logger.warning(
+                f"========== COMPLETE ENCODER DEVICE MAPPING ==========\n"
+                f"{encoder_device_mapping}\n"
+                f"===================================================="
+            )
+
+            logger.info("Connected to encoder workers")
+            return encode_worker_client, encoder_device_mapping
+        return None, {}

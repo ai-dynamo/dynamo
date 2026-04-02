@@ -369,6 +369,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Optional[Client] = None,
+        encoder_device_mapping: dict[int, str] | None = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -391,7 +392,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
-        self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
+        self.embedding_loader = self.init_embedding_loader(
+            config, encode_worker_client, encoder_device_mapping
+        )
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -409,7 +412,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.shutdown_event = shutdown_event
 
     def init_embedding_loader(
-        self, config: Config, encode_worker_client: Optional[Client] = None
+        self,
+        config: Config,
+        encode_worker_client: Optional[Client] = None,
+        encoder_device_mapping: dict[int, str] | None = None,
     ) -> Optional[MultiModalEmbeddingLoader]:
         """Initialize the embedding loader with the given encode worker client."""
         # Without encode worker, the embedding will be generated internally by vLLM.
@@ -452,6 +458,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             encode_worker_client=self.encode_worker_client,  # type: ignore
             receiver=self.embedding_receiver,
             embedding_cache_manager=self.embedding_cache_manager,
+            encoder_device_mapping=encoder_device_mapping,
         )
 
     async def sleep(self, body: dict) -> dict:
@@ -1522,6 +1529,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        encoder_device_mapping: dict[int, str] | None = None,
     ):
         super().__init__(
             runtime,
@@ -1535,6 +1543,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             shutdown_event,
             enable_frontend_decoding,
             encode_worker_client,
+            encoder_device_mapping,
         )
 
     async def generate(self, request, context):
@@ -1756,6 +1765,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        encoder_device_mapping: dict[int, str] | None = None,
     ):
         super().__init__(
             runtime,
@@ -1769,6 +1779,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             shutdown_event,
             enable_frontend_decoding,
             encode_worker_client,
+            encoder_device_mapping,
         )
 
     async def generate(self, request, context):
