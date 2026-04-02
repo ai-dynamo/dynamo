@@ -135,6 +135,9 @@ struct HfTokenizerConfigJsonFormatter {
     /// When true, strip tool definitions from the chat template when tool_choice is "none".
     /// This prevents models from generating raw XML tool calls in the content field.
     exclude_tools_when_tool_choice_none: bool,
+    /// True if the chat template natively references `reasoning_content`.
+    /// When true, skip injection — the template handles it.
+    template_handles_reasoning: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter

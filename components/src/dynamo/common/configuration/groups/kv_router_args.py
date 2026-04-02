@@ -34,8 +34,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
-    "router_enable_cache_control",
-    "min_initial_workers",
     "router_queue_policy",
     "remote_indexer_component",
 )
@@ -60,8 +58,6 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
-    router_enable_cache_control: bool
-    min_initial_workers: int
     router_queue_policy: str
     remote_indexer_component: Optional[str]
 
@@ -261,30 +257,6 @@ class KvRouterArgGroup(ArgGroup):
                 "--no-router-kv-events is set."
             ),
             arg_type=int,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--enable-cache-control",
-            env_var="DYN_ENABLE_CACHE_CONTROL",
-            default=False,
-            dest="router_enable_cache_control",
-            help=(
-                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
-                "a cache_control service mesh client and fires pin_prefix after generation for "
-                "requests with nvext.cache_control."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-min-initial-workers",
-            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
-            default=1,
-            help=(
-                "KV Router: Minimum number of workers that must be discovered before "
-                "router startup continues. Ignored when skip_initial_worker_wait is enabled."
-            ),
-            arg_type=int,
-            dest="min_initial_workers",
         )
         add_argument(
             g,

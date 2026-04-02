@@ -53,7 +53,24 @@ make docker-push-placeholder \
 
 The placeholder image preserves the normal runtime entrypoint/command contract and adds the `criu`, `cuda-checkpoint`, and `nsrestore` tooling needed for checkpoint and restore.
 
-### 2. Enable operator checkpointing
+To build either snapshot image against a custom CRIU fork or ref, pass
+`CRIU_REPO` and `CRIU_REF` through `make`. If they are unset, the Dockerfile
+defaults are used.
+
+```bash
+make docker-build-agent \
+  IMG=registry.example.com/dynamo/snapshot-agent:1.0.0 \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
+  CRIU_REF="branch-or-sha"
+
+make docker-build-placeholder \
+  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
+  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}" \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
+  CRIU_REF="branch-or-sha"
+```
+
+### 2. Enable checkpointing in the platform and verify it
 
 Whether you are installing or upgrading `dynamo-platform`, the operator only needs checkpointing enabled:
 

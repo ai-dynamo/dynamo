@@ -50,6 +50,7 @@ class FrontendConfig(KvRouterConfigBase):
     tls_key_path: Optional[pathlib.Path]
 
     router_mode: str
+    min_initial_workers: int
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
     enforce_disagg: bool
@@ -90,8 +91,8 @@ class FrontendConfig(KvRouterConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
-        if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.min_initial_workers < 0:
+            raise ValueError("--router-min-initial-workers must be >= 0")
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -183,10 +184,32 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
             help="How to route the request. power-of-two picks 2 random workers and "
-            "routes to the one with fewer in-flight requests. In disaggregated prefill "
-            "mode, power-of-two skips bootstrap optimization and falls back to the "
-            "synchronous prefill path.",
-            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
+            "routes to the one with fewer in-flight requests. least-loaded routes to "
+            "the worker with the fewest active requests. In disaggregated prefill mode, "
+            "both power-of-two and least-loaded skip bootstrap optimization and fall "
+            "back to the synchronous prefill path.",
+            choices=[
+                "round-robin",
+                "random",
+                "power-of-two",
+                "kv",
+                "direct",
+                "least-loaded",
+            ],
+        )
+        add_argument(
+            g,
+            flag_name="--router-min-initial-workers",
+            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+            default=0,
+            help=(
+                "Minimum number of workers required before router startup continues. "
+                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                "push-router path and the KV router's config-ready worker gate share "
+                "the same startup threshold. Set to 0 to disable the startup wait."
+            ),
+            arg_type=int,
+            dest="min_initial_workers",
         )
 
         # KV router options (shared with dynamo.router)

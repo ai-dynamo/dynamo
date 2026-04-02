@@ -378,24 +378,22 @@ async fn apply_entry(
                 isl,
                 OverlapScores::default(),
             );
-            let _ = multi
-                .add_request(SequenceRequest {
-                    request_id,
-                    token_sequence: Some(block_hashes),
-                    isl,
-                    overlap: 0,
-                    track_prefill_tokens: true,
-                    expected_output_tokens: Some(output_length as u32),
-                    worker,
-                    lora_name: None,
-                })
-                .await;
+            let _ = multi.add_request(SequenceRequest {
+                request_id,
+                token_sequence: Some(block_hashes),
+                isl,
+                overlap: 0,
+                track_prefill_tokens: true,
+                expected_output_tokens: Some(output_length as u32),
+                worker,
+                lora_name: None,
+            });
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
-            let _ = multi.mark_prefill_completed(&request_id).await;
+            let _ = multi.mark_prefill_completed(&request_id);
         }
         SequenceTraceEntry::Free { request_id } => {
-            let _ = multi.free(&request_id).await;
+            let _ = multi.free(&request_id);
         }
     }
 }

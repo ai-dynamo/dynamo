@@ -46,6 +46,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -353,6 +354,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(
         self,
         runtime,
@@ -610,7 +613,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -642,13 +645,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -656,7 +661,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -670,7 +675,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):
@@ -679,6 +684,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}
+
+    async def get_perf_metrics(self, request=None):
+        """Return self-benchmark FPM results, or an error dict if none."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
 
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
