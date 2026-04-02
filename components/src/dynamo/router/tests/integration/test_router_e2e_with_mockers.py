@@ -63,6 +63,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
+    pytest.mark.planner,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2

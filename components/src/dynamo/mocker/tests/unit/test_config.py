@@ -24,6 +24,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.unit,
+    pytest.mark.planner,
     pytest.mark.mocker,
 ]
 
