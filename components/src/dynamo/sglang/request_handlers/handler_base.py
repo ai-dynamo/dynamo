@@ -380,6 +380,78 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
+    async def open_session(self, body: dict) -> dict:
+        """Open a streaming session for subagent KV isolation.
+
+        Args:
+            body: Dict with "session_id", optional "timeout" (default 120),
+                  and optional "capacity_of_str_len" (default 65536).
+        """
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        timeout = body.get("timeout", 120)
+        capacity = body.get("capacity_of_str_len", 65536)
+        try:
+            obj = OpenSessionReqInput(
+                capacity_of_str_len=capacity,
+                session_id=session_id,
+                streaming=True,
+                timeout=float(timeout),
+            )
+            result = await self.engine.tokenizer_manager.open_session(obj, None)
+            if result is None:
+                return {
+                    "status": "ok",
+                    "session_id": session_id,
+                    "message": "Session already exists",
+                }
+            return {"status": "ok", "session_id": result}
+        except Exception as e:
+            logging.error(f"Failed to open session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def close_session(self, body: dict) -> dict:
+        """Close a streaming session and release its KV resources.
+
+        Args:
+            body: Dict with "session_id".
+        """
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        try:
+            obj = CloseSessionReqInput(session_id=session_id)
+            await self.engine.tokenizer_manager.close_session(obj, None)
+            return {"status": "ok", "session_id": session_id}
+        except Exception as e:
+            logging.error(f"Failed to close session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def session_control(self, request, context=None):
+        """Service mesh endpoint for session lifecycle operations.
+
+        Args:
+            request: Dict with "action" key ("open_session" or "close_session")
+                     and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "open_session":
+            result = await self.open_session(request)
+        elif action == "close_session":
+            result = await self.close_session(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -409,6 +481,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
+        # session_control is served as a discoverable service endpoint
+        # (not an engine route) so the router can find it via
+        # component.endpoint("session_control"). See init_llm.py.
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -436,6 +511,17 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _session_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
+        routing = request.get("routing") or {}
+        session_control = routing.get("session_control") or {}
+        session_id = session_control.get("session_id")
+        if not session_id:
+            return {}
+
+        # Streaming sessions only need the session identifier on each turn.
+        return {"session_params": {"id": session_id}}
 
     @staticmethod
     def _generate_bootstrap_room() -> int:

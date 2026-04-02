@@ -118,8 +118,15 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    # Only serve session_control when streaming sessions are enabled.
+    if getattr(server_args, "enable_streaming_session", False):
+        session_control_endpoint = runtime.endpoint(
+            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
+        )
+        shutdown_endpoints.append(session_control_endpoint)
+
     try:
-        await asyncio.gather(
+        gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -134,7 +141,12 @@ async def init_decode(
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
-        )
+        ]
+        if getattr(server_args, "enable_streaming_session", False):
+            gather_tasks.append(
+                session_control_endpoint.serve_endpoint(handler.session_control)
+            )
+        await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
