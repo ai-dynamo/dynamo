@@ -41,8 +41,8 @@ const (
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
-	mgr                manager.Manager
-	operatorPrincipal  string
+	mgr               manager.Manager
+	operatorPrincipal string
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
