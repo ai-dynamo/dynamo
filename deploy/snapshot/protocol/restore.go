@@ -48,7 +48,7 @@ func PrepareRestorePodSpec(
 	container *corev1.Container,
 	storage Storage,
 	seccompProfile string,
-	placeholder bool,
+	isCheckpointReady bool,
 ) {
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
 	if storage.PVCName != "" {
@@ -57,7 +57,7 @@ func PrepareRestorePodSpec(
 	if storage.BasePath != "" {
 		injectCheckpointVolumeMount(container, storage.BasePath)
 	}
-	if placeholder {
+	if isCheckpointReady {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
 		container.StartupProbe = nil
@@ -178,7 +178,7 @@ func PrepareRestorePodSpecForCheckpoint(
 	checkpointID string,
 	artifactVersion string,
 	seccompProfile string,
-	placeholder bool,
+	isCheckpointReady bool,
 ) error {
 	if reader == nil {
 		return fmt.Errorf("snapshot client is required")
@@ -204,7 +204,7 @@ func PrepareRestorePodSpecForCheckpoint(
 		return err
 	}
 
-	PrepareRestorePodSpec(podSpec, container, resolvedStorage, seccompProfile, placeholder)
+	PrepareRestorePodSpec(podSpec, container, resolvedStorage, seccompProfile, isCheckpointReady)
 	return nil
 }
 
