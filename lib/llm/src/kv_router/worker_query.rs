@@ -729,7 +729,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::Indexer;
+    use crate::kv_router::{Indexer, indexer::LowerTierIndexers};
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -833,7 +833,7 @@ mod tests {
             kv_indexer.clone(),
             Indexer::KvIndexer {
                 primary: kv_indexer,
-                lower_tier: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                lower_tier: LowerTierIndexers::new(1, 4),
             },
         )
     }

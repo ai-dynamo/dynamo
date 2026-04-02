@@ -31,35 +31,50 @@ use dynamo_runtime::{
 };
 use tokio::sync::oneshot;
 
-type LowerTierIndexers = Arc<Mutex<HashMap<StorageTier, Arc<LowerTierIndexer>>>>;
-
-fn new_lower_tier_indexers() -> LowerTierIndexers {
-    Arc::new(Mutex::new(HashMap::new()))
+#[derive(Clone)]
+pub struct LowerTierIndexers {
+    num_threads: usize,
+    block_size: u32,
+    indexers: Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
-fn get_or_create_lower_tier_indexer(
-    indexers: &LowerTierIndexers,
-    storage_tier: StorageTier,
-) -> Arc<LowerTierIndexer> {
-    debug_assert!(!storage_tier.is_gpu());
-    let mut lower_tier_indexers = indexers.lock().unwrap();
-    lower_tier_indexers
-        .entry(storage_tier)
-        .or_insert_with(|| Arc::new(LowerTierIndexer::new()))
-        .clone()
-}
+impl LowerTierIndexers {
+    pub(crate) fn new(num_threads: usize, block_size: u32) -> Self {
+        assert!(
+            num_threads > 0,
+            "lower-tier indexer threads must be non-zero"
+        );
+        Self {
+            num_threads,
+            block_size,
+            indexers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 
-fn all_lower_tier_indexers(indexers: &LowerTierIndexers) -> Vec<Arc<LowerTierIndexer>> {
-    let lower_tier_indexers = indexers.lock().unwrap();
-    lower_tier_indexers.values().cloned().collect()
-}
+    fn get_or_create(&self, storage_tier: StorageTier) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
+        debug_assert!(!storage_tier.is_gpu());
+        let mut lower_tier_indexers = self.indexers.lock().unwrap();
+        lower_tier_indexers
+            .entry(storage_tier)
+            .or_insert_with(|| {
+                Arc::new(ThreadPoolIndexer::new(
+                    LowerTierIndexer::new(),
+                    self.num_threads,
+                    self.block_size,
+                ))
+            })
+            .clone()
+    }
 
-fn get_lower_tier_indexer(
-    indexers: &LowerTierIndexers,
-    storage_tier: StorageTier,
-) -> Option<Arc<LowerTierIndexer>> {
-    let lower_tier_indexers = indexers.lock().unwrap();
-    lower_tier_indexers.get(&storage_tier).cloned()
+    fn all(&self) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        let lower_tier_indexers = self.indexers.lock().unwrap();
+        lower_tier_indexers.values().cloned().collect()
+    }
+
+    fn get(&self, storage_tier: StorageTier) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        let lower_tier_indexers = self.indexers.lock().unwrap();
+        lower_tier_indexers.get(&storage_tier).cloned()
+    }
 }
 
 fn lower_tier_query_order() -> [StorageTier; 3] {
@@ -94,17 +109,21 @@ fn query_lower_tiers(
     let mut lower_tier_matches = HashMap::new();
 
     for storage_tier in lower_tier_query_order() {
-        let Some(indexer) = get_lower_tier_indexer(indexers, storage_tier) else {
+        let Some(indexer) = indexers.get(storage_tier) else {
             continue;
         };
 
-        for worker in indexer.workers() {
-            continuations
-                .entry(worker)
-                .or_insert_with(|| LowerTierContinuation::from_root(0));
+        if let Some(&first_hash) = sequence.first() {
+            for worker in indexer.backend().root_workers(first_hash) {
+                continuations
+                    .entry(worker)
+                    .or_insert_with(|| LowerTierContinuation::from_root(0));
+            }
         }
 
-        let tier_matches = indexer.query_match_details(sequence, &continuations);
+        let tier_matches = indexer
+            .backend()
+            .query_match_details(sequence, &continuations);
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
         tracing::debug!(
             ?storage_tier,
@@ -227,7 +246,7 @@ impl Indexer {
                     kv_indexer_metrics,
                     prune_config,
                 ),
-                lower_tier: new_lower_tier_indexers(),
+                lower_tier: LowerTierIndexers::new(1, block_size),
             });
         }
 
@@ -238,7 +257,10 @@ impl Indexer {
                     kv_router_config.router_event_threads as usize,
                     block_size,
                 )),
-                lower_tier: new_lower_tier_indexers(),
+                lower_tier: LowerTierIndexers::new(
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                ),
             });
         }
 
@@ -253,7 +275,7 @@ impl Indexer {
                 kv_indexer_metrics,
                 None,
             ),
-            lower_tier: new_lower_tier_indexers(),
+            lower_tier: LowerTierIndexers::new(1, block_size),
         })
     }
 
@@ -350,13 +372,8 @@ impl Indexer {
                         tracing::warn!("Failed to send event to indexer: {e}");
                     }
 
-                    for indexer in all_lower_tier_indexers(lower_tier) {
-                        if let Err(e) = indexer.apply_event(event.clone()) {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to apply cleared event to lower-tier indexer"
-                            );
-                        }
+                    for indexer in lower_tier.all() {
+                        indexer.apply_event(event.clone()).await;
                     }
                 }
                 _ if event.storage_tier.is_gpu() => {
@@ -365,11 +382,10 @@ impl Indexer {
                     }
                 }
                 _ => {
-                    if let Err(e) = get_or_create_lower_tier_indexer(lower_tier, event.storage_tier)
+                    lower_tier
+                        .get_or_create(event.storage_tier)
                         .apply_event(event)
-                    {
-                        tracing::warn!(error = %e, "Failed to apply event to lower-tier indexer");
-                    }
+                        .await;
                 }
             },
             Self::Concurrent {
@@ -379,24 +395,18 @@ impl Indexer {
                 dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
                     primary.apply_event(event.clone()).await;
 
-                    for indexer in all_lower_tier_indexers(lower_tier) {
-                        if let Err(e) = indexer.apply_event(event.clone()) {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to apply cleared event to lower-tier indexer"
-                            );
-                        }
+                    for indexer in lower_tier.all() {
+                        indexer.apply_event(event.clone()).await;
                     }
                 }
                 _ if event.storage_tier.is_gpu() => {
                     primary.apply_event(event).await;
                 }
                 _ => {
-                    if let Err(e) = get_or_create_lower_tier_indexer(lower_tier, event.storage_tier)
+                    lower_tier
+                        .get_or_create(event.storage_tier)
                         .apply_event(event)
-                    {
-                        tracing::warn!(error = %e, "Failed to apply event to lower-tier indexer");
-                    }
+                        .await;
                 }
             },
             Self::Remote(_) | Self::None => {}
@@ -409,8 +419,8 @@ impl Indexer {
                 primary,
                 lower_tier,
             } => {
-                for indexer in all_lower_tier_indexers(lower_tier) {
-                    indexer.remove_worker(worker_id);
+                for indexer in lower_tier.all() {
+                    indexer.remove_worker(worker_id).await;
                 }
                 if let Err(e) = primary.remove_worker_sender().send(worker_id).await {
                     tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
@@ -420,8 +430,8 @@ impl Indexer {
                 primary,
                 lower_tier,
             } => {
-                for indexer in all_lower_tier_indexers(lower_tier) {
-                    indexer.remove_worker(worker_id);
+                for indexer in lower_tier.all() {
+                    indexer.remove_worker(worker_id).await;
                 }
                 KvIndexerInterface::remove_worker(primary.as_ref(), worker_id).await;
             }
@@ -452,8 +462,9 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{Indexer, new_lower_tier_indexers};
+    use super::{Indexer, LowerTierIndexers};
     use dynamo_kv_router::{
+        ConcurrentRadixTree, ThreadPoolIndexer,
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
         protocols::{
             ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -469,17 +480,36 @@ mod tests {
                 4,
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
-            lower_tier: new_lower_tier_indexers(),
+            lower_tier: LowerTierIndexers::new(1, 4),
         }
     }
 
-    async fn flush_primary(indexer: &Indexer) {
+    fn make_test_concurrent_indexer() -> Indexer {
+        Indexer::Concurrent {
+            primary: Arc::new(ThreadPoolIndexer::new(ConcurrentRadixTree::new(), 2, 4)),
+            lower_tier: LowerTierIndexers::new(2, 4),
+        }
+    }
+
+    async fn flush_indexer(indexer: &Indexer) {
         match indexer {
-            Indexer::KvIndexer { primary, .. } => {
+            Indexer::KvIndexer {
+                primary,
+                lower_tier,
+            } => {
                 let _ = primary.flush().await;
+                for indexer in lower_tier.all() {
+                    let _ = indexer.dump_events().await.unwrap();
+                }
             }
-            Indexer::Concurrent { primary, .. } => {
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+            } => {
                 primary.flush().await;
+                for indexer in lower_tier.all() {
+                    let _ = indexer.dump_events().await.unwrap();
+                }
             }
             Indexer::Remote(_) | Indexer::None => {}
         }
@@ -560,7 +590,7 @@ mod tests {
                 StorageTier::Disk,
             ))
             .await;
-        flush_primary(&indexer).await;
+        flush_indexer(&indexer).await;
 
         let matches = indexer
             .find_matches_by_tier(vec![
@@ -605,7 +635,7 @@ mod tests {
         indexer
             .apply_event(store_event(30, 0, 3, &[], &[21], StorageTier::Disk))
             .await;
-        flush_primary(&indexer).await;
+        flush_indexer(&indexer).await;
 
         let matches = indexer
             .find_matches_by_tier(vec![LocalBlockHash(21)])
@@ -644,6 +674,175 @@ mod tests {
                 .get(&StorageTier::Disk)
                 .and_then(|tier| tier.hits.get(&disk_only_worker)),
             Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn tiered_query_only_seeds_matching_root_workers() {
+        let indexer = make_test_indexer();
+        let matching_host_worker = WorkerWithDpRank::new(20, 0);
+        let nonmatching_host_worker = WorkerWithDpRank::new(21, 0);
+
+        indexer
+            .apply_event(store_event(20, 0, 1, &[], &[31], StorageTier::HostPinned))
+            .await;
+        indexer
+            .apply_event(store_event(21, 0, 2, &[], &[32], StorageTier::HostPinned))
+            .await;
+        flush_indexer(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(31)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&matching_host_worker)),
+            Some(&1)
+        );
+        assert!(
+            !matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .is_some_and(|tier| tier.hits.contains_key(&nonmatching_host_worker))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_tiered_query_chains_device_and_lower_tier_matches() {
+        let indexer = make_test_concurrent_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+        flush_indexer(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&2));
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&worker)),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_tiered_query_seeds_lower_tier_only_workers_without_affecting_device_scores()
+    {
+        let indexer = make_test_concurrent_indexer();
+        let device_worker = WorkerWithDpRank::new(10, 0);
+        let host_only_worker = WorkerWithDpRank::new(20, 0);
+        let disk_only_worker = WorkerWithDpRank::new(30, 0);
+
+        indexer
+            .apply_event(store_event(10, 0, 1, &[], &[21], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(20, 0, 2, &[], &[21], StorageTier::HostPinned))
+            .await;
+        indexer
+            .apply_event(store_event(30, 0, 3, &[], &[21], StorageTier::Disk))
+            .await;
+        flush_indexer(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(21)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            matches.device.overlap_scores.scores.get(&device_worker),
+            Some(&1)
+        );
+        assert!(
+            !matches
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&host_only_worker)
+        );
+        assert!(
+            !matches
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&disk_only_worker)
+        );
+
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&host_only_worker)),
+            Some(&1)
+        );
+        assert_eq!(
+            matches
+                .lower_tier
+                .get(&StorageTier::Disk)
+                .and_then(|tier| tier.hits.get(&disk_only_worker)),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_remove_worker_removes_lower_tier_state() {
+        let indexer = make_test_concurrent_indexer();
+        let worker = WorkerWithDpRank::new(20, 0);
+
+        indexer
+            .apply_event(store_event(20, 0, 1, &[], &[31], StorageTier::HostPinned))
+            .await;
+        flush_indexer(&indexer).await;
+
+        let before = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(31)])
+            .await
+            .unwrap();
+        assert_eq!(
+            before
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|tier| tier.hits.get(&worker)),
+            Some(&1)
+        );
+
+        indexer.remove_worker(20).await;
+        flush_indexer(&indexer).await;
+
+        let after = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(31)])
+            .await
+            .unwrap();
+        assert!(
+            !after
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .is_some_and(|tier| tier.hits.contains_key(&worker))
         );
     }
 }

@@ -3,20 +3,34 @@
 
 //! Exact lower-tier KV continuation index.
 //!
-//! This structure stores worker-local transition edges in the event hash space:
-//! `(parent_sequence_hash, local_hash) -> child_sequence_hash`.
+//! This structure stores worker ownership over shared continuation edges in the
+//! event hash space: `(parent_sequence_hash, local_hash) -> child_sequence_hash`.
 //!
 //! Unlike the primary KV indexers, this index does not attempt prefix-overlap
 //! scoring. Queries continue from a caller-provided per-worker continuation
 //! point and count how many consecutive lower-tier blocks are present.
+//!
+//! The index treats lower-tier state as a set of unique continuation edges. If a
+//! duplicate or conflicting store arrives, the existing mapping wins and the new
+//! event is ignored.
+
+use std::{collections::BTreeMap, hash::BuildHasher};
 
 use dashmap::DashMap;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+use super::{SyncIndexer, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, RouterEvent, WorkerWithDpRank,
+    LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
 };
+
+type WorkerSet = FxHashSet<WorkerWithDpRank>;
+type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
+type Frontier = BTreeMap<usize, FrontierBuckets>;
+type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
+type WorkerBlockIndex =
+    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
@@ -24,176 +38,105 @@ struct TransitionKey {
     local_hash: LocalBlockHash,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct StoredBlock {
-    key: TransitionKey,
-    refcount: usize,
-}
-
 #[derive(Debug, Clone)]
-enum TransitionEntry {
-    Single(ExternalSequenceBlockHash, usize),
-    Multi(FxHashMap<ExternalSequenceBlockHash, usize>),
-}
-
-impl TransitionEntry {
-    fn new(child_hash: ExternalSequenceBlockHash) -> Self {
-        Self::Single(child_hash, 1)
-    }
-
-    fn insert(&mut self, child_hash: ExternalSequenceBlockHash) {
-        match self {
-            Self::Single(existing_hash, refcount) if *existing_hash == child_hash => {
-                *refcount += 1;
-            }
-            Self::Single(existing_hash, existing_refcount) => {
-                let mut map = FxHashMap::default();
-                map.insert(*existing_hash, *existing_refcount);
-                *map.entry(child_hash).or_insert(0) += 1;
-                *self = Self::Multi(map);
-            }
-            Self::Multi(map) => {
-                *map.entry(child_hash).or_insert(0) += 1;
-            }
-        }
-    }
-
-    fn remove(&mut self, child_hash: ExternalSequenceBlockHash) -> bool {
-        match self {
-            Self::Single(existing_hash, refcount) if *existing_hash == child_hash => {
-                *refcount = refcount.saturating_sub(1);
-                *refcount == 0
-            }
-            Self::Single(_, _) => false,
-            Self::Multi(map) => {
-                if let Some(refcount) = map.get_mut(&child_hash) {
-                    *refcount = refcount.saturating_sub(1);
-                    if *refcount == 0 {
-                        map.remove(&child_hash);
-                    }
-                }
-
-                if map.len() == 1 {
-                    let (&only_hash, &only_refcount) = map.iter().next().unwrap();
-                    *self = Self::Single(only_hash, only_refcount);
-                    false
-                } else {
-                    map.is_empty()
-                }
-            }
-        }
-    }
-
-    fn next_child(&self) -> Option<ExternalSequenceBlockHash> {
-        match self {
-            Self::Single(child_hash, refcount) if *refcount > 0 => Some(*child_hash),
-            Self::Single(_, _) => None,
-            Self::Multi(map) if map.len() == 1 => map.keys().next().copied(),
-            Self::Multi(_) => None,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct WorkerState {
-    transitions: FxHashMap<TransitionKey, TransitionEntry>,
-    blocks: FxHashMap<ExternalSequenceBlockHash, StoredBlock>,
-    total_blocks: usize,
-}
-
-impl WorkerState {
-    fn apply_store(&mut self, store_data: KvCacheStoreData) {
-        let mut parent_hash = store_data.parent_hash;
-
-        for block in store_data.blocks {
-            self.insert_block(parent_hash, block.tokens_hash, block.block_hash);
-            parent_hash = Some(block.block_hash);
-        }
-    }
-
-    fn insert_block(
-        &mut self,
-        parent_hash: Option<ExternalSequenceBlockHash>,
-        local_hash: LocalBlockHash,
+enum EdgeOwnersEntry {
+    Single {
         child_hash: ExternalSequenceBlockHash,
-    ) {
-        let key = TransitionKey {
-            parent_hash,
-            local_hash,
-        };
+        owner: WorkerWithDpRank,
+    },
+    Multi {
+        child_hash: ExternalSequenceBlockHash,
+        owners: WorkerSet,
+    },
+}
 
-        self.transitions
-            .entry(key)
-            .and_modify(|entry| entry.insert(child_hash))
-            .or_insert_with(|| TransitionEntry::new(child_hash));
+impl EdgeOwnersEntry {
+    fn new(child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> Self {
+        Self::Single { child_hash, owner }
+    }
 
-        match self.blocks.get_mut(&child_hash) {
-            Some(stored) => {
-                if stored.key != key {
-                    tracing::warn!(
-                        child_hash = ?child_hash,
-                        existing_parent = ?stored.key.parent_hash,
-                        new_parent = ?key.parent_hash,
-                        existing_local = ?stored.key.local_hash,
-                        new_local = ?key.local_hash,
-                        "Conflicting lower-tier child hash mapping for worker"
-                    );
-                } else {
-                    stored.refcount += 1;
+    fn child_hash(&self) -> ExternalSequenceBlockHash {
+        match self {
+            Self::Single { child_hash, .. } | Self::Multi { child_hash, .. } => *child_hash,
+        }
+    }
+
+    fn insert(&mut self, child_hash: ExternalSequenceBlockHash, owner: WorkerWithDpRank) -> bool {
+        match self {
+            Self::Single {
+                child_hash: existing_hash,
+                owner: existing_owner,
+            } => {
+                if *existing_hash != child_hash {
+                    return false;
                 }
+
+                if *existing_owner == owner {
+                    return true;
+                }
+
+                let mut owners = WorkerSet::default();
+                owners.insert(*existing_owner);
+                owners.insert(owner);
+                *self = Self::Multi { child_hash, owners };
+                true
             }
-            None => {
-                self.blocks
-                    .insert(child_hash, StoredBlock { key, refcount: 1 });
+            Self::Multi {
+                child_hash: existing_hash,
+                owners,
+            } => {
+                if *existing_hash != child_hash {
+                    return false;
+                }
+                owners.insert(owner);
+                true
             }
         }
-
-        self.total_blocks += 1;
     }
 
-    fn apply_remove(
-        &mut self,
-        remove_hashes: &[ExternalSequenceBlockHash],
-    ) -> Result<(), KvCacheEventError> {
-        for child_hash in remove_hashes {
-            let Some(stored_block) = self.blocks.get_mut(child_hash) else {
-                return Err(KvCacheEventError::BlockNotFound);
-            };
+    fn remove(&mut self, owner: WorkerWithDpRank) -> bool {
+        match self {
+            Self::Single {
+                owner: existing_owner,
+                ..
+            } => *existing_owner == owner,
+            Self::Multi { child_hash, owners } => {
+                if !owners.remove(&owner) {
+                    return false;
+                }
 
-            let key = stored_block.key;
-            stored_block.refcount = stored_block.refcount.saturating_sub(1);
-            let remove_block_entry = stored_block.refcount == 0;
+                if owners.is_empty() {
+                    return true;
+                }
 
-            if remove_block_entry {
-                self.blocks.remove(child_hash);
+                if owners.len() == 1 {
+                    let remaining_owner = owners.iter().next().copied().unwrap();
+                    *self = Self::Single {
+                        child_hash: *child_hash,
+                        owner: remaining_owner,
+                    };
+                }
+
+                false
             }
-
-            let remove_transition = match self.transitions.get_mut(&key) {
-                Some(entry) => entry.remove(*child_hash),
-                None => false,
-            };
-
-            if remove_transition {
-                self.transitions.remove(&key);
-            }
-
-            self.total_blocks = self.total_blocks.saturating_sub(1);
         }
-
-        Ok(())
     }
 
-    fn next_child(
-        &self,
-        parent_hash: Option<ExternalSequenceBlockHash>,
-        local_hash: LocalBlockHash,
-    ) -> Option<ExternalSequenceBlockHash> {
-        self.transitions
-            .get(&TransitionKey {
-                parent_hash,
-                local_hash,
-            })
-            .and_then(TransitionEntry::next_child)
+    fn contains(&self, owner: &WorkerWithDpRank) -> bool {
+        match self {
+            Self::Single {
+                owner: existing_owner,
+                ..
+            } => existing_owner == owner,
+            Self::Multi { owners, .. } => owners.contains(owner),
+        }
+    }
+
+    fn collect_workers(&self) -> Vec<WorkerWithDpRank> {
+        match self {
+            Self::Single { owner, .. } => vec![*owner],
+            Self::Multi { owners, .. } => owners.iter().copied().collect(),
+        }
     }
 }
 
@@ -227,114 +170,236 @@ pub struct LowerTierMatchDetails {
 
 /// Standalone lower-tier continuation index.
 pub struct LowerTierIndexer {
-    workers: DashMap<WorkerWithDpRank, WorkerState, FxBuildHasher>,
+    edges: DashMap<TransitionKey, EdgeOwnersEntry, FxBuildHasher>,
 }
 
 impl LowerTierIndexer {
     pub fn new() -> Self {
         Self {
-            workers: DashMap::with_hasher(FxBuildHasher),
+            edges: DashMap::with_hasher(FxBuildHasher),
         }
     }
 
-    fn clear_worker(&self, worker_id: u64) {
-        let worker_keys: Vec<_> = self
-            .workers
-            .iter()
-            .filter_map(|entry| (entry.key().worker_id == worker_id).then_some(*entry.key()))
-            .collect();
-
-        for worker in worker_keys {
-            if let Some(mut worker_state) = self.workers.get_mut(&worker) {
-                worker_state.transitions.clear();
-                worker_state.blocks.clear();
-                worker_state.total_blocks = 0;
-            }
-        }
-    }
-
-    pub fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+    fn apply_event(
+        &self,
+        worker_blocks: &mut WorkerBlockIndex,
+        event: RouterEvent,
+    ) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        let mut worker_state = self.workers.entry(worker).or_default();
 
         match event.event.data {
             KvCacheEventData::Stored(store_data) => {
-                worker_state.apply_store(store_data);
+                self.store_blocks_impl(worker_blocks, worker, store_data);
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                worker_state.apply_remove(&remove_data.block_hashes)
+                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
             }
             KvCacheEventData::Cleared => {
-                drop(worker_state);
-                self.clear_worker(event.worker_id);
+                self.clear_worker_impl(worker_blocks, event.worker_id);
                 Ok(())
             }
         }
     }
 
-    pub fn remove_worker(&self, worker_id: u64) {
-        let worker_keys: Vec<_> = self
-            .workers
-            .iter()
-            .filter_map(|entry| (entry.key().worker_id == worker_id).then_some(*entry.key()))
+    fn store_blocks_impl(
+        &self,
+        worker_blocks: &mut WorkerBlockIndex,
+        worker: WorkerWithDpRank,
+        store_data: KvCacheStoreData,
+    ) {
+        let mut parent_hash = store_data.parent_hash;
+        let worker_map = worker_blocks.entry(worker).or_default();
+
+        for block in store_data.blocks {
+            let key = TransitionKey {
+                parent_hash,
+                local_hash: block.tokens_hash,
+            };
+
+            if worker_map
+                .get(&block.block_hash)
+                .is_some_and(|existing_key| *existing_key != key)
+            {
+                parent_hash = Some(block.block_hash);
+                continue;
+            }
+
+            let inserted = match self.edges.entry(key) {
+                dashmap::mapref::entry::Entry::Occupied(mut edge) => {
+                    edge.get_mut().insert(block.block_hash, worker)
+                }
+                dashmap::mapref::entry::Entry::Vacant(edge) => {
+                    edge.insert(EdgeOwnersEntry::new(block.block_hash, worker));
+                    true
+                }
+            };
+
+            if inserted {
+                worker_map.insert(block.block_hash, key);
+            }
+            parent_hash = Some(block.block_hash);
+        }
+    }
+
+    fn remove_blocks_impl(
+        &self,
+        worker_blocks: &mut WorkerBlockIndex,
+        worker: WorkerWithDpRank,
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> Result<(), KvCacheEventError> {
+        let remove_worker_entry = {
+            let Some(worker_map) = worker_blocks.get_mut(&worker) else {
+                return Err(KvCacheEventError::BlockNotFound);
+            };
+
+            for block_hash in block_hashes {
+                let Some(key) = worker_map.remove(block_hash) else {
+                    return Err(KvCacheEventError::BlockNotFound);
+                };
+
+                let remove_edge = match self.edges.get_mut(&key) {
+                    Some(mut edge) => edge.remove(worker),
+                    None => false,
+                };
+                if remove_edge {
+                    self.edges.remove(&key);
+                }
+            }
+
+            worker_map.is_empty()
+        };
+
+        if remove_worker_entry {
+            worker_blocks.remove(&worker);
+        }
+
+        Ok(())
+    }
+
+    fn clear_worker_impl(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
+        let workers: Vec<_> = worker_blocks
+            .keys()
+            .copied()
+            .filter(|worker| worker.worker_id == worker_id)
             .collect();
 
-        for worker in worker_keys {
-            self.workers.remove(&worker);
+        for worker in workers {
+            self.remove_worker_dp_rank_impl(worker_blocks, worker);
         }
     }
 
-    pub fn remove_worker_dp_rank(&self, worker_id: u64, dp_rank: u32) {
-        self.workers
-            .remove(&WorkerWithDpRank::new(worker_id, dp_rank));
-    }
-
-    pub fn workers(&self) -> Vec<WorkerWithDpRank> {
-        self.workers.iter().map(|entry| *entry.key()).collect()
-    }
-
-    pub fn query_contiguous_hits(
+    fn remove_worker_dp_rank_impl(
         &self,
-        local_hashes: &[LocalBlockHash],
-        continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
-    ) -> FxHashMap<WorkerWithDpRank, usize> {
-        let mut results = FxHashMap::default();
+        worker_blocks: &mut WorkerBlockIndex,
+        worker: WorkerWithDpRank,
+    ) {
+        let Some(worker_map) = worker_blocks.remove(&worker) else {
+            return;
+        };
 
-        for (worker, continuation) in continuations {
-            let hits = match self.workers.get(worker) {
-                Some(worker_state) => {
-                    contiguous_hits_for_worker(&worker_state, local_hashes, *continuation)
-                }
-                None => 0,
+        for (_, key) in worker_map {
+            let remove_edge = match self.edges.get_mut(&key) {
+                Some(mut edge) => edge.remove(worker),
+                None => false,
             };
-            results.insert(*worker, hits);
+            if remove_edge {
+                self.edges.remove(&key);
+            }
         }
-
-        results
     }
 
-    pub fn query_match_details(
+    fn remove_worker(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
+        self.clear_worker_impl(worker_blocks, worker_id);
+    }
+
+    fn remove_worker_dp_rank(
+        &self,
+        worker_blocks: &mut WorkerBlockIndex,
+        worker_id: u64,
+        dp_rank: u32,
+    ) {
+        self.remove_worker_dp_rank_impl(worker_blocks, WorkerWithDpRank::new(worker_id, dp_rank));
+    }
+
+    pub fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
+        self.edges
+            .get(&TransitionKey {
+                parent_hash: None,
+                local_hash,
+            })
+            .map(|edge| edge.collect_workers())
+            .unwrap_or_default()
+    }
+
+    pub fn query_contiguous_hits<S>(
         &self,
         local_hashes: &[LocalBlockHash],
-        continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
-    ) -> LowerTierMatchDetails {
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+    ) -> FxHashMap<WorkerWithDpRank, usize>
+    where
+        S: BuildHasher,
+    {
+        self.query_match_details(local_hashes, continuations).hits
+    }
+
+    pub fn query_match_details<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        let mut frontier = Frontier::new();
+        for (worker, continuation) in continuations {
+            frontier
+                .entry(continuation.start_pos)
+                .or_default()
+                .entry(continuation.last_matched_hash)
+                .or_default()
+                .insert(*worker);
+        }
+
+        let mut final_states = FinalStates::default();
+
+        while let Some((&pos, _)) = frontier.iter().next() {
+            let states = frontier.remove(&pos).unwrap();
+            let next_breakpoint = frontier
+                .keys()
+                .next()
+                .copied()
+                .unwrap_or(local_hashes.len());
+
+            for (parent_hash, workers) in states {
+                advance_state_to_breakpoint(
+                    self,
+                    local_hashes,
+                    pos,
+                    parent_hash,
+                    workers,
+                    next_breakpoint,
+                    &mut frontier,
+                    &mut final_states,
+                );
+            }
+        }
+
         let mut results = LowerTierMatchDetails::default();
-
         for (worker, continuation) in continuations {
-            let (hits, final_hash) = match self.workers.get(worker) {
-                Some(worker_state) => {
-                    continuation_progress_for_worker(&worker_state, local_hashes, *continuation)
-                }
-                None => (0, None),
-            };
+            let (final_pos, final_hash) = final_states
+                .get(worker)
+                .copied()
+                .unwrap_or((continuation.start_pos, continuation.last_matched_hash));
 
+            let hits = final_pos.saturating_sub(continuation.start_pos);
             results.hits.insert(*worker, hits);
+
             let next_continuation = if hits == 0 {
                 *continuation
             } else {
                 LowerTierContinuation {
-                    start_pos: continuation.start_pos + hits,
+                    start_pos: final_pos,
                     last_matched_hash: final_hash.or(continuation.last_matched_hash),
                 }
             };
@@ -353,46 +418,136 @@ impl Default for LowerTierIndexer {
     }
 }
 
-fn contiguous_hits_for_worker(
-    worker_state: &WorkerState,
-    local_hashes: &[LocalBlockHash],
-    continuation: LowerTierContinuation,
-) -> usize {
-    continuation_progress_for_worker(worker_state, local_hashes, continuation).0
+impl SyncIndexer for LowerTierIndexer {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+        let mut worker_blocks = WorkerBlockIndex::default();
+
+        while let Ok(task) = event_receiver.recv() {
+            match task {
+                WorkerTask::Event(event) => {
+                    if let Err(error) = self.apply_event(&mut worker_blocks, event) {
+                        tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                }
+                WorkerTask::RemoveWorker(worker_id) => {
+                    self.remove_worker(&mut worker_blocks, worker_id);
+                }
+                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                    self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
+                }
+                WorkerTask::DumpEvents(sender) => {
+                    let _ = sender.send(Ok(Vec::new()));
+                }
+                WorkerTask::Terminate => {
+                    break;
+                }
+            }
+        }
+
+        tracing::debug!("LowerTierIndexer worker thread shutting down");
+        Ok(())
+    }
+
+    fn find_matches(&self, sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+        let Some(&first_hash) = sequence.first() else {
+            return OverlapScores::default();
+        };
+
+        let mut continuations = FxHashMap::default();
+        for worker in self.root_workers(first_hash) {
+            continuations.insert(worker, LowerTierContinuation::from_root(0));
+        }
+
+        let hits = self.query_contiguous_hits(sequence, &continuations);
+        let mut scores = OverlapScores::default();
+        for (worker, hits) in hits {
+            if hits > 0 {
+                scores
+                    .scores
+                    .insert(worker, hits.min(u32::MAX as usize) as u32);
+            }
+        }
+
+        scores
+    }
 }
 
-fn continuation_progress_for_worker(
-    worker_state: &WorkerState,
+fn advance_state_to_breakpoint(
+    index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
-    continuation: LowerTierContinuation,
-) -> (usize, Option<ExternalSequenceBlockHash>) {
-    if continuation.start_pos >= local_hashes.len() {
-        return (0, None);
-    }
+    start_pos: usize,
+    start_hash: Option<ExternalSequenceBlockHash>,
+    workers: WorkerSet,
+    next_breakpoint: usize,
+    frontier: &mut Frontier,
+    final_states: &mut FinalStates,
+) {
+    let mut cur_pos = start_pos;
+    let mut cur_hash = start_hash;
+    let mut active = workers;
 
-    let mut count = 0usize;
-    let mut position = continuation.start_pos;
-    let mut parent_hash = continuation.last_matched_hash;
-    let mut last_matched_hash = None;
-
-    while position < local_hashes.len() {
-        let Some(child_hash) = worker_state.next_child(parent_hash, local_hashes[position]) else {
+    while cur_pos < next_breakpoint && !active.is_empty() {
+        let Some(edge) = index.edges.get(&TransitionKey {
+            parent_hash: cur_hash,
+            local_hash: local_hashes[cur_pos],
+        }) else {
+            finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
             break;
         };
-        count += 1;
-        parent_hash = Some(child_hash);
-        last_matched_hash = Some(child_hash);
-        position += 1;
+
+        let mut matched = WorkerSet::default();
+        let mut unmatched = WorkerSet::default();
+        for worker in active.drain() {
+            if edge.contains(&worker) {
+                matched.insert(worker);
+            } else {
+                unmatched.insert(worker);
+            }
+        }
+
+        finalize_workers(final_states, unmatched, cur_pos, cur_hash);
+        if matched.is_empty() {
+            break;
+        }
+
+        active = matched;
+        cur_hash = Some(edge.child_hash());
+        cur_pos += 1;
     }
 
-    (count, last_matched_hash)
+    if active.is_empty() {
+        return;
+    }
+
+    if cur_pos >= local_hashes.len() {
+        finalize_workers(final_states, active, cur_pos, cur_hash);
+    } else {
+        frontier
+            .entry(cur_pos)
+            .or_default()
+            .entry(cur_hash)
+            .or_default()
+            .extend(active);
+    }
+}
+
+fn finalize_workers(
+    final_states: &mut FinalStates,
+    workers: impl IntoIterator<Item = WorkerWithDpRank>,
+    pos: usize,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+) {
+    for worker in workers {
+        final_states.insert(worker, (pos, parent_hash));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LowerTierContinuation, LowerTierIndexer};
+    use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
     use rustc_hash::FxHashMap;
 
+    use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
         WorkerWithDpRank,
@@ -425,9 +580,66 @@ mod tests {
         )
     }
 
+    struct TestLowerTierIndex {
+        index: LowerTierIndexer,
+        worker_blocks: WorkerBlockIndex,
+    }
+
+    impl TestLowerTierIndex {
+        fn new() -> Self {
+            Self {
+                index: LowerTierIndexer::new(),
+                worker_blocks: WorkerBlockIndex::default(),
+            }
+        }
+
+        fn apply_event(
+            &mut self,
+            event: crate::protocols::RouterEvent,
+        ) -> Result<(), crate::protocols::KvCacheEventError> {
+            self.index.apply_event(&mut self.worker_blocks, event)
+        }
+
+        fn remove_worker(&mut self, worker_id: u64) {
+            self.index.remove_worker(&mut self.worker_blocks, worker_id);
+        }
+
+        fn remove_worker_dp_rank(&mut self, worker_id: u64, dp_rank: u32) {
+            self.index
+                .remove_worker_dp_rank(&mut self.worker_blocks, worker_id, dp_rank);
+        }
+
+        fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
+            self.index.root_workers(local_hash)
+        }
+
+        fn query_contiguous_hits<S>(
+            &self,
+            local_hashes: &[LocalBlockHash],
+            continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        ) -> FxHashMap<WorkerWithDpRank, usize>
+        where
+            S: std::hash::BuildHasher,
+        {
+            self.index
+                .query_contiguous_hits(local_hashes, continuations)
+        }
+
+        fn query_match_details<S>(
+            &self,
+            local_hashes: &[LocalBlockHash],
+            continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        ) -> super::LowerTierMatchDetails
+        where
+            S: std::hash::BuildHasher,
+        {
+            self.index.query_match_details(local_hashes, continuations)
+        }
+    }
+
     #[test]
     fn root_query_uses_none_parent_transition() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
             .unwrap();
@@ -443,8 +655,98 @@ mod tests {
     }
 
     #[test]
+    fn root_workers_only_include_matching_root_edges() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(8, 0, 1, Some(500), &[11], &[201]))
+            .unwrap();
+
+        let workers = index.root_workers(LocalBlockHash(11));
+        assert_eq!(workers.len(), 1);
+        assert!(workers.contains(&WorkerWithDpRank::new(7, 0)));
+    }
+
+    #[tokio::test]
+    async fn thread_pool_backend_applies_lower_tier_events() {
+        let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .await;
+        let _ = index.dump_events().await.unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker, LowerTierContinuation::from_root(0));
+
+        let hits = index
+            .backend()
+            .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
+        assert_eq!(hits.get(&worker), Some(&2));
+    }
+
+    #[tokio::test]
+    async fn thread_pool_backend_remove_worker_dp_rank_keeps_other_rank() {
+        let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
+        let worker_dp0 = WorkerWithDpRank::new(43, 0);
+        let worker_dp1 = WorkerWithDpRank::new(43, 1);
+
+        index
+            .apply_event(store_event(43, 0, 0, None, &[11], &[101]))
+            .await;
+        index
+            .apply_event(store_event(43, 1, 1, None, &[11], &[101]))
+            .await;
+        let _ = index.dump_events().await.unwrap();
+
+        index.remove_worker_dp_rank(43, 0).await;
+        let _ = index.dump_events().await.unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_dp0, LowerTierContinuation::from_root(0));
+        continuations.insert(worker_dp1, LowerTierContinuation::from_root(0));
+
+        let hits = index
+            .backend()
+            .query_contiguous_hits(&local_hashes(&[11]), &continuations);
+        assert_eq!(hits.get(&worker_dp0), Some(&0));
+        assert_eq!(hits.get(&worker_dp1), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn thread_pool_backend_cleared_event_preserves_other_workers() {
+        let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
+        let worker_a = WorkerWithDpRank::new(29, 0);
+        let worker_b = WorkerWithDpRank::new(30, 0);
+
+        index
+            .apply_event(store_event(29, 0, 0, None, &[101, 102], &[1001, 1002]))
+            .await;
+        index
+            .apply_event(store_event(30, 0, 1, None, &[101, 102], &[1001, 1002]))
+            .await;
+        index
+            .apply_event(router_event(29, 2, 0, KvCacheEventData::Cleared))
+            .await;
+        let _ = index.dump_events().await.unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
+        continuations.insert(worker_b, LowerTierContinuation::from_root(0));
+
+        let hits = index
+            .backend()
+            .query_contiguous_hits(&local_hashes(&[101, 102]), &continuations);
+        assert_eq!(hits.get(&worker_a), Some(&0));
+        assert_eq!(hits.get(&worker_b), Some(&2));
+    }
+
+    #[test]
     fn missing_parent_tail_queries_exactly_from_last_matched_hash() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
                 3,
@@ -469,7 +771,7 @@ mod tests {
 
     #[test]
     fn mid_segment_continuation_works_without_materialization() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
                 5,
@@ -494,7 +796,7 @@ mod tests {
 
     #[test]
     fn branch_matching_is_exact_by_parent_hash() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(9, 0, 0, Some(500), &[91, 92], &[901, 902]))
             .unwrap();
@@ -521,8 +823,123 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_store_is_refcounted_for_exact_remove() {
-        let index = LowerTierIndexer::new();
+    fn shared_worker_traversal_fuses_at_descendant_breakpoint() {
+        let mut index = TestLowerTierIndex::new();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+
+        index
+            .apply_event(store_event(
+                1,
+                0,
+                0,
+                None,
+                &[11, 12, 13, 14],
+                &[101, 102, 103, 104],
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event(2, 0, 1, Some(102), &[13, 14], &[103, 104]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
+        continuations.insert(
+            worker_b,
+            LowerTierContinuation::new(2, ExternalSequenceBlockHash(102)),
+        );
+
+        let details = index.query_match_details(&local_hashes(&[11, 12, 13, 14]), &continuations);
+        assert_eq!(details.hits.get(&worker_a), Some(&4));
+        assert_eq!(details.hits.get(&worker_b), Some(&2));
+        assert_eq!(
+            details.next_continuations.get(&worker_a),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104)
+            ))
+        );
+        assert_eq!(
+            details.next_continuations.get(&worker_b),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104)
+            ))
+        );
+    }
+
+    #[test]
+    fn shared_worker_traversal_fuses_across_multiple_breakpoints() {
+        let mut index = TestLowerTierIndex::new();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let worker_c = WorkerWithDpRank::new(3, 0);
+
+        index
+            .apply_event(store_event(
+                1,
+                0,
+                0,
+                None,
+                &[11, 12, 13, 14],
+                &[101, 102, 103, 104],
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event(
+                2,
+                0,
+                1,
+                Some(101),
+                &[12, 13, 14],
+                &[102, 103, 104],
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event(3, 0, 2, Some(103), &[14], &[104]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
+        continuations.insert(
+            worker_b,
+            LowerTierContinuation::new(1, ExternalSequenceBlockHash(101)),
+        );
+        continuations.insert(
+            worker_c,
+            LowerTierContinuation::new(3, ExternalSequenceBlockHash(103)),
+        );
+
+        let details = index.query_match_details(&local_hashes(&[11, 12, 13, 14]), &continuations);
+        assert_eq!(details.hits.get(&worker_a), Some(&4));
+        assert_eq!(details.hits.get(&worker_b), Some(&3));
+        assert_eq!(details.hits.get(&worker_c), Some(&1));
+        assert_eq!(
+            details.next_continuations.get(&worker_a),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104)
+            ))
+        );
+        assert_eq!(
+            details.next_continuations.get(&worker_b),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104)
+            ))
+        );
+        assert_eq!(
+            details.next_continuations.get(&worker_c),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104)
+            ))
+        );
+    }
+
+    #[test]
+    fn duplicate_store_is_idempotent_for_remove() {
+        let mut index = TestLowerTierIndex::new();
         let event = store_event(13, 0, 0, Some(800), &[61], &[601]);
         index.apply_event(event.clone()).unwrap();
         index.apply_event(event).unwrap();
@@ -542,22 +959,46 @@ mod tests {
         let after_one_remove = index.query_contiguous_hits(&query, &continuations);
         assert_eq!(
             after_one_remove.get(&WorkerWithDpRank::new(13, 0)),
-            Some(&1)
-        );
-
-        index
-            .apply_event(remove_event(13, 2, 0, vec![ExternalSequenceBlockHash(601)]))
-            .unwrap();
-        let after_two_removes = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(
-            after_two_removes.get(&WorkerWithDpRank::new(13, 0)),
             Some(&0)
         );
     }
 
     #[test]
+    fn removing_one_owner_preserves_shared_edge_for_other_workers() {
+        let mut index = TestLowerTierIndex::new();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+
+        index
+            .apply_event(store_event(1, 0, 0, None, &[11, 12], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(2, 0, 1, None, &[11, 12], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(remove_event(
+                1,
+                2,
+                0,
+                vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+            ))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
+        continuations.insert(worker_b, LowerTierContinuation::from_root(0));
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
+
+        assert_eq!(hits.get(&worker_a), Some(&0));
+        assert_eq!(hits.get(&worker_b), Some(&2));
+    }
+
+    #[test]
     fn remove_stops_contiguous_walk_at_missing_edge() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
                 17,
@@ -586,7 +1027,7 @@ mod tests {
 
     #[test]
     fn unknown_last_matched_hash_returns_zero() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(19, 0, 0, Some(1000), &[81, 82], &[801, 802]))
             .unwrap();
@@ -604,7 +1045,7 @@ mod tests {
 
     #[test]
     fn start_pos_past_end_returns_zero() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(23, 0, 0, Some(1100), &[91], &[901]))
             .unwrap();
@@ -622,7 +1063,7 @@ mod tests {
 
     #[test]
     fn cleared_event_removes_all_lower_tier_state() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
                 29,
@@ -650,7 +1091,7 @@ mod tests {
 
     #[test]
     fn cleared_event_is_worker_wide_across_dp_ranks() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(29, 0, 0, Some(1200), &[101], &[1001]))
             .unwrap();
@@ -677,8 +1118,33 @@ mod tests {
     }
 
     #[test]
+    fn cleared_event_preserves_shared_edges_for_other_workers() {
+        let mut index = TestLowerTierIndex::new();
+        let worker_a = WorkerWithDpRank::new(29, 0);
+        let worker_b = WorkerWithDpRank::new(30, 0);
+
+        index
+            .apply_event(store_event(29, 0, 0, None, &[101, 102], &[1001, 1002]))
+            .unwrap();
+        index
+            .apply_event(store_event(30, 0, 1, None, &[101, 102], &[1001, 1002]))
+            .unwrap();
+        index
+            .apply_event(router_event(29, 2, 0, KvCacheEventData::Cleared))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker_a, LowerTierContinuation::from_root(0));
+        continuations.insert(worker_b, LowerTierContinuation::from_root(0));
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[101, 102]), &continuations);
+        assert_eq!(hits.get(&worker_a), Some(&0));
+        assert_eq!(hits.get(&worker_b), Some(&2));
+    }
+
+    #[test]
     fn remove_worker_drops_all_ranks() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(41, 0, 0, Some(3000), &[1], &[301]))
             .unwrap();
@@ -704,7 +1170,7 @@ mod tests {
 
     #[test]
     fn remove_worker_dp_rank_keeps_other_ranks() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(43, 0, 0, Some(5000), &[1], &[501]))
             .unwrap();
@@ -730,7 +1196,7 @@ mod tests {
 
     #[test]
     fn removing_parent_block_keeps_child_continuation_edge() {
-        let index = LowerTierIndexer::new();
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
                 31,
@@ -771,8 +1237,8 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_transition_returns_zero_until_conflict_removed() {
-        let index = LowerTierIndexer::new();
+    fn conflicting_transition_insert_is_ignored() {
+        let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(37, 0, 0, Some(1400), &[121], &[1201]))
             .unwrap();
@@ -787,19 +1253,39 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(1400)),
         );
 
-        let ambiguous_hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(ambiguous_hits.get(&WorkerWithDpRank::new(37, 0)), Some(&0));
+        let hits = index.query_contiguous_hits(&query, &continuations);
+        assert_eq!(hits.get(&WorkerWithDpRank::new(37, 0)), Some(&1));
+    }
 
+    #[test]
+    fn conflicting_child_hash_mapping_is_ignored() {
+        let mut index = TestLowerTierIndex::new();
         index
-            .apply_event(remove_event(
-                37,
-                2,
-                0,
-                vec![ExternalSequenceBlockHash(1202)],
-            ))
+            .apply_event(store_event(47, 0, 0, Some(1500), &[131], &[1301]))
+            .unwrap();
+        index
+            .apply_event(store_event(47, 0, 1, Some(2500), &[231], &[1301]))
             .unwrap();
 
-        let resolved_hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(resolved_hits.get(&WorkerWithDpRank::new(37, 0)), Some(&1));
+        let mut original_continuations = FxHashMap::default();
+        original_continuations.insert(
+            WorkerWithDpRank::new(47, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(1500)),
+        );
+        let original_hits =
+            index.query_contiguous_hits(&local_hashes(&[131]), &original_continuations);
+        assert_eq!(original_hits.get(&WorkerWithDpRank::new(47, 0)), Some(&1));
+
+        let mut conflicting_continuations = FxHashMap::default();
+        conflicting_continuations.insert(
+            WorkerWithDpRank::new(47, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(2500)),
+        );
+        let conflicting_hits =
+            index.query_contiguous_hits(&local_hashes(&[231]), &conflicting_continuations);
+        assert_eq!(
+            conflicting_hits.get(&WorkerWithDpRank::new(47, 0)),
+            Some(&0)
+        );
     }
 }

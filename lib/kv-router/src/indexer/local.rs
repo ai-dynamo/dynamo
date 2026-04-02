@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     DumpRequest, GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    LowerTierIndexer, WorkerKvQueryResponse,
+    LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
 };
 use crate::protocols::*;
 
@@ -27,20 +27,11 @@ pub struct LocalKvIndexer {
     /// The underlying indexer
     indexer: KvIndexer,
     /// Lazily-created exact lower-tier indexes partitioned by storage tier.
-    lower_tier_indexers: Arc<Mutex<HashMap<StorageTier, Arc<LowerTierIndexer>>>>,
+    lower_tier_indexers: Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
     /// Circular buffer of recent events
     pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
-}
-
-fn map_lower_tier_error(error: KvCacheEventError) -> KvRouterError {
-    match error {
-        KvCacheEventError::BlockNotFound => KvRouterError::BlockNotFound,
-        KvCacheEventError::ParentBlockNotFound | KvCacheEventError::InvalidBlockSequence => {
-            KvRouterError::IndexerDroppedRequest
-        }
-    }
 }
 
 impl LocalKvIndexer {
@@ -270,10 +261,11 @@ impl LocalKvIndexer {
             .map_err(|_| KvRouterError::IndexerOffline)
     }
 
-    fn apply_event_to_lower_tier(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+    async fn apply_event_to_lower_tier(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         self.get_or_create_lower_tier_indexer(event.storage_tier)
             .apply_event(event)
-            .map_err(map_lower_tier_error)
+            .await;
+        Ok(())
     }
 
     async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
@@ -281,27 +273,34 @@ impl LocalKvIndexer {
             KvCacheEventData::Cleared => {
                 self.apply_event_to_primary(event.clone()).await?;
                 for indexer in self.all_lower_tier_indexers() {
-                    indexer
-                        .apply_event(event.clone())
-                        .map_err(map_lower_tier_error)?;
+                    indexer.apply_event(event.clone()).await;
                 }
                 Ok(())
             }
             _ if event.storage_tier.is_gpu() => self.apply_event_to_primary(event.clone()).await,
-            _ => self.apply_event_to_lower_tier(event.clone()),
+            _ => self.apply_event_to_lower_tier(event.clone()).await,
         }
     }
 
-    fn get_or_create_lower_tier_indexer(&self, storage_tier: StorageTier) -> Arc<LowerTierIndexer> {
+    fn get_or_create_lower_tier_indexer(
+        &self,
+        storage_tier: StorageTier,
+    ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
         debug_assert!(!storage_tier.is_gpu());
         let mut indexers = self.lower_tier_indexers.lock().unwrap();
         indexers
             .entry(storage_tier)
-            .or_insert_with(|| Arc::new(LowerTierIndexer::new()))
+            .or_insert_with(|| {
+                Arc::new(ThreadPoolIndexer::new(
+                    LowerTierIndexer::new(),
+                    1,
+                    self.block_size(),
+                ))
+            })
             .clone()
     }
 
-    fn all_lower_tier_indexers(&self) -> Vec<Arc<LowerTierIndexer>> {
+    fn all_lower_tier_indexers(&self) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
         let indexers = self.lower_tier_indexers.lock().unwrap();
         indexers.values().cloned().collect()
     }
@@ -335,14 +334,14 @@ impl KvIndexerInterface for LocalKvIndexer {
 
     async fn remove_worker(&self, worker: WorkerId) {
         for indexer in self.all_lower_tier_indexers() {
-            indexer.remove_worker(worker);
+            indexer.remove_worker(worker).await;
         }
         let _ = self.indexer.remove_worker_sender().send(worker).await;
     }
 
     async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
         for indexer in self.all_lower_tier_indexers() {
-            indexer.remove_worker_dp_rank(worker, dp_rank);
+            indexer.remove_worker_dp_rank(worker, dp_rank).await;
         }
         let _ = self.indexer.remove_worker_dp_rank(worker, dp_rank).await;
     }
@@ -368,7 +367,11 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn flush(&self) -> usize {
-        self.indexer.flush().await
+        let queued = self.indexer.flush().await;
+        for indexer in self.all_lower_tier_indexers() {
+            let _ = indexer.dump_events().await;
+        }
+        queued
     }
 }
 
@@ -437,6 +440,7 @@ mod tests {
         );
 
         lower_tier_indexer
+            .backend()
             .query_contiguous_hits(&[LocalBlockHash(tokens_hash)], &continuations)
             .get(&WorkerWithDpRank::new(worker_id, dp_rank))
             .copied()
@@ -457,6 +461,7 @@ mod tests {
             .apply_event_with_buffer(event.clone())
             .await
             .unwrap();
+        let _ = indexer.flush().await;
 
         assert_eq!(indexer.get_all_events_in_buffer(), vec![event]);
         assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 1);
@@ -495,6 +500,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        let _ = indexer.flush().await;
         assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 1);
 
         indexer
@@ -509,6 +515,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        let _ = indexer.flush().await;
         assert_eq!(indexer.lower_tier_indexers.lock().unwrap().len(), 2);
 
         assert_eq!(
@@ -575,6 +582,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        let _ = indexer.flush().await;
 
         assert_eq!(
             lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 0, 1000, 21),
