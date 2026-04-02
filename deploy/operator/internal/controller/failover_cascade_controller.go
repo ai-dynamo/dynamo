@@ -30,8 +30,8 @@ const (
 
 // FailoverCascadeReconciler watches GMS failover pods (restartPolicy: Never)
 // and cascade-deletes all pods in the same engine group when any member
-// transitions to the Failed phase. This ensures broken distributed inference
-// groups are restarted cleanly by Grove.
+// reaches a terminal phase (Failed or Succeeded). This ensures broken
+// distributed inference groups are restarted cleanly by Grove.
 //
 // An engine group is identified by three Grove labels:
 //   - grove.io/podcliquescalinggroup           (PCSG name)
@@ -55,7 +55,7 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	if pod.Status.Phase != corev1.PodFailed {
+	if pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded {
 		return ctrl.Result{}, nil
 	}
 
@@ -90,8 +90,8 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		"podIndex", podIndex,
 	)
 	r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "FailoverCascade",
-		"Pod %s failed; cascade-deleted engine group (pcsg=%s, replica=%s, index=%s)",
-		pod.Name, pcsg, pcsgReplica, podIndex,
+		"Pod %s terminated (phase=%s); cascade-deleted engine group (pcsg=%s, replica=%s, index=%s)",
+		pod.Name, pod.Status.Phase, pcsg, pcsgReplica, podIndex,
 	)
 
 	return ctrl.Result{}, nil
@@ -106,8 +106,12 @@ func (r *FailoverCascadeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+func isTerminalPhase(phase corev1.PodPhase) bool {
+	return phase == corev1.PodFailed || phase == corev1.PodSucceeded
+}
+
 // failoverCascadePredicate filters to pods with the failover group label
-// and only triggers on updates where the phase transitions to Failed.
+// and only triggers on updates where the phase transitions to a terminal state.
 func failoverCascadePredicate() predicate.Predicate {
 	hasLabel := func(labels map[string]string) bool {
 		return labels[commonconsts.KubeLabelDynamoFailoverGroup] == commonconsts.KubeLabelValueTrue
@@ -135,7 +139,7 @@ func failoverCascadePredicate() predicate.Predicate {
 			if !ok {
 				return false
 			}
-			return oldPod.Status.Phase != corev1.PodFailed && newPod.Status.Phase == corev1.PodFailed
+			return !isTerminalPhase(oldPod.Status.Phase) && isTerminalPhase(newPod.Status.Phase)
 		},
 	}
 }

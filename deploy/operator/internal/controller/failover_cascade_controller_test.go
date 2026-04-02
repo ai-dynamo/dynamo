@@ -85,6 +85,24 @@ func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
 	assert.Empty(t, remaining.Items, "all pods in the engine group should be deleted")
 }
 
+func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
+	ns := "test-ns"
+	succeededPod := newFailoverPod("ldr-0", ns, corev1.PodSucceeded, "my-pcsg", "0", "0")
+	sibling := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+
+	r, c := newCascadeReconciler(succeededPod, sibling)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var remaining corev1.PodList
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	assert.Empty(t, remaining.Items, "succeeded pod should also trigger cascade")
+}
+
 func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	ns := "test-ns"
 	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
