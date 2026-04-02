@@ -384,7 +384,7 @@ async def test_fault_scenario(
                     "agg" in scenario.deployment.name
                     and "disagg" not in scenario.deployment.name
                 ):
-                    model = scenario.deployment["TRTLLMWorker"].model
+                    model = scenario.deployment["TRTLLMWorker"].model  # Intentional: aggregated TRTLLM deployment uses different name not yet in TrtllmComponentName defaults
                 else:
                     model = scenario.deployment[TrtllmComponentName.decode_worker_k8s_name].model
             else:

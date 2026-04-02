@@ -224,7 +224,7 @@ def parse_process_log(log_dir, process_name):
         Dictionary mapping replica names to list of (timestamp, message, relative_time) tuples
     """
     process_ready_pattern = {
-        "Frontend": re.compile(r"added model"),
+        "Frontend": re.compile(r"added model"),  # Intentional: shared component across all backends; no ComponentName class exists for Frontend
         VllmComponentName.decode_worker_k8s_name: re.compile(
             r"VllmWorker for (?P<model_name>.*?) has been initialized"
         ),
@@ -237,7 +237,7 @@ def parse_process_log(log_dir, process_name):
         SGLangComponentName.prefill_worker_k8s_name: re.compile(
             r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
         ),
-        "TRTLLMWorker": re.compile(
+        "TRTLLMWorker": re.compile(  # Intentional: aggregated TRTLLM deployment uses different name not yet in TrtllmComponentName defaults
             r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
         ),
         TrtllmComponentName.decode_worker_k8s_name: re.compile(
@@ -333,12 +333,12 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
         return None
 
     processes = [
-        "Frontend",
+        "Frontend",  # Intentional: shared component across all backends; no ComponentName class exists for Frontend
         VllmComponentName.decode_worker_k8s_name,
         VllmComponentName.prefill_worker_k8s_name,
         SGLangComponentName.decode_worker_k8s_name,
         SGLangComponentName.prefill_worker_k8s_name,
-        "TRTLLMWorker",
+        "TRTLLMWorker",  # Intentional: aggregated TRTLLM deployment uses different name not yet in TrtllmComponentName defaults
         TrtllmComponentName.decode_worker_k8s_name,
         TrtllmComponentName.prefill_worker_k8s_name,
     ]

@@ -77,8 +77,7 @@ WORKER_MAP = {
 # Process ready patterns for recovery detection
 # Uses component name attributes from dynamo.planner.defaults as keys
 WORKER_READY_PATTERNS: Dict[str, Pattern] = {
-    # Frontend
-    "Frontend": re.compile(r"added model"),
+    "Frontend": re.compile(r"added model"),  # Intentional: shared component across all backends; no ComponentName class exists for Frontend
     # vLLM workers
     VllmComponentName.decode_worker_k8s_name: re.compile(
         r"VllmWorker for (?P<model_name>.*?) has been initialized"
@@ -94,7 +93,7 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
         r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
     ),
     # TensorRT-LLM workers
-    "TRTLLMWorker": re.compile(
+    "TRTLLMWorker": re.compile(  # Intentional: aggregated TRTLLM deployment uses different name not yet in TrtllmComponentName defaults
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
     TrtllmComponentName.decode_worker_k8s_name: re.compile(
@@ -108,7 +107,7 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
 
 def get_all_worker_types() -> list[str]:
     """Get all worker type names for both vLLM and SGLang."""
-    worker_types = ["Frontend"]
+    worker_types = ["Frontend"]  # Intentional: shared component across all backends; no ComponentName class exists for Frontend
     for backend in WORKER_MAP.values():
         worker_types.extend(backend.values())
     # Remove duplicates while preserving order
@@ -214,8 +213,7 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
     """Set replicas for all components in a deployment based on backend type."""
     spec = deployment_spec["spec"]
 
-    # Frontend is common for all backends
-    spec["Frontend"].replicas = replicas
+    spec["Frontend"].replicas = replicas  # Intentional: Frontend is common to all backends; no ComponentName class exists for it
 
     if backend in WORKER_MAP:
         # For trtllm agg deployments, use different worker name
@@ -388,8 +386,8 @@ def _create_backend_failures(backend, deploy_type="disagg"):
     process_name = f"dynamo.{backend}"
 
     failures = {
-        "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
-        "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
+        "frontend": [Failure(30, "Frontend", "dynamo.frontend")],  # Intentional: Frontend is a shared component across all backends
+        "frontend_pod": [Failure(30, "Frontend", "delete_pod")],  # Intentional: Frontend is a shared component across all backends
         "decode_worker": [Failure(30, decode_worker, process_name, "SIGKILL")],
         "decode_worker_pod": [Failure(30, decode_worker, "delete_pod")],
         "prefill_worker": [Failure(30, prefill_worker, process_name, "SIGKILL")],
