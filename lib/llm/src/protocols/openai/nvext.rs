@@ -18,7 +18,7 @@ pub const HEADER_DP_RANK: &str = "x-dp-rank";
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
-/// - `x-dynamo-dp-rank` -> `dp_rank`
+/// - `x-dp-rank` -> `dp_rank`
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -175,7 +175,7 @@ pub struct NvExt {
     pub decode_worker_id: Option<u64>,
 
     /// Data parallel rank for the request, set by the EPP via the
-    /// `x-dynamo-dp-rank` header. When a worker hosts multiple DP engines,
+    /// `x-dp-rank` header. When a worker hosts multiple DP engines,
     /// this steers the request to the correct engine instance.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
