@@ -362,7 +362,7 @@ python -m dynamo.sglang \
 - **Streaming sessions only**: Sessions are opened with `streaming=True`, which means only sequential append operations are supported. Branching (`replace`), token-level rewind (`offset`), and `drop_previous_output` are not supported.
 - **Timeout is idle-based**: The timeout refreshes on every request. If a subagent pauses for a long tool call that exceeds the timeout, the session is reaped and KV is freed. The subagent must re-open the session and re-prefill.
 - **Memory pressure from concurrent sessions**: Each open session holds a `req_pool_idx` slot and GPU KV memory. Many concurrent sessions can starve prefill capacity. Use short timeouts for subagent sessions.
-- **No session metrics yet**: Active session count and held tokens are not yet exported as Prometheus metrics.
+- **Session metrics**: Active session count (`sglang:num_streaming_sessions`) and held KV tokens (`sglang:streaming_session_held_tokens`) are exported as Prometheus gauges on the worker's metrics endpoint.
 
 ## See Also
 
