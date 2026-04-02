@@ -119,7 +119,7 @@ async def init_decode(
         )
 
     # Only serve session_control when streaming sessions are enabled.
-    if server_args.enable_streaming_session:
+    if getattr(server_args, "enable_streaming_session", False):
         session_control_endpoint = runtime.endpoint(
             f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
         )
@@ -142,7 +142,7 @@ async def init_decode(
                 readiness_gate=ready_event,
             ),
         ]
-        if server_args.enable_streaming_session:
+        if getattr(server_args, "enable_streaming_session", False):
             gather_tasks.append(
                 session_control_endpoint.serve_endpoint(handler.session_control)
             )
