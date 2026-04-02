@@ -273,6 +273,14 @@ async fn anthropic_messages(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        request.id().to_string(),
+    );
+
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
@@ -304,13 +312,6 @@ async fn anthropic_messages(
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = Box::pin(engine_stream);
-
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
-        Endpoint::AnthropicMessages,
-        streaming,
-        ctx.id().to_string(),
-    );
 
     if streaming {
         stream_handle.arm();
