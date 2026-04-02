@@ -18,7 +18,7 @@ import (
 )
 
 func DesiredCheckpointJobName(identityHash string, annotations map[string]string) string {
-	return snapshotprotocol.CheckpointJobName(identityHash, annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	return "checkpoint-job-" + identityHash + "-" + snapshotprotocol.ArtifactVersion(annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 func buildCheckpointWorkerDefaultEnv(

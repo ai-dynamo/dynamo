@@ -60,7 +60,9 @@ var testHash = func() string {
 	return hash
 }()
 
-var defaultCheckpointJobName = snapshotprotocol.CheckpointJobName(testHash, snapshotprotocol.DefaultCheckpointArtifactVersion)
+var defaultCheckpointJobName = checkpointjob.DesiredCheckpointJobName(testHash, map[string]string{
+	snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+})
 
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
