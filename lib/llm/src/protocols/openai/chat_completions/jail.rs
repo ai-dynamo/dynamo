@@ -470,6 +470,9 @@ pub struct JailedStream {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     marker_matcher: MarkerMatcher,
@@ -492,8 +495,9 @@ impl JailedStream {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         let jail_mode = self.jail_mode.clone();
+        let named_tool_active = self.named_tool_name.is_some();
         let jailed_stream = self.apply(stream);
-        JailedStream::fix_finish_reason(jailed_stream, jail_mode)
+        JailedStream::fix_finish_reason(jailed_stream, jail_mode, named_tool_active)
     }
 
     /// Apply the jail transformation to a stream of chat completion responses
@@ -854,6 +858,37 @@ impl JailedStream {
                 if let Ok((tool_calls, normal_text)) = parse_result
                     && !tool_calls.is_empty()
                 {
+                    // If a named tool filter is set (tool_choice=named + parser path), reject
+                    // tool calls that don't match the required tool name.
+                    let tool_calls = if let Some(ref required_name) = self.named_tool_name {
+                        let filtered: Vec<_> = tool_calls
+                            .into_iter()
+                            .filter(|tc| tc.function.name == *required_name)
+                            .collect();
+                        if filtered.is_empty() {
+                            tracing::warn!(
+                                required = %required_name,
+                                "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                            );
+                        }
+                        filtered
+                    } else {
+                        tool_calls
+                    };
+
+                    if tool_calls.is_empty() {
+                        // All parsed calls were for the wrong tool — return content choice
+                        return create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            accumulated_content,
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
+                            base_choice.logprobs.clone(),
+                        );
+                    }
+
                     // Convert to streaming format
                     let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
                         .into_iter()
@@ -1002,6 +1037,7 @@ impl JailedStream {
     fn fix_finish_reason<S>(
         input_stream: S,
         jail_mode: JailMode,
+        named_tool_active: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1030,10 +1066,10 @@ impl JailedStream {
 
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
-                                        // Traditional: if tool calls emitted, change to ToolCalls
-                                        if has_tool_calls {
+                                        if has_tool_calls && !named_tool_active {
                                             choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
+                                        // When named_tool_active, keep Stop (OpenAI spec for tool_choice=named)
                                     }
                                     JailMode::Immediate { format } => {
                                         // tool_choice mode: apply specific finish_reason logic
@@ -1068,6 +1104,9 @@ pub struct JailedStreamBuilder {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     jail_mode: JailMode,
@@ -1080,6 +1119,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: Vec::new(),
             jail_end_sequences: Vec::new(),
             tool_call_parser: None,
+            named_tool_name: None,
             tool_definitions: None,
             emission_mode: EmissionMode::default(),
             jail_mode: JailMode::MarkerBased,
@@ -1121,6 +1161,14 @@ impl JailedStreamBuilder {
     /// Set the tool call parser to use for detection and parsing
     pub fn tool_call_parser(mut self, parser: impl Into<String>) -> Self {
         self.tool_call_parser = Some(parser.into());
+        self
+    }
+
+    /// Constrain parsed output to a single named tool (for tool_choice=named + parser path).
+    /// When set, tool calls emitted by the parser that don't match `tool_name` are silently
+    /// filtered out, enforcing the named-tool contract even when the model emits the wrong tool.
+    pub fn named_tool_filter(mut self, tool_name: impl Into<String>) -> Self {
+        self.named_tool_name = Some(tool_name.into());
         self
     }
 
@@ -1243,6 +1291,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: self.jail_start_sequences,
             jail_end_sequences: self.jail_end_sequences,
             tool_call_parser: self.tool_call_parser,
+            named_tool_name: self.named_tool_name,
             tool_definitions: self.tool_definitions,
             emission_mode: self.emission_mode,
             marker_matcher,

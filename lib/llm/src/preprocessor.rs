@@ -1044,14 +1044,35 @@ impl OpenAIPreprocessor {
         }
 
         // Configure jail based on tool_choice
+        //
+        // When a tool_call_parser is configured, always use marker-based mode
+        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
+        // Immediate JSON mode is only a fallback for required/named when no
+        // parser exists (the model is expected to emit raw JSON in that case).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                // Immediate jail mode for named tool choice
-                builder = builder.tool_choice_named(named.function.name.clone());
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    // Also install a named-tool filter so that if the model emits
+                    // the wrong tool, the parsed call is rejected before emission.
+                    builder = builder
+                        .tool_call_parser(parser)
+                        .named_tool_filter(named.function.name.clone());
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_named(named.function.name.clone());
+                }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
-                // Immediate jail mode for required tool choice
-                builder = builder.tool_choice_required();
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    builder = builder.tool_call_parser(parser);
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_required();
+                }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
             | Some(ChatCompletionToolChoiceOption::None)
