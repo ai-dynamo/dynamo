@@ -56,7 +56,15 @@ impl SessionCloseAction {
                 "action": "close_session",
                 "session_id": session_id,
             });
-            send_session_request(&client, request, instance_id, &session_id, &context_id, "close_session").await;
+            send_session_request(
+                &client,
+                request,
+                instance_id,
+                &session_id,
+                &context_id,
+                "close_session",
+            )
+            .await;
         });
     }
 }
@@ -93,9 +101,14 @@ impl AgentController {
                         "session_id": session_id,
                     });
                     send_session_request(
-                        &client, request, instance_id,
-                        &session_id, "session-affinity-reaper", "close_session",
-                    ).await;
+                        &client,
+                        request,
+                        instance_id,
+                        &session_id,
+                        "session-affinity-reaper",
+                        "close_session",
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -154,9 +167,14 @@ impl AgentController {
                     "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
                 });
                 let resp = send_session_request(
-                    &client, request, instance_id,
-                    &sc.session_id, context_id, "open_session",
-                ).await;
+                    &client,
+                    request,
+                    instance_id,
+                    &sc.session_id,
+                    context_id,
+                    "open_session",
+                )
+                .await;
 
                 if let Some(resp) = resp {
                     ensure_session_open_succeeded(&resp, &sc.session_id)?;
@@ -166,11 +184,7 @@ impl AgentController {
                 // session exists, otherwise retries can get pinned to a
                 // worker that never opened the session.
                 if let Some(sticky) = sticky {
-                    sticky.bind(
-                        &sc.session_id,
-                        instance_id,
-                        Duration::from_secs(sc.timeout),
-                    );
+                    sticky.bind(&sc.session_id, instance_id, Duration::from_secs(sc.timeout));
                 }
 
                 Ok(None)
