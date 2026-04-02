@@ -153,6 +153,10 @@ on:
         required: false
       HF_TOKEN:
         required: false
+      OTLP_ENDPOINT:
+        required: false
+      OTLP_TOKEN:
+        required: false
 jobs:
   # ============================================================================
   # BUILD
