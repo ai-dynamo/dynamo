@@ -16,8 +16,12 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.25
-ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
-ARG CRIU_COMMIT=777baaf27f6a76f743c9bf24b64886297dc0129b
+# Default to upstream CRIU development branch. Custom forks can override both
+# args at build time, for example:
+#   --build-arg CRIU_REPO=<git-remote-url>
+#   --build-arg CRIU_REF=<fork-branch-or-sha>
+ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -76,7 +80,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
-ARG CRIU_COMMIT
+ARG CRIU_REF
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -102,8 +106,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_COMMIT} \
-    && git checkout FETCH_HEAD \
+    && git fetch --depth 1 origin ${CRIU_REF} \
+    && git checkout FETCH_HEAD
+
+RUN python3 -c 'from pathlib import Path; path = Path("/tmp/criu/criu/sk-tcp.c"); text = path.read_text(); marker = "#ifndef IN_LOOPBACK\n#define IN_LOOPBACK(addr) ((((long int)(addr)) & 0xff000000) == 0x7f000000)\n#endif\n"; path.write_text(text if "#ifndef IN_LOOPBACK" in text else text.replace("#include <netinet/in.h>\n", "#include <netinet/in.h>\n" + marker, 1))' \
+    && cd /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 

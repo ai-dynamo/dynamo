@@ -39,11 +39,8 @@ func (c *AgentConfig) Validate() error {
 	if strings.TrimSpace(c.Storage.BasePath) == "" {
 		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath is required"}
 	}
-	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
-		return &ConfigError{
-			Field:   "criu",
-			Message: "tcpClose and tcpEstablished cannot both be true",
-		}
+	if err := c.CRIU.Validate(); err != nil {
+		return err
 	}
 	return c.Restore.Validate()
 }
@@ -83,6 +80,7 @@ type CRIUSettings struct {
 	LazyPages         bool   `yaml:"lazyPages"`
 	LeaveRunning      bool   `yaml:"leaveRunning"`
 	ShellJob          bool   `yaml:"shellJob"`
+	SocketPolicy      string `yaml:"socketPolicy"`
 	TcpClose          bool   `yaml:"tcpClose"`
 	TcpEstablished    bool   `yaml:"tcpEstablished"`
 	FileLocks         bool   `yaml:"fileLocks"`
@@ -99,6 +97,52 @@ type CRIUSettings struct {
 	LibDir            string `yaml:"libDir"`
 	AllowUprobes      bool   `yaml:"allowUprobes"`
 	SkipInFlight      bool   `yaml:"skipInFlight"`
+}
+
+type SocketPolicy string
+
+const (
+	SocketPolicyCloseAllConnected    SocketPolicy = "close-all-connected"
+	SocketPolicyPreserveAllConnected SocketPolicy = "preserve-all-connected"
+	SocketPolicyPreserveLoopbackOnly SocketPolicy = "preserve-loopback-only"
+)
+
+func (c CRIUSettings) Validate() error {
+	_, err := c.ResolvedSocketPolicy()
+	return err
+}
+
+func (c CRIUSettings) ResolvedSocketPolicy() (SocketPolicy, error) {
+	policy := SocketPolicy(strings.TrimSpace(c.SocketPolicy))
+	switch policy {
+	case "":
+		if c.TcpClose && c.TcpEstablished {
+			return "", &ConfigError{
+				Field:   "criu",
+				Message: "tcpClose and tcpEstablished cannot both be true",
+			}
+		}
+		if c.TcpClose {
+			return SocketPolicyCloseAllConnected, nil
+		}
+		if c.TcpEstablished {
+			return SocketPolicyPreserveAllConnected, nil
+		}
+		return SocketPolicyPreserveLoopbackOnly, nil
+	case SocketPolicyCloseAllConnected, SocketPolicyPreserveAllConnected, SocketPolicyPreserveLoopbackOnly:
+		if c.TcpClose || c.TcpEstablished {
+			return "", &ConfigError{
+				Field:   "criu",
+				Message: "socketPolicy cannot be combined with legacy tcpClose/tcpEstablished settings",
+			}
+		}
+		return policy, nil
+	default:
+		return "", &ConfigError{
+			Field:   "criu.socketPolicy",
+			Message: fmt.Sprintf("invalid socket policy %q", c.SocketPolicy),
+		}
+	}
 }
 
 // OverlaySettings is the static config for rootfs exclusions.

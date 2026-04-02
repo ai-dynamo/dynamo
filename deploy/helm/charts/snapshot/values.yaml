@@ -154,6 +154,7 @@ config:
     # K8s-specific options (recommended defaults for containers)
     leaveRunning: true      # Keep process running after checkpoint
     shellJob: true          # Containers are often session leaders
+    socketPolicy: ""        # "", close-all-connected, preserve-all-connected, preserve-loopback-only
     tcpClose: true          # Close non-listening TCP sockets on restore
     tcpEstablished: false   # Preserve established TCP sockets during restore
     fileLocks: true         # Applications use file locks

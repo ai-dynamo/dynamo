@@ -3,14 +3,20 @@
 
 """Unit tests for SGLang backend components."""
 
+import importlib
+import os
 import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
+import sglang.srt.distributed as distributed_module
+import sglang.srt.distributed.device_communicators as device_communicators
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+from dynamo.sglang import patches as sglang_patches
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -36,6 +42,90 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_snapshot_patches_force_file_dist_init_and_pynccl(monkeypatch):
+    """Checkpoint mode should avoid TCPStore listeners and keep PyNccl enabled."""
+
+    class FakePyNcclCommunicator:
+        def __init__(self, *args, **kwargs):
+            self.available = kwargs.get("available", True)
+            self.world_size = kwargs.get("world_size", 2)
+            self.disabled = True
+
+    class FakeGroup:
+        def __init__(self):
+            self.world_size = 2
+            self.pynccl_comm = FakePyNcclCommunicator(world_size=2, available=True)
+
+    def fake_init_model_parallel_group(*args, **kwargs):
+        return FakeGroup()
+
+    scheduler_calls = []
+
+    def fake_run_scheduler_process(*args, **kwargs):
+        scheduler_calls.append((args, kwargs))
+
+    class FakeEngine:
+        run_scheduler_process_func = staticmethod(fake_run_scheduler_process)
+
+    fake_pynccl_module = types.SimpleNamespace(
+        PyNcclCommunicator=FakePyNcclCommunicator
+    )
+    fake_parallel_state_module = types.SimpleNamespace(
+        init_model_parallel_group=fake_init_model_parallel_group
+    )
+    fake_engine_module = types.ModuleType("sglang.srt.entrypoints.engine")
+    fake_engine_module.Engine = FakeEngine
+    stale_store_path = Path("/tmp/dynamo-sglang-dist-init-test-pod")
+    stale_store_path.write_text("stale", encoding="utf-8")
+
+    monkeypatch.setenv("POD_UID", "test-pod")
+    monkeypatch.setenv(
+        "SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE", "tcp://127.0.0.1:1234"
+    )
+    monkeypatch.setattr(
+        device_communicators, "pynccl", fake_pynccl_module, raising=False
+    )
+    monkeypatch.setattr(
+        distributed_module,
+        "parallel_state",
+        fake_parallel_state_module,
+        raising=False,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.distributed.device_communicators.pynccl",
+        fake_pynccl_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.distributed.parallel_state",
+        fake_parallel_state_module,
+    )
+    monkeypatch.setitem(
+        sys.modules, "sglang.srt.entrypoints.engine", fake_engine_module
+    )
+
+    patches = importlib.reload(sglang_patches)
+    patches.apply_snapshot_patches()
+
+    assert os.environ["SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE"] == (
+        "file:///tmp/dynamo-sglang-dist-init-test-pod"
+    )
+    assert not stale_store_path.exists()
+
+    communicator = fake_pynccl_module.PyNcclCommunicator(world_size=2, available=True)
+    assert communicator.disabled is False
+
+    group = fake_parallel_state_module.init_model_parallel_group([], 0, "gloo")
+    assert group.pynccl_comm.disabled is False
+
+    FakeEngine.run_scheduler_process_func("tp0", rank=0)
+    assert scheduler_calls == [(("tp0",), {"rank": 0})]
+
+    single_rank = fake_pynccl_module.PyNcclCommunicator(world_size=1, available=True)
+    assert single_rank.disabled is True
 
 
 @pytest.mark.asyncio

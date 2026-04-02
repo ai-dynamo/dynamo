@@ -33,6 +33,7 @@ data:
       workDir: {{ .Values.config.criu.workDir | quote }}
       leaveRunning: {{ .Values.config.criu.leaveRunning }}
       shellJob: {{ .Values.config.criu.shellJob }}
+      socketPolicy: {{ .Values.config.criu.socketPolicy | quote }}
       tcpClose: {{ .Values.config.criu.tcpClose }}
       tcpEstablished: {{ .Values.config.criu.tcpEstablished }}
       fileLocks: {{ .Values.config.criu.fileLocks }}

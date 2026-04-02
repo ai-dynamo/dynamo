@@ -48,15 +48,15 @@ func TestParseManageCgroupsMode(t *testing.T) {
 }
 
 func TestApplyCommonSettings(t *testing.T) {
-	t.Run("valid mode sets all fields", func(t *testing.T) {
-		opts := &criurpc.CriuOpts{}
-		settings := &types.CRIUSettings{
-			LogLevel:          4,
-			ShellJob:          true,
-			TcpEstablished:    true,
-			FileLocks:         true,
-			ExtUnixSk:         true,
-			LinkRemap:         true,
+		t.Run("valid mode sets all fields", func(t *testing.T) {
+			opts := &criurpc.CriuOpts{}
+			settings := &types.CRIUSettings{
+				LogLevel:          4,
+				ShellJob:          true,
+				SocketPolicy:      string(types.SocketPolicyPreserveAllConnected),
+				FileLocks:         true,
+				ExtUnixSk:         true,
+				LinkRemap:         true,
 			ManageCgroupsMode: "soft",
 		}
 
@@ -101,17 +101,33 @@ func TestApplyCommonSettings(t *testing.T) {
 		}
 	})
 
-	t.Run("conflicting tcp settings return error", func(t *testing.T) {
-		opts := &criurpc.CriuOpts{}
-		settings := &types.CRIUSettings{
-			TcpClose:       true,
-			TcpEstablished: true,
-		}
-		if err := applyCommonSettings(opts, settings); err == nil {
-			t.Error("expected error for conflicting tcp settings")
-		}
-	})
-}
+		t.Run("conflicting tcp settings return error", func(t *testing.T) {
+			opts := &criurpc.CriuOpts{}
+			settings := &types.CRIUSettings{
+				TcpClose:       true,
+				TcpEstablished: true,
+			}
+			if err := applyCommonSettings(opts, settings); err == nil {
+				t.Error("expected error for conflicting tcp settings")
+			}
+		})
+
+		t.Run("loopback-only policy leaves both tcp flags disabled", func(t *testing.T) {
+			opts := &criurpc.CriuOpts{}
+			settings := &types.CRIUSettings{
+				SocketPolicy: string(types.SocketPolicyPreserveLoopbackOnly),
+			}
+			if err := applyCommonSettings(opts, settings); err != nil {
+				t.Fatalf("applyCommonSettings: %v", err)
+			}
+			if opts.GetTcpEstablished() {
+				t.Error("TcpEstablished should be false for loopback-only policy")
+			}
+			if opts.GetTcpClose() {
+				t.Error("TcpClose should be false for loopback-only policy")
+			}
+		})
+	}
 
 func TestBuildRestoreExtMounts(t *testing.T) {
 	t.Run("normal manifest with ExtMnt", func(t *testing.T) {
