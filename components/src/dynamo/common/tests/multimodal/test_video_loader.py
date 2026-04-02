@@ -12,6 +12,7 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
 ]
 
 
