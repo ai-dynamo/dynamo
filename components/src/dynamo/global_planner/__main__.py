@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from dynamo.global_planner.argparse_config import create_global_planner_parser
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -33,6 +33,17 @@ class HealthCheckRequest(BaseModel):
     """Request type for health check endpoint"""
 
     text: str = "ping"
+
+
+class HealthCheckResponse(BaseModel):
+    """Response type for health check endpoint"""
+
+    status: str
+    component: str
+    namespace: str
+    managed_namespaces: object
+    dgd_watch: dict
+    message: str = ""
 
 
 @dynamo_worker()
@@ -99,10 +110,11 @@ async def main(runtime: DistributedRuntime, args):
     # Serve scale_request endpoint
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
-    await scale_endpoint.serve_endpoint(handler.scale_request)
+    asyncio.ensure_future(scale_endpoint.serve_endpoint(handler.scale_request))
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
 
     # Serve health check endpoint (includes DGD watch health)
+    @dynamo_endpoint(HealthCheckRequest, HealthCheckResponse)
     async def health_check(request: HealthCheckRequest):
         """Health check endpoint for monitoring"""
         payload = {
@@ -123,7 +135,7 @@ async def main(runtime: DistributedRuntime, args):
         yield payload
 
     health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
-    await health_endpoint.serve_endpoint(health_check)
+    asyncio.ensure_future(health_endpoint.serve_endpoint(health_check))
     logger.info("  ✓ health - Health check endpoint")
 
     logger.info("=" * 60)

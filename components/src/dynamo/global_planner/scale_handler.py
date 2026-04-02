@@ -182,6 +182,7 @@ class ScaleRequestHandler:
                         if managed_names is not None and name not in managed_names:
                             continue
                         key = f"{self.k8s_namespace}/{name}"
+                        logger.debug(f"DGD watch event: {event_type} {key}")
                         with self._connectors_lock:
                             if event_type == "DELETED":
                                 self.connectors.pop(key, None)
