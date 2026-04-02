@@ -10,21 +10,39 @@ alternate between local sliding window and global attention layers. This
 exercises different KV cache offload/onboard paths compared to models with
 uniform full attention.
 
-Tests:
+Tests (both vLLM and TRT-LLM):
 1. Offload/Onboard: Request offloads to CPU, cache reset, re-request triggers onboarding
 2. Eviction: GPU cache fills, blocks evicted, later retrieved without corruption
 3. Determinism: Responses remain identical across offload/onboard/eviction cycles
 """
 
+import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TextIO
+
 import pytest
 import requests
 
+from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.test_output import resolve_test_output_path
+
 from .common import llm_server_kvbm  # noqa: F401
-from .common import DeterminismTester, assert_deterministic, fetch_kvbm_metrics
+from .common import (
+    DeterminismTester,
+    ServerType,
+    assert_deterministic,
+    check_module_available,
+    fetch_kvbm_metrics,
+)
 
 # Test configuration
-# Gemma-3-1b-it has ~4.4x smaller KV cache per token than 8B models,
-# so fewer blocks are expected per prompt.
 MIN_OFFLOAD_BLOCKS = 6
 MAX_TOKENS = 15
 
@@ -46,17 +64,20 @@ AELDORA_STORY = (
 # SWA model for these tests
 SWA_MODEL = "google/gemma-3-1b-it"
 
-# Test markers
+# Module-level markers (framework-specific markers applied per-test)
 pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
-    pytest.mark.vllm,
     pytest.mark.pre_merge,
 ]
 
 
+# =============================================================================
 # Helper functions
+# =============================================================================
+
+
 def print_test_header(title: str) -> None:
     """Print a formatted test header."""
     print(f"\n{'=' * 70}")
@@ -97,10 +118,248 @@ def reset_cache(base_url: str) -> None:
         print(f"Warning: Cache reset failed: {e}")
 
 
-# Fixtures
+# =============================================================================
+# TRT-LLM server manager (adapted from test_determinism_agg.py)
+# =============================================================================
+
+
+class TrtllmSWAServerManager:
+    """Manages TRT-LLM server lifecycle for SWA KVBM testing."""
+
+    def __init__(
+        self,
+        port: Optional[int] = None,
+        cpu_cache_blocks: Optional[int] = None,
+        gpu_cache_blocks: Optional[int] = None,
+        log_dir: Optional[Path] = None,
+    ):
+        self.server_type = ServerType.trtllm
+        if port is not None:
+            self.port = port
+            self.port_allocated = False
+        elif os.environ.get("KVBM_SERVER_PORT"):
+            self.port = int(os.environ["KVBM_SERVER_PORT"])
+            self.port_allocated = False
+        else:
+            self.port = allocate_port(start_port=8000)
+            self.port_allocated = True
+        self.base_url = f"http://localhost:{self.port}"
+        self.metrics_port = allocate_port(start_port=6880)
+        self.metrics_port_allocated = True
+        self.process: Optional[subprocess.Popen] = None
+        self.cpu_cache_blocks = cpu_cache_blocks
+        self.gpu_cache_blocks = gpu_cache_blocks
+
+        # Logging
+        self.log_dir = log_dir or Path(".")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config_str = (
+            f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
+        )
+        self.server_log_file = (
+            self.log_dir / f"trtllm_swa_server_{config_str}_{timestamp}.log"
+        )
+        self.server_stdout_file: Optional[TextIO] = None
+        self._tee_threads: List[threading.Thread] = []
+
+        # Environment
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "RUST_BACKTRACE": "1",
+                "NATS_SERVER": "nats://localhost:4222",
+                "ETCD_ENDPOINTS": "http://localhost:2379",
+                "DYN_KVBM_METRICS": "true",
+                "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
+            }
+        )
+
+        if cpu_cache_blocks is not None:
+            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        self._set_up_trtllm_config(gpu_cache_blocks)
+
+    def _set_up_trtllm_config(self, gpu_cache_blocks):
+        config_path = os.environ.get(
+            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_swa_llm_api_config.yaml"
+        )
+        llm_api_config: Dict[str, Any] = {}
+        # Disable CUDA graph since Connector API doesn't support it yet in TRTLLM
+        llm_api_config["cuda_graph_config"] = None
+        llm_api_config["kv_cache_config"] = {
+            "enable_partial_reuse": False,
+            # Smaller than 8B (0.10) since 1B model uses ~4.4x less KV cache per token
+            "free_gpu_memory_fraction": 0.03,
+        }
+        llm_api_config["kv_connector_config"] = {
+            "connector_module": "kvbm.trtllm_integration.connector",
+            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
+            "connector_worker_class": "DynamoKVBMConnectorWorker",
+        }
+
+        # GPU blocks override
+        if gpu_cache_blocks is not None:
+            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
+            llm_api_config["kv_cache_config"]["max_tokens"] = (
+                int(gpu_cache_blocks) * 32
+            )  # TRTLLM defaults 32 tokens per block
+
+        self.server_cmd = [
+            "trtllm-serve",
+            SWA_MODEL,
+            "--host",
+            "localhost",
+            "--port",
+            str(self.port),
+            "--backend",
+            "pytorch",
+            "--extra_llm_api_options",
+            config_path,
+        ]
+
+        import yaml
+
+        with open(config_path, "w") as f:
+            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
+
+    def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
+        """Read from pipe and write to both log file and stdout (tee)."""
+        try:
+            for line in iter(pipe.readline, ""):
+                if not line:
+                    break
+                log_file.write(line)
+                log_file.flush()
+                sys.stdout.write(f"[{prefix}] {line}")
+                sys.stdout.flush()
+        except (ValueError, OSError):
+            pass
+        finally:
+            pipe.close()
+
+    def start_server(self, timeout: int = 300) -> bool:
+        """Start TRT-LLM server and wait for readiness."""
+        if self.is_server_running():
+            self.stop_server()
+            time.sleep(2)
+
+        self.server_stdout_file = open(self.server_log_file.with_suffix(".log"), "w")
+
+        header = f"=== trtllm Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
+        self.server_stdout_file.write(header)
+        self.server_stdout_file.flush()
+        print(f"[trtllm] {header}", end="")
+
+        self.process = subprocess.Popen(
+            self.server_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=self.env,
+            preexec_fn=os.setsid,
+            text=True,
+            bufsize=1,
+        )
+
+        self._tee_threads = [
+            threading.Thread(
+                target=self._tee_output,
+                args=(self.process.stdout, self.server_stdout_file, "trtllm"),
+                daemon=True,
+            ),
+        ]
+        for t in self._tee_threads:
+            t.start()
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.is_server_running():
+                try:
+                    requests.get(
+                        f"http://localhost:{self.metrics_port}/metrics", timeout=5
+                    )
+                    return True
+                except requests.exceptions.RequestException:
+                    print(
+                        f"Warning: server healthy but metrics port {self.metrics_port} not reachable yet"
+                    )
+            if self.process.poll() is not None:
+                for t in self._tee_threads:
+                    t.join(timeout=2)
+                self._close_log_files()
+                return False
+            time.sleep(5)
+
+        self.stop_server()
+        return False
+
+    def stop_server(self):
+        """Stop TRT-LLM server and close logs."""
+        if self.process:
+            try:
+                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                try:
+                    self.process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    self.process.wait()
+            except (ProcessLookupError, OSError):
+                pass
+            finally:
+                self.process = None
+        for t in self._tee_threads:
+            t.join(timeout=2)
+        self._tee_threads = []
+        self._close_log_files()
+
+        if self.port_allocated:
+            deallocate_port(self.port)
+            self.port_allocated = False
+        if self.metrics_port_allocated:
+            deallocate_port(self.metrics_port)
+            self.metrics_port_allocated = False
+
+    def _close_log_files(self):
+        if self.server_stdout_file:
+            self.server_stdout_file.write(
+                f"\n=== Server Stopped at {datetime.now()} ===\n"
+            )
+            self.server_stdout_file.close()
+            self.server_stdout_file = None
+
+    def is_server_running(self) -> bool:
+        try:
+            response = requests.get(f"{self.base_url}/health", timeout=5)
+            if response.status_code != 200:
+                return False
+
+            test_payload = {
+                "model": SWA_MODEL,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_completion_tokens": 1,
+                "temperature": 0,
+            }
+
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions",
+                headers={"Content-Type": "application/json"},
+                json=test_payload,
+                timeout=10,
+            )
+            return response.status_code == 200
+
+        except requests.exceptions.RequestException:
+            return False
+
+
+# =============================================================================
+# vLLM fixtures
+# =============================================================================
+
+
 @pytest.fixture(scope="function")
 def tester(llm_server_kvbm):  # noqa: F811
-    """Create tester bound to the KVBM-enabled server."""
+    """Create tester bound to the KVBM-enabled vLLM server."""
     return DeterminismTester(
         base_url=llm_server_kvbm.base_url,
         model_id=SWA_MODEL,
@@ -108,12 +367,65 @@ def tester(llm_server_kvbm):  # noqa: F811
     )
 
 
-# Tests
+# =============================================================================
+# TRT-LLM fixtures
+# =============================================================================
+
+
+@pytest.fixture(scope="function")
+def trtllm_server(request, runtime_services):
+    """Start and stop a TRT-LLM server for SWA KVBM testing."""
+    logger = logging.getLogger("pytest")
+    logger.setLevel(logging.INFO)
+
+    cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
+    gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
+    port = getattr(request, "param", {}).get("port", None)
+
+    log_dir = Path(resolve_test_output_path(request.node.name))
+
+    if not check_module_available("tensorrt_llm"):
+        pytest.skip("tensorrt_llm module not available")
+
+    server_manager = TrtllmSWAServerManager(
+        port=port,
+        cpu_cache_blocks=cpu_blocks,
+        gpu_cache_blocks=gpu_blocks,
+        log_dir=log_dir,
+    )
+
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
+    if not server_manager.start_server(timeout=start_timeout):
+        pytest.fail(
+            f"Failed to start trtllm server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
+        )
+
+    yield server_manager
+
+    server_manager.stop_server()
+
+
+@pytest.fixture(scope="function")
+def trtllm_tester(trtllm_server):
+    """Create tester bound to the KVBM-enabled TRT-LLM server."""
+    return DeterminismTester(
+        base_url=trtllm_server.base_url,
+        model_id=SWA_MODEL,
+        server_type=trtllm_server.server_type,
+    )
+
+
+# =============================================================================
+# vLLM tests
+# =============================================================================
+
+
+@pytest.mark.vllm
 @pytest.mark.parametrize("llm_server_kvbm", [{"model": SWA_MODEL}], indirect=True)
 @pytest.mark.timeout(170)
 def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
-    Test offload → cache reset → onboard cycle with SWA model.
+    Test offload → cache reset → onboard cycle with SWA model (vLLM).
 
     Validates that:
     - Initial request triggers offload to CPU cache
@@ -121,6 +433,113 @@ def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     - Repeated request triggers onboard from CPU to GPU
     - Responses are deterministic across the cycle
     """
+    _run_offload_and_onboard(tester, llm_server_kvbm)
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}],
+    indirect=True,
+)
+@pytest.mark.timeout(170)
+def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
+    """
+    Test GPU cache eviction mechanics with SWA model (vLLM).
+
+    Validates that:
+    - Multiple requests fill GPU cache causing eviction
+    - Evicted blocks can be retrieved from CPU cache via onboarding
+    - Metrics correctly reflect offload and onboard operations
+    """
+    _run_gpu_cache_eviction(tester, llm_server_kvbm)
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}],
+    indirect=True,
+)
+@pytest.mark.timeout(160)
+def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
+    """
+    Test onboarding determinism under eviction scenario with SWA model (vLLM).
+
+    Validates that:
+    - Multiple onboarding cycles produce deterministic results
+    - Responses are consistent when blocks are onboarded multiple times
+    - Tests onboarded vs onboarded (not initial vs onboarded)
+    """
+    _run_onboarding_determinism(tester, llm_server_kvbm)
+
+
+# =============================================================================
+# TRT-LLM tests
+# =============================================================================
+
+
+@pytest.mark.trtllm
+@pytest.mark.parametrize("trtllm_server", [{}], indirect=True)
+@pytest.mark.timeout(170)
+def test_swa_offload_and_onboard_trtllm(trtllm_tester, trtllm_server):
+    """
+    Test offload → cache reset → onboard cycle with SWA model (TRT-LLM).
+
+    Validates that:
+    - Initial request triggers offload to CPU cache
+    - Cache reset clears GPU cache (via eviction with filler requests)
+    - Repeated request triggers onboard from CPU to GPU
+    - Responses are deterministic across the cycle
+    """
+    _run_offload_and_onboard(trtllm_tester, trtllm_server)
+
+
+@pytest.mark.trtllm
+@pytest.mark.parametrize(
+    "trtllm_server",
+    [{"cpu_blocks": 200, "gpu_blocks": 20}],
+    indirect=True,
+)
+@pytest.mark.timeout(170)
+def test_swa_gpu_cache_eviction_trtllm(trtllm_tester, trtllm_server):
+    """
+    Test GPU cache eviction mechanics with SWA model (TRT-LLM).
+
+    Validates that:
+    - Multiple requests fill GPU cache causing eviction
+    - Evicted blocks can be retrieved from CPU cache via onboarding
+    - Metrics correctly reflect offload and onboard operations
+    """
+    _run_gpu_cache_eviction(trtllm_tester, trtllm_server)
+
+
+@pytest.mark.trtllm
+@pytest.mark.parametrize(
+    "trtllm_server",
+    [{"cpu_blocks": 200, "gpu_blocks": 20}],
+    indirect=True,
+)
+@pytest.mark.timeout(160)
+def test_swa_onboarding_determinism_trtllm(trtllm_tester, trtllm_server):
+    """
+    Test onboarding determinism under eviction scenario with SWA model (TRT-LLM).
+
+    Validates that:
+    - Multiple onboarding cycles produce deterministic results
+    - Responses are consistent when blocks are onboarded multiple times
+    - Tests onboarded vs onboarded (not initial vs onboarded)
+    """
+    _run_onboarding_determinism(trtllm_tester, trtllm_server)
+
+
+# =============================================================================
+# Shared test logic
+# =============================================================================
+
+
+def _run_offload_and_onboard(tester, server):
+    """Shared offload/onboard test logic for both vLLM and TRT-LLM."""
     print_test_header("SWA OFFLOAD AND ONBOARD TEST")
 
     prompt = AELDORA_STORY[:400]
@@ -132,7 +551,7 @@ def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     response_1 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
     print(f"Response 1: {response_1}")
 
-    metrics = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
+    metrics = check_kvbm_metrics("Phase 1", server.metrics_port)
     assert (
         metrics["kvbm_offload_blocks_d2h"] > 0
     ), "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
@@ -143,7 +562,7 @@ def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
     # Phase 2: Reset GPU cache
     print_phase(2, "Clean up GPU cache")
-    reset_cache(llm_server_kvbm.base_url)
+    reset_cache(server.base_url)
 
     # Phase 3: Repeated request triggers onboard
     print_phase(3, "Re-send same request (expect onboard from CPU)")
@@ -152,7 +571,7 @@ def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     response_2 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
     print(f"Response 2: {response_2}")
 
-    metrics = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
+    metrics = check_kvbm_metrics("Phase 3", server.metrics_port)
     assert (
         metrics["kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache reset."
@@ -171,24 +590,11 @@ def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     print("\n=== TEST PASSED ===")
 
 
-@pytest.mark.parametrize(
-    "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}],
-    indirect=True,
-)
-@pytest.mark.timeout(170)
-def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
-    """
-    Test GPU cache eviction mechanics with SWA model.
-
-    Validates that:
-    - Multiple requests fill GPU cache causing eviction
-    - Evicted blocks can be retrieved from CPU cache via onboarding
-    - Metrics correctly reflect offload and onboard operations
-    """
+def _run_gpu_cache_eviction(tester, server):
+    """Shared GPU cache eviction test logic for both vLLM and TRT-LLM."""
     print_test_header("SWA GPU CACHE EVICTION TEST")
-    print(f"GPU blocks: {llm_server_kvbm.gpu_cache_blocks}")
-    print(f"CPU blocks: {llm_server_kvbm.cpu_cache_blocks}")
+    print(f"GPU blocks: {server.gpu_cache_blocks}")
+    print(f"CPU blocks: {server.cpu_cache_blocks}")
 
     prompt_1 = AELDORA_STORY
     prompt_2 = (
@@ -201,7 +607,7 @@ def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
-    metrics_p1 = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
+    metrics_p1 = check_kvbm_metrics("Phase 1", server.metrics_port)
     assert metrics_p1["kvbm_offload_blocks_d2h"] >= MIN_OFFLOAD_BLOCKS, (
         f"Phase 1: Expected >= {MIN_OFFLOAD_BLOCKS} blocks offloaded, "
         f"got {metrics_p1['kvbm_offload_blocks_d2h']}"
@@ -217,7 +623,7 @@ def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
 
-    metrics_p2 = check_kvbm_metrics("Phase 2", llm_server_kvbm.metrics_port)
+    metrics_p2 = check_kvbm_metrics("Phase 2", server.metrics_port)
     assert (
         metrics_p2["kvbm_offload_blocks_d2h"] > metrics_p1["kvbm_offload_blocks_d2h"]
     ), (
@@ -235,7 +641,7 @@ def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
-    metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
+    metrics_p3 = check_kvbm_metrics("Phase 3", server.metrics_port)
     assert (
         metrics_p3["kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU retrieval after eviction."
@@ -245,24 +651,11 @@ def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     print("\n=== TEST PASSED ===")
 
 
-@pytest.mark.parametrize(
-    "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}],
-    indirect=True,
-)
-@pytest.mark.timeout(160)
-def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
-    """
-    Test onboarding determinism under eviction scenario with SWA model.
-
-    Validates that:
-    - Multiple onboarding cycles produce deterministic results
-    - Responses are consistent when blocks are onboarded multiple times
-    - Tests onboarded vs onboarded (not initial vs onboarded)
-    """
+def _run_onboarding_determinism(tester, server):
+    """Shared onboarding determinism test logic for both vLLM and TRT-LLM."""
     print_test_header("SWA ONBOARDING DETERMINISM TEST")
-    print(f"GPU blocks: {llm_server_kvbm.gpu_cache_blocks}")
-    print(f"CPU blocks: {llm_server_kvbm.cpu_cache_blocks}")
+    print(f"GPU blocks: {server.gpu_cache_blocks}")
+    print(f"CPU blocks: {server.cpu_cache_blocks}")
 
     prompt_1 = AELDORA_STORY
     prompt_2 = (
@@ -273,41 +666,41 @@ def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     print_phase(1, "Send first request")
     print(f"Prompt 1: {prompt_1[:80]}...")
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
-    check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 1", server.metrics_port)
 
     # Phase 2: Second request (may evict first from GPU)
     print_phase(2, "Send second request (may evict first from GPU)")
     print(f"Prompt 2: {prompt_2[:80]}...")
     tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
-    check_kvbm_metrics("Phase 2", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 2", server.metrics_port)
 
     # Phase 3: Re-request prompt 1 (first onboard cycle)
     print_phase(3, "Re-request Prompt 1 (first onboard cycle)")
     print(f"Re-sending Prompt 1: {prompt_1[:80]}...")
     response_1_first_onboard = tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
     print(f"Response 1 (first onboard): {response_1_first_onboard}")
-    check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 3", server.metrics_port)
 
     # Phase 4: Re-request prompt 2 (first onboard cycle)
     print_phase(4, "Re-request Prompt 2 (first onboard cycle)")
     print(f"Re-sending Prompt 2: {prompt_2[:80]}...")
     response_2_first_onboard = tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
     print(f"Response 2 (first onboard): {response_2_first_onboard}")
-    check_kvbm_metrics("Phase 4", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 4", server.metrics_port)
 
     # Phase 5: Re-request prompt 1 (second onboard cycle)
     print_phase(5, "Re-request Prompt 1 (second onboard cycle)")
     print(f"Re-sending Prompt 1 (third time): {prompt_1[:80]}...")
     response_1_second_onboard = tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
     print(f"Response 1 (second onboard): {response_1_second_onboard}")
-    check_kvbm_metrics("Phase 5", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 5", server.metrics_port)
 
     # Phase 6: Re-request prompt 2 (second onboard cycle)
     print_phase(6, "Re-request Prompt 2 (second onboard cycle)")
     print(f"Re-sending Prompt 2 (third time): {prompt_2[:80]}...")
     response_2_second_onboard = tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
     print(f"Response 2 (second onboard): {response_2_second_onboard}")
-    check_kvbm_metrics("Phase 6", llm_server_kvbm.metrics_port)
+    check_kvbm_metrics("Phase 6", server.metrics_port)
 
     # Verify determinism between onboarded requests
     print_test_header("DETERMINISM VERIFICATION")
