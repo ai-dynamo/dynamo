@@ -325,6 +325,7 @@ impl OpenAIPreprocessor {
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: nvext.dp_rank,
+                prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| {
                     h.priority
