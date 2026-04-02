@@ -44,10 +44,6 @@ func ArtifactVersion(version string) string {
 	return version
 }
 
-func CheckpointJobName(checkpointID string, artifactVersion string) string {
-	return "checkpoint-job-" + checkpointID + "-" + ArtifactVersion(artifactVersion)
-}
-
 func ResolveCheckpointStorage(checkpointID string, version string, storage Storage) (Storage, error) {
 	resolved, err := resolveStorageConfig(storage)
 	if err != nil {
