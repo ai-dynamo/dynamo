@@ -96,9 +96,8 @@ impl NcclBootstrap {
         let mut bytes = Vec::with_capacity(136);
         bytes.extend_from_slice(&self.world_size.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 4]); // padding for alignment
-        let internal_bytes: &[u8; 128] = unsafe {
-            &*self.unique_id.internal.as_ptr().cast::<[u8; 128]>()
-        };
+        let internal_bytes: &[u8; 128] =
+            unsafe { &*self.unique_id.internal.as_ptr().cast::<[u8; 128]>() };
         bytes.extend_from_slice(internal_bytes);
         bytes
     }
@@ -288,9 +287,8 @@ mod tests {
 
         let restored = NcclBootstrap::deserialize(&bytes).unwrap();
         assert_eq!(restored.world_size, 4);
-        let restored_bytes: &[u8; 128] = unsafe {
-            &*restored.unique_id.internal.as_ptr().cast::<[u8; 128]>()
-        };
+        let restored_bytes: &[u8; 128] =
+            unsafe { &*restored.unique_id.internal.as_ptr().cast::<[u8; 128]>() };
         assert_eq!(*restored_bytes, [42u8; 128]);
     }
 
