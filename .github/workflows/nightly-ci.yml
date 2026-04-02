@@ -130,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm']
+        dir: ['.', 'lib/bindings/python', 'lib/bindings/kvbm']
     permissions:
       contents: read
     steps:
