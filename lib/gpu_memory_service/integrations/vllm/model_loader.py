@@ -11,11 +11,11 @@ processes import from GMS metadata (RO).
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service import get_or_create_gms_client_memory_manager
+from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
 from gpu_memory_service.common.types import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
@@ -23,6 +23,7 @@ from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
     get_gms_lock_mode,
     setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
 )
 
 if TYPE_CHECKING:
@@ -49,23 +50,14 @@ def register_gms_loader(load_format: str = "gms") -> None:
     class GMSModelLoader(BaseModelLoader):
         """vLLM model loader that loads weights via GPU Memory Service."""
 
-        # Keys in model_loader_extra_config that are GMS-specific and should
-        # not be passed to the fallback DefaultModelLoader.
-        _GMS_EXTRA_KEYS = frozenset({"gms_read_only"})
-
         def __init__(self, load_config):
             super().__init__(load_config)
             # Strip GMS-specific keys before creating the fallback loader,
             # otherwise DefaultModelLoader rejects unknown extra config.
-            extra = getattr(load_config, "model_loader_extra_config", None) or {}
-            clean_extra = {
-                k: v for k, v in extra.items() if k not in self._GMS_EXTRA_KEYS
-            }
             self.default_loader = DefaultModelLoader(
-                replace(
+                strip_gms_model_loader_config(
                     load_config,
                     load_format="auto",
-                    model_loader_extra_config=clean_extra,
                 )
             )
 
@@ -79,8 +71,8 @@ def register_gms_loader(load_format: str = "gms") -> None:
             device = torch.cuda.current_device()
             extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
             mode = get_gms_lock_mode(extra)
-            gms_client, pool = get_or_create_gms_client_memory_manager(
-                get_socket_path(device),
+            gms_client = get_or_create_gms_client_memory_manager(
+                get_socket_path(device, "weights"),
                 device,
                 mode=mode,
                 tag="weights",
@@ -91,7 +83,6 @@ def register_gms_loader(load_format: str = "gms") -> None:
             else:
                 return _load_write_mode(
                     gms_client,
-                    pool,
                     vllm_config,
                     model_config,
                     self.default_loader,
@@ -130,7 +121,6 @@ def _load_read_mode(
 
 def _load_write_mode(
     gms_client: "GMSClientMemoryManager",
-    pool,
     vllm_config,
     model_config,
     default_loader,
@@ -143,18 +133,15 @@ def _load_write_mode(
     """
     global _last_imported_weights_bytes
 
-    from torch.cuda.memory import use_mem_pool
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
         process_weights_after_loading,
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    gms_client.clear_all_handles()
-
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
-        with use_mem_pool(pool, device=target_device):
+        with gms_use_mem_pool("weights", target_device):
             with target_device:
                 model = initialize_model(
                     vllm_config=vllm_config, model_config=model_config

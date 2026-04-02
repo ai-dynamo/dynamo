@@ -7,7 +7,7 @@ use crate::request_template::RequestTemplate;
 use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_async_openai::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;
 use futures::StreamExt;
@@ -82,9 +82,9 @@ async fn main_loop(
         };
 
         // Construct messages
-        let user_message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let user_message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     prompt,
                 ),
                 name: None,
@@ -92,7 +92,7 @@ async fn main_loop(
         );
         messages.push(user_message);
         // Request
-        let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .messages(messages.clone())
             .model(
                 template
@@ -138,8 +138,9 @@ async fn main_loop(
             match (item.data.as_ref(), item.event.as_deref()) {
                 (Some(data), _) => {
                     // Normal case
-                    let entry = data.choices.first();
-                    let chat_comp = entry.as_ref().unwrap();
+                    let Some(chat_comp) = data.inner.choices.first() else {
+                        continue;
+                    };
                     if let Some(c) = &chat_comp.delta.content {
                         match c {
                             ChatCompletionMessageContent::Text(text) => {
@@ -180,15 +181,15 @@ async fn main_loop(
         println!();
 
         let assistant_content =
-            dynamo_async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
+            dynamo_protocols::types::ChatCompletionRequestAssistantMessageContent::Text(
                 assistant_message,
             );
 
-        let assistant_message = dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(
-            dynamo_async_openai::types::ChatCompletionRequestAssistantMessage {
+        let assistant_message = dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(
+            dynamo_protocols::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
                 reasoning_content: (!assistant_reasoning.is_empty()).then_some(
-                    dynamo_async_openai::types::ReasoningContent::Text(assistant_reasoning),
+                    dynamo_protocols::types::ReasoningContent::Text(assistant_reasoning),
                 ),
                 ..Default::default()
             },

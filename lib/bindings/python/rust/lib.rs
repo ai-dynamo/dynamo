@@ -46,10 +46,12 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
+    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
     Direct,
+    LeastLoaded,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -57,14 +59,17 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
+            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
+            RouterMode::LeastLoaded => Self::LeastLoaded,
         }
     }
 }
 
 mod context;
 mod engine;
+pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -194,6 +199,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;

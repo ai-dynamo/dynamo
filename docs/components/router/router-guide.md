@@ -20,6 +20,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
 | **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
 | **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
@@ -30,6 +31,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
+| **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
 
 ### KV Event Transport Modes (within `--router-mode kv`)
@@ -214,6 +216,8 @@ We can then use the default routing methods exposed by the client class to send 
 - **Random routing**: Default strategy, available via `client.generate()` or `client.random()`
 - **Round-robin routing**: Cycles through available workers via `client.round_robin()`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
+- **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
+  In disaggregated prefill paths it skips bootstrap optimization and uses the synchronous prefill path, matching power-of-two routing.
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
@@ -256,6 +260,8 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
 
+- `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. By default (`router_track_prefill_tokens=true`), the router counts uncached prompt tokens toward `active_prefill_tokens`, queue pressure, and potential prefill-token load. Disable this for decode-only routing paths where prompt processing has already happened elsewhere and the decode router should ignore transferred prompt load. In normal live disaggregated serving, the decode-stage override applies this behavior automatically.
+
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
 ### KV Indexer / Approx KV Indexer
@@ -279,6 +285,8 @@ The `--router-kv-overlap-score-weight` parameter is the primary knob for balanci
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly — for example, with hybrid models or custom engines that haven't been validated for event accuracy. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration and pruning, rather than relying on real-time block creation/deletion events from workers.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. By default the router assumes KV blocks transferred from prefill to decode will be deduplicated on the decode side, but vLLM and SGLang decode workers currently do not support this — only TensorRT-LLM does. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
+
+Use `--no-router-track-prefill-tokens` when a router is serving decode-only traffic and prompt processing has already completed elsewhere. This keeps decode routing decisions focused on decode-side load instead of briefly charging prompt tokens to the decode worker after handoff. The built-in live disaggregated decode path applies the equivalent per-request override automatically.
 
 Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
@@ -309,6 +317,11 @@ The prefill router is automatically created when:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers don't perform decode
 - **Seamlessly integrated** into the request pipeline between preprocessing and decode routing
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available
+
+**Key characteristics of the decode routing stage in disaggregated mode:**
+- **Disables overlap scoring** (`overlap_score_weight=0`) because decode routing should not chase prefix reuse
+- **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks
+- **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work
 
 ### Setup Example
 

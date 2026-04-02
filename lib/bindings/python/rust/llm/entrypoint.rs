@@ -58,7 +58,7 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_enable_cache_control=false, min_initial_workers=1, router_queue_policy="fcfs", remote_indexer_component=None))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -69,6 +69,7 @@ impl KvRouterConfig {
         router_track_active_blocks: bool,
         router_track_output_blocks: bool,
         router_assume_kv_reuse: bool,
+        router_track_prefill_tokens: bool,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
         router_ttl_secs: f64,
@@ -76,8 +77,6 @@ impl KvRouterConfig {
         router_prune_target_ratio: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
-        router_enable_cache_control: bool,
-        min_initial_workers: usize,
         router_queue_policy: &str,
         remote_indexer_component: Option<String>,
     ) -> Self {
@@ -91,6 +90,7 @@ impl KvRouterConfig {
                 router_track_active_blocks,
                 router_track_output_blocks,
                 router_assume_kv_reuse,
+                router_track_prefill_tokens,
                 router_snapshot_threshold,
                 router_reset_states,
                 router_ttl_secs,
@@ -98,9 +98,7 @@ impl KvRouterConfig {
                 router_prune_target_ratio,
                 router_queue_threshold,
                 router_event_threads,
-                router_enable_cache_control,
                 skip_initial_worker_wait: false,
-                min_initial_workers,
                 router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
                     panic!("invalid router_queue_policy: {router_queue_policy:?}")
                 }),
@@ -339,6 +337,11 @@ pub fn make_engine<'p>(
             } else {
                 // Mocker only needs tokenizer, not weights
                 let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                // Preserve the original HF model ID as source_path so the
+                // frontend can resolve model metadata even when the served
+                // model name differs (e.g., --model-name model-1 --model-path
+                // Qwen/Qwen3-0.6B).
+                builder.source_path(model_path.clone());
                 LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
                     .await
                     .map_err(to_pyerr)?

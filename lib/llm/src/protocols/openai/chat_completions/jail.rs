@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_stream::stream;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
 };
@@ -116,7 +116,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_async_openai::types::StopReason>,
+    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -124,9 +124,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(
-                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
-            ),
+            content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                content.to_string(),
+            )),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -470,6 +470,9 @@ pub struct JailedStream {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     marker_matcher: MarkerMatcher,
@@ -492,8 +495,9 @@ impl JailedStream {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         let jail_mode = self.jail_mode.clone();
+        let named_tool_active = self.named_tool_name.is_some();
         let jailed_stream = self.apply(stream);
-        JailedStream::fix_finish_reason(jailed_stream, jail_mode)
+        JailedStream::fix_finish_reason(jailed_stream, jail_mode, named_tool_active)
     }
 
     /// Apply the jail transformation to a stream of chat completion responses
@@ -513,6 +517,10 @@ impl JailedStream {
             let mut last_annotated_id: Option<String> = None;
             let mut last_annotated_event: Option<String> = None;
             let mut last_annotated_comment: Option<Vec<String>> = None;
+            // Track stream response metadata so finalization chunks carry real values
+            let mut last_stream_id = String::new();
+            let mut last_stream_model = String::new();
+            let mut last_stream_created: u32 = 0;
 
             // Pin the stream for iteration (stack pinning is more efficient)
             tokio::pin!(stream);
@@ -521,9 +529,13 @@ impl JailedStream {
             // Process each item in the stream
             while let Some(response) = stream.next().await {
                 if let Some(chat_response) = response.data.as_ref() {
+                    last_stream_id.clone_from(&chat_response.inner.id);
+                    last_stream_model.clone_from(&chat_response.inner.model);
+                    last_stream_created = chat_response.inner.created;
+
                     let mut all_emissions = Vec::new();
 
-                    if chat_response.choices.is_empty() {
+                    if chat_response.inner.choices.is_empty() {
                         // No choices processed (e.g., usage-only chunk)
                         // Pass through as-is to preserve usage and other metadata
                         yield response;
@@ -531,12 +543,12 @@ impl JailedStream {
                     }
 
                     // Process each choice independently using the new architecture
-                    for choice in &chat_response.choices {
+                    for choice in &chat_response.inner.choices {
                         if let Some(ref content) = choice.delta.content {
                             // Jailing only applies to text content
                             let text_content = match content {
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Parts(_) => None,
                             };
 
                             if let Some(text) = text_content {
@@ -666,16 +678,18 @@ impl JailedStream {
 
             if !final_emissions.is_empty() {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
-                // Create a dummy response for finalization
+                // Create a finalization response carrying forward real stream metadata
                 let dummy_response = NvCreateChatCompletionStreamResponse {
-                    id: "stream-end".to_string(),
-                    object: "chat.completion.chunk".to_string(),
-                    created: 0,
-                    model: "unknown".to_string(),
-                    choices: Vec::new(),
-                    usage: None,
-                    service_tier: None,
-                    system_fingerprint: None,
+                    inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                        id: last_stream_id,
+                        object: "chat.completion.chunk".to_string(),
+                        created: last_stream_created,
+                        model: last_stream_model,
+                        choices: Vec::new(),
+                        usage: None,
+                        service_tier: None,
+                        system_fingerprint: None,
+                    },
                     nvext: None,
                 };
 
@@ -705,7 +719,7 @@ impl JailedStream {
             EmissionMode::Packed => {
                 // Pack all choices into a single response
                 let mut response = base_response.clone();
-                response.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
+                response.inner.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
 
                 vec![Annotated {
                     data: Some(response),
@@ -721,7 +735,7 @@ impl JailedStream {
                     .into_iter()
                     .map(|emission| {
                         let mut response = base_response.clone();
-                        response.choices = vec![emission.into_choice()];
+                        response.inner.choices = vec![emission.into_choice()];
 
                         Annotated {
                             data: Some(response),
@@ -846,6 +860,37 @@ impl JailedStream {
                 if let Ok((tool_calls, normal_text)) = parse_result
                     && !tool_calls.is_empty()
                 {
+                    // If a named tool filter is set (tool_choice=named + parser path), reject
+                    // tool calls that don't match the required tool name.
+                    let tool_calls = if let Some(ref required_name) = self.named_tool_name {
+                        let filtered: Vec<_> = tool_calls
+                            .into_iter()
+                            .filter(|tc| tc.function.name == *required_name)
+                            .collect();
+                        if filtered.is_empty() {
+                            tracing::warn!(
+                                required = %required_name,
+                                "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                            );
+                        }
+                        filtered
+                    } else {
+                        tool_calls
+                    };
+
+                    if tool_calls.is_empty() {
+                        // All parsed calls were for the wrong tool — return content choice
+                        return create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            accumulated_content,
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
+                            base_choice.logprobs.clone(),
+                        );
+                    }
+
                     // Convert to streaming format
                     let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
                         .into_iter()
@@ -922,7 +967,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+            r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),
@@ -994,6 +1039,7 @@ impl JailedStream {
     fn fix_finish_reason<S>(
         input_stream: S,
         jail_mode: JailMode,
+        named_tool_active: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1005,7 +1051,7 @@ impl JailedStream {
             while let Some(mut response) = input_stream.next().await {
                 // Track if any choice emitted tool calls
                 if let Some(ref data) = response.data {
-                    for choice in &data.choices {
+                    for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
@@ -1014,7 +1060,7 @@ impl JailedStream {
 
                 // Fix finish_reason based on jail mode and whether tool calls were emitted
                 if let Some(ref mut data) = response.data {
-                    for choice in &mut data.choices {
+                    for choice in &mut data.inner.choices {
                         if let Some(finish) = choice.finish_reason {
                             // Only modify Stop finish reason, preserve Length/ContentFilter
                             if finish == FinishReason::Stop {
@@ -1022,10 +1068,10 @@ impl JailedStream {
 
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
-                                        // Traditional: if tool calls emitted, change to ToolCalls
-                                        if has_tool_calls {
+                                        if has_tool_calls && !named_tool_active {
                                             choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
+                                        // When named_tool_active, keep Stop (OpenAI spec for tool_choice=named)
                                     }
                                     JailMode::Immediate { format } => {
                                         // tool_choice mode: apply specific finish_reason logic
@@ -1060,6 +1106,9 @@ pub struct JailedStreamBuilder {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     jail_mode: JailMode,
@@ -1072,6 +1121,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: Vec::new(),
             jail_end_sequences: Vec::new(),
             tool_call_parser: None,
+            named_tool_name: None,
             tool_definitions: None,
             emission_mode: EmissionMode::default(),
             jail_mode: JailMode::MarkerBased,
@@ -1113,6 +1163,14 @@ impl JailedStreamBuilder {
     /// Set the tool call parser to use for detection and parsing
     pub fn tool_call_parser(mut self, parser: impl Into<String>) -> Self {
         self.tool_call_parser = Some(parser.into());
+        self
+    }
+
+    /// Constrain parsed output to a single named tool (for tool_choice=named + parser path).
+    /// When set, tool calls emitted by the parser that don't match `tool_name` are silently
+    /// filtered out, enforcing the named-tool contract even when the model emits the wrong tool.
+    pub fn named_tool_filter(mut self, tool_name: impl Into<String>) -> Self {
+        self.named_tool_name = Some(tool_name.into());
         self
     }
 
@@ -1235,6 +1293,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: self.jail_start_sequences,
             jail_end_sequences: self.jail_end_sequences,
             tool_call_parser: self.tool_call_parser,
+            named_tool_name: self.named_tool_name,
             tool_definitions: self.tool_definitions,
             emission_mode: self.emission_mode,
             marker_matcher,

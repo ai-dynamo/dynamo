@@ -2,8 +2,12 @@ name: 'Build Flavor'
 description: 'Build a single Dynamo framework image (checkout → login → tag → builder → dockerfile → build → test image → summary)'
 inputs:
   framework:
-    description: 'Framework name (vllm, sglang, trtllm)'
+    description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
     required: true
+  builder_flavor:
+    description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'
+    required: false
+    default: ''
   target:
     description: 'Target stage for Docker rendering'
     required: true
@@ -12,7 +16,12 @@ inputs:
     required: true
   cuda_version:
     description: 'CUDA version to build (e.g., 12.9, 13.0)'
-    required: true
+    required: false
+    default: ''
+  cpu_only:
+    description: 'Build and tag this image as CPU-only. The shared container render/build path still requires a default CUDA version internally.'
+    required: false
+    default: 'false'
   builder_name:
     description: 'Buildkit builder name'
     required: true
@@ -79,6 +88,10 @@ inputs:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
     required: false
     default: ''
+  fresh_builder:
+    description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
+    required: false
+    default: 'false'
 outputs:
   target_tag_plain:
     description: 'Target tag (without registry prefix)'
@@ -89,6 +102,12 @@ outputs:
   cuda_version_plain:
     description: 'CUDA major version (e.g., 12 from 12.9)'
     value: ${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
+  image_variant_label:
+    description: 'Image variant label used in job names and cache namespaces (e.g. cpu, cuda12)'
+    value: ${{ steps.calculate-target-tag.outputs.image_variant_label }}
+  image_tag_suffix:
+    description: 'Image tag suffix including leading hyphen (e.g. -cpu, -cuda12)'
+    value: ${{ steps.calculate-target-tag.outputs.image_tag_suffix }}
 
 runs:
   using: "composite"
@@ -105,43 +124,68 @@ runs:
       id: calculate-target-tag
       shell: bash
       run: |
-        CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-        CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+        if [[ "${{ inputs.cpu_only }}" == "true" ]]; then
+          CUDA_VERSION_RAW="${{ inputs.cuda_version }}"
+          if [[ -z "$CUDA_VERSION_RAW" ]]; then
+            # Planner still shares the CUDA-backed wheel builder path today even
+            # though the final runtime image is CPU-only. Keep that detail
+            # internal to the build action instead of surfacing it in job names.
+            CUDA_VERSION_RAW="12.9"
+          fi
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          IMAGE_VARIANT_LABEL="cpu"
+          IMAGE_TAG_SUFFIX="-cpu"
+          BUILDER_CUDA_VERSION=""
+        else
+          CUDA_VERSION_RAW="${{ inputs.cuda_version }}"
+          if [[ -z "$CUDA_VERSION_RAW" ]]; then
+            echo "cuda_version is required unless cpu_only=true" >&2
+            exit 1
+          fi
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          IMAGE_VARIANT_LABEL="cuda${CUDA_VERSION}"
+          IMAGE_TAG_SUFFIX="-cuda${CUDA_VERSION}"
+          BUILDER_CUDA_VERSION="${CUDA_VERSION_RAW}"
+        fi
         EFA_SUFFIX=""
         if [ "${{ inputs.make_efa }}" == "true" ]; then
           EFA_SUFFIX="-efa"
         fi
         TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}"
         TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}-test"
-        DEFAULT_TARGET_IMAGE_URI="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}"
-        TEST_IMAGE_URI="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}-cuda${CUDA_VERSION}"
+        DEFAULT_TARGET_IMAGE_URI="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}${IMAGE_TAG_SUFFIX}"
+        TEST_IMAGE_URI="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}${IMAGE_TAG_SUFFIX}"
         echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
         echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
         echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
         echo "test_tag_plain=${TEST_TAG_PLAIN}" >> $GITHUB_OUTPUT
         echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+        echo "effective_cuda_version=${CUDA_VERSION_RAW}" >> $GITHUB_OUTPUT
+        echo "builder_cuda_version=${BUILDER_CUDA_VERSION}" >> $GITHUB_OUTPUT
+        echo "image_variant_label=${IMAGE_VARIANT_LABEL}" >> $GITHUB_OUTPUT
+        echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
     - name: Initialize Dynamo Builder
       uses: ./.github/actions/init-dynamo-builder
       with:
         builder_name: ${{ inputs.builder_name }}
-        flavor: ${{ inputs.framework }}
+        flavor: ${{ inputs.builder_flavor != '' && inputs.builder_flavor || inputs.framework }}
         arch: ${{ inputs.platform }}
-        cuda_version: ${{ inputs.cuda_version }}
+        cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
+        fresh_builder: ${{ inputs.fresh_builder }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
       env:
         EXTRA_TAGS: ${{ inputs.extra_tags }}
-        CUDA_VERSION: ${{ inputs.cuda_version }}
+        IMAGE_TAG_SUFFIX: ${{ steps.calculate-target-tag.outputs.image_tag_suffix }}
       run: |
-        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
         ECR_REGISTRY="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com"
         ACR_REGISTRY="${{ inputs.azure_acr_hostname }}"
         RESULT=""
         if [ -n "$EXTRA_TAGS" ]; then
           while IFS= read -r tag; do
             if [ -n "$tag" ]; then
-              RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}"$'\n'
+              RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}${IMAGE_TAG_SUFFIX}"$'\n'
             fi
           done <<< "$EXTRA_TAGS"
         fi
@@ -160,7 +204,8 @@ runs:
         echo "framework: ${{ inputs.framework }}"
         echo "target: ${{ inputs.target }}"
         echo "platform: ${{ inputs.platform }}"
-        echo "cuda_version: ${{ inputs.cuda_version }}"
+        echo "image_variant: ${{ steps.calculate-target-tag.outputs.image_variant_label }}"
+        echo "effective_build_cuda_version: ${{ steps.calculate-target-tag.outputs.effective_cuda_version }}"
         echo "no_cache: ${{ inputs.no_cache }}"
         echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
         echo "push_image: ${{ inputs.push_image }}"
@@ -178,7 +223,7 @@ runs:
             --target=${{ inputs.target }} \
             --framework=${{ inputs.framework }} \
             --platform=${{ inputs.platform }} \
-            --cuda-version=${{ inputs.cuda_version }} \
+            --cuda-version=${{ steps.calculate-target-tag.outputs.effective_cuda_version }} \
             ${MAKE_EFA_FLAG} \
             --show-result \
             --output-short-filename
@@ -190,7 +235,7 @@ runs:
         framework: ${{ inputs.framework }}
         target: ${{ inputs.target }}
         platform: ${{ inputs.platform }}
-        cuda_version: ${{ inputs.cuda_version }}
+        cuda_version: ${{ steps.calculate-target-tag.outputs.effective_cuda_version }}
         aws_default_region: ${{ inputs.aws_default_region }}
         sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
         aws_account_id: ${{ inputs.aws_account_id }}
@@ -208,17 +253,17 @@ runs:
       uses: ./.github/actions/builder-refresher
       with:
         builder_name: ${{ inputs.builder_name }}
-        flavor: ${{ inputs.framework }}
+        flavor: ${{ inputs.builder_flavor != '' && inputs.builder_flavor || inputs.framework }}
         arch: ${{ inputs.platform }}
-        cuda_version: ${{ inputs.cuda_version }}
+        cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
     - name: Build and Push Test Image
       if: ${{ inputs.target != 'dev' }}
       shell: bash
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
-        CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-cache"
+        IMAGE_VARIANT="${{ steps.calculate-target-tag.outputs.image_variant_label }}"
+        CACHE_TAG="test-${{ inputs.framework }}-${IMAGE_VARIANT}-cache"
         CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
         CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -252,7 +297,7 @@ runs:
       shell: bash
       if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
       run: |
-        echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }} Default Image" >> $GITHUB_STEP_SUMMARY
+        echo "### 🐳 ${{ inputs.framework }}-${{ steps.calculate-target-tag.outputs.image_variant_label }} Default Image" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
         echo "|-----|" >> $GITHUB_STEP_SUMMARY
