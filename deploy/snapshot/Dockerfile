@@ -75,6 +75,25 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
+# Stage: CUDA checkpoint helper builder
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+
+RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.c \
+    -I/usr/local/cuda/include \
+    -L/usr/local/cuda/lib64/stubs \
+    -lcuda
+
+# =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
 FROM ubuntu:24.04 AS criu-builder
@@ -147,9 +166,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 RUN criu --version
 
-# Copy cuda-checkpoint binary
+# Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-RUN chmod +x /usr/local/sbin/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -202,9 +222,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 RUN criu --version && echo "CRIU installed successfully"
 
-# Copy cuda-checkpoint binary (used for external CUDA state checkpoint/restore)
+# Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-RUN chmod +x /usr/local/sbin/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
