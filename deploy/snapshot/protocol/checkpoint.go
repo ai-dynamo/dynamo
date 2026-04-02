@@ -23,21 +23,6 @@ type CheckpointJobOptions struct {
 	WrapLaunchJob         bool
 }
 
-type CheckpointJobPhase string
-
-const (
-	CheckpointJobPhaseRunning                CheckpointJobPhase = "running"
-	CheckpointJobPhaseWaitingForConfirmation CheckpointJobPhase = "waiting_for_confirmation"
-	CheckpointJobPhaseReady                  CheckpointJobPhase = "ready"
-	CheckpointJobPhaseFailed                 CheckpointJobPhase = "failed"
-)
-
-type CheckpointJobObservation struct {
-	Phase   CheckpointJobPhase
-	Reason  string
-	Message string
-}
-
 func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
 	if podTemplate.Labels == nil {
@@ -90,65 +75,6 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		Type:             corev1.SeccompProfileTypeLocalhost,
 		LocalhostProfile: &profile,
 	}
-}
-
-func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) CheckpointJobObservation {
-	jobComplete := false
-	jobFailed := false
-	for _, condition := range job.Status.Conditions {
-		if condition.Status != corev1.ConditionTrue {
-			continue
-		}
-		if condition.Type == batchv1.JobComplete {
-			jobComplete = true
-			continue
-		}
-		if condition.Type == batchv1.JobFailed {
-			jobFailed = true
-		}
-	}
-
-	status := job.Annotations[CheckpointStatusAnnotation]
-	if status == CheckpointStatusFailed {
-		observation := CheckpointJobObservation{
-			Phase:   CheckpointJobPhaseFailed,
-			Reason:  "JobFailed",
-			Message: "Checkpoint job failed",
-		}
-		if jobComplete {
-			observation.Reason = "CheckpointVerificationFailed"
-			observation.Message = "Checkpoint job completed but snapshot-agent reported checkpoint failure"
-		}
-		return observation
-	}
-
-	if jobComplete {
-		if status == CheckpointStatusCompleted {
-			return CheckpointJobObservation{
-				Phase:   CheckpointJobPhaseReady,
-				Reason:  "JobSucceeded",
-				Message: "Checkpoint job completed successfully",
-			}
-		}
-		if checkpointWorkerActive {
-			return CheckpointJobObservation{Phase: CheckpointJobPhaseWaitingForConfirmation}
-		}
-		return CheckpointJobObservation{
-			Phase:   CheckpointJobPhaseFailed,
-			Reason:  "CheckpointVerificationFailed",
-			Message: "Checkpoint job completed without snapshot-agent completion confirmation",
-		}
-	}
-
-	if jobFailed {
-		return CheckpointJobObservation{
-			Phase:   CheckpointJobPhaseFailed,
-			Reason:  "JobFailed",
-			Message: "Checkpoint job failed",
-		}
-	}
-
-	return CheckpointJobObservation{Phase: CheckpointJobPhaseRunning}
 }
 
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
