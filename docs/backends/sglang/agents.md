@@ -392,13 +392,13 @@ The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metric
 
 ```bash
 # Terminal 1: launch Dynamo with agent controller
-bash examples/backends/sglang/launch/agg_agent.sh --model-path <model> --tp 2
+bash examples/backends/sglang/launch/agg_agent.sh --model-path zai-org/GLM-4.7-Flash --tp 2
 
 # Terminal 2: run OpenCode pointing at Dynamo
-OPENCODE_API_BASE=http://localhost:8000/v1 opencode
+DYNAMO_API_KEY=dummy bun run --cwd packages/opencode src/index.ts -- --model "dynamo/zai-org/GLM-4.7-Flash"
 ```
 
-Each OpenCode session automatically opens a streaming session on the first request and routes subsequent turns to the same worker. KV cache is preserved across turns and freed when the session closes.
+OpenCode automatically opens a streaming session on the first request and routes subsequent turns to the same worker. KV cache is preserved across turns and freed when the session closes or times out.
 
 ## See Also
 
