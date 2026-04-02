@@ -555,8 +555,8 @@ impl MockEngine {
                             // Publish metrics using flat API
                             if let Err(e) = publisher.publish(
                                 Some(metrics.dp_rank),
-                                metrics.active_decode_blocks,
-                                metrics.active_decode_blocks,
+                                None,
+                                Some(metrics.active_decode_blocks),
                             ) {
                                 tracing::warn!("Failed to publish metrics for DP rank {}: {e}", metrics.dp_rank);
                             } else {

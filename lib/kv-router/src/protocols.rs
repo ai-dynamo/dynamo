@@ -360,14 +360,14 @@ pub struct WorkerSelectionResult {
 
 /// Active load metrics for a worker, used for busy detection.
 ///
-/// Published by workers (with `active_decode_blocks` and `kv_used_blocks`) and by
-/// the scheduler (with `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
+/// `active_decode_blocks` and `active_prefill_tokens`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
     #[serde(default)]
     pub dp_rank: DpRank,
-    /// Number of active KV cache blocks on the worker (decode phase).
+    /// Scheduler-reported decode block load.
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
