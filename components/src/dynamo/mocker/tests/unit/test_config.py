@@ -12,9 +12,7 @@ import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs, MockEngineArgs
 
-MODULE_PATH = (
-    Path(__file__).resolve().parents[2] / "components/src/dynamo/mocker/config.py"
-)
+MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
 assert SPEC is not None
 assert SPEC.loader is not None
@@ -26,6 +24,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.unit,
+    pytest.mark.mocker,
 ]
 
 

@@ -269,11 +269,6 @@ jobs:
         with:
           image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and parallel and not planner and not (vllm or sglang or trtllm) and (gpu_0)"
-          pytest_paths: |
-            tests
-            lib/bindings/python/tests
-            components/src/dynamo/common/tests
-            components/src/dynamo/frontend/tests
           framework: dynamo
           test_type: "pre_merge_parallel"
           platform_arch: amd64
@@ -306,11 +301,6 @@ jobs:
         with:
           image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and not parallel and not planner and not (vllm or sglang or trtllm) and (gpu_0)"
-          pytest_paths: |
-            tests
-            lib/bindings/python/tests
-            components/src/dynamo/common/tests
-            components/src/dynamo/frontend/tests
           framework: dynamo
           test_type: "pre_merge_sequential"
           platform_arch: amd64
