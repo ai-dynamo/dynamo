@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 import pytest
 
-from tests.router.common import (
+from dynamo.router.tests.support.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_python_router_bindings,
@@ -31,15 +31,15 @@ from tests.router.common import (
     _test_router_query_instance_id,
     _test_router_two_routers,
 )
-from tests.router.helper import (
+from dynamo.router.tests.support.constants import ROUTER_MODEL_NAME
+from dynamo.router.tests.support.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
     wait_for_indexer_workers_active,
 )
-from tests.utils.constants import ROUTER_MODEL_NAME
-from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import (
+from dynamo.router.tests.support.managed_process import ManagedProcess
+from dynamo.router.tests.support.port_utils import (
     allocate_contiguous_ports,
     allocate_ports,
     deallocate_ports,
