@@ -422,7 +422,16 @@ impl GuidedDecodingOptions {
         structural_tag: Option<serde_json::Value>,
         enable_thinking: Option<bool>,
     ) -> Result<Self> {
-        let instance = Self::new(json, regex, choice, grammar, backend, whitespace_pattern, structural_tag, enable_thinking);
+        let instance = Self::new(
+            json,
+            regex,
+            choice,
+            grammar,
+            backend,
+            whitespace_pattern,
+            structural_tag,
+            enable_thinking,
+        );
         instance.validate()?;
         Ok(instance)
     }
@@ -449,7 +458,16 @@ impl GuidedDecodingOptions {
         {
             return Ok(None);
         }
-        let instance = Self::validated(json, regex, choice, grammar, backend, whitespace_pattern, structural_tag, enable_thinking)?;
+        let instance = Self::validated(
+            json,
+            regex,
+            choice,
+            grammar,
+            backend,
+            whitespace_pattern,
+            structural_tag,
+            enable_thinking,
+        )?;
         Ok(Some(instance))
     }
 
@@ -776,7 +794,16 @@ mod tests {
 
         // Only regex set
         let regex = Some(r"\d+".to_string());
-        let opts = GuidedDecodingOptions::validated(None, regex.clone(), None, None, None, None, None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            regex.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.regex, regex);
@@ -787,7 +814,16 @@ mod tests {
 
         // Only choice set
         let choice = Some(vec!["A".to_string(), "B".to_string()]);
-        let opts = GuidedDecodingOptions::validated(None, None, choice.clone(), None, None, None, None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            choice.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.choice, choice);
@@ -798,7 +834,16 @@ mod tests {
 
         // Only grammar set
         let grammar = Some("root ::= 'yes' | 'no'".to_string());
-        let opts = GuidedDecodingOptions::validated(None, None, None, grammar.clone(), None, None, None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            grammar.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.grammar, grammar);
@@ -906,14 +951,23 @@ mod tests {
     #[test]
     fn test_guided_decoding_options_from_optional() {
         // All None returns Ok(None)
-        let opts = GuidedDecodingOptions::from_optional(None, None, None, None, None, None, None, None);
+        let opts =
+            GuidedDecodingOptions::from_optional(None, None, None, None, None, None, None, None);
         assert!(opts.is_ok());
         assert!(opts.unwrap().is_none());
 
         // Only one set returns Ok(Some)
         let regex = Some(r"\w+".to_string());
-        let opts =
-            GuidedDecodingOptions::from_optional(None, regex.clone(), None, None, None, None, None, None);
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            regex.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_some());

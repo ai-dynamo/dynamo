@@ -1698,12 +1698,7 @@ mod tests {
                 false,
                 "glm45 + enable_thinking=true → enabled",
             ),
-            (
-                Some("glm45"),
-                None,
-                false,
-                "glm45 + no args → enabled",
-            ),
+            (Some("glm45"), None, false, "glm45 + no args → enabled"),
             (
                 Some("glm45"),
                 Some(&empty_args),
