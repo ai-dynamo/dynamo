@@ -21,7 +21,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,  # sglang tests run on GPU-enabled workers
-    pytest.mark.profiled_vram_gib(0),  # does not actually consume GPU VRAM
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
 

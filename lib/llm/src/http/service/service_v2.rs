@@ -28,7 +28,7 @@ use derive_builder::Builder;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
-use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::logging::make_inference_request_span;
 use dynamo_runtime::metrics::{
     frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
     request_plane::ensure_request_plane_metrics_registered_prometheus,
@@ -526,7 +526,7 @@ impl HttpServiceConfigBuilder {
         // Add on_response callback for logging response status code
         router = router.layer(
             TraceLayer::new_for_http()
-                .make_span_with(make_request_span)
+                .make_span_with(make_inference_request_span)
                 .on_response(
                     |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
                         let status = response.status();
