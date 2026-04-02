@@ -334,19 +334,34 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Create a span for system endpoints (health, metrics, models, etc.).
+/// Create a span for system endpoints (health, metrics, models, engine, loras, etc.).
 ///
 /// Uses `target: "system_span"` which follows normal DYN_LOG filtering — these
 /// endpoints are polled frequently and don't need to be visible at INFO level.
+/// Preserves inbound trace context so management operations (e.g. /engine/*, /v1/loras)
+/// can be correlated with the caller's trace.
 pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
-    tracing::debug_span!(
+    let trace_parent = TraceParent::from_headers(req.headers());
+    let otel_context = extract_otel_context_from_http_headers(req.headers());
+
+    let span = tracing::debug_span!(
         target: "system_span",
         "http-request",
         method = %method,
         uri = %uri,
-    )
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        x_request_id = trace_parent.x_request_id,
+        request_id = trace_parent.x_dynamo_request_id,
+    );
+
+    if let Some(context) = otel_context {
+        let _ = span.set_parent(context);
+    }
+
+    span
 }
 
 /// Extract OpenTelemetry context from HTTP headers for distributed tracing
