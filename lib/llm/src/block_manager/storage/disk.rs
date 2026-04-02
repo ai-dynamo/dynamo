@@ -551,7 +551,9 @@ pub struct DiskAllocator {
 
 impl Default for DiskAllocator {
     fn default() -> Self {
-        Self::from_env().expect("Failed to initialize DiskAllocator from environment")
+        Self {
+            strategy: Box::new(DefaultDirectIo),
+        }
     }
 }
 
@@ -818,50 +820,43 @@ mod tests {
     /// Test that disk_open_strategy_from_env returns DefaultDirectIo by default.
     #[test]
     fn test_strategy_from_env_default() {
-        unsafe {
-            std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
-        }
-        let strategy = disk_open_strategy_from_env().expect("default strategy should succeed");
-        assert_eq!(strategy.name(), "default");
+        temp_env::with_var_unset(DISK_ALLOCATOR_TYPE_KEY, || {
+            let strategy =
+                disk_open_strategy_from_env().expect("default strategy should succeed");
+            assert_eq!(strategy.name(), "default");
+        });
     }
 
     /// Test that disk_open_strategy_from_env returns DefaultDirectIo for explicit "default".
     #[test]
     fn test_strategy_from_env_fcntl() {
-        unsafe {
-            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "default");
-        }
-        let strategy = disk_open_strategy_from_env().expect("fcntl strategy should succeed");
-        assert_eq!(strategy.name(), "default");
-        unsafe {
-            std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
-        }
+        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("default"), || {
+            let strategy =
+                disk_open_strategy_from_env().expect("fcntl strategy should succeed");
+            assert_eq!(strategy.name(), "default");
+        });
     }
 
     /// Test that disk_open_strategy_from_env returns MkostempDirectIo for "open-direct".
     #[test]
     fn test_strategy_from_env_open_direct() {
-        unsafe {
-            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "open-direct");
-        }
-        let strategy =
-            disk_open_strategy_from_env().expect("open-direct strategy should succeed");
-        assert_eq!(strategy.name(), "open-direct");
-        unsafe {
-            std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
-        }
+        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("open-direct"), || {
+            let strategy =
+                disk_open_strategy_from_env().expect("open-direct strategy should succeed");
+            assert_eq!(strategy.name(), "open-direct");
+        });
     }
 
     /// Test that disk_open_strategy_from_env rejects unknown values.
     #[test]
     fn test_strategy_from_env_unknown() {
-        unsafe {
-            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "not-a-real-backend");
-        }
-        let result = disk_open_strategy_from_env();
-        assert!(result.is_err(), "unknown strategy should fail");
-        unsafe {
-            std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
-        }
+        temp_env::with_var(
+            DISK_ALLOCATOR_TYPE_KEY,
+            Some("not-a-real-backend"),
+            || {
+                let result = disk_open_strategy_from_env();
+                assert!(result.is_err(), "unknown strategy should fail");
+            },
+        );
     }
 }
