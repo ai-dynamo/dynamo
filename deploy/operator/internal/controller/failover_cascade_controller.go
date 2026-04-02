@@ -8,6 +8,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +30,10 @@ const (
 	groveLabelPodIndex         = "grove.io/podclique-pod-index"
 )
 
+// cascadeCooldown prevents tight delete-recreate-fail loops by suppressing
+// repeated cascade-deletes for the same engine group within this window.
+const cascadeCooldown = 60 * time.Second
+
 // FailoverCascadeReconciler watches GMS failover pods (restartPolicy: Never)
 // and cascade-deletes all pods in the same engine group when any member
 // reaches a terminal phase (Failed or Succeeded). This ensures broken
@@ -40,6 +46,36 @@ const (
 type FailoverCascadeReconciler struct {
 	client.Client
 	Recorder record.EventRecorder
+	Now      func() time.Time
+
+	cooldownMu sync.Mutex
+	cooldowns  map[string]time.Time
+}
+
+func NewFailoverCascadeReconciler(c client.Client, recorder record.EventRecorder) *FailoverCascadeReconciler {
+	return &FailoverCascadeReconciler{
+		Client:   c,
+		Recorder: recorder,
+		Now:      time.Now,
+	}
+}
+
+func (r *FailoverCascadeReconciler) inCooldown(key string) bool {
+	r.cooldownMu.Lock()
+	defer r.cooldownMu.Unlock()
+	if last, ok := r.cooldowns[key]; ok {
+		return r.Now().Sub(last) < cascadeCooldown
+	}
+	return false
+}
+
+func (r *FailoverCascadeReconciler) setCooldown(key string) {
+	r.cooldownMu.Lock()
+	defer r.cooldownMu.Unlock()
+	if r.cooldowns == nil {
+		r.cooldowns = make(map[string]time.Time)
+	}
+	r.cooldowns[key] = r.Now()
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete;deletecollection
@@ -72,6 +108,17 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	groupKey := pcsg + "/" + pcsgReplica + "/" + podIndex
+	if r.inCooldown(groupKey) {
+		logger.V(1).Info("engine group in cascade cooldown, skipping",
+			"trigger", pod.Name,
+			"pcsg", pcsg,
+			"pcsgReplica", pcsgReplica,
+			"podIndex", podIndex,
+		)
+		return ctrl.Result{}, nil
+	}
+
 	groupLabels := client.MatchingLabels{
 		commonconsts.KubeLabelDynamoFailoverGroup: commonconsts.KubeLabelValueTrue,
 		groveLabelPCSG:             pcsg,
@@ -82,6 +129,8 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
+
+	r.setCooldown(groupKey)
 
 	logger.Info("cascade-deleted engine group",
 		"trigger", pod.Name,

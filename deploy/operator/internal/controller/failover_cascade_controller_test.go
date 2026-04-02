@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
@@ -60,10 +61,7 @@ func newCascadeReconciler(objs ...client.Object) (*FailoverCascadeReconciler, cl
 	}
 	c := cb.Build()
 
-	return &FailoverCascadeReconciler{
-		Client:   c,
-		Recorder: record.NewFakeRecorder(16),
-	}, c
+	return NewFailoverCascadeReconciler(c, record.NewFakeRecorder(16)), c
 }
 
 func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
@@ -224,4 +222,64 @@ func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
 	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
 	assert.Len(t, remaining.Items, 1, "only the different PCSG replica pod should remain")
 	assert.Equal(t, "ldr-r1-0", remaining.Items[0].Name)
+}
+
+func TestFailoverCascade_CooldownSuppressesRepeat(t *testing.T) {
+	ns := "test-ns"
+	now := time.Now()
+
+	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	r, c := newCascadeReconciler(failedPod)
+	r.Now = func() time.Time { return now }
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+	})
+	require.NoError(t, err)
+
+	var remaining corev1.PodList
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	assert.Empty(t, remaining.Items, "first cascade should delete")
+
+	// Grove recreates a new pod that also fails — within cooldown window.
+	newFailed := newFailoverPod("ldr-new", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	require.NoError(t, c.Create(context.Background(), newFailed))
+
+	r.Now = func() time.Time { return now.Add(10 * time.Second) }
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ldr-new", Namespace: ns},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	assert.Len(t, remaining.Items, 1, "second cascade should be suppressed by cooldown")
+	assert.Equal(t, "ldr-new", remaining.Items[0].Name)
+}
+
+func TestFailoverCascade_CooldownExpiresAllowsReCascade(t *testing.T) {
+	ns := "test-ns"
+	now := time.Now()
+
+	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	r, c := newCascadeReconciler(failedPod)
+	r.Now = func() time.Time { return now }
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+	})
+	require.NoError(t, err)
+
+	// After cooldown expires, a new failure should cascade again.
+	newFailed := newFailoverPod("ldr-new", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	require.NoError(t, c.Create(context.Background(), newFailed))
+
+	r.Now = func() time.Time { return now.Add(cascadeCooldown + time.Second) }
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ldr-new", Namespace: ns},
+	})
+	require.NoError(t, err)
+
+	var remaining corev1.PodList
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	assert.Empty(t, remaining.Items, "cascade should fire again after cooldown expires")
 }
