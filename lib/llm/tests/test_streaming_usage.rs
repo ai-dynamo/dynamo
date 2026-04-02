@@ -2,15 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
-    CreateChatCompletionRequest,
-};
-use dynamo_async_openai::types::{
-    CompletionUsage as AoaiCompletionUsage, CreateCompletionRequestArgs, Prompt,
-    PromptTokensDetails,
-};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
@@ -18,6 +9,15 @@ use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
 use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
+    CreateChatCompletionRequest,
+};
+use dynamo_protocols::types::{
+    CompletionUsage as AoaiCompletionUsage, CreateCompletionRequestArgs, Prompt,
+    PromptTokensDetails,
+};
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
@@ -481,7 +481,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
             .prompt(Prompt::String("Hello".to_string()))
             .stream(stream);
         if let Some(include) = include_usage {
-            builder.stream_options(dynamo_async_openai::types::ChatCompletionStreamOptions {
+            builder.stream_options(dynamo_protocols::types::ChatCompletionStreamOptions {
                 include_usage: include,
                 continuous_usage_stats: false,
             });

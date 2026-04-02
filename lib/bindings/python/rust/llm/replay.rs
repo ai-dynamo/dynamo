@@ -282,10 +282,13 @@ impl MockEngineArgs {
             "preemption_mode": preemption_mode,
             "router_queue_policy": router_queue_policy,
             "sglang": self.inner.sglang,
-            "has_perf_model": true,
         });
         serde_json::to_string_pretty(&payload)
             .map_err(|e| PyException::new_err(format!("Failed to serialize MockEngineArgs: {e}")))
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
     }
 
     #[getter]
@@ -309,6 +312,16 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn enable_prefix_caching(&self) -> bool {
+        self.inner.enable_prefix_caching
+    }
+
+    #[setter]
+    fn set_enable_prefix_caching(&mut self, value: bool) {
+        self.inner.enable_prefix_caching = value;
+    }
+
+    #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
     }
@@ -323,6 +336,76 @@ impl MockEngineArgs {
         self.inner.bootstrap_port
     }
 
+    #[getter]
+    fn aic_backend(&self) -> Option<String> {
+        self.inner.aic_backend.clone()
+    }
+
+    #[setter]
+    fn set_aic_backend(&mut self, value: Option<String>) {
+        self.inner.aic_backend = value;
+    }
+
+    #[getter]
+    fn aic_system(&self) -> Option<String> {
+        self.inner.aic_system.clone()
+    }
+
+    #[setter]
+    fn set_aic_system(&mut self, value: Option<String>) {
+        self.inner.aic_system = value;
+    }
+
+    #[getter]
+    fn aic_backend_version(&self) -> Option<String> {
+        self.inner.aic_backend_version.clone()
+    }
+
+    #[setter]
+    fn set_aic_backend_version(&mut self, value: Option<String>) {
+        self.inner.aic_backend_version = value;
+    }
+
+    #[getter]
+    fn aic_tp_size(&self) -> Option<usize> {
+        self.inner.aic_tp_size
+    }
+
+    #[setter]
+    fn set_aic_tp_size(&mut self, value: Option<usize>) {
+        self.inner.aic_tp_size = value;
+    }
+
+    #[getter]
+    fn aic_model_path(&self) -> Option<String> {
+        self.inner.aic_model_path.clone()
+    }
+
+    #[setter]
+    fn set_aic_model_path(&mut self, value: Option<String>) {
+        self.inner.aic_model_path = value;
+    }
+
+    #[getter]
+    fn worker_type(&self) -> &'static str {
+        match self.inner.worker_type {
+            RsWorkerType::Aggregated => "aggregated",
+            RsWorkerType::Prefill => "prefill",
+            RsWorkerType::Decode => "decode",
+        }
+    }
+
+    #[setter]
+    fn set_worker_type(&mut self, value: &str) -> PyResult<()> {
+        self.inner.worker_type = parse_worker_type(value)?;
+        Ok(())
+    }
+
+    #[setter]
+    fn set_num_gpu_blocks(&mut self, value: usize) {
+        self.inner.num_gpu_blocks = value;
+    }
+
     fn is_prefill(&self) -> bool {
         self.inner.is_prefill()
     }
@@ -331,13 +414,22 @@ impl MockEngineArgs {
         self.inner.is_decode()
     }
 
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
         zmq_kv_events_port: Option<u16>,
         zmq_replay_port: Option<u16>,
         kv_bytes_per_token: Option<usize>,
+        num_gpu_blocks: Option<usize>,
+        aic_backend: Option<String>,
+        aic_system: Option<String>,
+        aic_backend_version: Option<String>,
+        aic_tp_size: Option<usize>,
+        aic_model_path: Option<String>,
+        enable_prefix_caching: Option<bool>,
+        worker_type: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(port) = bootstrap_port {
@@ -351,6 +443,30 @@ impl MockEngineArgs {
         }
         if let Some(bytes_per_token) = kv_bytes_per_token {
             inner.kv_bytes_per_token = Some(bytes_per_token);
+        }
+        if let Some(blocks) = num_gpu_blocks {
+            inner.num_gpu_blocks = blocks;
+        }
+        if let Some(backend) = aic_backend {
+            inner.aic_backend = Some(backend);
+        }
+        if let Some(system) = aic_system {
+            inner.aic_system = Some(system);
+        }
+        if let Some(version) = aic_backend_version {
+            inner.aic_backend_version = Some(version);
+        }
+        if let Some(tp_size) = aic_tp_size {
+            inner.aic_tp_size = Some(tp_size);
+        }
+        if let Some(model_path) = aic_model_path {
+            inner.aic_model_path = Some(model_path);
+        }
+        if let Some(enable_prefix_caching) = enable_prefix_caching {
+            inner.enable_prefix_caching = enable_prefix_caching;
+        }
+        if let Some(worker_type) = worker_type {
+            inner.worker_type = parse_worker_type(&worker_type)?;
         }
         inner.normalized().map(|inner| Self { inner }).map_err(|e| {
             PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))

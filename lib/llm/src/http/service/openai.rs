@@ -1538,7 +1538,7 @@ async fn responses(
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
     chat_request.inner.stream = Some(true);
     chat_request.inner.stream_options =
-        Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+        Some(dynamo_protocols::types::ChatCompletionStreamOptions {
             include_usage: true,
             continuous_usage_stats: false,
         });
@@ -1915,9 +1915,9 @@ async fn images(
         .model
         .as_ref()
         .map(|m| match m {
-            dynamo_async_openai::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_async_openai::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_async_openai::types::ImageModel::Other(s) => s.clone(),
+            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
+            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
 
@@ -2327,8 +2327,8 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_async_openai::types::responses::{CreateResponse, Input, PromptConfig};
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
         CreateCompletionRequest,
@@ -3004,7 +3004,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_for_backend_error_with_normal_event() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::CreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
 
         // Create a normal data event
@@ -3178,7 +3178,7 @@ mod tests {
 
     use std::collections::{HashMap, HashSet};
 
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
         ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
         FunctionCallStream,
