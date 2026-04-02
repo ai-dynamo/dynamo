@@ -20,6 +20,7 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
+from tests.utils.device import get_device_visibility_env_var
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -208,8 +209,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
             command.extend(["--kv-events-config", kv_events_cfg])
 
             env = os.environ.copy()  # Copy parent environment
+            visibility_env_var = get_device_visibility_env_var()
             env_vars = {
-                "CUDA_VISIBLE_DEVICES": gpu_device,
+                visibility_env_var: gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
