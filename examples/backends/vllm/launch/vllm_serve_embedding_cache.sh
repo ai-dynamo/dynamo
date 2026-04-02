@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Need vLLM main or v0.17+
+# Requires vLLM 0.18+
 EC_ARGS=()
 if [[ "$CAPACITY_GB" != "0" ]]; then
     EC_ARGS=(--ec-transfer-config "{

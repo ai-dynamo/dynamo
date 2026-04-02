@@ -233,7 +233,7 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
 ### Aggregated Worker
 
-A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely.
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Supported natively with vLLM 0.18+.
 
 ```mermaid
 ---
@@ -262,7 +262,9 @@ vllm serve $model \
     }"
 ```
 
-This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
+This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector`. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled). No patches required — `ec_both` is supported natively in vLLM 0.18+.
+
+See `examples/backends/vllm/launch/vllm_serve_embedding_cache.sh` for a ready-to-run script.
 
 ### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
