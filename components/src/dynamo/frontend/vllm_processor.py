@@ -36,6 +36,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Client, DistributedRuntime
 
+from .multimodal_utils import extract_mm_urls
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import random_uuid
 
@@ -120,6 +121,18 @@ class VllmProcessor:
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
+
+        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
+        # The Rust HTTP layer accepts None/missing, so normalize before validation.
+        for msg in request.get("messages", []):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if part.get("type") == "image_url":
+                    img_url = part.get("image_url", {})
+                    if img_url.get("detail") is None:
+                        img_url["detail"] = "auto"
 
         pre = await preprocess_chat_request(
             request,
@@ -250,6 +263,11 @@ class VllmProcessor:
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
         }
+
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data = extract_mm_urls(request.get("messages", []))
+        if mm_data:
+            dynamo_preproc["multi_modal_data"] = mm_data
 
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
