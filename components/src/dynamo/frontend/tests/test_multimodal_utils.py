@@ -150,3 +150,23 @@ def test_handles_string_content():
         {"role": "user", "content": "Just a plain text message"},
     ]
     assert extract_mm_urls(messages) is None
+
+
+def test_handles_malformed_content_non_dict():
+    """Non-dict items in content list should be skipped, not crash."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                "a plain string instead of a dict",
+                42,
+                None,
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/ok.png"},
+                },
+            ],
+        }
+    ]
+    result = extract_mm_urls(messages)
+    assert result == {"image_url": [{"Url": "https://example.com/ok.png"}]}

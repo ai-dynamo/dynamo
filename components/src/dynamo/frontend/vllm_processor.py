@@ -124,13 +124,17 @@ class VllmProcessor:
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
         # The Rust HTTP layer accepts None/missing, so normalize before validation.
         for msg in request.get("messages", []):
+            if not isinstance(msg, dict):
+                continue
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
             for part in content:
+                if not isinstance(part, dict):
+                    continue
                 if part.get("type") == "image_url":
-                    img_url = part.get("image_url", {})
-                    if img_url.get("detail") is None:
+                    img_url = part.get("image_url")
+                    if isinstance(img_url, dict) and img_url.get("detail") is None:
                         img_url["detail"] = "auto"
 
         pre = await preprocess_chat_request(

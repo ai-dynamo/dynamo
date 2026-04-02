@@ -56,17 +56,22 @@ def extract_mm_urls(
     mm_data: dict[str, list[dict[str, str]]] = {}
 
     for msg in messages:
-        if msg.get("role") != "user":
+        if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
         content = msg.get("content")
         if not isinstance(content, list):
             continue
         for part in content:
+            if not isinstance(part, dict):
+                continue
             part_type = part.get("type")
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
-            url = part.get(part_type, {}).get("url")
-            if url:
+            media_value = part.get(part_type)
+            if not isinstance(media_value, dict):
+                continue
+            url = media_value.get("url")
+            if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
 
     return mm_data or None
