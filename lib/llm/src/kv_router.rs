@@ -28,7 +28,6 @@ use futures::stream;
 use tracing::Instrument;
 use validator::Validate;
 
-pub mod cache_control;
 pub mod indexer;
 mod jetstream;
 pub mod metrics;
@@ -40,7 +39,6 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
-pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};

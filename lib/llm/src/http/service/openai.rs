@@ -57,6 +57,7 @@ use crate::protocols::openai::{
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
+use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -1513,27 +1514,31 @@ async fn responses(
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
-    let mut chat_request: NvCreateChatCompletionRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest",
-            );
-            let err_response = ErrorMessage::not_implemented_error(
-                VALIDATION_PREFIX.to_string()
-                    + "Failed to convert responses request: "
-                    + &e.to_string(),
-            );
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert NvCreateResponse to UnifiedRequest",
+        );
+        let err_response = ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "Failed to convert responses request: "
+                + &e.to_string(),
+        );
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+    // Extract the API context before consuming the UnifiedRequest — this
+    // carries Responses-specific fields (previous_response_id, store, etc.)
+    // that the stream converter needs for faithful response reconstruction.
+    let responses_ctx = unified_request.responses_context().cloned();
+    let mut chat_request = unified_request.into_inner();
 
     // Always use internal streaming for aggregation.
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
     chat_request.inner.stream = Some(true);
     chat_request.inner.stream_options =
-        Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+        Some(dynamo_protocols::types::ChatCompletionStreamOptions {
             include_usage: true,
             continuous_usage_stats: false,
         });
@@ -1577,7 +1582,10 @@ async fn responses(
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let mut converter = ResponseStreamConverter::new(model.clone(), response_params);
+        let mut converter = match responses_ctx {
+            Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
+            None => ResponseStreamConverter::new(model.clone(), response_params),
+        };
         let start_events = converter.emit_start_events();
 
         // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
@@ -1685,18 +1693,19 @@ async fn responses(
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
-        let response: NvResponse = chat_completion_to_response(response, &response_params)
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
-                    e
-                );
-                let err_response =
-                    ErrorMessage::internal_server_error("Failed to convert internal response");
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
-            })?;
+        let response: NvResponse =
+            chat_completion_to_response(response, &response_params, responses_ctx.as_ref())
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
+                        e
+                    );
+                    let err_response =
+                        ErrorMessage::internal_server_error("Failed to convert internal response");
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?;
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -1906,9 +1915,9 @@ async fn images(
         .model
         .as_ref()
         .map(|m| match m {
-            dynamo_async_openai::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_async_openai::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_async_openai::types::ImageModel::Other(s) => s.clone(),
+            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
+            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
 
@@ -2318,8 +2327,8 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_async_openai::types::responses::{CreateResponse, Input, PromptConfig};
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
         CreateCompletionRequest,
@@ -2995,7 +3004,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_for_backend_error_with_normal_event() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::CreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
 
         // Create a normal data event
@@ -3169,7 +3178,7 @@ mod tests {
 
     use std::collections::{HashMap, HashSet};
 
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
         ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
         FunctionCallStream,

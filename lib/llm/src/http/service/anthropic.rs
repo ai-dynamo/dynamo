@@ -40,9 +40,10 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+    aggregator::ChatCompletionAggregator,
 };
+use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 
@@ -213,20 +214,25 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
 
-    // Convert Anthropic request -> Chat Completion request
-    let mut chat_request: NvCreateChatCompletionRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to NvCreateChatCompletionRequest",
-            );
-            anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("Failed to convert request: {}", e),
-            )
-        })?;
+    // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to convert request: {}", e),
+        )
+    })?;
+
+    // Extract the API context before consuming the UnifiedRequest — this
+    // carries Anthropic-specific fields (thinking config, cache breakpoints,
+    // etc.) that the stream converter needs for faithful response reconstruction.
+    let anthropic_ctx = unified_request.anthropic_context().cloned();
+    let mut chat_request = unified_request.into_inner();
 
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
@@ -309,7 +315,10 @@ async fn anthropic_messages(
 
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let mut converter = AnthropicStreamConverter::new(model_for_resp);
+        let mut converter = match anthropic_ctx {
+            Some(ctx) => AnthropicStreamConverter::with_context(model_for_resp, ctx),
+            None => AnthropicStreamConverter::new(model_for_resp),
+        };
         let start_events = converter.emit_start_events();
 
         let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
@@ -406,7 +415,11 @@ async fn anthropic_messages(
                     )
                 })?;
 
-        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(
+            chat_response,
+            &model_for_resp,
+            anthropic_ctx.as_ref(),
+        );
 
         inflight_guard.mark_ok();
 

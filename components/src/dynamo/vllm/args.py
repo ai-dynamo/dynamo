@@ -227,9 +227,8 @@ def update_engine_config_with_dynamo(
         engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
-        engine_config.block_size = 16
         logger.debug(
-            f"Setting reasonable default of {engine_config.block_size} for block_size"
+            "block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend."
         )
 
     if _uses_nixl_connector(engine_config):

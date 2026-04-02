@@ -23,7 +23,7 @@ use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
+use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::Status;
 
