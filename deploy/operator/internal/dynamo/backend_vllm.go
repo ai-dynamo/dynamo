@@ -117,7 +117,7 @@ def leader_pod_is_healthy():
     try:
         ip = socket.gethostbyname(host)
     except socket.gaierror:
-        return False, "DNS resolution failed"
+        return False, "DNS resolution failed", None
     try:
         req = urllib.request.Request(
             f"{_k8s_api()}?fieldSelector=status.podIP={ip}",
@@ -126,17 +126,20 @@ def leader_pod_is_healthy():
         resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(), timeout=5).read())
         pods = resp.get("items", [])
         if not pods:
-            return False, f"no pod found with IP {ip}"
+            return False, f"no pod found with IP {ip}", None
         pod = pods[0]
         name = pod["metadata"].get("name", "unknown")
+        uid = pod["metadata"].get("uid", "unknown")
         phase = pod.get("status", {}).get("phase")
-        if pod["metadata"].get("deletionTimestamp"):
-            return False, f"pod {name} is terminating"
+        deletion_ts = pod["metadata"].get("deletionTimestamp")
+        info = f"ip={ip} pod={name} uid={uid} phase={phase} deletionTimestamp={deletion_ts}"
+        if deletion_ts:
+            return False, f"pod {name} is terminating", info
         if phase != "Running":
-            return False, f"pod {name} phase is {phase}"
-        return True, ""
+            return False, f"pod {name} phase is {phase}", info
+        return True, "", info
     except Exception as e:
-        return False, f"K8s API error: {e}"
+        return False, f"K8s API error: {e}", None
 
 print(f"Waiting for leader master port at {host}:{port}...", flush=True)
 time.sleep(5)
@@ -144,18 +147,18 @@ start = time.monotonic()
 last_status = start
 last_err = ""
 while True:
-    healthy, reason = leader_pod_is_healthy()
+    healthy, reason, pod_info = leader_pod_is_healthy()
     if healthy:
         try:
             s = socket.create_connection((host, port), timeout=2)
             s.close()
             elapsed = time.monotonic() - start
-            print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
+            print(f"Leader master port ready (waited {elapsed:.1f}s) [{pod_info}]", flush=True)
             break
         except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
+            last_err = f"tcp: {type(e).__name__}: {e} [{pod_info}]"
     else:
-        last_err = reason
+        last_err = f"{reason} [{pod_info}]" if pod_info else reason
     now = time.monotonic()
     if now - last_status >= 30:
         print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})", flush=True)
