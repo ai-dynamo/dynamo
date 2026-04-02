@@ -263,7 +263,7 @@ async fn handle_shared_request(
                 trace_id = traceparent.trace_id,
                 parent_id = traceparent.parent_id,
                 x_request_id = traceparent.x_request_id,
-                x_dynamo_request_id = traceparent.x_dynamo_request_id,
+                request_id = traceparent.request_id,
                 tracestate = traceparent.tracestate
             ))
             .await;
@@ -308,10 +308,14 @@ impl TraceParent {
             traceparent.x_request_id = Some(s.to_string());
         }
 
-        if let Some(value) = headers.get("x-dynamo-request-id")
-            && let Ok(s) = value.to_str()
+        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        if let Some(s) = headers.get("request-id").and_then(|v| v.to_str().ok()) {
+            traceparent.request_id = Some(s.to_string());
+        } else if let Some(s) = headers
+            .get("x-dynamo-request-id")
+            .and_then(|v| v.to_str().ok())
         {
-            traceparent.x_dynamo_request_id = Some(s.to_string());
+            traceparent.request_id = Some(s.to_string());
         }
 
         traceparent
@@ -380,7 +384,7 @@ mod tests {
         assert_eq!(traceparent.trace_id, Some("test-trace-id".to_string()));
         assert_eq!(traceparent.tracestate, Some("test-state".to_string()));
         assert_eq!(traceparent.x_request_id, Some("req-123".to_string()));
-        assert_eq!(traceparent.x_dynamo_request_id, Some("dyn-456".to_string()));
+        assert_eq!(traceparent.request_id, Some("dyn-456".to_string()));
     }
 
     #[test]
