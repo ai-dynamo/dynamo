@@ -21,8 +21,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::{SyncIndexer, WorkerTask};
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
 };
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
@@ -331,6 +331,37 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
+    /// Reconstruct store events from the per-worker block index. Each block
+    /// becomes a single-block `Stored` event with the correct parent hash,
+    /// suitable for replaying into a fresh indexer to recreate the same state.
+    fn dump_events(worker_blocks: &WorkerBlockIndex) -> Vec<RouterEvent> {
+        let mut events = Vec::new();
+        let mut event_id = 0u64;
+
+        for (worker, block_map) in worker_blocks {
+            for (block_hash, key) in block_map {
+                events.push(RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: key.parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: *block_hash,
+                                tokens_hash: key.local_hash,
+                                mm_extra_info: None,
+                            }],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                ));
+                event_id += 1;
+            }
+        }
+
+        events
+    }
+
     pub fn query_contiguous_hits<S>(
         &self,
         local_hashes: &[LocalBlockHash],
@@ -478,7 +509,7 @@ impl SyncIndexer for LowerTierIndexer {
                     self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {
-                    let _ = sender.send(Ok(Vec::new()));
+                    let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
                 }
                 WorkerTask::Terminate => {
                     break;
@@ -788,6 +819,10 @@ mod tests {
             S: std::hash::BuildHasher,
         {
             self.index.query_match_details(local_hashes, continuations)
+        }
+
+        fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
+            LowerTierIndexer::dump_events(&self.worker_blocks)
         }
     }
 
@@ -1758,5 +1793,231 @@ mod tests {
 
         let details = index.query_match_details(&local_hashes(&[]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
+    }
+
+    // --- dump_events tests ---
+
+    /// Helper: replay dumped events into a fresh indexer and return it.
+    fn replay_dump(events: Vec<crate::protocols::RouterEvent>) -> TestLowerTierIndex {
+        let mut fresh = TestLowerTierIndex::new();
+        for event in events {
+            fresh.apply_event(event).unwrap();
+        }
+        fresh
+    }
+
+    #[test]
+    fn dump_empty_indexer_returns_no_events() {
+        let index = TestLowerTierIndex::new();
+        assert!(index.dump_events().is_empty());
+    }
+
+    #[test]
+    fn dump_round_trip_single_chain() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                7, 0, 0, None, &[11, 12, 13], &[101, 102, 103],
+            ))
+            .unwrap();
+
+        let events = index.dump_events();
+        assert_eq!(events.len(), 3);
+
+        let restored = replay_dump(events);
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(7, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let original = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        let replayed = restored.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        assert_eq!(original, replayed);
+        assert_eq!(replayed.get(&WorkerWithDpRank::new(7, 0)), Some(&3));
+    }
+
+    #[test]
+    fn dump_round_trip_multiple_workers() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(1, 0, 0, None, &[11, 12], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(2, 0, 1, Some(500), &[21, 22], &[201, 202]))
+            .unwrap();
+
+        let events = index.dump_events();
+        assert_eq!(events.len(), 4);
+
+        let restored = replay_dump(events);
+
+        // Worker 1: root chain
+        let mut c1 = FxHashMap::default();
+        c1.insert(
+            WorkerWithDpRank::new(1, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[11, 12]), &c1),
+            restored.query_contiguous_hits(&local_hashes(&[11, 12]), &c1),
+        );
+
+        // Worker 2: non-root chain
+        let mut c2 = FxHashMap::default();
+        c2.insert(
+            WorkerWithDpRank::new(2, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(500)),
+        );
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[21, 22]), &c2),
+            restored.query_contiguous_hits(&local_hashes(&[21, 22]), &c2),
+        );
+    }
+
+    #[test]
+    fn dump_round_trip_shared_edges() {
+        let mut index = TestLowerTierIndex::new();
+        // Two workers own the same chain.
+        index
+            .apply_event(store_event(1, 0, 0, None, &[11, 12], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(2, 0, 1, None, &[11, 12], &[101, 102]))
+            .unwrap();
+
+        let events = index.dump_events();
+        // 2 blocks * 2 workers = 4 events (each worker's blocks are dumped
+        // independently even if they share the same underlying edges).
+        assert_eq!(events.len(), 4);
+
+        let restored = replay_dump(events);
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(1, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(2, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations),
+            restored.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations),
+        );
+    }
+
+    #[test]
+    fn dump_after_removal_excludes_removed_blocks() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                5, 0, 0, Some(800), &[31, 32, 33], &[301, 302, 303],
+            ))
+            .unwrap();
+
+        // Remove the middle block.
+        index
+            .apply_event(remove_event(
+                5,
+                1,
+                0,
+                vec![ExternalSequenceBlockHash(302)],
+            ))
+            .unwrap();
+
+        let events = index.dump_events();
+        // Only 2 blocks remain (301 and 303).
+        assert_eq!(events.len(), 2);
+
+        let restored = replay_dump(events);
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(5, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(800)),
+        );
+
+        // Original and restored should give the same result: only 1 hit
+        // (block 301 matches, 302 is gone so the chain breaks).
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[31, 32, 33]), &continuations),
+            restored.query_contiguous_hits(&local_hashes(&[31, 32, 33]), &continuations),
+        );
+    }
+
+    #[test]
+    fn dump_round_trip_multiple_dp_ranks() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(10, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(10, 1, 1, None, &[3, 4], &[301, 302]))
+            .unwrap();
+
+        let events = index.dump_events();
+        assert_eq!(events.len(), 4);
+
+        let restored = replay_dump(events);
+
+        // Verify dp_rank=0 chain
+        let mut c0 = FxHashMap::default();
+        c0.insert(
+            WorkerWithDpRank::new(10, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[1, 2]), &c0),
+            restored.query_contiguous_hits(&local_hashes(&[1, 2]), &c0),
+        );
+
+        // Verify dp_rank=1 chain
+        let mut c1 = FxHashMap::default();
+        c1.insert(
+            WorkerWithDpRank::new(10, 1),
+            LowerTierContinuation::from_root(0),
+        );
+        assert_eq!(
+            index.query_contiguous_hits(&local_hashes(&[3, 4]), &c1),
+            restored.query_contiguous_hits(&local_hashes(&[3, 4]), &c1),
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_pool_dump_events_round_trip() {
+        let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
+            .await;
+
+        let events = index.dump_events().await.unwrap();
+        assert_eq!(events.len(), 3);
+
+        // Replay into a fresh ThreadPoolIndexer.
+        let restored = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
+        for event in events {
+            restored.apply_event(event).await;
+        }
+        let _ = restored.dump_events().await.unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker, LowerTierContinuation::from_root(0));
+
+        let original =
+            index
+                .backend()
+                .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        let replayed =
+            restored
+                .backend()
+                .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        assert_eq!(original, replayed);
+        assert_eq!(replayed.get(&worker), Some(&3));
     }
 }
