@@ -218,6 +218,23 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
+	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+				{Name: consts.MainContainerName, Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+			},
+		}
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[0].Command)
+		assert.Equal(t, []string{"run"}, podSpec.Containers[0].Args)
+		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[1].Command)
+		assert.Nil(t, podSpec.Containers[1].Args)
+	})
+
 	t.Run("error cases", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
@@ -228,6 +245,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}{
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
 			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container found"},
+			{"main container missing", &corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "img", Command: []string{"python3"}}}}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "main container not found"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -236,14 +254,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
 		}
-	})
-
-	t.Run("falls back to first container when main not found", func(t *testing.T) {
-		podSpec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "img", Command: []string{"python3"}}}}
-		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
-		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 	})
 }
 
