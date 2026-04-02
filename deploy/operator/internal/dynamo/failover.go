@@ -124,7 +124,7 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 		{Name: "TMPDIR", Value: gmsSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: gmsSharedMountPath + "/" + gmsFailoverLockFile},
 		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
-		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "unhealthy"},
+		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 	}
 }
 

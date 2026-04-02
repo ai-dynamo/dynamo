@@ -135,7 +135,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	assert.True(t, hasEnvVar(c, "TMPDIR", gmsSharedMountPath))
 	assert.True(t, hasEnvVar(c, "FAILOVER_LOCK_PATH", gmsSharedMountPath+"/"+gmsFailoverLockFile))
 	assert.True(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"))
-	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "unhealthy"))
+	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "notready"))
 	assert.True(t, hasEnvVar(c, "KEEP_ME", "yes"), "unrelated env vars should be preserved")
 
 	for _, e := range c.Env {
