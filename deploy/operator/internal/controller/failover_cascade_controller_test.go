@@ -41,7 +41,7 @@ func newFailoverPod(name, namespace string, phase corev1.PodPhase, pcsg, replica
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverGroup: commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
 				groveLabelPCSG:                            pcsg,
 				groveLabelPCSGReplicaIndex:                replicaIdx,
 				groveLabelPodIndex:                        podIdx,
@@ -190,7 +190,7 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 			Name:      "partial-labels",
 			Namespace: ns,
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverGroup: commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
 				groveLabelPCSG:                            "my-pcsg",
 			},
 		},

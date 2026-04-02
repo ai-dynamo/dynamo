@@ -120,7 +120,7 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	groupLabels := client.MatchingLabels{
-		commonconsts.KubeLabelDynamoFailoverGroup: commonconsts.KubeLabelValueTrue,
+		commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
 		groveLabelPCSG:             pcsg,
 		groveLabelPCSGReplicaIndex: pcsgReplica,
 		groveLabelPodIndex:         podIndex,
@@ -163,7 +163,7 @@ func isTerminalPhase(phase corev1.PodPhase) bool {
 // and only triggers on updates where the phase transitions to a terminal state.
 func failoverCascadePredicate() predicate.Predicate {
 	hasLabel := func(labels map[string]string) bool {
-		return labels[commonconsts.KubeLabelDynamoFailoverGroup] == commonconsts.KubeLabelValueTrue
+		return labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] == commonconsts.KubeLabelValueTrue
 	}
 
 	return predicate.Funcs{

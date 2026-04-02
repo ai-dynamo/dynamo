@@ -104,7 +104,6 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.VolumeMounts = append(c.VolumeMounts, mount)
 
 	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
-	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
 	return podSpec
 }
