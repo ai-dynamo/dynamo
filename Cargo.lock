@@ -2580,6 +2580,7 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "criterion 0.5.1",
+ "crossbeam-queue",
  "cudarc",
  "dashmap",
  "derive-getters",
