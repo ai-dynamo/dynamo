@@ -418,13 +418,15 @@ impl RequestTracker {
         self.decode_dispatch_time.set(Instant::now()).is_ok()
     }
 
-    /// Time between prefill completion and decode dispatch in seconds.
-    /// Only meaningful in disaggregated serving (original path, not bootstrap).
+    /// Upper-bound estimation of KV cache transfer latency in seconds.
+    /// Computed as `first_token_time - prefill_complete_time`, which captures:
+    /// router dispatch overhead + network + KV transfer (NIXL) + one decode forward pass.
+    /// Works for all disaggregated paths (original and bootstrap).
     /// Returns None if either timestamp was not recorded.
-    pub fn kv_transfer_latency_secs(&self) -> Option<f64> {
+    pub fn kv_transfer_estimated_latency_secs(&self) -> Option<f64> {
         let complete = *self.prefill_complete_time.get()?;
-        let dispatch = *self.decode_dispatch_time.get()?;
-        Some(dispatch.saturating_duration_since(complete).as_secs_f64())
+        let first_tok = *self.first_token_time.get()?;
+        Some(first_tok.saturating_duration_since(complete).as_secs_f64())
     }
 
     /// Get worker ID information if any worker IDs have been recorded.
@@ -532,7 +534,9 @@ impl RequestTracker {
             total_time_ms: self.total_time_ms(),
             kv_hit_rate: self.kv_hit_rate(),
             router_queue_depth: self.router_queue_depth(),
-            kv_transfer_latency_ms: self.kv_transfer_latency_secs().map(|s| s * 1000.0),
+            kv_transfer_estimated_latency_ms: self
+                .kv_transfer_estimated_latency_secs()
+                .map(|s| s * 1000.0),
         }
     }
 }
@@ -576,9 +580,10 @@ pub struct TimingInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub router_queue_depth: Option<usize>,
 
-    /// Time between prefill completion and decode dispatch in milliseconds (disaggregated only)
+    /// Upper-bound estimation of KV cache transfer latency in milliseconds (disaggregated only).
+    /// Measured as first_token_time - prefill_complete_time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_transfer_latency_ms: Option<f64>,
+    pub kv_transfer_estimated_latency_ms: Option<f64>,
 }
 
 #[cfg(test)]
@@ -757,16 +762,16 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_transfer_latency() {
+    fn test_kv_transfer_estimated_latency() {
         let tracker = RequestTracker::new();
         // Before any timestamps: returns None
-        assert!(tracker.kv_transfer_latency_secs().is_none());
+        assert!(tracker.kv_transfer_estimated_latency_secs().is_none());
 
         tracker.record_prefill_complete();
         thread::sleep(Duration::from_millis(10));
-        tracker.record_decode_dispatch();
+        tracker.record_first_token();
 
-        let latency = tracker.kv_transfer_latency_secs().unwrap();
+        let latency = tracker.kv_transfer_estimated_latency_secs().unwrap();
         assert!(
             latency >= 0.005,
             "latency should be at least 5ms, got {latency}"
@@ -774,27 +779,27 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_transfer_latency_none_without_dispatch() {
+    fn test_kv_transfer_estimated_latency_none_without_first_token() {
         let tracker = RequestTracker::new();
         tracker.record_prefill_complete();
         assert!(
-            tracker.kv_transfer_latency_secs().is_none(),
-            "Should return None when decode_dispatch_time is not set"
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
+            "Should return None when first_token_time is not set"
         );
     }
 
     #[test]
-    fn test_kv_transfer_latency_none_without_prefill_complete() {
+    fn test_kv_transfer_estimated_latency_none_without_prefill_complete() {
         let tracker = RequestTracker::new();
-        tracker.record_decode_dispatch();
+        tracker.record_first_token();
         assert!(
-            tracker.kv_transfer_latency_secs().is_none(),
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
             "Should return None when prefill_complete_time is not set"
         );
     }
 
     #[test]
-    fn test_kv_transfer_latency_oncelock_first_write_wins() {
+    fn test_kv_transfer_estimated_latency_oncelock_first_write_wins() {
         let tracker = RequestTracker::new();
         assert!(tracker.record_prefill_complete()); // first call returns true
         assert!(!tracker.record_prefill_complete()); // second call returns false (OnceLock)
@@ -803,14 +808,16 @@ mod tests {
     }
 
     #[test]
-    fn test_timing_info_includes_kv_transfer_latency() {
+    fn test_timing_info_includes_kv_transfer_estimated_latency() {
         let tracker = RequestTracker::new();
         tracker.record_prefill_complete();
         thread::sleep(Duration::from_millis(10));
-        tracker.record_decode_dispatch();
+        tracker.record_first_token();
 
         let info = tracker.get_timing_info();
-        let latency_ms = info.kv_transfer_latency_ms.expect("should be Some");
+        let latency_ms = info
+            .kv_transfer_estimated_latency_ms
+            .expect("should be Some");
         assert!(
             latency_ms >= 5.0,
             "latency should be at least 5ms, got {latency_ms}"
@@ -818,35 +825,35 @@ mod tests {
     }
 
     #[test]
-    fn test_timing_info_kv_transfer_latency_none_in_aggregated() {
+    fn test_timing_info_kv_transfer_estimated_latency_none_in_aggregated() {
         let tracker = RequestTracker::new();
-        // No record_prefill_complete / record_decode_dispatch called
+        // No record_prefill_complete / record_first_token called
         let info = tracker.get_timing_info();
         assert!(
-            info.kv_transfer_latency_ms.is_none(),
+            info.kv_transfer_estimated_latency_ms.is_none(),
             "Should be None in aggregated mode (no timestamps recorded)"
         );
     }
 
     #[test]
-    fn test_timing_info_kv_transfer_latency_serialization() {
+    fn test_timing_info_kv_transfer_estimated_latency_serialization() {
         let tracker = RequestTracker::new();
         // When not set, the field should be omitted from JSON (skip_serializing_if)
         let info = tracker.get_timing_info();
         let json = serde_json::to_string(&info).unwrap();
         assert!(
-            !json.contains("kv_transfer_latency_ms"),
+            !json.contains("kv_transfer_estimated_latency_ms"),
             "None field should be omitted from JSON, got: {json}"
         );
 
         // When set, it should appear
         let tracker2 = RequestTracker::new();
         tracker2.record_prefill_complete();
-        tracker2.record_decode_dispatch();
+        tracker2.record_first_token();
         let info2 = tracker2.get_timing_info();
         let json2 = serde_json::to_string(&info2).unwrap();
         assert!(
-            json2.contains("kv_transfer_latency_ms"),
+            json2.contains("kv_transfer_estimated_latency_ms"),
             "Set field should appear in JSON, got: {json2}"
         );
     }
