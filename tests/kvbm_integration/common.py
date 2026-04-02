@@ -736,14 +736,12 @@ class TestDeterminism:
         import subprocess
 
         model = llm_server.model_config.model_id
-        # Keep prompts short enough that the tokenizer decoding phase completes
-        # well within KVBM_BENCH_STARTUP_WAIT (default 120s).  2000 × 4000-token
-        # prompts take ~160s to decode; 500 × 1000-token prompts take ~10s and
-        # still create enough requests to overflow the GPU KV cache (2048 blocks /
-        # ~63 blocks per 1000-token request ≈ 33 requests to fill, easily
-        # exceeded before the 500-prompt run finishes).
-        num_prompts = int(os.environ.get("KVBM_BENCH_NUM_PROMPTS", "500"))
-        input_len = int(os.environ.get("KVBM_BENCH_INPUT_LEN", "1000"))
+        # NOTE: with large models (e.g. DeepSeek-V2-Lite), vllm bench decodes all
+        # prompts through the tokenizer before sending requests.  2000 × 4000-token
+        # prompts take ~160s to decode, exceeding KVBM_BENCH_STARTUP_WAIT (120s).
+        # Reduce via KVBM_BENCH_NUM_PROMPTS / KVBM_BENCH_INPUT_LEN if needed.
+        num_prompts = int(os.environ.get("KVBM_BENCH_NUM_PROMPTS", "2000"))
+        input_len = int(os.environ.get("KVBM_BENCH_INPUT_LEN", "4000"))
         output_len = int(os.environ.get("KVBM_BENCH_OUTPUT_LEN", "180"))
         concurrency = int(os.environ.get("KVBM_BENCH_CONCURRENCY", "7"))
         bench_cmd = [
