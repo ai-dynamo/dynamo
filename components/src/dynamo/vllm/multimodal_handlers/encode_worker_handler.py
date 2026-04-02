@@ -65,6 +65,7 @@ class EncodeWorkerHandler:
         # Check for encoder device override via environment variable
         # DYN_ENCODER_DEVICE can be: "auto", "cpu", "cuda", "xpu", or specific device like "cuda:0"
         encoder_device = os.getenv("DYN_ENCODER_DEVICE", "auto")
+        self.encoder_device = encoder_device  # Store for later logging
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
@@ -158,6 +159,35 @@ class EncodeWorkerHandler:
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
         logger.info("Encode worker startup completed.")
+
+    def log_registration(
+        self, endpoint, namespace: str, component: str, endpoint_name: str
+    ):
+        """Log encoder registration with instance_id and device type"""
+        try:
+            instance_id = endpoint.connection_id()
+            # Store the generate endpoint so get_device_info can return its instance_id
+            self._generate_endpoint = endpoint
+            self._generate_instance_id = instance_id
+            logger.warning(
+                f"========== ENCODER REGISTERED ==========\n"
+                f"Instance ID: {instance_id}\n"
+                f"Device Type: {self.encoder_device.upper()}\n"
+                f"Endpoint: {namespace}.{component}.{endpoint_name}\n"
+                f"========================================"
+            )
+        except Exception as e:
+            logger.error(f"Failed to log encoder registration: {e}")
+
+    async def get_device_info(self, request: str, context) -> AsyncIterator[str]:
+        """Return device type and generate endpoint's instance_id for this encoder worker"""
+        import json
+
+        response = {
+            "device_type": self.encoder_device,
+            "generate_instance_id": getattr(self, "_generate_instance_id", None),
+        }
+        yield json.dumps(response)
 
     @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
     async def generate(
@@ -255,28 +285,71 @@ class EncodeWorkerHandler:
                     )
 
             if loaded_images:
-                with _nvtx.annotate(
-                    "mm:enc:image_preprocess", color="yellow"
-                ), time_and_log_code_section(
-                    f"[ENCODE] request: {request_id} image processing"
-                ):
-                    image_embeds = await asyncio.to_thread(
-                        self.image_processor, images=loaded_images, return_tensors="pt"
-                    )
+                # Check if using HuggingFace encoder (VLLM_ENCODER=0)
+                vllm_encoder = int(os.getenv("VLLM_ENCODER", 1))
 
-                with _nvtx.annotate(
-                    "mm:enc:vision_encode", color="red"
-                ), time_and_log_code_section(
-                    f"[ENCODE] request: {request_id} encoding"
-                ):
-                    # Encode the image embeddings using model-specific encoder
-                    embeddings = await asyncio.to_thread(
-                        encode_image_embeddings,
-                        model_name=self.model,
-                        image_embeds=image_embeds,
-                        vision_encoder=self.vision_encoder,
-                        projector=self.projector,
+                if vllm_encoder == 0 and len(loaded_images) > 1:
+                    # HuggingFace encoder path: process images one at a time
+                    logger.info(
+                        f"[ENCODE] VLLM_ENCODER=0: Processing {len(loaded_images)} images individually"
                     )
+                    all_embeddings = []
+                    all_grid_thw = []
+
+                    for img_idx, single_image in enumerate(loaded_images):
+                        with _nvtx.annotate(
+                            f"mm:enc:image_preprocess_{img_idx}", color="yellow"
+                        ):
+                            image_embeds = await asyncio.to_thread(
+                                self.image_processor,
+                                images=[single_image],
+                                return_tensors="pt",
+                            )
+
+                        with _nvtx.annotate(
+                            f"mm:enc:vision_encode_{img_idx}", color="red"
+                        ):
+                            embeddings_single = await asyncio.to_thread(
+                                encode_image_embeddings,
+                                model_name=self.model,
+                                image_embeds=image_embeds,
+                                vision_encoder=self.vision_encoder,
+                                projector=self.projector,
+                            )
+                            all_embeddings.append(embeddings_single.squeeze(0))
+                            if "image_grid_thw" in image_embeds:
+                                all_grid_thw.append(image_embeds["image_grid_thw"])
+
+                    # Concatenate all embeddings
+                    embeddings = torch.cat(all_embeddings, dim=0).unsqueeze(0)
+                    if all_grid_thw:
+                        image_embeds["image_grid_thw"] = torch.cat(all_grid_thw, dim=0)
+                else:
+                    # Standard batch processing (vLLM encoder or single image)
+                    with _nvtx.annotate(
+                        "mm:enc:image_preprocess", color="yellow"
+                    ), time_and_log_code_section(
+                        f"[ENCODE] request: {request_id} image processing"
+                    ):
+                        image_embeds = await asyncio.to_thread(
+                            self.image_processor,
+                            images=loaded_images,
+                            return_tensors="pt",
+                        )
+
+                    with _nvtx.annotate(
+                        "mm:enc:vision_encode", color="red"
+                    ), time_and_log_code_section(
+                        f"[ENCODE] request: {request_id} encoding"
+                    ):
+                        # Encode the image embeddings using model-specific encoder
+                        embeddings = await asyncio.to_thread(
+                            encode_image_embeddings,
+                            model_name=self.model,
+                            image_embeds=image_embeds,
+                            vision_encoder=self.vision_encoder,
+                            projector=self.projector,
+                        )
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
                     # [gluo FIXME] This is specific to qwen vision processing..
@@ -300,7 +373,33 @@ class EncodeWorkerHandler:
                             // merge_size
                             // merge_size
                         ).tolist()
-                        splitted_embeddings = embeddings.squeeze(0).split(sizes)
+
+                        # Check if embeddings size matches expected sizes
+                        embeddings_squeezed = embeddings.squeeze(0)
+                        expected_total = sum(sizes)
+                        actual_total = embeddings_squeezed.shape[0]
+
+                        if expected_total != actual_total:
+                            logger.warning(
+                                f"Embeddings size mismatch: expected {expected_total}, got {actual_total}. "
+                                f"Sizes: {sizes}, embeddings shape: {embeddings.shape}. "
+                                f"This may indicate batch processing issue with VLLM_ENCODER=0."
+                            )
+                            # If embeddings don't match, assume they're already split per image
+                            # This happens with HuggingFace encoder (VLLM_ENCODER=0)
+                            if len(sizes) > 1 and actual_total == sizes[0]:
+                                logger.info(
+                                    "Using embeddings as-is (already per-image)"
+                                )
+                                splitted_embeddings = [embeddings_squeezed]
+                            else:
+                                raise RuntimeError(
+                                    f"Cannot split embeddings: expected total {expected_total}, "
+                                    f"got {actual_total}. Sizes={sizes}"
+                                )
+                        else:
+                            splitted_embeddings = embeddings_squeezed.split(sizes)
+
                         logger.debug(
                             f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                         )

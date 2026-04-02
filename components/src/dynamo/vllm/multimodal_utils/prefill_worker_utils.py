@@ -172,6 +172,7 @@ async def _fetch_from_encode_workers(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     context=None,
+    encoder_device_mapping: dict | None = None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image URLs to encode workers, load embeddings, and return ready groups.
 
@@ -205,22 +206,64 @@ async def _fetch_from_encode_workers(
             # Per-request mode: pick one encoder for entire request, rotate across requests
             global _encoder_round_robin_index
             instance_ids = encode_worker_client.instance_ids()
+
+            logger.debug(
+                f"[ENCODER_SELECTION] Available instance_ids (original): {instance_ids}, "
+                f"Split ratio: {ENCODER_SPLIT_RATIO}"
+            )
             if not instance_ids:
                 raise RuntimeError("No encoder instances available")
+
+            # Reorder instance_ids so XPU is always first, based on encoder_device_mapping
+            if encoder_device_mapping and len(instance_ids) == 2:
+                # Sort: XPU/auto first, then CPU
+                sorted_ids = []
+                for iid in instance_ids:
+                    device = encoder_device_mapping.get(iid, "").lower()
+                    # XPU/auto goes first (priority 0), CPU goes second (priority 1)
+                    priority = 1 if device == "cpu" else 0
+                    sorted_ids.append((priority, iid))
+                sorted_ids.sort()
+                instance_ids = [iid for _, iid in sorted_ids]
+                logger.info(
+                    f"[ENCODER_SELECTION] Reordered instance_ids (XPU first): {instance_ids}"
+                )
 
             # Apply weighted round-robin based on split ratio
             if len(instance_ids) == 2:
                 # Weighted selection for dual encoder setup
+                # instance_ids has been reordered: [0]=XPU, [1]=CPU
                 ratio1, ratio2 = ENCODER_SPLIT_RATIO
                 total_ratio = ratio1 + ratio2
                 position = _encoder_round_robin_index % total_ratio
 
-                # Select first encoder if position < ratio1, else second encoder
+                # Select first encoder (XPU) if position < ratio1, else second encoder (CPU)
                 encoder_index = 0 if position < ratio1 else 1
                 selected_instance_id = instance_ids[encoder_index]
 
+                # Look up actual device type from mapping
+                if encoder_device_mapping:
+                    encoder_type = encoder_device_mapping.get(
+                        selected_instance_id, "unknown"
+                    ).upper()
+                else:
+                    encoder_type = "UNKNOWN (no mapping)"
+
+                logger.warning(
+                    f"========== ENCODER SELECTION ==========\n"
+                    f"Request ID: {request_id}\n"
+                    f"Round-robin index: {_encoder_round_robin_index}\n"
+                    f"Position in cycle: {position}/{total_ratio}\n"
+                    f"Instance IDs (ordered: XPU first): {instance_ids}\n"
+                    f"Selected index: {encoder_index} (instance_id={selected_instance_id})\n"
+                    f"Device type (from mapping): {encoder_type}\n"
+                    f"Split ratio XPU:CPU = {ratio1}:{ratio2}\n"
+                    f"Images: {len(image_urls)}\n"
+                    f"========================================"
+                )
+
                 logger.info(
-                    f"[PREFILL] request: {request_id} assigned to encoder instance {selected_instance_id} "
+                    f"[PREFILL] request: {request_id} assigned to {encoder_type} encoder instance {selected_instance_id} "
                     f"(mode=per_request, split_ratio={ratio1}:{ratio2}, position={position}/{total_ratio}, {len(image_urls)} images)"
                 )
             else:
@@ -323,6 +366,7 @@ async def _fetch_embeddings(
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
     context=None,
+    encoder_device_mapping: dict | None = None,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
@@ -363,6 +407,7 @@ async def _fetch_embeddings(
             request_id,
             receiver,
             context=context,
+            encoder_device_mapping=encoder_device_mapping,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
@@ -393,10 +438,12 @@ class MultiModalEmbeddingLoader:
         encode_worker_client: Client,
         receiver: AbstractEmbeddingReceiver,
         embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None,
+        encoder_device_mapping: dict | None = None,
     ):
         self._encode_worker_client = encode_worker_client
         self._receiver = receiver
         self._embedding_cache_manager = embedding_cache_manager
+        self._encoder_device_mapping = encoder_device_mapping
 
     async def load_multimodal_embeddings(
         self,
@@ -423,6 +470,7 @@ class MultiModalEmbeddingLoader:
             self._receiver,
             cache=self._embedding_cache_manager,
             context=context,
+            encoder_device_mapping=self._encoder_device_mapping,
         )
 
         multi_modal_data: Dict[str, Any] = defaultdict(list)

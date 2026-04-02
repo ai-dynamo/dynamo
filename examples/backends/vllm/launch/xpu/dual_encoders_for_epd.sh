@@ -85,8 +85,8 @@ fi
 echo ""
 echo "=========================================="
 echo "Dual Encoder Configuration:"
-echo "  - Encoder 1: CPU (vision model on CPU)"
-echo "  - Encoder 2: XPU $DYN_ENCODE_WORKER_1_GPU (vision model on GPU)"
+echo "  - Encoder 1: XPU $DYN_ENCODE_WORKER_1_GPU (vision model on GPU)"
+echo "  - Encoder 2: CPU (vision model on CPU)"
 echo "  - Prefill: XPU $DYN_PREFILL_WORKER_GPU"
 echo "  - Decode: XPU $DYN_DECODE_WORKER_GPU"
 echo "  - Scheduler Mode: ${DYN_ENCODER_SCHEDULER:-per_request}"
@@ -94,12 +94,29 @@ echo "  - Split Ratio: ${DYN_ENCODER_SPLIT_RATIO:-1:1}"
 echo "=========================================="
 echo ""
 
-# Start encoder worker 1 on CPU
-echo "Starting encoder worker 1 with CPU vision model..."
+# Start encoder worker 1 on XPU (first for faster registration)
+echo "Starting encoder worker 1 with XPU vision model (GPU $DYN_ENCODE_WORKER_1_GPU)..."
+VLLM_NIXL_SIDE_CHANNEL_PORT=20100 \
+env $DEVICE_AFFINITY_ENV=$DYN_ENCODE_WORKER_1_GPU \
+python -m dynamo.vllm \
+  --multimodal-encode-worker \
+  --enable-multimodal \
+  --enable-mm-embeds \
+  --model $MODEL_NAME \
+  --gpu-memory-utilization 0.9 \
+  $EXTRA_ARGS \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'$DEVICE_PLATFORM'"}' \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083"}' &
+
+sleep 15  # Give encoders time to register
+
+# Start encoder worker 2 on CPU
+echo "Starting encoder worker 2 with CPU vision model..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYN_ENCODER_DEVICE=cpu \
 VLLM_ENCODER=0 \
-env $DEVICE_AFFINITY_ENV=0 \
+CUDA_VISIBLE_DEVICES="" \
+ZE_AFFINITY_MASK="" \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
   --enable-multimodal \
@@ -109,22 +126,6 @@ python -m dynamo.vllm \
   $EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "cpu"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
-
-# Start encoder worker 2 on XPU
-echo "Starting encoder worker 2 with XPU vision model (GPU $DYN_ENCODE_WORKER_1_GPU)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20100 \
-env $DEVICE_AFFINITY_ENV=$DYN_ENCODE_WORKER_1_GPU \
-python -m dynamo.vllm \
-  --multimodal-encode-worker \
-  --enable-multimodal \
-  --enable-mm-embeds \
-  --model $MODEL_NAME \
-  --gpu-memory-utilization 0.3 \
-  $EXTRA_ARGS \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'$DEVICE_PLATFORM'"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083"}' &
-
-sleep 5  # Give encoders time to register
 
 # Start prefill worker (routes to both encoders via scheduler)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU..."
