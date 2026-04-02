@@ -306,7 +306,8 @@ runs:
       if: always()
       uses: ./.github/actions/push-metrics
       with:
-        pushgateway-url: ${{ env.PUSHGATEWAY_URL }}
+        otlp-endpoint: ${{ env.OTLP_ENDPOINT }}
+        otlp-token: ${{ env.OTLP_TOKEN }}
         loki-url: ${{ env.LOKI_URL }}
         test-results: test-results/
         framework: ${{ inputs.framework }}

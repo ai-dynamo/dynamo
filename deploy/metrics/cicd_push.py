@@ -34,6 +34,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -269,7 +270,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Targets
-    parser.add_argument("--pushgateway-url", help="Prometheus Pushgateway URL")
+    parser.add_argument("--otlp-endpoint", help="OTLP HTTP endpoint (e.g. https://otlp-http.nvidia.com)")
+    parser.add_argument("--otlp-token", help="Bearer token for OTLP auth (or set OTLP_TOKEN env / use --otlp-token-file)")
+    parser.add_argument("--otlp-token-file", help="File containing the OTLP bearer token")
     parser.add_argument("--loki-url", help="Loki base URL")
 
     # Data sources
@@ -287,7 +290,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-status", help="Job conclusion: success/failure/cancelled")
 
     # Behavior
-    parser.add_argument("--pushgateway-job", default="cicd_push", help="Prometheus job label")
+    parser.add_argument("--service-name", default="dynamo-cicd-metrics", help="OTLP service name")
     parser.add_argument("--dry-run", action="store_true", help="Log without pushing")
 
     return parser.parse_args()
@@ -296,8 +299,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if not args.pushgateway_url and not args.loki_url:
-        print("Error: at least one of --pushgateway-url or --loki-url is required")
+    # Resolve OTLP token
+    otlp_token = args.otlp_token or os.environ.get("OTLP_TOKEN") or os.environ.get("OTEL_AUTH_TOKEN") or ""
+    if not otlp_token and args.otlp_token_file:
+        try:
+            with open(args.otlp_token_file) as f:
+                otlp_token = f.read().strip()
+        except Exception as e:
+            print(f"Warning: could not read token file {args.otlp_token_file}: {e}")
+
+    otlp_endpoint = args.otlp_endpoint or os.environ.get("OTLP_ENDPOINT") or ""
+
+    if not otlp_endpoint and not args.loki_url:
+        print("Error: at least one of --otlp-endpoint or --loki-url is required")
         sys.exit(1)
     if not args.test_results and not args.build_metrics:
         print("Error: at least one of --test-results or --build-metrics is required")
@@ -318,10 +332,11 @@ def main() -> None:
 
     # Initialize exporters
     prometheus = PrometheusExporter(
-        pushgateway_url=args.pushgateway_url or "",
-        job_name=args.pushgateway_job,
+        otlp_endpoint=otlp_endpoint,
+        otlp_token=otlp_token,
+        service_name=args.service_name,
         dry_run=args.dry_run,
-    ) if args.pushgateway_url else None
+    ) if otlp_endpoint else None
 
     loki = LokiExporter(
         loki_url=args.loki_url or "",
@@ -378,10 +393,9 @@ def main() -> None:
                 print("Warning: build metrics missing 'container' field")
 
     # ── 4. Push ───────────────────────────────────────────────────────
-    grouping_key = {"run_id": ctx.run_id, "job_name": ctx.job_name} if ctx.run_id else None
-
     if prometheus:
-        prometheus.push(grouping_key=grouping_key)
+        prometheus.push()
+        prometheus.shutdown()
     if loki:
         loki.flush()
 
@@ -389,7 +403,7 @@ def main() -> None:
     if prometheus:
         summary = prometheus.get_summary()
         parts = [f"{k}={v}" for k, v in sorted(summary.items()) if v > 0]
-        print(f"Prometheus: {', '.join(parts) if parts else 'no metrics'}")
+        print(f"OTLP metrics: {', '.join(parts) if parts else 'none'}")
     if loki:
         summary = loki.get_summary()
         parts = [f"{k}={v}" for k, v in sorted(summary.items()) if v > 0]

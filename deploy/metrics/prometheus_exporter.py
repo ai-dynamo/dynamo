@@ -13,180 +13,121 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Prometheus Pushgateway exporter for CI/CD metrics.
+OpenTelemetry OTLP metrics exporter for CI/CD metrics.
 
-Pushes metrics to Prometheus via Pushgateway, matching the schema defined in the
-migration plan. Designed to be called alongside the existing OpenSearch uploader
-during the dual-write phase.
+Pushes metrics to an OTLP HTTP endpoint (e.g., https://otlp-http.nvidia.com/v1/metrics)
+using the OpenTelemetry SDK. The public API (record_workflow, record_job, record_test, etc.)
+accepts the same OpenSearch-shaped dicts as the previous Pushgateway implementation.
 """
 
 import logging
+import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from prometheus_client import (
-    CollectorRegistry,
-    Counter,
-    Gauge,
-    Histogram,
-    push_to_gateway,
-)
+from opentelemetry import metrics
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
 
 log = logging.getLogger(__name__)
 
-# Histogram bucket definitions from the plan
-WORKFLOW_DURATION_BUCKETS = (60, 120, 300, 600, 900, 1200, 1800, 3600, 7200)
-WORKFLOW_QUEUE_BUCKETS = (10, 30, 60, 120, 300, 600, 900)
-JOB_DURATION_BUCKETS = (30, 60, 120, 300, 600, 900, 1800, 3600)
-JOB_QUEUE_BUCKETS = (5, 10, 30, 60, 120, 300, 600)
-TEST_DURATION_BUCKETS = (0.1, 0.5, 1, 5, 10, 30, 60, 120, 300)
-CONTAINER_BUILD_DURATION_BUCKETS = (60, 120, 300, 600, 900, 1200, 1800, 3600)
-PR_MERGE_DURATION_BUCKETS = (1, 4, 8, 24, 48, 72, 168, 336)
-
 
 class PrometheusExporter:
-    """Exports CI/CD metrics to Prometheus via Pushgateway."""
+    """Exports CI/CD metrics via OpenTelemetry OTLP HTTP.
 
-    def __init__(self, pushgateway_url: str, job_name: str = "cicd_metrics", dry_run: bool = False):
-        self.pushgateway_url = pushgateway_url
-        self.job_name = job_name
+    Despite the class name (kept for backward compatibility), this now uses
+    the OpenTelemetry SDK to push metrics to any OTLP-compatible endpoint.
+    """
+
+    def __init__(
+        self,
+        otlp_endpoint: str = "",
+        otlp_token: str = "",
+        service_name: str = "dynamo-cicd-metrics",
+        dry_run: bool = False,
+        # Legacy parameter names — still accepted for backward compat
+        pushgateway_url: str = "",
+        job_name: str = "cicd_metrics",
+    ):
         self.dry_run = dry_run
-        self.registry = CollectorRegistry()
-
+        self.otlp_endpoint = otlp_endpoint or pushgateway_url
+        self.otlp_token = otlp_token
+        self.service_name = service_name
         self._counters: Dict[str, int] = defaultdict(int)
+        self._provider: Optional[MeterProvider] = None
 
-        # ── Workflow metrics ──
-        self.workflow_total = Counter(
-            "cicd_workflow_total",
-            "Total workflow runs",
-            ["repo", "workflow_name", "branch", "commit_sha", "status"],
-            registry=self.registry,
-        )
-        self.workflow_duration = Histogram(
-            "cicd_workflow_duration_seconds",
-            "Workflow duration in seconds",
-            ["repo", "workflow_name", "branch", "commit_sha", "status"],
-            buckets=WORKFLOW_DURATION_BUCKETS,
-            registry=self.registry,
-        )
-        self.workflow_queue_time = Histogram(
-            "cicd_workflow_queue_time_seconds",
-            "Workflow queue time in seconds",
-            ["repo", "workflow_name", "branch", "commit_sha"],
-            buckets=WORKFLOW_QUEUE_BUCKETS,
-            registry=self.registry,
-        )
+        if not self.dry_run and self.otlp_endpoint:
+            self._setup_provider()
 
-        # ── Job metrics ──
-        self.job_total = Counter(
-            "cicd_job_total",
-            "Total job runs",
-            ["repo", "workflow_name", "job_name", "branch", "commit_sha", "status", "runner_prefix"],
-            registry=self.registry,
-        )
-        self.job_duration = Histogram(
-            "cicd_job_duration_seconds",
-            "Job duration in seconds",
-            ["repo", "workflow_name", "job_name", "branch", "commit_sha", "runner_prefix"],
-            buckets=JOB_DURATION_BUCKETS,
-            registry=self.registry,
-        )
-        self.job_queue_time = Histogram(
-            "cicd_job_queue_time_seconds",
-            "Job queue time in seconds",
-            ["repo", "job_name", "branch", "commit_sha", "runner_prefix"],
-            buckets=JOB_QUEUE_BUCKETS,
-            registry=self.registry,
-        )
-        self.job_annotation_total = Gauge(
-            "cicd_job_annotation_total",
-            "Job annotation counts by severity",
-            ["repo", "job_name", "commit_sha", "severity"],
-            registry=self.registry,
+        # Create meter (works in dry-run too — just won't export)
+        self._meter = metrics.get_meter("cicd-metrics", "1.0.0")
+        self._instruments: Dict[str, Any] = {}
+
+    # ── Provider setup ────────────────────────────────────────────────────
+
+    def _setup_provider(self) -> None:
+        """Configure the OpenTelemetry MeterProvider with OTLP exporter."""
+        resource_attrs = {
+            "service.name": self.service_name,
+            "service.version": "1.0.0",
+        }
+        if self.otlp_token:
+            resource_attrs["authorization"] = self.otlp_token
+
+        resource = Resource.create(resource_attrs)
+
+        headers = {}
+        if self.otlp_token:
+            headers["Authorization"] = f"Bearer {self.otlp_token}"
+
+        endpoint = self.otlp_endpoint
+        if not endpoint.endswith("/v1/metrics"):
+            endpoint = endpoint.rstrip("/") + "/v1/metrics"
+
+        exporter = OTLPMetricExporter(
+            endpoint=endpoint,
+            headers=headers,
+            timeout=30,
         )
 
-        # ── Test metrics ──
-        self.test_total = Counter(
-            "cicd_test_total",
-            "Total test results",
-            ["repo", "framework", "test_type", "arch", "cuda_version", "branch", "commit_sha", "status"],
-            registry=self.registry,
-        )
-        self.test_status = Gauge(
-            "cicd_test_status",
-            "Per-test pass/fail status (1=pass, 0=fail)",
-            ["repo", "framework", "test_type", "arch", "cuda_version", "branch", "commit_sha", "test_name", "job_name"],
-            registry=self.registry,
-        )
-        self.test_duration = Histogram(
-            "cicd_test_duration_seconds",
-            "Test duration in seconds",
-            ["repo", "framework", "test_type", "arch", "cuda_version", "branch", "commit_sha"],
-            buckets=TEST_DURATION_BUCKETS,
-            registry=self.registry,
+        reader = PeriodicExportingMetricReader(
+            exporter=exporter,
+            export_interval_millis=60000,
         )
 
-        # ── Container build metrics ──
-        self.container_image_size = Gauge(
-            "cicd_container_image_size_bytes",
-            "Container image size in bytes",
-            ["repo", "framework", "target", "platform", "cuda_version", "branch", "commit_sha"],
-            registry=self.registry,
-        )
-        self.container_build_duration = Histogram(
-            "cicd_container_build_duration_seconds",
-            "Container build duration in seconds",
-            ["repo", "framework", "target", "platform", "cuda_version", "branch", "commit_sha"],
-            buckets=CONTAINER_BUILD_DURATION_BUCKETS,
-            registry=self.registry,
-        )
-        self.container_cache_hit_rate = Gauge(
-            "cicd_container_cache_hit_rate",
-            "Docker layer cache hit rate (0.0-1.0)",
-            ["repo", "framework", "cuda_version", "branch", "commit_sha"],
-            registry=self.registry,
-        )
-        self.container_sccache_hit_rate = Gauge(
-            "cicd_container_sccache_hit_rate",
-            "sccache compilation cache hit rate (0.0-1.0)",
-            ["repo", "framework", "cuda_version", "branch", "commit_sha"],
-            registry=self.registry,
-        )
-        self.container_steps_total = Gauge(
-            "cicd_container_steps_total",
-            "Container build step counts by type",
-            ["repo", "framework", "cuda_version", "branch", "commit_sha", "type"],
-            registry=self.registry,
-        )
-        self.container_stage_duration = Gauge(
-            "cicd_container_stage_duration_seconds",
-            "Container stage duration in seconds",
-            ["repo", "framework", "stage_name", "cuda_version", "branch", "commit_sha"],
-            registry=self.registry,
-        )
-        self.container_stage_cache_hit_rate = Gauge(
-            "cicd_container_stage_cache_hit_rate",
-            "Container stage cache hit rate",
-            ["repo", "framework", "stage_name", "cuda_version", "branch", "commit_sha"],
-            registry=self.registry,
-        )
+        self._provider = MeterProvider(resource=resource, metric_readers=[reader])
+        metrics.set_meter_provider(self._provider)
 
-        # ── PR metrics ──
-        self.pr_total = Counter(
-            "cicd_pr_total",
-            "Total pull requests",
-            ["repo", "state", "is_external", "base_branch"],
-            registry=self.registry,
-        )
-        self.pr_merge_duration = Histogram(
-            "cicd_pr_merge_duration_hours",
-            "PR time-to-merge in hours",
-            ["repo", "base_branch", "is_external"],
-            buckets=PR_MERGE_DURATION_BUCKETS,
-            registry=self.registry,
-        )
+    # ── Instrument helpers ────────────────────────────────────────────────
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    def _counter(self, name: str, description: str = "", unit: str = "1"):
+        key = f"counter_{name}"
+        if key not in self._instruments:
+            self._instruments[key] = self._meter.create_counter(
+                name=name, description=description, unit=unit,
+            )
+        return self._instruments[key]
+
+    def _histogram(self, name: str, description: str = "", unit: str = "1"):
+        key = f"histogram_{name}"
+        if key not in self._instruments:
+            self._instruments[key] = self._meter.create_histogram(
+                name=name, description=description, unit=unit,
+            )
+        return self._instruments[key]
+
+    def _gauge(self, name: str, description: str = "", unit: str = "1"):
+        """Up-down counter used as a settable gauge."""
+        key = f"gauge_{name}"
+        if key not in self._instruments:
+            self._instruments[key] = self._meter.create_gauge(
+                name=name, description=description, unit=unit,
+            )
+        return self._instruments[key]
+
+    # ── Public API (same signatures as before) ────────────────────────────
 
     def record_workflow(self, doc: Dict[str, Any]) -> None:
         """Record a workflow run from an OpenSearch-shaped document."""
@@ -198,15 +139,15 @@ class PrometheusExporter:
         duration = doc.get("l_duration_sec", 0)
         queue_time = doc.get("l_queue_time_sec", 0)
 
-        labels = dict(repo=repo, workflow_name=workflow_name, branch=branch,
-                       commit_sha=commit_sha, status=status)
-        self.workflow_total.labels(**labels).inc()
+        attrs = dict(repo=repo, workflow_name=workflow_name, branch=branch,
+                     commit_sha=commit_sha, status=status)
+
+        self._counter("cicd_workflow_total", "Total workflow runs").add(1, attrs)
         if duration > 0:
-            self.workflow_duration.labels(**labels).observe(duration)
+            self._histogram("cicd_workflow_duration_seconds", "Workflow duration", "s").record(duration, attrs)
         if queue_time > 0:
-            queue_labels = dict(repo=repo, workflow_name=workflow_name,
-                                branch=branch, commit_sha=commit_sha)
-            self.workflow_queue_time.labels(**queue_labels).observe(queue_time)
+            queue_attrs = dict(repo=repo, workflow_name=workflow_name, branch=branch, commit_sha=commit_sha)
+            self._histogram("cicd_workflow_queue_time_seconds", "Workflow queue time", "s").record(queue_time, queue_attrs)
 
         self._counters["workflows"] += 1
 
@@ -222,23 +163,19 @@ class PrometheusExporter:
         duration = doc.get("l_duration_sec", 0)
         queue_time = doc.get("l_queue_time_sec", 0)
 
-        self.job_total.labels(
-            repo=repo, workflow_name=workflow_name, job_name=job_name,
-            branch=branch, commit_sha=commit_sha, status=status,
-            runner_prefix=runner_prefix,
-        ).inc()
-        if duration > 0:
-            self.job_duration.labels(
-                repo=repo, workflow_name=workflow_name, job_name=job_name,
-                branch=branch, commit_sha=commit_sha, runner_prefix=runner_prefix,
-            ).observe(duration)
-        if queue_time > 0:
-            self.job_queue_time.labels(
-                repo=repo, job_name=job_name, branch=branch,
-                commit_sha=commit_sha, runner_prefix=runner_prefix,
-            ).observe(queue_time)
+        attrs = dict(repo=repo, workflow_name=workflow_name, job_name=job_name,
+                     branch=branch, commit_sha=commit_sha, status=status,
+                     runner_prefix=runner_prefix)
 
-        # Annotations
+        self._counter("cicd_job_total", "Total job runs").add(1, attrs)
+        if duration > 0:
+            dur_attrs = {k: v for k, v in attrs.items() if k != "status"}
+            self._histogram("cicd_job_duration_seconds", "Job duration", "s").record(duration, dur_attrs)
+        if queue_time > 0:
+            q_attrs = dict(repo=repo, job_name=job_name, branch=branch,
+                           commit_sha=commit_sha, runner_prefix=runner_prefix)
+            self._histogram("cicd_job_queue_time_seconds", "Job queue time", "s").record(queue_time, q_attrs)
+
         for severity, field in [
             ("failure", "l_annotation_failure_count"),
             ("warning", "l_annotation_warning_count"),
@@ -246,10 +183,9 @@ class PrometheusExporter:
         ]:
             count = doc.get(field, 0)
             if count > 0:
-                self.job_annotation_total.labels(
-                    repo=repo, job_name=job_name, commit_sha=commit_sha,
-                    severity=severity,
-                ).set(count)
+                self._gauge("cicd_job_annotation_total", "Job annotations").set(
+                    count, dict(repo=repo, job_name=job_name, commit_sha=commit_sha, severity=severity),
+                )
 
         self._counters["jobs"] += 1
 
@@ -267,27 +203,21 @@ class PrometheusExporter:
         job_name = doc.get("s_job_name", "")
         duration_ms = doc.get("l_test_duration_ms", 0)
 
-        # Aggregate counter
-        self.test_total.labels(
-            repo=repo, framework=framework, test_type=test_type, arch=arch,
-            cuda_version=cuda_version, branch=branch, commit_sha=commit_sha,
-            status=status,
-        ).inc()
+        base_attrs = dict(repo=repo, framework=framework, test_type=test_type, arch=arch,
+                          cuda_version=cuda_version, branch=branch, commit_sha=commit_sha)
 
-        # Per-test status gauge (only for pass/fail, skip skipped)
+        self._counter("cicd_test_total", "Total test results").add(1, {**base_attrs, "status": status})
+
         if status in ("passed", "failed", "error"):
-            self.test_status.labels(
-                repo=repo, framework=framework, test_type=test_type, arch=arch,
-                cuda_version=cuda_version, branch=branch, commit_sha=commit_sha,
-                test_name=test_name, job_name=job_name,
-            ).set(1 if status == "passed" else 0)
+            self._gauge("cicd_test_status", "Per-test pass/fail (1=pass, 0=fail)").set(
+                1 if status == "passed" else 0,
+                {**base_attrs, "test_name": test_name, "job_name": job_name},
+            )
 
-        # Duration histogram (convert ms to seconds)
         if duration_ms > 0:
-            self.test_duration.labels(
-                repo=repo, framework=framework, test_type=test_type, arch=arch,
-                cuda_version=cuda_version, branch=branch, commit_sha=commit_sha,
-            ).observe(duration_ms / 1000.0)
+            self._histogram("cicd_test_duration_seconds", "Test duration", "s").record(
+                duration_ms / 1000.0, base_attrs,
+            )
 
         self._counters["tests"] += 1
 
@@ -301,42 +231,29 @@ class PrometheusExporter:
         branch = doc.get("s_branch", "")
         commit_sha = doc.get("s_commit_sha", "")
 
-        # Image size
+        full_attrs = dict(repo=repo, framework=framework, target=target, platform=platform,
+                          cuda_version=cuda_version, branch=branch, commit_sha=commit_sha)
+        cache_attrs = dict(repo=repo, framework=framework, cuda_version=cuda_version,
+                           branch=branch, commit_sha=commit_sha)
+
         size_bytes = doc.get("l_build_size_bytes", 0)
         if size_bytes > 0:
-            self.container_image_size.labels(
-                repo=repo, framework=framework, target=target, platform=platform,
-                cuda_version=cuda_version, branch=branch, commit_sha=commit_sha,
-            ).set(size_bytes)
+            self._gauge("cicd_container_image_size_bytes", "Container image size", "By").set(size_bytes, full_attrs)
 
-        # Build duration
         duration = doc.get("l_build_duration_sec", 0)
         if duration > 0:
-            self.container_build_duration.labels(
-                repo=repo, framework=framework, target=target, platform=platform,
-                cuda_version=cuda_version, branch=branch, commit_sha=commit_sha,
-            ).observe(duration)
+            self._histogram("cicd_container_build_duration_seconds", "Build duration", "s").record(duration, full_attrs)
 
-        # Cache hit rate
         cache_hit_rate = doc.get("f_cache_hit_rate", -1)
         if cache_hit_rate >= 0:
-            self.container_cache_hit_rate.labels(
-                repo=repo, framework=framework, cuda_version=cuda_version,
-                branch=branch, commit_sha=commit_sha,
-            ).set(cache_hit_rate)
+            self._gauge("cicd_container_cache_hit_rate", "Docker cache hit rate").set(cache_hit_rate, cache_attrs)
 
-        # Step counts
-        for type_name, field in [
-            ("total", "l_total_steps"),
-            ("cached", "l_cached_steps"),
-            ("built", "l_built_steps"),
-        ]:
+        for type_name, field in [("total", "l_total_steps"), ("cached", "l_cached_steps"), ("built", "l_built_steps")]:
             val = doc.get(field, 0)
             if val > 0:
-                self.container_steps_total.labels(
-                    repo=repo, framework=framework, cuda_version=cuda_version,
-                    branch=branch, commit_sha=commit_sha, type=type_name,
-                ).set(val)
+                self._gauge("cicd_container_steps_total", "Build step counts").set(
+                    val, {**cache_attrs, "type": type_name},
+                )
 
         self._counters["containers"] += 1
 
@@ -349,16 +266,16 @@ class PrometheusExporter:
         branch = doc.get("s_branch", "")
         commit_sha = doc.get("s_commit_sha", "")
 
-        labels = dict(repo=repo, framework=framework, stage_name=stage_name,
-                       cuda_version=cuda_version, branch=branch, commit_sha=commit_sha)
+        attrs = dict(repo=repo, framework=framework, stage_name=stage_name,
+                     cuda_version=cuda_version, branch=branch, commit_sha=commit_sha)
 
         duration = doc.get("f_stage_duration_sec", 0)
         if duration > 0:
-            self.container_stage_duration.labels(**labels).set(duration)
+            self._gauge("cicd_container_stage_duration_seconds", "Stage duration", "s").set(duration, attrs)
 
         cache_rate = doc.get("f_stage_cache_hit_rate", -1)
         if cache_rate >= 0:
-            self.container_stage_cache_hit_rate.labels(**labels).set(cache_rate)
+            self._gauge("cicd_container_stage_cache_hit_rate", "Stage cache rate").set(cache_rate, attrs)
 
         self._counters["stages"] += 1
 
@@ -369,56 +286,57 @@ class PrometheusExporter:
         is_external = str(doc.get("b_is_external", False)).lower()
         base_branch = doc.get("s_base_branch", "")
 
-        self.pr_total.labels(
-            repo=repo, state=state, is_external=is_external, base_branch=base_branch,
-        ).inc()
+        self._counter("cicd_pr_total", "Total pull requests").add(
+            1, dict(repo=repo, state=state, is_external=is_external, base_branch=base_branch),
+        )
 
-        # Time-to-merge histogram
         ttm = doc.get("l_time_to_merge_hours")
         if ttm is not None and ttm > 0:
-            self.pr_merge_duration.labels(
-                repo=repo, base_branch=base_branch, is_external=is_external,
-            ).observe(ttm)
+            self._histogram("cicd_pr_merge_duration_hours", "PR time-to-merge", "h").record(
+                ttm, dict(repo=repo, base_branch=base_branch, is_external=is_external),
+            )
 
         self._counters["prs"] += 1
 
-    # ── Push to gateway ───────────────────────────────────────────────────────
+    # ── Flush / Push ──────────────────────────────────────────────────────
 
     def push(self, grouping_key: Optional[Dict[str, str]] = None) -> None:
-        """Push all collected metrics to the Pushgateway.
+        """Flush all pending metrics to the OTLP endpoint.
 
-        Args:
-            grouping_key: Optional dict of additional grouping labels. When pushing
-                from CI, pass ``{"run_id": ..., "job_name": ...}`` to avoid
-                collisions between concurrent jobs.
+        The grouping_key parameter is accepted for backward compatibility
+        but is not used with OTLP (each metric carries its own attributes).
         """
         if self.dry_run:
-            log.info("[DRY RUN] Would push to Pushgateway at %s", self.pushgateway_url)
+            log.info("[DRY RUN] Would push to OTLP endpoint %s", self.otlp_endpoint)
             self._log_summary()
             return
 
-        if not self.pushgateway_url:
-            log.warning("PUSHGATEWAY_URL not configured, skipping Prometheus push")
+        if not self._provider:
+            log.warning("OTLP endpoint not configured, skipping push")
             return
 
         try:
-            push_to_gateway(
-                self.pushgateway_url,
-                job=self.job_name,
-                grouping_key=grouping_key or {},
-                registry=self.registry,
-            )
-            log.info("Pushed metrics to Pushgateway at %s", self.pushgateway_url)
+            success = self._provider.force_flush(timeout_millis=30000)
+            if success:
+                log.info("Flushed metrics to OTLP endpoint %s", self.otlp_endpoint)
+            else:
+                log.warning("OTLP flush returned False — some metrics may not have been exported")
             self._log_summary()
         except Exception:
-            log.exception("Failed to push metrics to Pushgateway")
+            log.exception("Failed to flush metrics to OTLP endpoint")
+
+    def shutdown(self) -> None:
+        """Shutdown the meter provider and release resources."""
+        if self._provider:
+            try:
+                self._provider.shutdown()
+            except Exception:
+                log.exception("Error shutting down meter provider")
 
     def _log_summary(self) -> None:
-        """Log a summary of recorded metrics."""
         parts = [f"{k}={v}" for k, v in sorted(self._counters.items()) if v > 0]
         if parts:
-            log.info("Prometheus metrics recorded: %s", ", ".join(parts))
+            log.info("Metrics recorded: %s", ", ".join(parts))
 
     def get_summary(self) -> Dict[str, int]:
-        """Return counts of recorded metrics."""
         return dict(self._counters)
