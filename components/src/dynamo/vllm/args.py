@@ -293,7 +293,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {
+        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
             "mode": dynamo_config.benchmark_mode,
             "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
             "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,

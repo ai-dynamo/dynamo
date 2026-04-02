@@ -354,6 +354,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(
         self,
         runtime,
