@@ -65,7 +65,16 @@ func InjectCheckpointIntoPodSpec(
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
-	mainContainer := &podSpec.Containers[0]
+	var mainContainer *corev1.Container
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			mainContainer = &podSpec.Containers[i]
+			break
+		}
+	}
+	if mainContainer == nil {
+		return fmt.Errorf("main container not found in pod spec")
+	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
