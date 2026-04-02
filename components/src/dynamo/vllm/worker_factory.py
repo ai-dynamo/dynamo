@@ -207,6 +207,9 @@ class WorkerFactory:
         )
 
         # Create P/D worker, internally may use remote encode worker for multimodal work
+        # NOTE: --benchmark-mode is not supported for multimodal workers.
+        # Benchmark waiting and get_perf_metrics endpoint are only wired in
+        # _create_decode_worker and _create_prefill_worker.
         if legacy_multimodal_llm_worker:
             await self._create_multimodal_worker(
                 runtime,

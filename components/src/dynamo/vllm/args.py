@@ -285,6 +285,11 @@ def update_engine_config_with_dynamo(
             )
 
     if dynamo_config.benchmark_mode is not None:
+        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+            logger.warning(
+                "--benchmark-mode is not supported for multimodal workers. "
+                "Benchmark data will be collected but not served via endpoint."
+            )
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
             defaults[
