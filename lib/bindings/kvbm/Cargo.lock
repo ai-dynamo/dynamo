@@ -1707,6 +1707,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "crossbeam-queue",
  "dashmap",
  "derive-getters",
  "derive_builder",
