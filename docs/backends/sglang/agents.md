@@ -364,6 +364,42 @@ python -m dynamo.sglang \
 - **Memory pressure from concurrent sessions**: Each open session holds a `req_pool_idx` slot and GPU KV memory. Many concurrent sessions can starve prefill capacity. Use short timeouts for subagent sessions.
 - **Session metrics**: Active session count (`sglang:num_streaming_sessions`) and held KV tokens (`sglang:streaming_session_held_tokens`) are exported as Prometheus gauges on the worker's metrics endpoint.
 
+## Quickstart
+
+### Launch Script
+
+The `agg_agent.sh` script launches a single aggregated worker with the agent controller enabled (session control, sticky routing, KV events):
+
+```bash
+# Default model (Qwen3-0.6B, 1 GPU)
+bash examples/backends/sglang/launch/agg_agent.sh
+
+# Larger model with tensor parallelism
+bash examples/backends/sglang/launch/agg_agent.sh --model-path <model> --tp 2
+
+# With reasoning and tool-call parsers
+bash examples/backends/sglang/launch/agg_agent.sh \
+  --model-path <model> --tp 2 \
+  --dyn-reasoning-parser <parser> \
+  --dyn-tool-call-parser <parser>
+```
+
+The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metrics are on port 8081.
+
+### Testing with OpenCode
+
+[OpenCode](https://github.com/nicholasgasior/opencode) is an open-source AI coding agent that supports OpenAI-compatible endpoints. The [ai-dynamo fork](https://github.com/ai-dynamo/opencode) adds `nvext.session_control` support so each coding session maps to a Dynamo streaming session with sticky routing and subagent KV isolation.
+
+```bash
+# Terminal 1: launch Dynamo with agent controller
+bash examples/backends/sglang/launch/agg_agent.sh --model-path <model> --tp 2
+
+# Terminal 2: run OpenCode pointing at Dynamo
+OPENCODE_API_BASE=http://localhost:8000/v1 opencode
+```
+
+Each OpenCode session automatically opens a streaming session on the first request and routes subsequent turns to the same worker. KV cache is preserved across turns and freed when the session closes.
+
 ## See Also
 
 - **[NVIDIA Request Extensions (nvext)](../../components/frontend/nvext.md)**: Full `nvext` field reference including agent hints
