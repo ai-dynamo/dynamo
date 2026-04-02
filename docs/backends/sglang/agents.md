@@ -296,17 +296,58 @@ The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metric
 
 ### Testing with OpenCode
 
-[OpenCode](https://github.com/anomalyco/opencode) is an open-source AI coding agent that supports OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) adds `nvext.session_control` support so each coding session maps to a Dynamo streaming session with sticky routing and subagent KV isolation.
+[OpenCode](https://github.com/anomalyco/opencode) is an open-source AI coding agent with built-in support for subagents, tool calling, and OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) injects `nvext.session_control` on subagent requests, giving each spawned agent its own Dynamo streaming session with sticky routing and KV isolation.
 
 ```bash
-# Terminal 1: launch Dynamo with agent controller
-bash examples/backends/sglang/launch/agg_agent.sh --model-path zai-org/GLM-4.7-Flash --tp 2
+# Terminal 1 -- launch Dynamo with agent controller + tool/reasoning parsers
+bash examples/backends/sglang/launch/agg_agent.sh \
+  --model-path zai-org/GLM-4.7-Flash --tp 2
 
-# Terminal 2: run OpenCode pointing at Dynamo
-DYNAMO_API_KEY=dummy bun run --cwd packages/opencode src/index.ts -- --model "dynamo/zai-org/GLM-4.7-Flash"
+# Terminal 2 -- run OpenCode against Dynamo
+DYNAMO_API_KEY=dummy bun run --cwd packages/opencode src/index.ts \
+  -- --model "dynamo/zai-org/GLM-4.7-Flash"
 ```
 
-OpenCode automatically opens a streaming session on the first request and routes subsequent turns to the same worker. KV cache is preserved across turns and freed when the session closes or times out.
+When OpenCode spawns a subagent (via the `task` tool), the provider automatically:
+
+1. Sends `session_control.action = "open"` on the subagent's first turn
+2. Routes subsequent turns to the same worker via `session_id`
+3. Sends `session_control.action = "close"` when the subagent completes, freeing KV
+
+The primary agent runs without session control -- only subagent sessions are pinned. This keeps lead-agent requests load-balanced while subagent multi-turn conversations stay on a single worker with warm KV cache.
+
+#### Configuration
+
+Model and endpoint are configured in `.opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "provider": {
+    "dynamo": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Dynamo",
+      "env": ["DYNAMO_API_KEY"],
+      "models": {
+        "zai-org/GLM-4.7-Flash": {
+          "id": "zai-org/GLM-4.7-Flash",
+          "name": "GLM 4.7 Flash",
+          "tool_call": true,
+          "reasoning": true,
+          "temperature": true,
+          "attachment": false,
+          "release_date": "2025-06-01",
+          "limit": { "context": 131072, "output": 8192 },
+          "cost": { "input": 0, "output": 0 },
+          "interleaved": { "field": "reasoning_content" }
+        }
+      },
+      "options": {
+        "baseURL": "http://localhost:8000/v1"
+      }
+    }
+  }
+}
+```
 
 ## See Also
 
