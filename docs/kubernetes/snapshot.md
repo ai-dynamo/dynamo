@@ -282,6 +282,8 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
 
+`snapshotctl` is intended for lower-level debugging and validation workflows, not as the primary user-facing checkpoint interface. For command details and manifest requirements, see [deploy/snapshot/cmd/snapshotctl/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/cmd/snapshotctl/README.md).
+
 ### Checkpoint from a worker pod manifest
 
 ```bash
