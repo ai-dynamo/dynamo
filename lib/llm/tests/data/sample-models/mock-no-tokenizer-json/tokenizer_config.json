@@ -1,0 +1,7 @@
+{
+  "bos_token": "<|endoftext|>",
+  "eos_token": "<|im_end|>",
+  "model_max_length": 32768,
+  "tokenizer_class": "Qwen2Tokenizer",
+  "chat_template": "{% for message in messages %}{{ message.content }}{% endfor %}"
+}

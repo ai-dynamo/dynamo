@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_stream::stream;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
 };
@@ -116,7 +116,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_async_openai::types::StopReason>,
+    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -124,9 +124,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(
-                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
-            ),
+            content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                content.to_string(),
+            )),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -525,13 +525,13 @@ impl JailedStream {
             // Process each item in the stream
             while let Some(response) = stream.next().await {
                 if let Some(chat_response) = response.data.as_ref() {
-                    last_stream_id.clone_from(&chat_response.id);
-                    last_stream_model.clone_from(&chat_response.model);
-                    last_stream_created = chat_response.created;
+                    last_stream_id.clone_from(&chat_response.inner.id);
+                    last_stream_model.clone_from(&chat_response.inner.model);
+                    last_stream_created = chat_response.inner.created;
 
                     let mut all_emissions = Vec::new();
 
-                    if chat_response.choices.is_empty() {
+                    if chat_response.inner.choices.is_empty() {
                         // No choices processed (e.g., usage-only chunk)
                         // Pass through as-is to preserve usage and other metadata
                         yield response;
@@ -539,12 +539,12 @@ impl JailedStream {
                     }
 
                     // Process each choice independently using the new architecture
-                    for choice in &chat_response.choices {
+                    for choice in &chat_response.inner.choices {
                         if let Some(ref content) = choice.delta.content {
                             // Jailing only applies to text content
                             let text_content = match content {
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Parts(_) => None,
                             };
 
                             if let Some(text) = text_content {
@@ -676,14 +676,16 @@ impl JailedStream {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
                 // Create a finalization response carrying forward real stream metadata
                 let dummy_response = NvCreateChatCompletionStreamResponse {
-                    id: last_stream_id,
-                    object: "chat.completion.chunk".to_string(),
-                    created: last_stream_created,
-                    model: last_stream_model,
-                    choices: Vec::new(),
-                    usage: None,
-                    service_tier: None,
-                    system_fingerprint: None,
+                    inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                        id: last_stream_id,
+                        object: "chat.completion.chunk".to_string(),
+                        created: last_stream_created,
+                        model: last_stream_model,
+                        choices: Vec::new(),
+                        usage: None,
+                        service_tier: None,
+                        system_fingerprint: None,
+                    },
                     nvext: None,
                 };
 
@@ -713,7 +715,7 @@ impl JailedStream {
             EmissionMode::Packed => {
                 // Pack all choices into a single response
                 let mut response = base_response.clone();
-                response.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
+                response.inner.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
 
                 vec![Annotated {
                     data: Some(response),
@@ -729,7 +731,7 @@ impl JailedStream {
                     .into_iter()
                     .map(|emission| {
                         let mut response = base_response.clone();
-                        response.choices = vec![emission.into_choice()];
+                        response.inner.choices = vec![emission.into_choice()];
 
                         Annotated {
                             data: Some(response),
@@ -930,7 +932,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+            r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),
@@ -1013,7 +1015,7 @@ impl JailedStream {
             while let Some(mut response) = input_stream.next().await {
                 // Track if any choice emitted tool calls
                 if let Some(ref data) = response.data {
-                    for choice in &data.choices {
+                    for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
@@ -1022,7 +1024,7 @@ impl JailedStream {
 
                 // Fix finish_reason based on jail mode and whether tool calls were emitted
                 if let Some(ref mut data) = response.data {
-                    for choice in &mut data.choices {
+                    for choice in &mut data.inner.choices {
                         if let Some(finish) = choice.finish_reason {
                             // Only modify Stop finish reason, preserve Length/ContentFilter
                             if finish == FinishReason::Stop {

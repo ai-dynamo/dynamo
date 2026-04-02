@@ -18,7 +18,7 @@ pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
 };
@@ -33,6 +33,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
     TOKENIZE_SECONDS,
 };
+use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -311,9 +312,6 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
 
-        // Extract cache_control TTL from either nvext or top-level field
-        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
-
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -332,16 +330,13 @@ impl OpenAIPreprocessor {
                 }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
-                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() || cache_control_ttl.is_some() {
-            // Ensure routing hints exist when we have LoRA or cache_control,
-            // even when nvext is absent (e.g. Anthropic endpoint requests).
+        } else if lora_name.is_some() {
+            // Ensure routing hints exist when we have LoRA.
             builder.routing(Some(RoutingHints {
                 lora_name,
-                cache_control_ttl,
                 ..Default::default()
             }));
         }
@@ -621,7 +616,13 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let encoding = self.tokenizer.encode(prompt)?;
+        let prompt = if prompt.contains('\0') {
+            tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
+            Cow::Owned(prompt.replace('\0', ""))
+        } else {
+            Cow::Borrowed(prompt)
+        };
+        let encoding = self.tokenizer.encode(prompt.as_ref())?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -642,11 +643,11 @@ impl OpenAIPreprocessor {
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
-            dynamo_async_openai::types::EmbeddingInput::String(s) => {
+            dynamo_protocols::types::EmbeddingInput::String(s) => {
                 let encoding = self.tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
-            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
+            dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
@@ -662,10 +663,10 @@ impl OpenAIPreprocessor {
                     .collect();
                 token_arrays
             }
-            dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
+            dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
                 vec![token_ids.clone()]
             }
-            dynamo_async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+            dynamo_protocols::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
                 token_arrays.clone()
             }
         };
@@ -1025,11 +1026,11 @@ impl OpenAIPreprocessor {
         stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
-                let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
+                let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| dynamo_async_openai::types::Embedding {
+                    .map(|(index, embedding)| dynamo_protocols::types::Embedding {
                         index: index as u32,
                         object: "embedding".to_string(),
                         embedding: embedding.into_iter().map(|f| f as f32).collect(),
@@ -1037,11 +1038,11 @@ impl OpenAIPreprocessor {
                     .collect();
 
                 let response = NvCreateEmbeddingResponse {
-                    inner: dynamo_async_openai::types::CreateEmbeddingResponse {
+                    inner: dynamo_protocols::types::CreateEmbeddingResponse {
                         object: "list".to_string(),
                         model: original_request.inner.model.clone(),
                         data: embeddings,
-                        usage: dynamo_async_openai::types::EmbeddingUsage {
+                        usage: dynamo_protocols::types::EmbeddingUsage {
                             prompt_tokens: engine_output.prompt_tokens,
                             total_tokens: engine_output.total_tokens,
                         },
@@ -1088,14 +1089,14 @@ impl OpenAIPreprocessor {
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
-        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
 
@@ -1217,12 +1218,10 @@ impl OpenAIPreprocessor {
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
-                        for choice in data.choices.iter_mut() {
+                        for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
                             if let Some(
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                    text,
-                                ),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text),
                             ) = choice.delta.content.as_ref()
                             {
                                 let parser_result =
@@ -1230,7 +1229,7 @@ impl OpenAIPreprocessor {
 
                                 // Update this specific choice with parsed content
                                 choice.delta.content = parser_result.get_some_normal_text().map(
-                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text,
+                                    dynamo_protocols::types::ChatCompletionMessageContent::Text,
                                 );
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
