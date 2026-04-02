@@ -1407,9 +1407,8 @@ def _test_router_decisions_disagg(
                             decode_worker_ids.append(decode_wid)
 
                         # Verify timing info is present and valid.
-                        # kv_transfer_latency_ms is only measured on the original
-                        # prefill path, not the bootstrap path where decode is
-                        # dispatched before prefill completes.
+                        # kv_transfer_estimated_latency_ms is measured on both the original
+                        # and bootstrap prefill paths (uses first_token_time as stop).
                         assert (
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
