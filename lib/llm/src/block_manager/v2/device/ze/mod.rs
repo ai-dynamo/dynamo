@@ -3,7 +3,7 @@
 //! Wraps Level-Zero API types with the device abstraction traits.
 
 use crate::block_manager::v2::device::traits::*;
-use anyhow::{Result, Context as AnyhowContext, bail};
+use anyhow::Result;
 use level_zero::{self as ze, ZE_EVENT_SCOPE_FLAG_HOST};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::HashMap;
@@ -44,7 +44,8 @@ fn ensure_ze_initialized() -> Result<()> {
 
 /// Device context cache entry
 struct DeviceContextCache {
-    driver: ze::Driver,
+    /// Driver handle kept alive for RAII - ensures driver remains valid for context lifetime
+    _driver: ze::Driver,
     device: ze::Device,
     context: Arc<ze::Context>,
     event_pool: Arc<ze::EventPool>,
@@ -58,7 +59,7 @@ unsafe impl Sync for DeviceContextCache {}
 impl std::fmt::Debug for DeviceContextCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceContextCache")
-            .field("driver", &"<ze::Driver>")
+            .field("_driver", &"<ze::Driver>")
             .field("device", &"<ze::Device>")
             .field("context", &"<Arc<ze::Context>>")
             .field("event_pool", &"<Arc<ze::EventPool>>")
@@ -106,7 +107,7 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         .map_err(|e| anyhow::anyhow!("Failed to create event pool: {:?}", e))?;
 
     let cache_entry = Arc::new(DeviceContextCache {
-        driver: *driver,
+        _driver: *driver,
         device: *device,
         context: Arc::new(context),
         event_pool: Arc::new(event_pool),
@@ -220,7 +221,8 @@ impl DeviceContextOps for ZeContext {
 }
 
 /// Wrapper for ze::DeviceBuffer to add Send+Sync
-struct SendSyncDeviceBuffer(ze::DeviceBuffer, Arc<ze::Context>);
+/// Fields kept alive for RAII - prevents premature deallocation
+struct SendSyncDeviceBuffer(#[allow(dead_code)] ze::DeviceBuffer, #[allow(dead_code)] Arc<ze::Context>);
 unsafe impl Send for SendSyncDeviceBuffer {}
 unsafe impl Sync for SendSyncDeviceBuffer {}
 
@@ -243,7 +245,8 @@ fn remove_device_buffer(ptr: u64) {
 }
 
 /// Wrapper for ze::HostBuffer to add Send+Sync
-struct SendSyncHostBuffer(ze::HostBuffer, Arc<ze::Context>);
+/// Fields kept alive for RAII - prevents premature deallocation
+struct SendSyncHostBuffer(#[allow(dead_code)] ze::HostBuffer, #[allow(dead_code)] Arc<ze::Context>);
 unsafe impl Send for SendSyncHostBuffer {}
 unsafe impl Sync for SendSyncHostBuffer {}
 
