@@ -303,12 +303,11 @@ runs:
         docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Push Test Metrics
-      if: always()
+      if: always() && env.OTLP_ENDPOINT != ''
       uses: ./.github/actions/push-metrics
       with:
         otlp-endpoint: ${{ env.OTLP_ENDPOINT }}
         otlp-token: ${{ env.OTLP_TOKEN }}
-        loki-url: ${{ env.LOKI_URL }}
         test-results: test-results/
         framework: ${{ inputs.framework }}
         test-type: ${{ inputs.test_type }}

@@ -47,12 +47,9 @@ class PrometheusExporter:
         otlp_token: str = "",
         service_name: str = "dynamo-cicd-metrics",
         dry_run: bool = False,
-        # Legacy parameter names — still accepted for backward compat
-        pushgateway_url: str = "",
-        job_name: str = "cicd_metrics",
     ):
         self.dry_run = dry_run
-        self.otlp_endpoint = otlp_endpoint or pushgateway_url
+        self.otlp_endpoint = otlp_endpoint
         self.otlp_token = otlp_token
         self.service_name = service_name
         self._counters: Dict[str, int] = defaultdict(int)

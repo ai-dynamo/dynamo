@@ -273,7 +273,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--otlp-endpoint", help="OTLP HTTP endpoint (e.g. https://otlp-http.nvidia.com)")
     parser.add_argument("--otlp-token", help="Bearer token for OTLP auth (or set OTLP_TOKEN env / use --otlp-token-file)")
     parser.add_argument("--otlp-token-file", help="File containing the OTLP bearer token")
-    parser.add_argument("--loki-url", help="Loki base URL")
 
     # Data sources
     parser.add_argument("--test-results", help="Path to directory containing JUnit XML files")
@@ -310,8 +309,8 @@ def main() -> None:
 
     otlp_endpoint = args.otlp_endpoint or os.environ.get("OTLP_ENDPOINT") or ""
 
-    if not otlp_endpoint and not args.loki_url:
-        print("Error: at least one of --otlp-endpoint or --loki-url is required")
+    if not otlp_endpoint:
+        print("Error: --otlp-endpoint is required (or set OTLP_ENDPOINT)")
         sys.exit(1)
     if not args.test_results and not args.build_metrics:
         print("Error: at least one of --test-results or --build-metrics is required")
@@ -330,23 +329,24 @@ def main() -> None:
     common = ctx.to_common_fields()
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Initialize exporters
+    # Initialize exporters — both metrics and logs go through OTLP
     prometheus = PrometheusExporter(
         otlp_endpoint=otlp_endpoint,
         otlp_token=otlp_token,
         service_name=args.service_name,
         dry_run=args.dry_run,
-    ) if otlp_endpoint else None
+    )
 
     loki = LokiExporter(
-        loki_url=args.loki_url or "",
+        otlp_endpoint=otlp_endpoint,
+        otlp_token=otlp_token,
+        service_name=args.service_name,
         dry_run=args.dry_run,
-    ) if args.loki_url else None
+    )
 
     # ── 1. Job-level metrics ──────────────────────────────────────────
     job_doc = build_job_document(ctx, args, timestamp)
-    if prometheus:
-        prometheus.record_job(job_doc)
+    prometheus.record_job(job_doc)
     print(f"Recorded job metrics: {ctx.job_name} status={args.job_status}")
 
     # ── 2. Test results ───────────────────────────────────────────────
@@ -360,10 +360,8 @@ def main() -> None:
 
             for test in tests:
                 doc = build_test_document(test, common, args, timestamp)
-                if prometheus:
-                    prometheus.record_test(doc)
-                if loki:
-                    loki.record_test_result(doc)
+                prometheus.record_test(doc)
+                loki.record_test_result(doc)
 
     # ── 3. Build metrics ──────────────────────────────────────────────
     if args.build_metrics:
@@ -374,40 +372,34 @@ def main() -> None:
             metrics = parse_build_metrics_json(metrics_path)
             if metrics and "container" in metrics:
                 container_doc = build_container_document(metrics, common, args, timestamp)
-                if prometheus:
-                    prometheus.record_container(container_doc)
+                prometheus.record_container(container_doc)
                 print(f"Recorded container metrics: {container_doc.get(FIELD_BUILD_FRAMEWORK)}")
 
                 for stage in metrics.get("stages", []):
                     stage_doc = build_stage_document(stage, metrics, common, args, timestamp)
-                    if prometheus:
-                        prometheus.record_stage(stage_doc)
+                    prometheus.record_stage(stage_doc)
 
                 for layer in metrics.get("layers", []):
                     layer_doc = build_layer_document(layer, metrics, common, args, timestamp)
-                    if loki:
-                        loki.record_build_layer(layer_doc)
+                    loki.record_build_layer(layer_doc)
 
                 print(f"Recorded {len(metrics.get('stages', []))} stages, {len(metrics.get('layers', []))} layers")
             else:
                 print("Warning: build metrics missing 'container' field")
 
     # ── 4. Push ───────────────────────────────────────────────────────
-    if prometheus:
-        prometheus.push()
-        prometheus.shutdown()
-    if loki:
-        loki.flush()
+    prometheus.push()
+    prometheus.shutdown()
+    loki.flush()
+    loki.shutdown()
 
     # Summary
-    if prometheus:
-        summary = prometheus.get_summary()
-        parts = [f"{k}={v}" for k, v in sorted(summary.items()) if v > 0]
-        print(f"OTLP metrics: {', '.join(parts) if parts else 'none'}")
-    if loki:
-        summary = loki.get_summary()
-        parts = [f"{k}={v}" for k, v in sorted(summary.items()) if v > 0]
-        print(f"Loki: {', '.join(parts) if parts else 'no entries'}")
+    prom_summary = prometheus.get_summary()
+    loki_summary = loki.get_summary()
+    parts = [f"{k}={v}" for k, v in sorted(prom_summary.items()) if v > 0]
+    print(f"OTLP metrics: {', '.join(parts) if parts else 'none'}")
+    parts = [f"{k}={v}" for k, v in sorted(loki_summary.items()) if v > 0]
+    print(f"OTLP logs: {', '.join(parts) if parts else 'none'}")
 
     print("Done.")
 

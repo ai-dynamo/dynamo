@@ -14,18 +14,15 @@
 # limitations under the License.
 
 name: 'Push CI/CD Metrics'
-description: 'Push test results and build metrics to OTLP telemetry endpoint and/or Loki'
+description: 'Push test results and build metrics to OTLP endpoint (metrics + logs)'
 
 inputs:
   otlp-endpoint:
     description: 'OTLP HTTP endpoint (e.g., https://otlp-http.nvidia.com)'
-    required: false
+    required: true
   otlp-token:
     description: 'Bearer token for OTLP authentication'
-    required: false
-  loki-url:
-    description: 'Loki base URL'
-    required: false
+    required: true
   test-results:
     description: 'Path to directory containing JUnit XML test results'
     required: false
@@ -53,7 +50,7 @@ runs:
   steps:
     - name: Install metrics dependencies
       shell: bash
-      run: pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http requests 2>/dev/null || true
+      run: pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null || true
 
     - name: Push CI/CD metrics
       if: always()
@@ -61,7 +58,6 @@ runs:
       env:
         OTLP_ENDPOINT: ${{ inputs.otlp-endpoint }}
         OTLP_TOKEN: ${{ inputs.otlp-token }}
-        LOKI_URL: ${{ inputs.loki-url }}
         TEST_RESULTS: ${{ inputs.test-results }}
         BUILD_METRICS: ${{ inputs.build-metrics }}
         FRAMEWORK: ${{ inputs.framework }}
@@ -76,9 +72,8 @@ runs:
         export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
         python3 "${SCRIPT_DIR}/cicd_push.py" \
-          ${OTLP_ENDPOINT:+--otlp-endpoint "$OTLP_ENDPOINT"} \
-          ${OTLP_TOKEN:+--otlp-token "$OTLP_TOKEN"} \
-          ${LOKI_URL:+--loki-url "$LOKI_URL"} \
+          --otlp-endpoint "$OTLP_ENDPOINT" \
+          --otlp-token "$OTLP_TOKEN" \
           ${TEST_RESULTS:+--test-results "$TEST_RESULTS"} \
           ${BUILD_METRICS:+--build-metrics "$BUILD_METRICS"} \
           ${FRAMEWORK:+--framework "$FRAMEWORK"} \
