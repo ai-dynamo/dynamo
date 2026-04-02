@@ -116,10 +116,6 @@ and are fully indexed in the checkpoint's `model.safetensors.index.json`.
 Uses `--kv-cache-dtype fp8_e4m3` (NSA backend auto-selects this on SM100/GB200).
 Saves ~50% KV memory vs BF16.
 
-### NIXL Disaggregation
-KV cache is transferred from prefill to decode over RoCE RDMA using NIXL.
-The GKE multi-network annotations inject `rdma0-3` interfaces (one per GPU).
-
 ### Discovery
 Uses `--discovery-backend kubernetes` (no etcd required). Worker registration
 is tied to pod lifetime via Kubernetes EndpointSlices, preventing TTL expiry
