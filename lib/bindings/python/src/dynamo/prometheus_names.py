@@ -379,6 +379,7 @@ class transport:
     class nats:
         ERRORS_TOTAL = "nats_errors_total"
 
+
 class trtllm_additional:
     """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
 
