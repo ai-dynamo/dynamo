@@ -975,7 +975,7 @@ mod tests {
     #[test]
     fn test_guided_grammar_deep_nesting_rejected() {
         let grammar = "(".repeat(501) + "a" + &")".repeat(501);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nesting depth"));
     }
@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn test_guided_grammar_acceptable_nesting_ok() {
         let grammar = "(".repeat(500) + "a" + &")".repeat(500);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None, None);
         assert!(result.is_ok());
     }
 }

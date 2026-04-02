@@ -1082,7 +1082,9 @@ class HandlerBase(BaseGenerativeHandler):
             ],
         }
 
-    def _override_sampling_params(self, sampling_params, request: dict) -> SamplingParams:
+    def _override_sampling_params(
+        self, sampling_params, request: dict
+    ) -> SamplingParams:
         overrides = {
             key: value
             for key, value in request["sampling_options"].items()
@@ -1168,7 +1170,10 @@ class HandlerBase(BaseGenerativeHandler):
             # See tensorrt_llm/serve/openai_protocol.py lines 307-309
             if isinstance(structural_tag, dict):
                 # Check if already wrapped (user-provided full format)
-                if structural_tag.get("type") == "structural_tag" and "format" in structural_tag:
+                if (
+                    structural_tag.get("type") == "structural_tag"
+                    and "format" in structural_tag
+                ):
                     structural_tag_str = json.dumps(structural_tag)
                 else:
                     # Wrap inner format dict
