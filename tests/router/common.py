@@ -870,6 +870,58 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+
+        # If standalone indexer mode, launch mockers one-by-one and register.
+        # We need to create a temporary endpoint just to discover worker IDs.
+        if standalone_indexer_url:
+            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_endpoint = tmp_runtime.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            await engine_workers.launch_mockers_with_indexer(tmp_endpoint)
+
+        async def send_requests_to_router(router, num_requests, router_name, endpoint):
+            # Now send the actual requests
+            tasks = []
+            for i in range(num_requests):
+                # Generate random token IDs for each request
+                logger.debug(f"Sending request {i + 1}/{num_requests} to {router_name}")
+
+                # Generate 30 random tokens
+                request_tokens = [random.randint(1, 10000) for _ in range(30)]
+
+                # Send request to mocker via the router
+                tasks.append(
+                    asyncio.create_task(
+                        send_request_via_python_kv_router(
+                            kv_python_router=router,
+                            model_name=model_name,
+                            token_ids=request_tokens,
+                            initial_wait=1.0,
+                            max_retries=8,
+                            stop_conditions={
+                                "ignore_eos": True,  # Don't stop on EOS token
+                                "max_tokens": 10,  # Generate exactly 10 tokens
+                            },
+                        )
+                    )
+                )
+
+            # Wait for all requests to complete
+            results = await asyncio.gather(*tasks)
+            successful = sum(1 for r in results if r)
+            logger.info(
+                f"Completed {successful}/{num_requests} requests for {router_name}"
+            )
+            return successful
+
+        # Create first runtime and endpoint for router 1
+        logger.info("Creating first KV router with its own runtime")
+        runtime1 = get_runtime(store_backend, request_plane)
+        endpoint1 = runtime1.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
+
         with min_initial_workers_env(num_workers):
             kv_router1 = KvRouter(
                 endpoint=endpoint1,
