@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	cudaCheckpointHelperBinary = "cuda-checkpoint-helper"
+	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
