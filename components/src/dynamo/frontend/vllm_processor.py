@@ -36,9 +36,8 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Client, DistributedRuntime
 
-from .multimodal_utils import extract_mm_urls
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import random_uuid
+from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
 

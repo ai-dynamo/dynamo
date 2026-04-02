@@ -30,13 +30,12 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
-from .multimodal_utils import extract_mm_urls
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, random_uuid, worker_warmup
+from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
