@@ -17,6 +17,7 @@ const (
 	SnapshotAgentLabelKey      = "app.kubernetes.io/component"
 	SnapshotAgentLabelValue    = "snapshot-agent"
 	SnapshotAgentContainerName = "agent"
+	SnapshotAgentVolumeName    = "checkpoints"
 	SnapshotAgentLabelSelector = SnapshotAgentLabelKey + "=" + SnapshotAgentLabelValue
 )
 
@@ -140,6 +141,9 @@ func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonS
 		}
 
 		for _, volume := range daemonSet.Spec.Template.Spec.Volumes {
+			if volume.Name != SnapshotAgentVolumeName {
+				continue
+			}
 			if volume.PersistentVolumeClaim == nil {
 				continue
 			}
