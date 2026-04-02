@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Optional
 
+from kubernetes import client
+
 from dynamo.planner import KubernetesConnector
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
@@ -162,9 +164,15 @@ class ScaleRequestHandler:
 
     def _run_dgd_watch(self) -> None:
         """Background thread: list+watch DGDs and keep connectors[].dgd updated."""
+        _BACKOFF_BASE_SEC = 5
+        _BACKOFF_MAX_SEC = 60
+        _ERROR_LOG_THRESHOLD = (
+            3  # escalate to ERROR after this many consecutive failures
+        )
         try:
             kube_api = KubernetesAPI(self.k8s_namespace)
             managed_names = self._managed_dgd_names()
+            consecutive_failures = 0
             while True:
                 try:
                     for event_type, dgd in kube_api.watch_graph_deployments():
@@ -185,9 +193,55 @@ class ScaleRequestHandler:
                                     }
                                 else:
                                     self.connectors[key]["dgd"] = dgd
+                    # watch_graph_deployments exhausted without error → reset counter
+                    consecutive_failures = 0
+                except client.ApiException as e:
+                    consecutive_failures += 1
+                    backoff = min(
+                        _BACKOFF_BASE_SEC * (2 ** (consecutive_failures - 1)),
+                        _BACKOFF_MAX_SEC,
+                    )
+                    if e.status == 403:
+                        # RBAC misconfiguration: backing off but flagging loudly.
+                        logger.error(
+                            f"DGD watch RBAC error (403 Forbidden, attempt {consecutive_failures}, "
+                            f"retry in {backoff}s). Check planner ClusterRole/Role for 'watch' verb "
+                            f"on dynamographdeployments: {e}"
+                        )
+                    elif e.status == 410:
+                        # Normal expiry: re-list will happen on next iteration.
+                        consecutive_failures = 0
+                        backoff = 0
+                        logger.debug(
+                            "DGD watch resource version expired (410), restarting immediately"
+                        )
+                    else:
+                        log_fn = (
+                            logger.error
+                            if consecutive_failures > _ERROR_LOG_THRESHOLD
+                            else logger.warning
+                        )
+                        log_fn(
+                            f"DGD watch ApiException (status={e.status}, attempt {consecutive_failures}, "
+                            f"retry in {backoff}s): {e}"
+                        )
+                    if backoff:
+                        time.sleep(backoff)
                 except Exception as e:
-                    logger.warning(f"DGD watch error (will restart): {e}")
-                    time.sleep(5)
+                    consecutive_failures += 1
+                    backoff = min(
+                        _BACKOFF_BASE_SEC * (2 ** (consecutive_failures - 1)),
+                        _BACKOFF_MAX_SEC,
+                    )
+                    log_fn = (
+                        logger.error
+                        if consecutive_failures > _ERROR_LOG_THRESHOLD
+                        else logger.warning
+                    )
+                    log_fn(
+                        f"DGD watch error (attempt {consecutive_failures}, retry in {backoff}s): {e}"
+                    )
+                    time.sleep(backoff)
         except BaseException:
             self._dgd_watch_exited_unexpectedly = True
             logger.critical(
@@ -418,7 +472,7 @@ class ScaleRequestHandler:
                 connector.parent_dgd_name
             )
             current_replicas = {}
-            for service_name, service_spec in (
+            for _service_name, service_spec in (
                 deployment.get("spec", {}).get("services", {}).items()
             ):
                 sub_type = service_spec.get("subComponentType", "")

@@ -79,7 +79,7 @@ def test_watch_graph_deployments_yields_events(k8s_api_with_namespace, mock_cust
         {"type": "DELETED", "object": {"metadata": {"name": "dgd-a"}}},
     ]
 
-    with patch("dynamo.planner.kube.Watch") as mock_watch_cls:
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
         mock_watch = MagicMock()
         mock_watch_cls.return_value = mock_watch
         mock_watch.stream.return_value = iter(events)
@@ -103,7 +103,7 @@ def test_watch_graph_deployments_yields_events(k8s_api_with_namespace, mock_cust
 
 def test_watch_graph_deployments_reraises_410(k8s_api_with_namespace, mock_custom_api):
     """Test watch_graph_deployments logs and re-raises ApiException on 410 Gone."""
-    with patch("dynamo.planner.kube.Watch") as mock_watch_cls:
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
         mock_watch = MagicMock()
         mock_watch_cls.return_value = mock_watch
         mock_watch.stream.side_effect = client.ApiException(status=410)
@@ -118,7 +118,7 @@ def test_watch_graph_deployments_reraises_other_api_errors(
     k8s_api_with_namespace, mock_custom_api
 ):
     """Test watch_graph_deployments re-raises non-410 ApiException."""
-    with patch("dynamo.planner.kube.Watch") as mock_watch_cls:
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
         mock_watch = MagicMock()
         mock_watch_cls.return_value = mock_watch
         mock_watch.stream.side_effect = client.ApiException(status=500)
