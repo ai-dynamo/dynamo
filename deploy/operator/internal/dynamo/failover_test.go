@@ -367,7 +367,6 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
-	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[0].Filter.Mode)
 	assert.Equal(t, []string{"svc-gms-0", "svc"}, refs[0].Filter.CliqueNames)
 }
 
@@ -386,13 +385,11 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
-	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[0].Filter.Mode)
 	assert.Equal(t, []string{"svc-gms-0", "svc-ldr"}, refs[0].Filter.CliqueNames)
 
 	assert.Equal(t, "svc-gpu-rank-1", refs[1].Name)
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[1].Scope)
 	require.NotNil(t, refs[1].Filter)
-	assert.Equal(t, grovev1alpha1.ResourceSharingFilterModeInclude, refs[1].Filter.Mode)
 	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.CliqueNames)
 }
 
