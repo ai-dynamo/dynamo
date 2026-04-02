@@ -161,40 +161,53 @@ impl KvConnectorWorker {
 }
 
 /// Build NcclConfig from the provided parameters.
-/// Returns NcclConfig::disabled() if any required parameter is missing or if NCCL feature is not enabled.
+///
+/// Returns an error if NCCL parameters are partially provided or if the NCCL
+/// feature is not enabled but replicated mode was requested. This matches the
+/// validation in the distributed worker binding.
 fn build_nccl_config(
     nccl_rank: Option<i32>,
     world_size: Option<i32>,
     nccl_comm_ptr: Option<usize>,
-) -> NcclConfig {
+) -> anyhow::Result<NcclConfig> {
+    let wants_replicated = nccl_rank.is_some() || world_size.is_some() || nccl_comm_ptr.is_some();
+
     #[cfg(feature = "nccl")]
     {
         match (nccl_rank, world_size, nccl_comm_ptr) {
             (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
                 tracing::info!(
                     "Creating NCCL config for replicated mode: rank={}, world_size={}, comm_ptr={:#x}",
-                    r,
-                    ws,
-                    ptr
+                    r, ws, ptr
                 );
-                // Safety: The caller (Python side) is responsible for ensuring the pointer
-                // is a valid NCCL communicator that outlives this config.
-                unsafe {
-                    use cudarc::nccl::sys::ncclComm_t;
-                    NcclConfig::enabled(ptr as ncclComm_t, r, ws)
-                }
+                use cudarc::nccl::sys::ncclComm_t;
+                Ok(unsafe { NcclConfig::enabled(ptr as ncclComm_t, r, ws) })
             }
-            _ => {
-                tracing::debug!("NCCL parameters incomplete, using sharded mode");
-                NcclConfig::disabled()
-            }
+            (Some(r), Some(ws), Some(0)) => anyhow::bail!(
+                "NCCL replicated mode requires a valid communicator: rank={}, world_size={}, \
+                 nccl_comm_ptr=0 (invalid). Provide a non-null nccl_comm_ptr or omit all for sharded mode.",
+                r, ws
+            ),
+            (r, ws, ptr) if wants_replicated => anyhow::bail!(
+                "NCCL replicated mode requires rank, world_size, and nccl_comm_ptr together; \
+                 partial configuration is not allowed. Got rank={:?}, world_size={:?}, \
+                 nccl_comm_ptr={:?}. Provide all three or omit all for sharded mode.",
+                r, ws, ptr
+            ),
+            _ => Ok(NcclConfig::disabled()),
         }
     }
     #[cfg(not(feature = "nccl"))]
     {
-        let _ = (nccl_rank, world_size, nccl_comm_ptr); // suppress unused warnings
-        tracing::debug!("NCCL feature not enabled, using sharded mode");
-        NcclConfig::disabled()
+        if wants_replicated {
+            anyhow::bail!(
+                "NCCL replicated mode requested (rank={:?}, world_size={:?}, nccl_comm_ptr={:?}) \
+                 but kvbm was not built with the 'nccl' feature. Rebuild with --features nccl \
+                 or omit rank/world_size/nccl_comm_ptr for sharded mode.",
+                nccl_rank, world_size, nccl_comm_ptr
+            );
+        }
+        Ok(NcclConfig::disabled())
     }
 }
 
@@ -220,7 +233,7 @@ impl Worker for KvConnectorWorker {
         let nccl_comm_ptr = self.nccl_comm.as_ref().map(|a| a.as_raw() as usize);
         #[cfg(not(feature = "nccl"))]
         let nccl_comm_ptr: Option<usize> = None;
-        let nccl_config = build_nccl_config(self.nccl_rank, self.world_size, nccl_comm_ptr);
+        let nccl_config = build_nccl_config(self.nccl_rank, self.world_size, nccl_comm_ptr)?;
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
         let nccl_rank = if nccl_config.is_enabled() {
             self.nccl_rank

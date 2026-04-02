@@ -95,10 +95,10 @@ impl NcclBootstrap {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(136);
         bytes.extend_from_slice(&self.world_size.to_le_bytes());
-        // 4 bytes padding for alignment
-        bytes.extend_from_slice(&[0u8; 4]);
-        // Cast i8 array to u8 for serialization (same binary representation)
-        let internal_bytes: &[u8; 128] = unsafe { std::mem::transmute(&self.unique_id.internal) };
+        bytes.extend_from_slice(&[0u8; 4]); // padding for alignment
+        let internal_bytes: &[u8; 128] = unsafe {
+            &*self.unique_id.internal.as_ptr().cast::<[u8; 128]>()
+        };
         bytes.extend_from_slice(internal_bytes);
         bytes
     }
@@ -121,11 +121,14 @@ impl NcclBootstrap {
         );
 
         let mut unique_id = ncclUniqueId { internal: [0; 128] };
-        // Copy bytes directly using transmute to handle both i8 and u8 internal arrays
-        // (ARM64 uses u8, x86_64 uses i8 - same binary representation)
-        let internal_bytes: &[u8; 128] = bytes[8..136].try_into().unwrap();
-        unique_id.internal =
-            unsafe { *std::mem::transmute::<&[u8; 128], &[i8; 128]>(internal_bytes) };
+        // c_char is i8 on x86_64 but u8 on aarch64; use ptr copy to be portable
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes[8..136].as_ptr(),
+                unique_id.internal.as_mut_ptr().cast::<u8>(),
+                128,
+            );
+        }
 
         Ok(Self {
             unique_id,
@@ -266,14 +269,17 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize() {
-        // We can test serialization without actually calling NCCL
-        // Use transmute to create the internal array in a platform-agnostic way
-        // (ARM64 uses [u8; 128], x86_64 uses [i8; 128])
         let internal_bytes: [u8; 128] = [42u8; 128];
+        let mut unique_id = ncclUniqueId { internal: [0; 128] };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                internal_bytes.as_ptr(),
+                unique_id.internal.as_mut_ptr().cast::<u8>(),
+                128,
+            );
+        }
         let bootstrap = NcclBootstrap {
-            unique_id: ncclUniqueId {
-                internal: unsafe { std::mem::transmute(internal_bytes) },
-            },
+            unique_id,
             world_size: 4,
         };
 
@@ -282,9 +288,10 @@ mod tests {
 
         let restored = NcclBootstrap::deserialize(&bytes).unwrap();
         assert_eq!(restored.world_size, 4);
-        // Compare as bytes to be platform-agnostic
-        let restored_bytes: [u8; 128] = unsafe { std::mem::transmute(restored.unique_id.internal) };
-        assert_eq!(restored_bytes, [42u8; 128]);
+        let restored_bytes: &[u8; 128] = unsafe {
+            &*restored.unique_id.internal.as_ptr().cast::<[u8; 128]>()
+        };
+        assert_eq!(*restored_bytes, [42u8; 128]);
     }
 
     #[test]

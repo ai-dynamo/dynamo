@@ -88,36 +88,20 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int):
 
     logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
 
-    # In TRT-LLM TP mode with MPI, all ranks see all GPUs (device_count=4)
-    # but default to device 0. We must set each rank to its corresponding GPU.
-    # NCCL requires each rank to be on a DIFFERENT device for multi-GPU comm.
-    device_count = torch.cuda.device_count()
-    if device_count > 1:
-        # Multi-GPU: each rank uses its own GPU
-        target_device = rank % device_count
-        torch.cuda.set_device(target_device)
-        logger.info(
-            f"KVBM: Rank {rank} set to CUDA device {target_device} "
-            f"(device_count={device_count})"
-        )
-    else:
-        # Single GPU per process (CUDA_VISIBLE_DEVICES restricts view)
-        target_device = 0
-        torch.cuda.set_device(target_device)
-        logger.info(
-            f"KVBM: Rank {rank} on CUDA device {target_device} "
-            f"(device_count={device_count})"
-        )
+    # Trust the framework (TRT-LLM / MPI launcher) to have already
+    # set the correct CUDA device for this rank, either via
+    # CUDA_VISIBLE_DEVICES or its own initialization.
+    current_device = torch.cuda.current_device()
+    logger.info(
+        f"KVBM: Rank {rank} on CUDA device {current_device} "
+        f"(device_count={torch.cuda.device_count()})"
+    )
 
-    torch.cuda.synchronize()  # Ensure device is properly initialized
-
-    # Synchronize all ranks before NCCL initialization
-    # This ensures all processes are ready before the collective call
-    logger.info(f"KVBM: Rank {rank} waiting at MPI barrier before ncclCommInitRank")
+    logger.info(f"KVBM: Rank {rank} waiting at MPI barrier " "before ncclCommInitRank")
     comm.Barrier()
-    logger.info(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
+    logger.info(f"KVBM: Rank {rank} passed barrier, " "calling ncclCommInitRank")
 
-    # All ranks collectively initialize (must be called together)
+    # All ranks collectively initialize (must be called together).
     # This is a blocking collective operation; returns owning NcclCommRef.
     nccl_comm_ref = bootstrap.init_communicator(rank)
 
