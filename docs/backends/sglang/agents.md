@@ -182,6 +182,9 @@ Key behaviors:
 
 ### Enabling Session Control
 
+> [!NOTE]
+> Streaming sessions require the SGLang changes in [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, deferred close, session metrics). This is not yet merged upstream.
+
 **SGLang worker:**
 
 ```bash
