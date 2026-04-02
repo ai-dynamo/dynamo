@@ -131,7 +131,7 @@ runs:
           COVERAGE_ENV=""
           if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
             echo "📊 Coverage collection enabled"
-            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report=term --cov-report="
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
             COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src"
           fi
 
