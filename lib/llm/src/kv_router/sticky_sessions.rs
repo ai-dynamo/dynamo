@@ -109,7 +109,7 @@ impl AffinityStore for InMemoryAffinityStore {
         // Refresh TTL on access (sliding window)
         entry.expires_at = Instant::now() + entry.ttl;
         let worker_id = entry.worker_id;
-        tracing::info!(%session_id, worker_id, "Resolved session affinity -> routing to pinned worker");
+        tracing::info!(%session_id, worker_id, "Sticky session hit");
         Some(worker_id)
     }
 

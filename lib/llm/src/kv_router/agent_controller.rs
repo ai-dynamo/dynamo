@@ -46,17 +46,18 @@ pub struct SessionCloseAction {
 impl SessionCloseAction {
     /// Fire the close_session RPC as a background task.
     pub fn execute(&self, context_id: &str) {
-        spawn_session_request(
-            self.client.clone(),
-            serde_json::json!({
+        let client = self.client.clone();
+        let instance_id = self.instance_id;
+        let session_id = self.session_id.clone();
+        let context_id = context_id.to_owned();
+
+        tokio::spawn(async move {
+            let request = serde_json::json!({
                 "action": "close_session",
-                "session_id": self.session_id,
-            }),
-            self.instance_id,
-            &self.session_id,
-            context_id,
-            "close_session",
-        );
+                "session_id": session_id,
+            });
+            send_session_request(&client, request, instance_id, &session_id, &context_id, "close_session").await;
+        });
     }
 }
 
@@ -87,17 +88,14 @@ impl AgentController {
                         session_id = %session_id,
                         "Session affinity expired, closing worker session"
                     );
-                    spawn_session_request(
-                        client,
-                        serde_json::json!({
-                            "action": "close_session",
-                            "session_id": session_id.clone(),
-                        }),
-                        instance_id,
-                        &session_id,
-                        "session-affinity-reaper",
-                        "close_session",
-                    );
+                    let request = serde_json::json!({
+                        "action": "close_session",
+                        "session_id": session_id,
+                    });
+                    send_session_request(
+                        &client, request, instance_id,
+                        &session_id, "session-affinity-reaper", "close_session",
+                    ).await;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -125,21 +123,22 @@ impl AgentController {
         context_id: &str,
         sticky: Option<&StickySessionRouter>,
     ) -> Result<Option<SessionCloseAction>> {
-        let routing = request.routing.as_ref();
-        let session_control = routing.and_then(|r| r.session_control.clone());
+        let sc = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.session_control.as_ref());
 
-        let Some(sc) = session_control else {
+        let Some(sc) = sc else {
             return Ok(None);
         };
 
-        let Some(action) = sc.action else {
+        let Some(action) = sc.action.as_ref() else {
             // No action -- just session_id for sticky routing (handled by StickySessionRouter)
             return Ok(None);
         };
 
         match action {
             SessionAction::Open => {
-                // Fail fast if we can't connect to the session_control endpoint.
                 let client = self.get_session_control_client().await?;
                 let worker_timeout_secs = sc
                     .timeout
@@ -154,43 +153,24 @@ impl AgentController {
                     "timeout": worker_timeout_secs,
                     "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
                 });
-                match client.direct(SingleIn::new(request), instance_id).await {
-                    Ok(mut stream) => {
-                        if let Some(resp) = stream.next().await {
-                            ensure_session_open_succeeded(&resp, &sc.session_id)?;
-                            tracing::info!(
-                                request_id = %context_id,
-                                worker_id = instance_id,
-                                session_id = %sc.session_id,
-                                router_ttl_secs = sc.timeout,
-                                worker_timeout_secs,
-                                ?resp,
-                                "open_session response"
-                            );
-                        }
-                        // Drain remaining stream items
-                        while stream.next().await.is_some() {}
+                let resp = send_session_request(
+                    &client, request, instance_id,
+                    &sc.session_id, context_id, "open_session",
+                ).await;
 
-                        // Bind affinity only after the worker confirms the
-                        // session exists, otherwise retries can get pinned to a
-                        // worker that never opened the session.
-                        if let Some(sticky) = sticky {
-                            sticky.bind(
-                                &sc.session_id,
-                                instance_id,
-                                Duration::from_secs(sc.timeout),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            request_id = %context_id,
-                            worker_id = instance_id,
-                            session_id = %sc.session_id,
-                            "Failed open_session: {e}"
-                        );
-                        return Err(e);
-                    }
+                if let Some(resp) = resp {
+                    ensure_session_open_succeeded(&resp, &sc.session_id)?;
+                }
+
+                // Bind affinity only after the worker confirms the
+                // session exists, otherwise retries can get pinned to a
+                // worker that never opened the session.
+                if let Some(sticky) = sticky {
+                    sticky.bind(
+                        &sc.session_id,
+                        instance_id,
+                        Duration::from_secs(sc.timeout),
+                    );
                 }
 
                 Ok(None)
@@ -269,41 +249,41 @@ fn ensure_session_open_succeeded(
     }
 }
 
-/// Fire-and-forget session lifecycle request to a specific worker.
-fn spawn_session_request(
-    client: EventPlaneClient,
+/// Send a session lifecycle request to a specific worker and return the first response.
+///
+/// Used by both synchronous (open_session) and fire-and-forget (close_session) paths.
+async fn send_session_request(
+    client: &EventPlaneClient,
     request: serde_json::Value,
     instance_id: u64,
     session_id: &str,
     context_id: &str,
     action_label: &str,
-) {
-    let session_id = session_id.to_owned();
-    let context_id = context_id.to_owned();
-    let action_label = action_label.to_owned();
-
-    tokio::spawn(async move {
-        match client.direct(SingleIn::new(request), instance_id).await {
-            Ok(mut stream) => {
-                if let Some(resp) = stream.next().await {
-                    tracing::info!(
-                        request_id = %context_id,
-                        worker_id = instance_id,
-                        %session_id,
-                        ?resp,
-                        "{action_label} response"
-                    );
-                }
-                while stream.next().await.is_some() {}
-            }
-            Err(e) => {
-                tracing::warn!(
+) -> Option<Annotated<serde_json::Value>> {
+    match client.direct(SingleIn::new(request), instance_id).await {
+        Ok(mut stream) => {
+            let resp = stream.next().await;
+            if let Some(ref r) = resp {
+                tracing::info!(
                     request_id = %context_id,
                     worker_id = instance_id,
                     %session_id,
-                    "Failed {action_label}: {e}"
+                    ?r,
+                    "{action_label} response"
                 );
             }
+            // Drain remaining stream to avoid "Failed to publish complete final" errors.
+            while stream.next().await.is_some() {}
+            resp
         }
-    });
+        Err(e) => {
+            tracing::warn!(
+                request_id = %context_id,
+                worker_id = instance_id,
+                %session_id,
+                "Failed {action_label}: {e}"
+            );
+            None
+        }
+    }
 }

@@ -209,51 +209,6 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-/// Anthropic-style cache control hint for prefix pinning with TTL.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct CacheControl {
-    #[serde(rename = "type")]
-    pub control_type: CacheControlType,
-    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-}
-
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheControlType {
-    #[default]
-    Ephemeral,
-    #[serde(other)]
-    Unknown,
-}
-
-const MIN_TTL_SECONDS: u64 = 300;
-const MAX_TTL_SECONDS: u64 = 3600;
-
-impl CacheControl {
-    /// Parse TTL string to seconds, clamped to [300, 3600].
-    ///
-    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
-    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
-    /// Unrecognized strings default to 300s.
-    pub fn ttl_seconds(&self) -> u64 {
-        let raw = match self.ttl.as_deref() {
-            None => return MIN_TTL_SECONDS,
-            Some("5m") => 300,
-            Some("1h") => 3600,
-            Some(other) => match other.parse::<u64>() {
-                Ok(secs) => secs,
-                Err(_) => {
-                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
-                    return MIN_TTL_SECONDS;
-                }
-            },
-        };
-        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
-    }
-}
-
 fn default_session_timeout() -> u64 {
     300
 }
@@ -333,67 +288,6 @@ mod tests {
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
-    }
-
-    // Test CacheControl serde roundtrip and TTL parsing
-    #[test]
-    fn test_cache_control_serde_and_ttl() {
-        // Default (ephemeral, no TTL)
-        let cc = CacheControl::default();
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl, None);
-        assert_eq!(cc.ttl_seconds(), 300);
-
-        // Shorthand values
-        let cc_5m = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("5m".to_string()),
-        };
-        assert_eq!(cc_5m.ttl_seconds(), 300);
-
-        let cc_1h = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("1h".to_string()),
-        };
-        assert_eq!(cc_1h.ttl_seconds(), 3600);
-
-        // Integer seconds -- within range
-        let cc_600 = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("600".to_string()),
-        };
-        assert_eq!(cc_600.ttl_seconds(), 600);
-
-        // Integer seconds -- clamped to min (300)
-        let cc_low = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("10".to_string()),
-        };
-        assert_eq!(cc_low.ttl_seconds(), 300);
-
-        // Integer seconds -- clamped to max (3600)
-        let cc_high = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("7200".to_string()),
-        };
-        assert_eq!(cc_high.ttl_seconds(), 3600);
-
-        // Unrecognized string defaults to 300
-        let cc_bad = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("forever".to_string()),
-        };
-        assert_eq!(cc_bad.ttl_seconds(), 300);
-
-        // Serde roundtrip
-        let json = serde_json::to_string(&cc_5m).unwrap();
-        let deser: CacheControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, cc_5m);
-
-        // Deserialize from API-style JSON
-        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
-        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
-        assert_eq!(from_api.ttl_seconds(), 3600);
     }
 
     // Test valid builder configurations
