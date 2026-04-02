@@ -3,7 +3,7 @@
 
 import pytest
 
-from dynamo.frontend.multimodal_utils import extract_mm_urls
+from dynamo.frontend.utils import extract_mm_urls
 
 pytestmark = [
     pytest.mark.unit,
