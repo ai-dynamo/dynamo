@@ -10772,6 +10772,26 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      failover:
+                        description: |-
+                          Failover configures GMS (GPU Memory Service) failover for this service.
+                          When enabled, the operator creates a dedicated GMS weight server pod and
+                          multiple engine pods per rank that share GPUs via DRA resource claims.
+                        properties:
+                          enabled:
+                            description: Enabled activates GMS failover for this service.
+                            type: boolean
+                          numShadows:
+                            default: 1
+                            description: |-
+                              NumShadows is the number of shadow (standby) engine pods per rank.
+                              Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        required:
+                          - enabled
+                        type: object
                       frontendSidecar:
                         description: |-
                           FrontendSidecar configures an auto-generated frontend sidecar container.

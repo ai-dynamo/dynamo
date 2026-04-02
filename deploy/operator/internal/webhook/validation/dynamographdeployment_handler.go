@@ -41,13 +41,15 @@ const (
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
-	mgr manager.Manager
+	mgr          manager.Manager
+	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager) *DynamoGraphDeploymentHandler {
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager, groveEnabled bool) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
-		mgr: mgr,
+		mgr:          mgr,
+		groveEnabled: groveEnabled,
 	}
 }
 
@@ -63,7 +65,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr)
+	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled)
 	return validator.Validate(ctx)
 }
 
@@ -90,7 +92,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
+	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled)
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
