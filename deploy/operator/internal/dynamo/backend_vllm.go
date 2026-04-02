@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -162,6 +163,16 @@ while True:
     time.sleep(5)
 `
 
+// k8sVarPattern matches Kubernetes $(VAR) env-var expansion syntax.
+var k8sVarPattern = regexp.MustCompile(`\$\((\w+)\)`)
+
+// k8sToShellVarSyntax converts Kubernetes $(VAR) references to shell ${VAR}
+// so that variables can be expanded by a shell at runtime. Plain $VAR
+// references (e.g. from LWS) are already valid shell syntax and left as-is.
+func k8sToShellVarSyntax(s string) string {
+	return k8sVarPattern.ReplaceAllString(s, `${$1}`)
+}
+
 // GetWaitLeaderConfigMapName returns the ConfigMap name for a given DGD.
 func GetWaitLeaderConfigMapName(dgdName string) string {
 	return fmt.Sprintf("%s-%s", dgdName, waitLeaderConfigMapSuffix)
@@ -208,14 +219,18 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		},
 	})
 
+	// Use sh -c so the shell expands variable references at runtime.
+	// Grove/LWS env vars are appended to init containers AFTER our env
+	// vars, so Kubernetes $(VAR) expansion (which is order-dependent)
+	// cannot resolve them. The shell sees all env vars regardless of
+	// definition order.
+	shellHostname := k8sToShellVarSyntax(leaderHostname)
 	initContainer := corev1.Container{
-		Name:    "wait-for-leader-mp",
-		Image:   mainImage,
-		Command: []string{"python3", fmt.Sprintf("%s/%s", waitLeaderMountPath, waitLeaderScriptKey)},
-		Env: []corev1.EnvVar{
-			{Name: "LEADER_HOST", Value: leaderHostname},
-			{Name: "LEADER_PORT", Value: commonconsts.VLLMMpMasterPort},
-		},
+		Name:  "wait-for-leader-mp",
+		Image: mainImage,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
+			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      waitLeaderVolumeName,

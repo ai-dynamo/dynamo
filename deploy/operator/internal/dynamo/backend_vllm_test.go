@@ -590,7 +590,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:latest",
-			expectedLeaderHost:  "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{
 			name:          "mp worker with LWS deployer injects init container",
@@ -678,7 +678,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:latest",
-			expectedLeaderHost:  "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 	}
 
@@ -697,14 +697,12 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
 				g.Expect(injected.Name).To(gomega.Equal("wait-for-leader-mp"))
 				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
-				g.Expect(injected.Command).To(gomega.Equal([]string{"python3", "/scripts/wait-for-leader.py"}))
 
-				envMap := map[string]string{}
-				for _, e := range injected.Env {
-					envMap[e.Name] = e.Value
-				}
-				g.Expect(envMap).To(gomega.HaveKeyWithValue("LEADER_HOST", tt.expectedLeaderHost))
-				g.Expect(envMap).To(gomega.HaveKeyWithValue("LEADER_PORT", commonconsts.VLLMMpMasterPort))
+				expectedCmd := fmt.Sprintf(
+					`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
+					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
+				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
+				g.Expect(injected.Env).To(gomega.BeEmpty())
 
 				g.Expect(injected.VolumeMounts).To(gomega.HaveLen(1))
 				g.Expect(injected.VolumeMounts[0].Name).To(gomega.Equal("wait-leader-script"))
