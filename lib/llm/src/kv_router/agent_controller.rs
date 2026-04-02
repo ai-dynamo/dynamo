@@ -230,7 +230,7 @@ impl AgentController {
                 // endpoint before returning. Without this, .direct() fails on
                 // the first call because discovery hasn't propagated yet.
                 c.wait_for_instances().await?;
-                EventPlaneClient::from_client(c, RouterMode::KV).await
+                EventPlaneClient::from_client_no_fault_detection(c, RouterMode::KV).await
             })
             .await?;
         Ok(client.clone())
