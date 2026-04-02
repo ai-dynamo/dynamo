@@ -106,7 +106,7 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, cudaCheckpointBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
+		cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -122,7 +122,7 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 	return cudaPIDs
 }
 
-// BuildDeviceMap creates a cuda-checkpoint --device-map value from source and target GPU UUID lists.
+// BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
 // When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
 // unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
@@ -201,7 +201,7 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 		if err := unlock(ctx, pid, log); err != nil {
 			state, stateErr := getState(ctx, pid)
 			if stateErr == nil && state == "running" {
-				log.Info("cuda-checkpoint unlock returned error but process is already running", "pid", pid)
+				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
 			}
 			return err

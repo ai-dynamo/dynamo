@@ -484,6 +484,7 @@ impl MockEngineArgs {
             "decode_speedup_ratio",
             "dp_size",
             "startup_time",
+            "worker_type",
             "is_prefill",
             "is_decode",
             "planner_profile_data",
@@ -502,6 +503,7 @@ impl MockEngineArgs {
             "preemption_mode",
             "router_queue_policy",
             "sglang",
+            "has_perf_model",
         ]
         .iter()
         .cloned()
@@ -551,16 +553,20 @@ impl MockEngineArgs {
             builder = builder.block_size(num as usize);
         }
 
-        if let Some(value) = extra_args.get("max_num_seqs")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.max_num_seqs(Some(num as usize));
+        if let Some(value) = extra_args.get("max_num_seqs") {
+            if value.is_null() {
+                builder = builder.max_num_seqs(None);
+            } else if let Some(num) = value.as_u64() {
+                builder = builder.max_num_seqs(Some(num as usize));
+            }
         }
 
-        if let Some(value) = extra_args.get("max_num_batched_tokens")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.max_num_batched_tokens(Some(num as usize));
+        if let Some(value) = extra_args.get("max_num_batched_tokens") {
+            if value.is_null() {
+                builder = builder.max_num_batched_tokens(None);
+            } else if let Some(num) = value.as_u64() {
+                builder = builder.max_num_batched_tokens(Some(num as usize));
+            }
         }
 
         if let Some(value) = extra_args.get("enable_prefix_caching")
@@ -623,7 +629,9 @@ impl MockEngineArgs {
             builder = builder.kv_transfer_bandwidth(Some(num));
         }
 
-        if let Some(value) = extra_args.get("reasoning") {
+        if let Some(value) = extra_args.get("reasoning")
+            && !value.is_null()
+        {
             let cfg: ReasoningConfig = serde_json::from_value(value.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse reasoning config: {}", e))?;
             builder = builder.reasoning(Some(cfg));
@@ -664,31 +672,51 @@ impl MockEngineArgs {
             builder = builder.router_queue_policy(Some(policy));
         }
 
-        if let Some(value) = extra_args.get("sglang") {
+        if let Some(value) = extra_args.get("sglang")
+            && !value.is_null()
+        {
             let cfg: SglangArgs = serde_json::from_value(value.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse sglang config: {}", e))?;
             builder = builder.sglang(Some(cfg));
         }
 
-        // Parse worker type from is_prefill and is_decode flags
-        let is_prefill = extra_args
-            .get("is_prefill")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_decode = extra_args
-            .get("is_decode")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let worker_type = if let Some(value) = extra_args.get("worker_type") {
+            match value.as_str() {
+                Some("aggregated") => WorkerType::Aggregated,
+                Some("prefill") => WorkerType::Prefill,
+                Some("decode") => WorkerType::Decode,
+                Some(other) => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid worker_type '{}'. Must be 'aggregated', 'prefill', or 'decode'.",
+                        other
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid worker_type: expected string value."
+                    ));
+                }
+            }
+        } else {
+            let is_prefill = extra_args
+                .get("is_prefill")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_decode = extra_args
+                .get("is_decode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-        // Determine worker type based on flags
-        let worker_type = match (is_prefill, is_decode) {
-            (false, false) => WorkerType::Aggregated,
-            (true, false) => WorkerType::Prefill,
-            (false, true) => WorkerType::Decode,
-            (true, true) => panic!(
-                "Invalid worker configuration: is_prefill and is_decode cannot both be true. \
-                 Worker must be either Aggregated (both false), Prefill (is_prefill=true), or Decode (is_decode=true)."
-            ),
+            match (is_prefill, is_decode) {
+                (false, false) => WorkerType::Aggregated,
+                (true, false) => WorkerType::Prefill,
+                (false, true) => WorkerType::Decode,
+                (true, true) => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid worker configuration: is_prefill and is_decode cannot both be true."
+                    ));
+                }
+            }
         };
         builder = builder.worker_type(worker_type);
 
@@ -755,6 +783,58 @@ impl MockEngineArgs {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {
+        let args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Decode)
+            .max_num_seqs(None)
+            .max_num_batched_tokens(None)
+            .reasoning(None)
+            .sglang(None)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        let payload = serde_json::json!({
+            "engine_type": "vllm",
+            "num_gpu_blocks": args.num_gpu_blocks,
+            "block_size": args.block_size,
+            "max_num_seqs": args.max_num_seqs,
+            "max_num_batched_tokens": args.max_num_batched_tokens,
+            "enable_prefix_caching": args.enable_prefix_caching,
+            "enable_chunked_prefill": args.enable_chunked_prefill,
+            "speedup_ratio": args.speedup_ratio,
+            "decode_speedup_ratio": args.decode_speedup_ratio,
+            "dp_size": args.dp_size,
+            "startup_time": args.startup_time,
+            "worker_type": "decode",
+            "planner_profile_data": args.planner_profile_data,
+            "aic_backend": args.aic_backend,
+            "aic_system": args.aic_system,
+            "aic_backend_version": args.aic_backend_version,
+            "aic_tp_size": args.aic_tp_size,
+            "aic_model_path": args.aic_model_path,
+            "enable_local_indexer": args.enable_local_indexer,
+            "bootstrap_port": args.bootstrap_port,
+            "kv_bytes_per_token": args.kv_bytes_per_token,
+            "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "reasoning": args.reasoning,
+            "zmq_kv_events_port": args.zmq_kv_events_port,
+            "zmq_replay_port": args.zmq_replay_port,
+            "preemption_mode": "lifo",
+            "router_queue_policy": args.router_queue_policy.map(|policy| policy.to_string()),
+            "sglang": args.sglang,
+            "has_perf_model": true,
+        });
+
+        let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
+
+        assert_eq!(restored.worker_type, WorkerType::Decode);
+        assert_eq!(restored.max_num_seqs, None);
+        assert_eq!(restored.max_num_batched_tokens, None);
+    }
 
     #[test]
     fn test_unique_block_default_uniqueness() {

@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 
+use dynamo_protocols::types::anthropic::CacheControl;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +42,7 @@ use crate::preprocessor::prompt::{OAIChatLikeRequest, TextInput};
 
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
-use crate::protocols::openai::nvext::{CacheControl, NvExt, NvExtProvider};
+use crate::protocols::openai::nvext::{NvExt, NvExtProvider};
 use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -77,12 +78,8 @@ pub struct AnthropicContext {
     pub thinking: Option<ThinkingConfig>,
 
     /// Per-block cache control breakpoints with their position in the
-    /// message array. The existing Anthropic→Chat Completions conversion
-    /// collapses all per-block `cache_control` annotations into a single
-    /// last-one-wins `nvext.cache_control` field. This preserves the full
-    /// per-block granularity for future use (e.g., multi-breakpoint prefix
-    /// caching, or faithfully reporting per-breakpoint `cache_creation_input_tokens`
-    /// / `cache_read_input_tokens` in the response).
+    /// message array. These remain available in the API sidecar even when
+    /// the request conversion does not forward cache control into `nvext`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<CacheBreakpoint>,
 
@@ -286,15 +283,6 @@ impl NvExtProvider for UnifiedRequest {
 
     fn raw_prompt(&self) -> Option<String> {
         None
-    }
-
-    /// Returns the single collapsed cache control from `nvext`. This is the
-    /// last-one-wins value produced by the Anthropic→Chat Completions conversion
-    /// and is sufficient for backends that support a single prefix cache boundary
-    /// (SGLang, vLLM). For per-block granularity, consult
-    /// `AnthropicContext::cache_breakpoints` via the `ApiContext` sidecar.
-    fn effective_cache_control(&self) -> Option<&CacheControl> {
-        NvExtProvider::nvext(self).and_then(|ext| ext.cache_control.as_ref())
     }
 }
 

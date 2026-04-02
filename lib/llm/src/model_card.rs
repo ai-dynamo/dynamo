@@ -104,14 +104,25 @@ impl TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    HfChatTemplate { is_custom: bool, file: CheckedFile },
+    #[serde(rename = "hf_chat_template", alias = "hf_chat_template_jinja")]
+    HfChatTemplateJinja {
+        is_custom: bool,
+        file: CheckedFile,
+    },
+    HfChatTemplateJson {
+        is_custom: bool,
+        file: CheckedFile,
+    },
 }
 
 impl PromptFormatterArtifact {
     pub fn checksum(&self) -> String {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => {
+                c.checksum().to_string()
+            }
         }
     }
 
@@ -119,21 +130,24 @@ impl PromptFormatterArtifact {
     pub fn is_local(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.is_local(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.is_local(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.is_local(),
         }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.update_dir(dir),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.update_dir(dir),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.update_dir(dir),
         }
     }
 
     pub fn is_custom(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(_) => false,
-            PromptFormatterArtifact::HfChatTemplate { is_custom, .. } => *is_custom,
+            PromptFormatterArtifact::HfChatTemplateJinja { is_custom, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { is_custom, .. } => *is_custom,
         }
     }
 }
@@ -553,10 +567,16 @@ impl ModelDeploymentCard {
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
-        if let Some(PromptFormatterArtifact::HfChatTemplate {
-            file: src_file,
-            is_custom,
-        }) = self.chat_template_file.as_mut()
+        if let Some(
+            PromptFormatterArtifact::HfChatTemplateJinja {
+                file: src_file,
+                is_custom,
+            }
+            | PromptFormatterArtifact::HfChatTemplateJson {
+                file: src_file,
+                is_custom,
+            },
+        ) = self.chat_template_file.as_mut()
         {
             if *is_custom {
                 tracing::info!(
@@ -708,7 +728,7 @@ impl ModelDeploymentCard {
                 )
             })?;
 
-            Some(PromptFormatterArtifact::HfChatTemplate {
+            Some(PromptFormatterArtifact::HfChatTemplateJinja {
                 is_custom: custom_template_path.is_some(),
                 file: CheckedFile::from_disk(template_path)?,
             })
@@ -1001,13 +1021,29 @@ impl PromptFormatterArtifact {
     }
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate {
+        // Try chat_template.jinja first (raw Jinja template)
+        let jinja_path = directory.join("chat_template.jinja");
+        if jinja_path.exists() {
+            let f = CheckedFile::from_disk(&jinja_path)
+                .with_context(|| format!("Failed to load {}", jinja_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJinja {
                 file: f,
                 is_custom: false,
-            })),
-            Err(_) => Ok(None),
+            }));
         }
+
+        // Try chat_template.json (JSON with "chat_template" key, e.g. Qwen3-Omni)
+        let json_path = directory.join("chat_template.json");
+        if json_path.exists() {
+            let f = CheckedFile::from_disk(&json_path)
+                .with_context(|| format!("Failed to load {}", json_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJson {
+                file: f,
+                is_custom: false,
+            }));
+        }
+
+        Ok(None)
     }
 }
 
