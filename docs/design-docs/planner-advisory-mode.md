@@ -38,8 +38,8 @@ class ScalingMode(str, Enum):
 | Initialize Connector (read cluster state) | Y | Y | N |
 | Execute scaling (`set_component_replicas`) | Y | N | N |
 | Emit Advisory Prometheus metrics | Y | Y | N |
-| Emit structured advisory logs | N | Y | N |
-| Write advisory JSONL file | N | Y | N |
+| Emit structured advisory logs | Y | Y | N |
+| Write advisory JSONL file | Y | Y | N |
 
 **Why advisory mode initializes the Connector**: Advisory mode must call
 `get_workers_info()` and `get_actual_worker_counts()` via `KubernetesConnector` to
@@ -48,10 +48,11 @@ metrics would be zero, making the output meaningless. The Connector is used in
 read-only mode — `_apply_scaling()` and `_apply_scaling_blocking()` are gated on
 `scaling_mode == ACTIVE`.
 
-**Why active mode also emits advisory metrics**: Every executed scaling decision
-should be traceable. When an incident occurs, SREs can query the advisory metrics
-to see the full decision context (predicted load, estimated SLA impact, GPU budget
-constraints) that led to the scaling action.
+**Why active mode also emits advisory metrics and structured logs**: Every executed
+scaling decision should be traceable. When an incident occurs, SREs can query the
+advisory metrics and search structured logs to see the full decision context
+(predicted load, estimated SLA impact, GPU budget constraints) that led to the
+scaling action.
 
 ### Connector Initialization Logic
 
@@ -137,26 +138,26 @@ the Grafana Advisory Dashboard.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `planner:advisory_recommended_p` | Gauge | Final recommended prefill replicas (after GPU budget) |
-| `planner:advisory_recommended_d` | Gauge | Final recommended decode replicas (after GPU budget) |
-| `planner:advisory_current_p` | Gauge | Current actual prefill replicas from DGD |
-| `planner:advisory_current_d` | Gauge | Current actual decode replicas from DGD |
-| `planner:advisory_delta_p` | Gauge | Prefill delta (recommended - current). Positive = scale up |
-| `planner:advisory_delta_d` | Gauge | Decode delta (recommended - current). Positive = scale up |
-| `planner:advisory_scaling_action` | Gauge | Aggregate action: 1=scale up, 0=hold, -1=scale down |
-| `planner:advisory_action_reason` | Gauge | Reason code (see table below) |
-| `planner:advisory_est_ttft` | Gauge | Estimated TTFT after applying recommendation (ms). NaN if no profiling data |
-| `planner:advisory_est_itl` | Gauge | Estimated ITL after applying recommendation (ms). NaN if no profiling data |
-| `planner:advisory_ttft_headroom` | Gauge | TTFT SLA target - estimated TTFT (ms). Positive = safe |
-| `planner:advisory_itl_headroom` | Gauge | ITL SLA target - estimated ITL (ms). Positive = safe |
+| `dynamo_planner_advisory_recommended_p` | Gauge | Final recommended prefill replicas (after GPU budget) |
+| `dynamo_planner_advisory_recommended_d` | Gauge | Final recommended decode replicas (after GPU budget) |
+| `dynamo_planner_advisory_current_p` | Gauge | Current actual prefill replicas from DGD |
+| `dynamo_planner_advisory_current_d` | Gauge | Current actual decode replicas from DGD |
+| `dynamo_planner_advisory_delta_p` | Gauge | Prefill delta (recommended - current). Positive = scale up |
+| `dynamo_planner_advisory_delta_d` | Gauge | Decode delta (recommended - current). Positive = scale up |
+| `dynamo_planner_advisory_scaling_action` | Gauge | Aggregate action: 1=scale up, 0=hold, -1=scale down |
+| `dynamo_planner_advisory_action_reason` | Gauge | Reason code (see table below) |
+| `dynamo_planner_advisory_est_ttft` | Gauge | Estimated TTFT after applying recommendation (ms). NaN if no profiling data |
+| `dynamo_planner_advisory_est_itl` | Gauge | Estimated ITL after applying recommendation (ms). NaN if no profiling data |
+| `dynamo_planner_advisory_ttft_headroom` | Gauge | TTFT SLA target - estimated TTFT (ms). Positive = safe |
+| `dynamo_planner_advisory_itl_headroom` | Gauge | ITL SLA target - estimated ITL (ms). Positive = safe |
 
 **Counters (3):**
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `planner:advisory_scaleup_total` | Counter | Cumulative scale-up recommendations |
-| `planner:advisory_scaledown_total` | Counter | Cumulative scale-down recommendations |
-| `planner:advisory_hold_total` | Counter | Cumulative hold recommendations |
+| `dynamo_planner_advisory_scaleup_total` | Counter | Cumulative scale-up recommendations |
+| `dynamo_planner_advisory_scaledown_total` | Counter | Cumulative scale-down recommendations |
+| `dynamo_planner_advisory_hold_total` | Counter | Cumulative hold recommendations |
 
 **Total: 15 new metrics.**
 
@@ -178,8 +179,10 @@ Note: Prometheus counters reset to zero on Pod restart. Grafana queries must use
 In v1, reason codes provide a quick signal in dashboards. Detailed reasoning
 is in the structured logs (Layer 2).
 
-**Naming convention**: Uses colons (`planner:advisory_*`) to match existing Planner
-metrics (`planner:num_p_workers`, `planner:observed_ttft`, etc.).
+**Naming convention**: Advisory metrics use `dynamo_planner_advisory_*` (underscore-separated)
+following the Dynamo naming guideline in `lib/runtime/src/metrics/prometheus_names.rs`.
+Existing Planner metrics (`planner:num_p_workers`, etc.) retain their current naming
+for backward compatibility and will be migrated in a follow-up PR.
 
 ### Layer 2: Execution Path (Structured Logs)
 
@@ -482,17 +485,17 @@ existing "Dynamo Planner - SLA & Scaling" dashboard for cross-reference.
 - Dual-line chart per component (prefill / decode)
 - Recommended = dashed line, Actual = solid line
 - Delta region shaded (green = headroom, red = under-provisioned)
-- Queries: `planner:advisory_recommended_p`, `planner:advisory_current_p`
+- Queries: `dynamo_planner_advisory_recommended_p`, `dynamo_planner_advisory_current_p`
 
 ### Panel 2: Scaling Action Timeline
 
 - State timeline visualization
 - Values: 1 (scale up / green), 0 (hold / gray), -1 (scale down / blue)
-- Query: `planner:advisory_scaling_action`
+- Query: `dynamo_planner_advisory_scaling_action`
 
 ### Panel 3: SLA Headroom
 
-- Dual-line: `planner:advisory_ttft_headroom` and `planner:advisory_itl_headroom`
+- Dual-line: `dynamo_planner_advisory_ttft_headroom` and `dynamo_planner_advisory_itl_headroom`
 - Horizontal reference line at y=0 (boundary between safe and violation)
 - Area below 0 shaded as warning zone
 - Handles NaN display as "N/A" via Grafana's "Connect null values" = off
@@ -500,23 +503,23 @@ existing "Dynamo Planner - SLA & Scaling" dashboard for cross-reference.
 ### Panel 4: Estimated vs Actual TTFT
 
 - Two lines overlaid:
-  - `planner:advisory_est_ttft` (what Planner predicted)
+  - `dynamo_planner_advisory_est_ttft` (what Planner predicted)
   - `rate(dynamo_frontend_time_to_first_token_seconds_sum[3m]) / rate(dynamo_frontend_time_to_first_token_seconds_count[3m]) * 1000` (what actually happened)
 - Divergence between lines indicates estimation accuracy
 - Useful for building trust in advisory recommendations before enabling active mode
 
 ### Panel 5: GPU Delta Over Time
 
-- Single line: `planner:advisory_delta_p * prefill_gpu + planner:advisory_delta_d * decode_gpu`
+- Single line: `dynamo_planner_advisory_delta_p * prefill_gpu + dynamo_planner_advisory_delta_d * decode_gpu`
 - Positive = needs more GPUs, Negative = can release GPUs
 - Visualizes resource pressure over time
 
 ### Panel 6: Recommendation Statistics
 
 - Stacked rate chart:
-  - `rate(planner:advisory_scaleup_total[5m])`
-  - `rate(planner:advisory_scaledown_total[5m])`
-  - `rate(planner:advisory_hold_total[5m])`
+  - `rate(dynamo_planner_advisory_scaleup_total[5m])`
+  - `rate(dynamo_planner_advisory_scaledown_total[5m])`
+  - `rate(dynamo_planner_advisory_hold_total[5m])`
 - Shows recommendation frequency distribution
 - A healthy Planner should mostly "hold" with occasional scale-up/down
 
@@ -524,8 +527,8 @@ existing "Dynamo Planner - SLA & Scaling" dashboard for cross-reference.
 
 - Multi-row panel combining:
   - Top: `planner:observed_request_rate` + `planner:predicted_request_rate`
-  - Middle: `planner:advisory_recommended_p` vs `planner:advisory_current_p`
-  - Bottom: `planner:advisory_scaling_action`
+  - Middle: `dynamo_planner_advisory_recommended_p` vs `dynamo_planner_advisory_current_p`
+  - Bottom: `dynamo_planner_advisory_scaling_action`
 - Grafana Annotations overlay marking actual scaling events (from K8s events or DGD status changes)
 - Provides a single view of the full decision chain: traffic → prediction → recommendation → execution
 
@@ -622,7 +625,7 @@ In hierarchical deployments (multiple DGDs with GlobalPlanner):
 
 ### Confidence Score
 
-Add `planner:advisory_confidence` Gauge (0.0 - 1.0) based on:
+Add `dynamo_planner_advisory_confidence` Gauge (0.0 - 1.0) based on:
 - Metrics stability (low variance in recent observations)
 - NaN frequency (fewer NaN gaps = higher confidence)
 - Prediction consistency (consecutive recommendations agreeing)
@@ -635,7 +638,7 @@ outcomes:
 - Record `(recommended_replicas, est_ttft)` at decision time
 - After scaling completes, record `(actual_ttft)` at steady state
 - Compute `accuracy = 1 - abs(est_ttft - actual_ttft) / est_ttft`
-- Expose as `planner:advisory_accuracy` Gauge
+- Expose as `dynamo_planner_advisory_accuracy` Gauge
 
 ### Webhook and Alert Integration
 

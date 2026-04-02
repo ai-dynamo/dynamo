@@ -64,10 +64,10 @@ data:
           "id": 1,
           "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
           "targets": [
-            { "expr": "planner:advisory_recommended_p{namespace=~\"$namespace\"}", "legendFormat": "Recommended Prefill", "refId": "A" },
-            { "expr": "planner:advisory_recommended_d{namespace=~\"$namespace\"}", "legendFormat": "Recommended Decode",  "refId": "B" },
-            { "expr": "planner:advisory_current_p{namespace=~\"$namespace\"}",     "legendFormat": "Actual Prefill",      "refId": "C" },
-            { "expr": "planner:advisory_current_d{namespace=~\"$namespace\"}",     "legendFormat": "Actual Decode",       "refId": "D" }
+            { "expr": "dynamo_planner_advisory_recommended_p{namespace=~\"$namespace\"}", "legendFormat": "Recommended Prefill", "refId": "A" },
+            { "expr": "dynamo_planner_advisory_recommended_d{namespace=~\"$namespace\"}", "legendFormat": "Recommended Decode",  "refId": "B" },
+            { "expr": "dynamo_planner_advisory_current_p{namespace=~\"$namespace\"}",     "legendFormat": "Actual Prefill",      "refId": "C" },
+            { "expr": "dynamo_planner_advisory_current_d{namespace=~\"$namespace\"}",     "legendFormat": "Actual Decode",       "refId": "D" }
           ],
           "title": "Recommended vs Actual Replicas",
           "type": "timeseries"
@@ -90,7 +90,7 @@ data:
           "id": 2,
           "options": { "colWidth": 0.9, "legend": { "displayMode": "list", "placement": "bottom" }, "rowHeight": 0.9, "showValue": "always", "tooltip": { "mode": "single" } },
           "targets": [
-            { "expr": "planner:advisory_scaling_action{namespace=~\"$namespace\"}", "legendFormat": "Scaling Action", "refId": "A" }
+            { "expr": "dynamo_planner_advisory_scaling_action{namespace=~\"$namespace\"}", "legendFormat": "Scaling Action", "refId": "A" }
           ],
           "title": "Scaling Action Timeline",
           "type": "state-timeline"
@@ -113,8 +113,8 @@ data:
             "tooltip": { "mode": "multi" }
           },
           "targets": [
-            { "expr": "planner:advisory_ttft_headroom{namespace=~\"$namespace\"}", "legendFormat": "TTFT Headroom (ms)", "refId": "A" },
-            { "expr": "planner:advisory_itl_headroom{namespace=~\"$namespace\"}",  "legendFormat": "ITL Headroom (ms)",  "refId": "B" }
+            { "expr": "dynamo_planner_advisory_ttft_headroom{namespace=~\"$namespace\"}", "legendFormat": "TTFT Headroom (ms)", "refId": "A" },
+            { "expr": "dynamo_planner_advisory_itl_headroom{namespace=~\"$namespace\"}",  "legendFormat": "ITL Headroom (ms)",  "refId": "B" }
           ],
           "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] },
           "title": "SLA Headroom (positive = safe)",
@@ -137,7 +137,7 @@ data:
           "id": 4,
           "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
           "targets": [
-            { "expr": "planner:advisory_est_ttft{namespace=~\"$namespace\"}", "legendFormat": "Estimated TTFT", "refId": "A" },
+            { "expr": "dynamo_planner_advisory_est_ttft{namespace=~\"$namespace\"}", "legendFormat": "Estimated TTFT", "refId": "A" },
             { "expr": "planner:observed_ttft{namespace=~\"$namespace\"}",     "legendFormat": "Observed TTFT",  "refId": "B" }
           ],
           "title": "Estimated vs Actual TTFT",
@@ -162,9 +162,9 @@ data:
           "id": 5,
           "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
           "targets": [
-            { "expr": "rate(planner:advisory_scaleup_total{namespace=~\"$namespace\"}[5m]) * 60",   "legendFormat": "Scale Up/min",   "refId": "A" },
-            { "expr": "rate(planner:advisory_scaledown_total{namespace=~\"$namespace\"}[5m]) * 60", "legendFormat": "Scale Down/min", "refId": "B" },
-            { "expr": "rate(planner:advisory_hold_total{namespace=~\"$namespace\"}[5m]) * 60",      "legendFormat": "Hold/min",       "refId": "C" }
+            { "expr": "rate(dynamo_planner_advisory_scaleup_total{namespace=~\"$namespace\"}[5m]) * 60",   "legendFormat": "Scale Up/min",   "refId": "A" },
+            { "expr": "rate(dynamo_planner_advisory_scaledown_total{namespace=~\"$namespace\"}[5m]) * 60", "legendFormat": "Scale Down/min", "refId": "B" },
+            { "expr": "rate(dynamo_planner_advisory_hold_total{namespace=~\"$namespace\"}[5m]) * 60",      "legendFormat": "Hold/min",       "refId": "C" }
           ],
           "title": "Recommendation Statistics (per minute)",
           "type": "timeseries"
@@ -188,7 +188,7 @@ data:
           "targets": [
             { "expr": "planner:observed_request_rate{namespace=~\"$namespace\"}",     "legendFormat": "Observed Req Rate",   "refId": "A" },
             { "expr": "planner:predicted_request_rate{namespace=~\"$namespace\"}",    "legendFormat": "Predicted Req Rate",  "refId": "B" },
-            { "expr": "planner:advisory_recommended_p{namespace=~\"$namespace\"}",    "legendFormat": "Recommended Prefill", "refId": "C" }
+            { "expr": "dynamo_planner_advisory_recommended_p{namespace=~\"$namespace\"}",    "legendFormat": "Recommended Prefill", "refId": "C" }
           ],
           "title": "Decision Context Timeline",
           "type": "timeseries"
@@ -208,8 +208,8 @@ data:
           "id": 7,
           "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
           "targets": [
-            { "expr": "planner:advisory_delta_p{namespace=~\"$namespace\"}", "legendFormat": "Prefill Delta", "refId": "A" },
-            { "expr": "planner:advisory_delta_d{namespace=~\"$namespace\"}", "legendFormat": "Decode Delta",  "refId": "B" }
+            { "expr": "dynamo_planner_advisory_delta_p{namespace=~\"$namespace\"}", "legendFormat": "Prefill Delta", "refId": "A" },
+            { "expr": "dynamo_planner_advisory_delta_d{namespace=~\"$namespace\"}", "legendFormat": "Decode Delta",  "refId": "B" }
           ],
           "title": "Advisory Delta (recommended - actual)",
           "type": "timeseries"

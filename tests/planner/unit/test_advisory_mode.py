@@ -73,15 +73,14 @@ def test_advisory_max_step_size_invalid():
         PlannerConfig(namespace="test-ns", advisory_max_step_size=0)
 
 
-def test_advisory_file_output_requires_log_dir():
-    with pytest.raises(
-        ValidationError, match="advisory_file_output=True requires log_dir"
-    ):
-        PlannerConfig(
-            namespace="test-ns",
-            advisory_file_output=True,
-            log_dir=None,
-        )
+def test_advisory_file_output_auto_fills_log_dir():
+    config = PlannerConfig(
+        namespace="test-ns",
+        advisory_file_output=True,
+        log_dir=None,
+    )
+    assert config.advisory_file_output is True
+    assert config.log_dir == "/tmp/planner"
 
 
 def test_advisory_file_output_with_log_dir():

@@ -138,66 +138,69 @@ class PlannerPrometheusMetrics:
         self.gpu_hours = Gauge(f"{prefix}:gpu_hours", "Cumulative GPU hours used")
 
         # Advisory metrics — Gauges (12)
+        # Follows Dynamo naming guideline: dynamo_planner_advisory_*
+        # See lib/runtime/src/metrics/prometheus_names.rs
+        _adv = "dynamo_planner_advisory"
         self.advisory_recommended_p = Gauge(
-            f"{prefix}:advisory_recommended_p",
+            f"{_adv}_recommended_p",
             "Recommended prefill replicas (after GPU budget)",
         )
         self.advisory_recommended_d = Gauge(
-            f"{prefix}:advisory_recommended_d",
+            f"{_adv}_recommended_d",
             "Recommended decode replicas (after GPU budget)",
         )
         self.advisory_current_p = Gauge(
-            f"{prefix}:advisory_current_p",
+            f"{_adv}_current_p",
             "Current actual prefill replicas from DGD",
         )
         self.advisory_current_d = Gauge(
-            f"{prefix}:advisory_current_d",
+            f"{_adv}_current_d",
             "Current actual decode replicas from DGD",
         )
         self.advisory_delta_p = Gauge(
-            f"{prefix}:advisory_delta_p",
+            f"{_adv}_delta_p",
             "Prefill delta (recommended - current). Positive = scale up",
         )
         self.advisory_delta_d = Gauge(
-            f"{prefix}:advisory_delta_d",
+            f"{_adv}_delta_d",
             "Decode delta (recommended - current). Positive = scale up",
         )
         self.advisory_scaling_action = Gauge(
-            f"{prefix}:advisory_scaling_action",
+            f"{_adv}_scaling_action",
             "Aggregate action: 1=scale up, 0=hold, -1=scale down",
         )
         self.advisory_action_reason = Gauge(
-            f"{prefix}:advisory_action_reason",
+            f"{_adv}_action_reason",
             "Reason code for the advisory action",
         )
         self.advisory_est_ttft = Gauge(
-            f"{prefix}:advisory_est_ttft",
+            f"{_adv}_est_ttft",
             "Estimated TTFT after applying recommendation (ms). NaN if no profiling data",
         )
         self.advisory_est_itl = Gauge(
-            f"{prefix}:advisory_est_itl",
+            f"{_adv}_est_itl",
             "Estimated ITL after applying recommendation (ms). NaN if no profiling data",
         )
         self.advisory_ttft_headroom = Gauge(
-            f"{prefix}:advisory_ttft_headroom",
+            f"{_adv}_ttft_headroom",
             "TTFT SLA target - estimated TTFT (ms). Positive = safe",
         )
         self.advisory_itl_headroom = Gauge(
-            f"{prefix}:advisory_itl_headroom",
+            f"{_adv}_itl_headroom",
             "ITL SLA target - estimated ITL (ms). Positive = safe",
         )
 
         # Advisory metrics — Counters (3)
         self.advisory_scaleup_total = Counter(
-            f"{prefix}:advisory_scaleup_total",
+            f"{_adv}_scaleup_total",
             "Cumulative scale-up recommendations",
         )
         self.advisory_scaledown_total = Counter(
-            f"{prefix}:advisory_scaledown_total",
+            f"{_adv}_scaledown_total",
             "Cumulative scale-down recommendations",
         )
         self.advisory_hold_total = Counter(
-            f"{prefix}:advisory_hold_total",
+            f"{_adv}_hold_total",
             "Cumulative hold recommendations",
         )
 
@@ -1085,8 +1088,8 @@ class BasePlanner:
             }
         )
 
-        # Advisory mode only: structured logs + optional JSONL file (Layer 2)
-        if self.config.effective_scaling_mode == ScalingMode.ADVISORY:
+        # Structured logs for active + advisory modes (Layer 2)
+        if self.config.effective_scaling_mode in (ScalingMode.ACTIVE, ScalingMode.ADVISORY):
             path = self._build_path_recommendation(
                 current_p, current_d, recommended_p, recommended_d
             )
