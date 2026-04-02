@@ -830,6 +830,99 @@ vllm_configs = {
             ),
         ],
     ),
+    # Embedding cache integration test for aggregated multimodal.
+    # Validates the ec_both code path (DynamoMultimodalEmbeddingCacheConnector):
+    #   Payload 1: image A → GPU miss, save embedding to CPU store
+    #   Payload 2: image B (synthetic) → GPU miss, save B, evicts A from GPU cache
+    #   Payload 3: image A again → GPU miss, CPU hit, load from CPU store
+    # GPU encoder cache is shrunk via --max-num-batched-tokens so it holds ~1 image.
+    "multimodal_agg_embedding_cache": VLLMConfig(
+        name="multimodal_agg_embedding_cache",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(8.0),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+            pytest.mark.multimodal,
+            pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct"),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        request_payloads=[
+            # Payload 1: image A — warms the embedding cache (save)
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in this image?",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green", "purple"],
+                expected_log=[
+                    r"Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector",
+                    r"DynamoMultimodalEmbeddingCacheConnector initialized: capacity_gb=",
+                    r"EC cache save:",
+                ],
+                max_tokens=64,
+                temperature=0.0,
+            ),
+            # Payload 2: image B (synthetic 2x2 red PNG) — evicts image A from GPU cache
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What do you see?",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,"
+                            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAA"
+                            "EElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=="
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                temperature=0.0,
+            ),
+            # Payload 3: image A again — GPU miss, CPU cache hit (load)
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in this image?",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green", "purple"],
+                expected_log=[
+                    r"EC cache load:",
+                ],
+                max_tokens=64,
+                temperature=0.0,
+            ),
+        ],
+        script_args=[
+            "--multimodal-embedding-cache-capacity-gb",
+            "0.5",
+            "--max-num-batched-tokens",
+            "256",
+            "--max-num-seqs",
+            "1",
+        ],
+    ),
 }
 
 
