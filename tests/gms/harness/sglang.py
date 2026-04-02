@@ -13,7 +13,10 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 
+from .runtime import REPO_ROOT
+
 logger = logging.getLogger(__name__)
+SGLANG_BIN = REPO_ROOT / "dynamo-sglang" / "bin"
 
 
 class SGLangWithGMSProcess(ManagedProcess):
@@ -26,6 +29,8 @@ class SGLangWithGMSProcess(ManagedProcess):
         system_port: int,
         sglang_port: int,
         frontend_port: int,
+        *,
+        read_only_weights: bool = False,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
@@ -33,23 +38,34 @@ class SGLangWithGMSProcess(ManagedProcess):
         log_dir = f"{request.node.name}_{engine_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        command = [
+            "python",
+            "-m",
+            "dynamo.sglang",
+            "--model-path",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--load-format",
+            "gms",
+            "--enable-memory-saver",
+            "--mem-fraction-static",
+            "0.9",
+            "--port",
+            str(sglang_port),
+        ]
+        if read_only_weights:
+            command.extend(
+                [
+                    "--model-loader-extra-config",
+                    '{"gms_read_only": true}',
+                ]
+            )
         super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "dynamo.sglang",
-                "--model-path",
-                FAULT_TOLERANCE_MODEL_NAME,
-                "--load-format",
-                "gms",
-                "--enable-memory-saver",
-                "--mem-fraction-static",
-                "0.9",
-                "--port",
-                str(sglang_port),
-            ],
+            command=command,
             env={
                 **os.environ,
+                "PATH": f"/usr/local/cuda/bin:{SGLANG_BIN}:{os.environ.get('PATH', '')}",
+                "CC": "/usr/bin/gcc",
+                "CXX": "/usr/bin/g++",
                 "DYN_LOG": "debug",
                 "DYN_SYSTEM_PORT": str(system_port),
             },
@@ -63,6 +79,7 @@ class SGLangWithGMSProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
             stragglers=[],
             log_dir=log_dir,
+            display_name=engine_id,
         )
 
     def _is_ready(self, response) -> bool:
@@ -72,22 +89,22 @@ class SGLangWithGMSProcess(ManagedProcess):
             return False
 
     def sleep(self) -> dict:
-        """Put the engine to sleep, offloading weights from GPU memory."""
+        """Put the engine to sleep, offloading weights and KV cache."""
         r = requests.post(
             f"http://localhost:{self.system_port}/engine/release_memory_occupation",
-            json={},
+            json={"tags": ["weights", "kv_cache"]},
             timeout=30,
         )
         r.raise_for_status()
         logger.info(f"{self.engine_id} release_memory_occupation: {r.json()}")
         return r.json()
 
-    def wake(self) -> dict:
-        """Wake the engine, reloading weights to GPU memory."""
+    def wake(self, timeout: int = 30) -> dict:
+        """Wake the engine, restoring weights and KV cache."""
         r = requests.post(
             f"http://localhost:{self.system_port}/engine/resume_memory_occupation",
-            json={},
-            timeout=30,
+            json={"tags": ["weights", "kv_cache"]},
+            timeout=timeout,
         )
         r.raise_for_status()
         logger.info(f"{self.engine_id} resume_memory_occupation: {r.json()}")
