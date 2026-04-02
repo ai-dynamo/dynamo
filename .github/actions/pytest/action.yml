@@ -42,6 +42,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  max_vram_gib:
+    description: 'Optional GPU VRAM budget in GiB passed to pytest as --max-vram-gib'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -131,6 +135,10 @@ runs:
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
+        fi
+
+        if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
+          PYTEST_CMD="${PYTEST_CMD} --max-vram-gib=${{ inputs.max_vram_gib }}"
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -225,6 +233,10 @@ runs:
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
           PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
+          PYTEST_CMD="${PYTEST_CMD} --max-vram-gib=${{ inputs.max_vram_gib }}"
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions

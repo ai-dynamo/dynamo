@@ -623,6 +623,7 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.max_vram_gib(24.6),  # observed peak 22.3 GiB (+10% safety)
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
@@ -816,6 +817,7 @@ def test_serve_deployment(
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 def test_multimodal_b64(
     request,
     runtime_services_dynamic_ports,

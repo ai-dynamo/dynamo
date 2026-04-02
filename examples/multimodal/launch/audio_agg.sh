@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/../../common/gpu_utils.sh"
 MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
 PROMPT_TEMPLATE=""
 PROVIDED_PROMPT_TEMPLATE=""
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -93,10 +94,10 @@ python -m dynamo.frontend --http-port 8000 &
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME")
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN")
 
 CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill --max-model-len "$MAX_MODEL_LEN" ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} &
 
 # Wait for all background processes to complete
 wait

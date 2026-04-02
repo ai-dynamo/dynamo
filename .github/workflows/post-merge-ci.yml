@@ -39,6 +39,8 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
+      single_gpu_test_max_vram_gib: '22'
+      multi_gpu_test_max_vram_gib: '22'
     secrets: inherit
 
   # ============================================================================
@@ -64,6 +66,8 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
+      single_gpu_test_max_vram_gib: '22'
+      multi_gpu_test_max_vram_gib: '22'
     secrets: inherit
 
   # ============================================================================
@@ -89,6 +93,8 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
+      single_gpu_test_max_vram_gib: '22'
+      multi_gpu_test_max_vram_gib: '22'
     secrets: inherit
 
   # ============================================================================
