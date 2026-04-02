@@ -14,7 +14,7 @@
 //! duplicate or conflicting store arrives, the existing mapping wins and the new
 //! event is ignored.
 
-use std::{collections::BTreeMap, hash::BuildHasher};
+use std::hash::BuildHasher;
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -27,7 +27,6 @@ use crate::protocols::{
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
-type Frontier = BTreeMap<usize, FrontierBuckets>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
 type WorkerBlockIndex =
     FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
@@ -343,6 +342,16 @@ impl LowerTierIndexer {
         self.query_match_details(local_hashes, continuations).hits
     }
 
+    /// For each worker, counts how many contiguous lower-tier blocks match
+    /// starting from the worker's continuation point, and returns the updated
+    /// continuation state.
+    ///
+    /// Workers may start at different positions in `local_hashes` (each has its
+    /// own `LowerTierContinuation`). The algorithm groups workers that share a
+    /// start position into "breakpoints", sorts them, and advances each group
+    /// forward through the hash sequence one position at a time. When a group
+    /// reaches the next breakpoint it pauses so the two groups can be merged
+    /// (workers that converge onto the same edge path are walked together).
     pub fn query_match_details<S>(
         &self,
         local_hashes: &[LocalBlockHash],
@@ -351,25 +360,48 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
-        let mut frontier = Frontier::new();
-        for (worker, continuation) in continuations {
-            frontier
-                .entry(continuation.start_pos)
-                .or_default()
-                .entry(continuation.last_matched_hash)
-                .or_default()
-                .insert(*worker);
+        // Build the sorted breakpoint list. Each entry is a position in the
+        // hash sequence and a set of (parent_hash -> workers) groups that start
+        // walking from that position. The set of positions is fixed — the walk
+        // never creates new breakpoints, it only merges overflow workers into
+        // the next existing one.
+        let mut breakpoints: Vec<(usize, FrontierBuckets)> = Vec::new();
+        {
+            let mut pos_index: FxHashMap<usize, usize> = FxHashMap::default();
+            for (worker, continuation) in continuations {
+                let idx = match pos_index.get(&continuation.start_pos) {
+                    Some(&idx) => idx,
+                    None => {
+                        let idx = breakpoints.len();
+                        pos_index.insert(continuation.start_pos, idx);
+                        breakpoints.push((continuation.start_pos, FrontierBuckets::default()));
+                        idx
+                    }
+                };
+                breakpoints[idx]
+                    .1
+                    .entry(continuation.last_matched_hash)
+                    .or_default()
+                    .insert(*worker);
+            }
+            breakpoints.sort_unstable_by_key(|(pos, _)| *pos);
         }
 
         let mut final_states = FinalStates::default();
 
-        while let Some((&pos, _)) = frontier.iter().next() {
-            let states = frontier.remove(&pos).unwrap();
-            let next_breakpoint = frontier
-                .keys()
-                .next()
-                .copied()
+        // Process breakpoints front-to-back. Each group walks forward until it
+        // hits the next breakpoint or runs out of matching edges. Workers that
+        // survive to the next breakpoint are collected as "overflow" and merged
+        // into that breakpoint's buckets before it gets processed.
+        for idx in 0..breakpoints.len() {
+            let pos = breakpoints[idx].0;
+            let states = std::mem::take(&mut breakpoints[idx].1);
+            let next_breakpoint = breakpoints
+                .get(idx + 1)
+                .map(|(p, _)| *p)
                 .unwrap_or(local_hashes.len());
+
+            let mut overflow = FrontierBuckets::default();
 
             for (parent_hash, workers) in states {
                 advance_state_to_breakpoint(
@@ -379,12 +411,22 @@ impl LowerTierIndexer {
                     parent_hash,
                     workers,
                     next_breakpoint,
-                    &mut frontier,
+                    &mut overflow,
                     &mut final_states,
                 );
             }
+
+            if !overflow.is_empty() {
+                if let Some((_, next_buckets)) = breakpoints.get_mut(idx + 1) {
+                    for (hash, workers) in overflow {
+                        next_buckets.entry(hash).or_default().extend(workers);
+                    }
+                }
+            }
         }
 
+        // Convert final_states into the result. Workers that never appeared in
+        // final_states (e.g. empty sequence) keep their original continuation.
         let mut results = LowerTierMatchDetails::default();
         for (worker, continuation) in continuations {
             let (final_pos, final_hash) = final_states
@@ -472,6 +514,16 @@ impl SyncIndexer for LowerTierIndexer {
     }
 }
 
+/// Walks a group of workers sharing the same `(start_pos, parent_hash)` forward
+/// through `local_hashes`, one position at a time, until `next_breakpoint`.
+///
+/// At each position the function looks up the edge `(cur_hash, local_hash) ->
+/// child_hash` and partitions workers into those that own the edge (they
+/// continue) and those that don't (they are finalized at this position).
+///
+/// Workers that survive all the way to `next_breakpoint` are placed into
+/// `overflow` so the caller can merge them into the next breakpoint's groups.
+/// Workers that reach the end of `local_hashes` are finalized instead.
 fn advance_state_to_breakpoint(
     index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
@@ -479,14 +531,37 @@ fn advance_state_to_breakpoint(
     start_hash: Option<ExternalSequenceBlockHash>,
     workers: WorkerSet,
     next_breakpoint: usize,
-    frontier: &mut Frontier,
+    overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
 ) {
     let mut cur_pos = start_pos;
     let mut cur_hash = start_hash;
     let mut active = workers;
 
+    // When only one worker is active we can skip all set bookkeeping and just
+    // do a straight edge-lookup loop.
+    if active.len() == 1 {
+        let worker = active.into_iter().next().unwrap();
+        advance_single_worker(
+            index,
+            local_hashes,
+            worker,
+            &mut cur_pos,
+            &mut cur_hash,
+            next_breakpoint,
+            overflow,
+            final_states,
+        );
+        return;
+    }
+
+    // Reusable scratch buffer for partitioning workers each iteration, avoids
+    // allocating new HashSets on every step.
+    let mut scratch = WorkerSet::default();
+
     while cur_pos < next_breakpoint && !active.is_empty() {
+        // Look up the edge for the current (parent_hash, local_hash) pair.
+        // If no edge exists, no worker can continue — finalize everyone.
         let Some(edge) = index.edges.get(&TransitionKey {
             parent_hash: cur_hash,
             local_hash: local_hashes[cur_pos],
@@ -495,39 +570,118 @@ fn advance_state_to_breakpoint(
             break;
         };
 
-        let mut matched = WorkerSet::default();
-        let mut unmatched = WorkerSet::default();
-        for worker in active.drain() {
-            if edge.contains(&worker) {
-                matched.insert(worker);
-            } else {
-                unmatched.insert(worker);
+        // Partition active workers into matched (own the edge) and unmatched.
+        // For single-owner edges we can check membership in O(1) instead of
+        // iterating all active workers. For multi-owner edges we iterate
+        // whichever side is smaller.
+        match edge.value() {
+            EdgeOwnersEntry::Single { owner, .. } => {
+                if active.remove(owner) {
+                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
+                    active.insert(*owner);
+                } else {
+                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
+                    break;
+                }
+            }
+            EdgeOwnersEntry::Multi { owners, .. } => {
+                if owners.len() <= active.len() {
+                    scratch.clear();
+                    for owner in owners {
+                        if active.remove(owner) {
+                            scratch.insert(*owner);
+                        }
+                    }
+                    finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
+                    std::mem::swap(&mut active, &mut scratch);
+                } else {
+                    scratch.clear();
+                    for worker in active.drain() {
+                        if owners.contains(&worker) {
+                            scratch.insert(worker);
+                        } else {
+                            final_states.insert(worker, (cur_pos, cur_hash));
+                        }
+                    }
+                    std::mem::swap(&mut active, &mut scratch);
+                }
+
+                if active.is_empty() {
+                    break;
+                }
             }
         }
 
-        finalize_workers(final_states, unmatched, cur_pos, cur_hash);
-        if matched.is_empty() {
-            break;
-        }
-
-        active = matched;
         cur_hash = Some(edge.child_hash());
         cur_pos += 1;
+
+        // If we're down to one worker, switch to the scalar loop for the
+        // remaining positions to avoid set overhead.
+        if active.len() == 1 {
+            let worker = active.into_iter().next().unwrap();
+            advance_single_worker(
+                index,
+                local_hashes,
+                worker,
+                &mut cur_pos,
+                &mut cur_hash,
+                next_breakpoint,
+                overflow,
+                final_states,
+            );
+            return;
+        }
     }
 
     if active.is_empty() {
         return;
     }
 
+    // Workers that reached the breakpoint without dropping off. If we're past
+    // the end of the sequence they're finalized; otherwise they overflow into
+    // the next breakpoint for continued walking.
     if cur_pos >= local_hashes.len() {
         finalize_workers(final_states, active, cur_pos, cur_hash);
     } else {
-        frontier
-            .entry(cur_pos)
-            .or_default()
-            .entry(cur_hash)
-            .or_default()
-            .extend(active);
+        overflow.entry(cur_hash).or_default().extend(active);
+    }
+}
+
+/// Simplified walk for exactly one worker. Just does sequential edge lookups
+/// without any set operations — either the worker owns each edge and continues,
+/// or it stops.
+fn advance_single_worker(
+    index: &LowerTierIndexer,
+    local_hashes: &[LocalBlockHash],
+    worker: WorkerWithDpRank,
+    cur_pos: &mut usize,
+    cur_hash: &mut Option<ExternalSequenceBlockHash>,
+    next_breakpoint: usize,
+    overflow: &mut FrontierBuckets,
+    final_states: &mut FinalStates,
+) {
+    while *cur_pos < next_breakpoint {
+        let Some(edge) = index.edges.get(&TransitionKey {
+            parent_hash: *cur_hash,
+            local_hash: local_hashes[*cur_pos],
+        }) else {
+            final_states.insert(worker, (*cur_pos, *cur_hash));
+            return;
+        };
+
+        if !edge.contains(&worker) {
+            final_states.insert(worker, (*cur_pos, *cur_hash));
+            return;
+        }
+
+        *cur_hash = Some(edge.child_hash());
+        *cur_pos += 1;
+    }
+
+    if *cur_pos >= local_hashes.len() {
+        final_states.insert(worker, (*cur_pos, *cur_hash));
+    } else {
+        overflow.entry(*cur_hash).or_default().insert(worker);
     }
 }
 
@@ -1287,5 +1441,322 @@ mod tests {
             conflicting_hits.get(&WorkerWithDpRank::new(47, 0)),
             Some(&0)
         );
+    }
+
+    // --- Tests targeting optimization edge cases ---
+
+    /// Single-worker fast path: exercises the scalar loop that skips set
+    /// operations when only one worker is in the continuation map.
+    #[test]
+    fn single_worker_fast_path_full_match() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                50, 0, 0, None, &[1, 2, 3, 4, 5], &[101, 102, 103, 104, 105],
+            ))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(50, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2, 3, 4, 5]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(50, 0)), Some(&5));
+        assert_eq!(
+            details.next_continuations.get(&WorkerWithDpRank::new(50, 0)),
+            Some(&LowerTierContinuation::new(
+                5,
+                ExternalSequenceBlockHash(105),
+            )),
+        );
+    }
+
+    /// Single-worker fast path where the worker doesn't own the edge.
+    #[test]
+    fn single_worker_fast_path_no_match() {
+        let mut index = TestLowerTierIndex::new();
+        // Worker 50 owns the chain, but we query with worker 51.
+        index
+            .apply_event(store_event(50, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(51, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[1, 2]), &continuations);
+        assert_eq!(hits.get(&WorkerWithDpRank::new(51, 0)), Some(&0));
+    }
+
+    /// Single-worker partial match: worker owns the first two edges but the
+    /// third edge doesn't exist, testing early termination in the scalar loop.
+    #[test]
+    fn single_worker_fast_path_partial_match() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(52, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(52, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(52, 0)), Some(&2));
+        assert_eq!(
+            details.next_continuations.get(&WorkerWithDpRank::new(52, 0)),
+            Some(&LowerTierContinuation::new(
+                2,
+                ExternalSequenceBlockHash(102),
+            )),
+        );
+    }
+
+    /// Exercises the Single-edge flip: two workers query, but the edge is
+    /// owned by only one of them (Single variant). The non-owner should be
+    /// finalized immediately.
+    #[test]
+    fn single_edge_owner_splits_active_set() {
+        let mut index = TestLowerTierIndex::new();
+        // Only worker 60 owns this chain.
+        index
+            .apply_event(store_event(60, 0, 0, None, &[1, 2, 3], &[101, 102, 103]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(60, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(61, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(60, 0)), Some(&3));
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(61, 0)), Some(&0));
+    }
+
+    /// Multiple workers share an edge (Multi variant), but only a subset are
+    /// active. Tests the min-side iteration path.
+    #[test]
+    fn multi_edge_subset_of_owners_active() {
+        let mut index = TestLowerTierIndex::new();
+        // Workers 70, 71, 72 all own the same chain.
+        index
+            .apply_event(store_event(70, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(71, 0, 1, None, &[1, 2], &[101, 102]))
+            .unwrap();
+        index
+            .apply_event(store_event(72, 0, 2, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        // Query with only workers 70 and 71 (active < owners wouldn't apply
+        // here since counts are close, but the Multi branch is exercised).
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(70, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(71, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(70, 0)), Some(&2));
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(71, 0)), Some(&2));
+    }
+
+    /// Multi-worker walk where one worker drops off mid-sequence, causing the
+    /// set to shrink to 1 and triggering the mid-loop scalar fast path.
+    #[test]
+    fn multi_to_single_worker_transition_mid_walk() {
+        let mut index = TestLowerTierIndex::new();
+        // Worker 80 owns [1,2,3,4], worker 81 owns only [1,2].
+        index
+            .apply_event(store_event(
+                80, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104],
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event(81, 0, 1, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(80, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(81, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(80, 0)), Some(&4));
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(81, 0)), Some(&2));
+        assert_eq!(
+            details.next_continuations.get(&WorkerWithDpRank::new(80, 0)),
+            Some(&LowerTierContinuation::new(
+                4,
+                ExternalSequenceBlockHash(104),
+            )),
+        );
+        assert_eq!(
+            details.next_continuations.get(&WorkerWithDpRank::new(81, 0)),
+            Some(&LowerTierContinuation::new(
+                2,
+                ExternalSequenceBlockHash(102),
+            )),
+        );
+    }
+
+    /// All active workers drop off at the same position because none of them
+    /// own the edge (Single variant, owner not in active set).
+    #[test]
+    fn single_edge_no_active_worker_owns_it() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(90, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(91, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(92, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(91, 0)), Some(&0));
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(92, 0)), Some(&0));
+    }
+
+    /// Single-worker fast path hitting the breakpoint boundary — worker starts
+    /// at pos 0 but a second worker's start_pos creates a breakpoint at pos 2.
+    /// The first worker should stop at the breakpoint, then be re-merged in the
+    /// frontier and continue.
+    #[test]
+    fn single_worker_stops_at_breakpoint_then_continues() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                95, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104],
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event(96, 0, 1, Some(102), &[3, 4], &[103, 104]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(95, 0),
+            LowerTierContinuation::from_root(0),
+        );
+        continuations.insert(
+            WorkerWithDpRank::new(96, 0),
+            LowerTierContinuation::new(2, ExternalSequenceBlockHash(102)),
+        );
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(95, 0)), Some(&4));
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(96, 0)), Some(&2));
+    }
+
+    /// Exercises the Multi-edge path where the active set is larger than the
+    /// owner set (iterate owners side).
+    #[test]
+    fn multi_edge_fewer_owners_than_active_workers() {
+        let mut index = TestLowerTierIndex::new();
+        // Edge owned by workers 100 and 101 (Multi with 2 owners).
+        index
+            .apply_event(store_event(100, 0, 0, None, &[1], &[101]))
+            .unwrap();
+        index
+            .apply_event(store_event(101, 0, 1, None, &[1], &[101]))
+            .unwrap();
+
+        // Query with 4 workers — only 2 own the edge.
+        let mut continuations = FxHashMap::default();
+        for id in 100..104 {
+            continuations.insert(
+                WorkerWithDpRank::new(id, 0),
+                LowerTierContinuation::from_root(0),
+            );
+        }
+
+        let details =
+            index.query_match_details(&local_hashes(&[1]), &continuations);
+        assert_eq!(
+            details.hits.get(&WorkerWithDpRank::new(100, 0)),
+            Some(&1),
+        );
+        assert_eq!(
+            details.hits.get(&WorkerWithDpRank::new(101, 0)),
+            Some(&1),
+        );
+        assert_eq!(
+            details.hits.get(&WorkerWithDpRank::new(102, 0)),
+            Some(&0),
+        );
+        assert_eq!(
+            details.hits.get(&WorkerWithDpRank::new(103, 0)),
+            Some(&0),
+        );
+    }
+
+    /// Empty continuations map — should return empty results without panicking.
+    #[test]
+    fn empty_continuations_returns_empty_results() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(110, 0, 0, None, &[1, 2], &[101, 102]))
+            .unwrap();
+
+        let continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation> =
+            FxHashMap::default();
+
+        let details =
+            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        assert!(details.hits.is_empty());
+        assert!(details.next_continuations.is_empty());
+    }
+
+    /// Empty sequence — every worker should get 0 hits.
+    #[test]
+    fn empty_sequence_returns_zero_hits() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(111, 0, 0, None, &[1], &[101]))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(111, 0),
+            LowerTierContinuation::from_root(0),
+        );
+
+        let details = index.query_match_details(&local_hashes(&[]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 }
