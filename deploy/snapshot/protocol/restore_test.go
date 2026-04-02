@@ -3,6 +3,7 @@ package protocol
 import (
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -208,5 +209,46 @@ func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
 
 	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "restore target must have exactly one container, got 2" {
 		t.Fatalf("expected multi-container restore target to be rejected, got %v", err)
+	}
+}
+
+func TestDiscoverStorageFromDaemonSetsUsesCheckpointsVolume(t *testing.T) {
+	daemonSet := appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-agent", Namespace: "test-ns"},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "cache", MountPath: "/cache"},
+							{Name: SnapshotAgentVolumeName, MountPath: "/checkpoints"},
+						},
+					}},
+					Volumes: []corev1.Volume{
+						{
+							Name: "cache",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cache-pvc"},
+							},
+						},
+						{
+							Name: SnapshotAgentVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	storage, err := DiscoverStorageFromDaemonSets("test-ns", []appsv1.DaemonSet{daemonSet})
+	if err != nil {
+		t.Fatalf("expected daemonset storage discovery to succeed, got %v", err)
+	}
+	if storage.PVCName != "snapshot-pvc" || storage.BasePath != "/checkpoints" {
+		t.Fatalf("expected snapshot PVC discovery, got %#v", storage)
 	}
 }
