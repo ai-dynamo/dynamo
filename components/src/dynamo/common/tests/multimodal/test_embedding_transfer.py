@@ -21,6 +21,14 @@ from dynamo.common.multimodal.embedding_transfer import (
     RingBuffer,
 )
 
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.unit,
+    pytest.mark.multimodal,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 logger = logging.getLogger(__name__)
 
 # GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
