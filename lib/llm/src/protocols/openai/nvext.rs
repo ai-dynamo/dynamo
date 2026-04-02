@@ -49,13 +49,6 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
-
-    /// Return the effective cache control for this request.
-    /// Default: delegates to `nvext.cache_control`. Implementations may override
-    /// to also check a top-level `cache_control` field (see `NvCreateChatCompletionRequest`).
-    fn effective_cache_control(&self) -> Option<&CacheControl> {
-        self.nvext().and_then(|ext| ext.cache_control.as_ref())
-    }
 }
 
 /// Worker ID information for disaggregated serving
@@ -169,12 +162,6 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
 
-    /// Cache control hint (Anthropic-style). When present, the router pins
-    /// the prefix on the selected worker with the given TTL.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-
     /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,10 +200,6 @@ pub struct AgentHints {
     #[schema(ignore)]
     pub latency_sensitivity: Option<f64>,
 }
-
-// Re-export CacheControl types from dynamo-async-openai where they are canonically defined
-// alongside the Anthropic protocol types they originate from.
-pub use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
 impl Default for NvExt {
     fn default() -> Self {
@@ -265,74 +248,7 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.cache_control, None);
-    }
-
-    // Test CacheControl serde roundtrip and TTL parsing
-    #[test]
-    fn test_cache_control_serde_and_ttl() {
-        // Default (ephemeral, no TTL)
-        let cc = CacheControl::default();
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl, None);
-        assert_eq!(cc.ttl_seconds(), 300);
-
-        // Shorthand values
-        let cc_5m = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("5m".to_string()),
-        };
-        assert_eq!(cc_5m.ttl_seconds(), 300);
-
-        let cc_1h = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("1h".to_string()),
-        };
-        assert_eq!(cc_1h.ttl_seconds(), 3600);
-
-        // Integer seconds -- within range
-        let cc_600 = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("600".to_string()),
-        };
-        assert_eq!(cc_600.ttl_seconds(), 600);
-
-        // Integer seconds -- clamped to min (300)
-        let cc_low = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("10".to_string()),
-        };
-        assert_eq!(cc_low.ttl_seconds(), 300);
-
-        // Integer seconds -- clamped to max (3600)
-        let cc_high = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("7200".to_string()),
-        };
-        assert_eq!(cc_high.ttl_seconds(), 3600);
-
-        // Unrecognized string defaults to 300
-        let cc_bad = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("forever".to_string()),
-        };
-        assert_eq!(cc_bad.ttl_seconds(), 300);
-
-        // Serde roundtrip
-        let json = serde_json::to_string(&cc_5m).unwrap();
-        let deser: CacheControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, cc_5m);
-
-        // Deserialize from API-style JSON
-        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
-        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
-        assert_eq!(from_api.ttl_seconds(), 3600);
-
-        // NvExt with cache_control
-        let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;
-        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
-        assert!(nvext.cache_control.is_some());
-        assert_eq!(nvext.cache_control.unwrap().ttl_seconds(), 300);
+        assert_eq!(nv_ext.request_timestamp_ms, None);
     }
 
     // Test valid builder configurations

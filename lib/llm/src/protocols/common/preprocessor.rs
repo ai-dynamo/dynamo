@@ -58,10 +58,6 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
-    /// TTL in seconds for cache control pinning. None = no pinning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_ttl: Option<u64>,
-
     /// Worker IDs provided externally and not discovered by the router.
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
