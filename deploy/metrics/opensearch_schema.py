@@ -90,19 +90,15 @@ WORKFLOW_FIELDS = {
     # Workflow identification
     "workflow_id": "s_workflow_id",
     "workflow_name": "s_workflow_name",
-
     # Status fields
     "status": "s_status",
     "status_number": "l_status_number",
-
     # Timing fields
     "queue_time_sec": "l_queue_time_sec",
     "duration_sec": "l_duration_sec",
-
     # Retry fields
     "run_attempt": "l_run_attempt",
     "retry_count": "l_retry_count",
-
     # Annotation fields
     "annotation_count": "l_annotation_count",
     "annotation_failure_count": "l_annotation_failure_count",
@@ -115,24 +111,19 @@ JOB_FIELDS = {
     # Job identification
     "job_id": "s_job_id",
     "job_name": "s_job_name",
-
     # Runner fields
     "runner_id": "s_runner_id",
     "runner_name": "s_runner_name",
     "runner_prefix": "s_runner_prefix",
-
     # Status fields
     "status": "s_status",
     "status_number": "l_status_number",
-
     # Timing fields
     "queue_time_sec": "l_queue_time_sec",
     "duration_sec": "l_duration_sec",
-
     # Retry fields
     "run_attempt": "l_run_attempt",
     "retry_count": "l_retry_count",
-
     # Annotation fields
     "annotation_count": "l_annotation_count",
     "annotation_failure_count": "l_annotation_failure_count",
@@ -148,14 +139,11 @@ STEP_FIELDS = {
     "step_name": "s_step_name",
     "step_number": "l_step_number",
     "command": "s_command",
-
     # Status fields
     "status": "s_status",
     "status_number": "l_status_number",
-
     # Timing fields
     "duration_sec": "l_duration_sec",
-
     # Retry fields
     "run_attempt": "l_run_attempt",
     "retry_count": "l_retry_count",
@@ -216,34 +204,28 @@ ISSUE_FIELDS = {
 COMMON_FIELDS = {
     # Document ID
     "id": "_id",
-
     # Repository context
     "repo": "s_repo",
     "user_alias": "s_user_alias",
     "commit_sha": "s_commit_sha",
     "branch": "s_branch",
     "pr_id": "s_pr_id",
-
     # Workflow context
     "workflow_id": "s_workflow_id",
     "workflow_name": "s_workflow_name",
     "github_event": "s_github_event",
     "run_id": "s_run_id",
-
     # Job context
     "job_id": "s_job_id",
     "job_name": "s_job_name",
     "runner_name": "s_runner_name",
-
     # Step context
     "step_id": "s_step_id",
-
     # Test/Build context
     "status": "s_status",
     "framework": "s_framework",
     "test_type": "s_test_type",
     "arch": "s_arch",
-
     # Timestamp
     "timestamp": "@timestamp",
 }
@@ -251,6 +233,7 @@ COMMON_FIELDS = {
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
 
 def get_field(category: str, field_name: str) -> str:
     """
@@ -269,18 +252,18 @@ def get_field(category: str, field_name: str) -> str:
         's_job_id'
     """
     categories = {
-        'test': TEST_FIELDS,
-        'container': CONTAINER_FIELDS,
-        'stage': STAGE_FIELDS,
-        'layer': LAYER_FIELDS,
-        'workflow': WORKFLOW_FIELDS,
-        'job': JOB_FIELDS,
-        'step': STEP_FIELDS,
-        'pr': PR_FIELDS,
-        'review': REVIEW_FIELDS,
-        'commit': COMMIT_FIELDS,
-        'issue': ISSUE_FIELDS,
-        'common': COMMON_FIELDS,
+        "test": TEST_FIELDS,
+        "container": CONTAINER_FIELDS,
+        "stage": STAGE_FIELDS,
+        "layer": LAYER_FIELDS,
+        "workflow": WORKFLOW_FIELDS,
+        "job": JOB_FIELDS,
+        "step": STEP_FIELDS,
+        "pr": PR_FIELDS,
+        "review": REVIEW_FIELDS,
+        "commit": COMMIT_FIELDS,
+        "issue": ISSUE_FIELDS,
+        "common": COMMON_FIELDS,
     }
 
     if category not in categories:
@@ -303,18 +286,18 @@ def get_all_fields(category: str) -> dict:
         Dictionary mapping field names to OpenSearch field names
     """
     categories = {
-        'test': TEST_FIELDS,
-        'container': CONTAINER_FIELDS,
-        'stage': STAGE_FIELDS,
-        'layer': LAYER_FIELDS,
-        'workflow': WORKFLOW_FIELDS,
-        'job': JOB_FIELDS,
-        'step': STEP_FIELDS,
-        'pr': PR_FIELDS,
-        'review': REVIEW_FIELDS,
-        'commit': COMMIT_FIELDS,
-        'issue': ISSUE_FIELDS,
-        'common': COMMON_FIELDS,
+        "test": TEST_FIELDS,
+        "container": CONTAINER_FIELDS,
+        "stage": STAGE_FIELDS,
+        "layer": LAYER_FIELDS,
+        "workflow": WORKFLOW_FIELDS,
+        "job": JOB_FIELDS,
+        "step": STEP_FIELDS,
+        "pr": PR_FIELDS,
+        "review": REVIEW_FIELDS,
+        "commit": COMMIT_FIELDS,
+        "issue": ISSUE_FIELDS,
+        "common": COMMON_FIELDS,
     }
 
     if category not in categories:

@@ -63,7 +63,9 @@ def _extract_from_zip(zip_path: Path) -> Optional[Dict[str, Any]]:
                 if (
                     file_name.endswith("build_metrics.json")
                     or file_name == "build_metrics.json"
-                    or (file_name.startswith("metrics-") and file_name.endswith(".json"))
+                    or (
+                        file_name.startswith("metrics-") and file_name.endswith(".json")
+                    )
                     or file_name.endswith("-metrics.json")
                     or (file_name.startswith("build-") and file_name.endswith(".json"))
                 ):

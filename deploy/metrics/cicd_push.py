@@ -38,11 +38,11 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
+from loki_exporter import LokiExporter
 from opensearch_schema import (
     FIELD_ARCH,
-    FIELD_BRANCH,
     FIELD_BUILD_DURATION_SEC,
     FIELD_BUILD_FRAMEWORK,
     FIELD_BUILD_PLATFORM,
@@ -51,13 +51,9 @@ from opensearch_schema import (
     FIELD_BUILT_STEPS,
     FIELD_CACHE_HIT_RATE,
     FIELD_CACHED_STEPS,
-    FIELD_COMMIT_SHA,
     FIELD_ERROR_MESSAGE,
     FIELD_FRAMEWORK,
-    FIELD_GITHUB_EVENT,
     FIELD_ID,
-    FIELD_JOB_ID,
-    FIELD_JOB_NAME,
     FIELD_LAYER_CACHED,
     FIELD_LAYER_COMMAND,
     FIELD_LAYER_DURATION_SEC,
@@ -66,10 +62,6 @@ from opensearch_schema import (
     FIELD_LAYER_STATUS,
     FIELD_LAYER_STEP_NAME,
     FIELD_LAYER_STEP_NUMBER,
-    FIELD_PR_ID,
-    FIELD_REPO,
-    FIELD_RUN_ID,
-    FIELD_RUNNER_NAME,
     FIELD_STAGE_CACHE_HIT_RATE,
     FIELD_STAGE_DURATION_SEC,
     FIELD_STAGE_NAME,
@@ -80,16 +72,11 @@ from opensearch_schema import (
     FIELD_TEST_STATUS,
     FIELD_TEST_TYPE,
     FIELD_TOTAL_STEPS,
-    FIELD_USER_ALIAS,
-    FIELD_WORKFLOW_ID,
-    FIELD_WORKFLOW_NAME,
 )
 from parsers.build_metrics import parse_build_metrics_json
 from parsers.github_context import GitHubActionsContext
 from parsers.junit_xml import parse_junit_xml_directory
 from prometheus_exporter import PrometheusExporter
-from loki_exporter import LokiExporter
-
 
 # ── Document builders ─────────────────────────────────────────────────────
 # These construct the same s_*/l_* prefixed dicts the exporters expect.
@@ -107,7 +94,9 @@ def build_job_document(
     doc = {**common}
     doc[FIELD_ID] = f"ci-push-job-{ctx.run_id}-{ctx.job_name}"
     doc[FIELD_STATUS] = status
-    doc["l_status_number"] = 1 if status == "success" else (0 if status == "failure" else None)
+    doc["l_status_number"] = (
+        1 if status == "success" else (0 if status == "failure" else None)
+    )
     doc["s_runner_prefix"] = _extract_runner_prefix(ctx.runner_name)
     doc["@timestamp"] = timestamp
 
@@ -144,7 +133,11 @@ def build_test_document(
     doc[FIELD_TEST_DURATION] = int(test["time"] * 1000)  # ms
     doc[FIELD_TEST_STATUS] = test["status"]
     doc[FIELD_STATUS] = test["status"]
-    doc["l_test_status_number"] = 1 if test["status"] == "passed" else (0 if test["status"] in ("failed", "error") else None)
+    doc["l_test_status_number"] = (
+        1
+        if test["status"] == "passed"
+        else (0 if test["status"] in ("failed", "error") else None)
+    )
     doc[FIELD_FRAMEWORK] = args.framework or "unknown"
     doc[FIELD_TEST_TYPE] = args.test_type or "unknown"
     doc[FIELD_ARCH] = args.arch or common.get("s_arch", "unknown")
@@ -254,7 +247,9 @@ def _extract_runner_prefix(runner_name: str) -> str:
     if version_match:
         return version_match.group(1)
 
-    runner_suffix_match = re.match(r"^(.*?)-[a-z0-9]{4,8}-runner-[a-z0-9]+$", runner_name)
+    runner_suffix_match = re.match(
+        r"^(.*?)-[a-z0-9]{4,8}-runner-[a-z0-9]+$", runner_name
+    )
     if runner_suffix_match:
         return runner_suffix_match.group(1)
 
@@ -270,12 +265,21 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Targets
-    parser.add_argument("--otlp-endpoint", help="OTLP HTTP endpoint (e.g. https://otlp-http.nvidia.com)")
-    parser.add_argument("--otlp-token", help="Bearer token for OTLP auth (or set OTLP_TOKEN env / use --otlp-token-file)")
-    parser.add_argument("--otlp-token-file", help="File containing the OTLP bearer token")
+    parser.add_argument(
+        "--otlp-endpoint", help="OTLP HTTP endpoint (e.g. https://otlp-http.nvidia.com)"
+    )
+    parser.add_argument(
+        "--otlp-token",
+        help="Bearer token for OTLP auth (or set OTLP_TOKEN env / use --otlp-token-file)",
+    )
+    parser.add_argument(
+        "--otlp-token-file", help="File containing the OTLP bearer token"
+    )
 
     # Data sources
-    parser.add_argument("--test-results", help="Path to directory containing JUnit XML files")
+    parser.add_argument(
+        "--test-results", help="Path to directory containing JUnit XML files"
+    )
     parser.add_argument("--build-metrics", help="Path to build_metrics.json file")
 
     # Metadata
@@ -285,11 +289,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cuda-version", help="CUDA version")
 
     # Job timing
-    parser.add_argument("--job-started-at", help="Job start time ISO 8601 (from github.run_started_at)")
-    parser.add_argument("--job-status", help="Job conclusion: success/failure/cancelled")
+    parser.add_argument(
+        "--job-started-at", help="Job start time ISO 8601 (from github.run_started_at)"
+    )
+    parser.add_argument(
+        "--job-status", help="Job conclusion: success/failure/cancelled"
+    )
 
     # Behavior
-    parser.add_argument("--service-name", default="dynamo-cicd-metrics", help="OTLP service name")
+    parser.add_argument(
+        "--service-name", default="dynamo-cicd-metrics", help="OTLP service name"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Log without pushing")
 
     return parser.parse_args()
@@ -299,7 +309,12 @@ def main() -> None:
     args = parse_args()
 
     # Resolve OTLP token
-    otlp_token = args.otlp_token or os.environ.get("OTLP_TOKEN") or os.environ.get("OTEL_AUTH_TOKEN") or ""
+    otlp_token = (
+        args.otlp_token
+        or os.environ.get("OTLP_TOKEN")
+        or os.environ.get("OTEL_AUTH_TOKEN")
+        or ""
+    )
     if not otlp_token and args.otlp_token_file:
         try:
             with open(args.otlp_token_file) as f:
@@ -371,19 +386,29 @@ def main() -> None:
         else:
             metrics = parse_build_metrics_json(metrics_path)
             if metrics and "container" in metrics:
-                container_doc = build_container_document(metrics, common, args, timestamp)
+                container_doc = build_container_document(
+                    metrics, common, args, timestamp
+                )
                 prometheus.record_container(container_doc)
-                print(f"Recorded container metrics: {container_doc.get(FIELD_BUILD_FRAMEWORK)}")
+                print(
+                    f"Recorded container metrics: {container_doc.get(FIELD_BUILD_FRAMEWORK)}"
+                )
 
                 for stage in metrics.get("stages", []):
-                    stage_doc = build_stage_document(stage, metrics, common, args, timestamp)
+                    stage_doc = build_stage_document(
+                        stage, metrics, common, args, timestamp
+                    )
                     prometheus.record_stage(stage_doc)
 
                 for layer in metrics.get("layers", []):
-                    layer_doc = build_layer_document(layer, metrics, common, args, timestamp)
+                    layer_doc = build_layer_document(
+                        layer, metrics, common, args, timestamp
+                    )
                     loki.record_build_layer(layer_doc)
 
-                print(f"Recorded {len(metrics.get('stages', []))} stages, {len(metrics.get('layers', []))} layers")
+                print(
+                    f"Recorded {len(metrics.get('stages', []))} stages, {len(metrics.get('layers', []))} layers"
+                )
             else:
                 print("Warning: build metrics missing 'container' field")
 

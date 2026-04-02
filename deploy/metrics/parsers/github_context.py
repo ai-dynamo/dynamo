@@ -17,7 +17,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
@@ -104,8 +104,11 @@ class GitHubActionsContext:
             try:
                 with open(event_path) as f:
                     data = json.load(f)
-                pr_num = (data.get("pull_request") or data.get("number") or
-                          (data.get("pull_request", {}) or {}).get("number"))
+                pr_num = (
+                    data.get("pull_request")
+                    or data.get("number")
+                    or (data.get("pull_request", {}) or {}).get("number")
+                )
                 if pr_num:
                     return str(pr_num)
             except Exception:
