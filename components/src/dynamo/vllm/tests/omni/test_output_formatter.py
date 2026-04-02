@@ -205,8 +205,14 @@ class TestDiffusionFormatterImage:
 class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
     async def test_empty_frames_returns_none(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
         f = _make_diffusion_formatter()
-        result = await f._encode_video([], "req-1", fps=16)
+        stage = MagicMock()
+        stage.images = []
+        result = await f.format(
+            stage, "req-1", request_type=RequestType.VIDEO_GENERATION
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -344,15 +350,25 @@ class TestAudioFormatterFormat:
 
 
 class TestOutputFormatter:
+    """Tests pass the full ctx that _generate_openai_mode actually sends
+    (request_type, fps, response_format, previous_text, speed) to catch
+    signature mismatches in individual formatters early."""
+
+    # Full ctx matching _generate_openai_mode's call signature
+    _FULL_CTX = dict(fps=16, response_format=None, previous_text="", speed=1.0)
+
     @pytest.mark.asyncio
     async def test_routes_text(self):
+        from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
         stage = MagicMock()
         stage.final_output_type = "text"
         stage.request_output = _make_request_output("hello world")
-        chunk = await f.format(stage, "req-1", previous_text="")
+        chunk = await f.format(
+            stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
+        )
         assert chunk["choices"][0]["delta"]["content"] == "hello world"
 
     @pytest.mark.asyncio
@@ -366,13 +382,16 @@ class TestOutputFormatter:
         img = MagicMock()
         img.save = lambda b, format: b.write(b"px")
         stage.images = [img]
-        chunk = await f.format(stage, "req-1", request_type=RequestType.CHAT_COMPLETION)
+        chunk = await f.format(
+            stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
+        )
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
 
     @pytest.mark.asyncio
     async def test_routes_audio(self):
         import numpy as np
 
+        from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
@@ -382,7 +401,9 @@ class TestOutputFormatter:
             "audio": np.random.randn(2400).astype(np.float32),
             "sr": 24000,
         }
-        chunk = await f.format(stage, "req-1")
+        chunk = await f.format(
+            stage, "req-1", request_type=RequestType.AUDIO_GENERATION, **self._FULL_CTX
+        )
         assert chunk["status"] == "completed"
 
     @pytest.mark.asyncio

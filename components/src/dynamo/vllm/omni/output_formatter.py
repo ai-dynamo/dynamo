@@ -114,8 +114,6 @@ class DiffusionFormatter:
         from dynamo.common.storage import upload_to_fs
         from dynamo.common.utils.video_utils import normalize_video_frames
 
-        if not images:
-            return None
         try:
             start_time = time.time()
             frame_list = normalize_video_frames(images)
@@ -241,9 +239,12 @@ class AudioFormatter:
     def __init__(
         self, model_name: str, media_fs: Any, media_http_url: Optional[str]
     ) -> None:
+        from dynamo.common.protocols.audio_protocol import AudioData
+
         self._model_name = model_name
         self._media_fs = media_fs
         self._media_http_url = media_http_url
+        self._AudioData = AudioData
 
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
@@ -292,9 +293,9 @@ class AudioFormatter:
                     audio_bytes,
                     self._media_http_url,
                 )
-                audio_data_obj = AudioData(url=url)
+                audio_data_obj = self._AudioData(url=url)
             else:
-                audio_data_obj = AudioData(
+                audio_data_obj = self._AudioData(
                     b64_json=base64.b64encode(audio_bytes).decode()
                 )
 
@@ -391,13 +392,6 @@ class AudioFormatter:
         ).model_dump()
 
 
-# AudioData is needed by AudioFormatter at runtime
-try:
-    from dynamo.common.protocols.audio_protocol import AudioData
-except ImportError:
-    AudioData = None  # type: ignore[assignment,misc]
-
-
 def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:
@@ -474,12 +468,14 @@ class OutputFormatter:
         if formatter is None:
             return None
 
-        # TextFormatter is sync and takes request_output, not stage_output
+        # TextFormatter is sync and takes request_output, not stage_output.
         if fmt_type == "text":
             ro = getattr(stage_output, "request_output", None)
             if not ro:
                 return None
-            return formatter.format(ro, request_id, **ctx)
+            return formatter.format(
+                ro, request_id, previous_text=ctx.get("previous_text", "")
+            )
 
         return await formatter.format(
             stage_output, request_id, request_type=request_type, **ctx
