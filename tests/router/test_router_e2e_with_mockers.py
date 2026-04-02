@@ -674,6 +674,7 @@ class DisaggMockerProcess:
             "kv",
             False,
             {"planner_profile_data": MOCKER_PROFILE_DATA_DIR},
+            marks=[pytest.mark.planner],
             id="kv-profile-data",
         ),
         pytest.param(
