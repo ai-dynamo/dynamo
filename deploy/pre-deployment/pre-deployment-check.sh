@@ -6,13 +6,37 @@
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
 # before deploying Dynamo platform.
 #
+# Usage: ./pre-deployment-check.sh [--device gpu|xpu]
+#   --device gpu  (default) Check for NVIDIA GPU nodes and GPU Operator
+#   --device xpu            Check for Intel XPU nodes and Intel Device Plugin
+#
 # Checks performed:
 # 1. kubectl connectivity - Verifies kubectl is installed and can connect to cluster
 # 2. Default StorageClass - Ensures a default StorageClass is configured
-# 3. Cluster GPU Resources - Validates GPU nodes are available
-# 4. GPU Operator - Confirms GPU operator is installed and running
+# 3. Cluster GPU/XPU Resources - Validates GPU/XPU nodes are available
+# 4. GPU/XPU Operator - Confirms the appropriate operator is installed and running
 
 set -e
+
+# Parse arguments
+DEVICE_TYPE="gpu"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)
+            DEVICE_TYPE="$2"
+            if [[ "$DEVICE_TYPE" != "gpu" && "$DEVICE_TYPE" != "xpu" ]]; then
+                echo "Error: --device must be 'gpu' or 'xpu'" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--device gpu|xpu]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -120,59 +144,128 @@ check_default_storage_class() {
 }
 
 check_cluster_resources() {
-    print_section "Checking cluster GPU resources"
+    print_section "Checking cluster ${DEVICE_TYPE^^} resources"
 
-    local node_count
-    node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
+    if [[ "$DEVICE_TYPE" == "xpu" ]]; then
+        # Path 1: Intel Device Plugin — sets node label gpu.intel.com/product
+        # Note: gpu.intel.com/i915 / gpu.intel.com/xe are allocatable *resources*, not labels.
+        local plugin_node_count
+        plugin_node_count=$(kubectl get nodes -l 'gpu.intel.com/product' -o name 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
-    if [[ $node_count -eq 0 ]]; then
-        print_status $RED "❌ No GPU nodes found in the cluster"
-        print_status $YELLOW "Dynamo requires nodes with nvidia.com/gpu.present=true label."
-        print_status $BLUE "Please ensure your cluster has GPU-enabled nodes properly labeled."
-        return 1
+        # Path 2: Intel GPU DRA driver — publishes ResourceSlice with driverName=gpu.intel.com
+        local dra_slice_count
+        dra_slice_count=$(kubectl get resourceslice -o jsonpath='{range .items[?(@.spec.driver=="gpu.intel.com")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l | tr -d ' ')
+
+        local total_xpu=$(( plugin_node_count + dra_slice_count ))
+
+        if [[ $total_xpu -eq 0 ]]; then
+            print_status $RED "❌ No Intel XPU resources found in the cluster"
+            print_status $YELLOW "Dynamo requires Intel XPU via one of:"
+            print_status $YELLOW "  - Intel GPU Device Plugin: node label gpu.intel.com/product"
+            print_status $YELLOW "  - Intel GPU DRA driver:    ResourceSlice with driver gpu.intel.com"
+            print_status $BLUE "Please install the appropriate driver/plugin before proceeding."
+            return 1
+        else
+            [[ $plugin_node_count -gt 0 ]] && print_status $GREEN "✅ Found ${plugin_node_count} Intel XPU node(s) via Device Plugin (gpu.intel.com/product)"
+            [[ $dra_slice_count -gt 0 ]]   && print_status $GREEN "✅ Found ${dra_slice_count} Intel XPU ResourceSlice(s) via DRA driver (gpu.intel.com)"
+            return 0
+        fi
     else
-        print_status $GREEN "✅ Found ${node_count} GPU node(s) in the cluster"
-        return 0
-    fi
+        # Check for NVIDIA GPU nodes via node label set by NVIDIA GPU Operator
+        local nvidia_node_count
+        nvidia_node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
 
-    # Show basic node information (commented out for cleaner output)
-    # print_status $BLUE "GPU Node information:"
-    # kubectl get nodes -l nvidia.com/gpu.present=true -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLES:.metadata.labels.'node-role\.kubernetes\.io/.*',VERSION:.status.nodeInfo.kubeletVersion 2>/dev/null || true
+        if [[ $nvidia_node_count -eq 0 ]]; then
+            print_status $RED "❌ No NVIDIA GPU nodes found in the cluster"
+            print_status $YELLOW "Dynamo requires nodes with label nvidia.com/gpu.present=true."
+            print_status $BLUE "Please ensure the NVIDIA GPU Operator is installed and nodes are labeled."
+            return 1
+        else
+            print_status $GREEN "✅ Found ${nvidia_node_count} NVIDIA GPU node(s) in the cluster"
+            return 0
+        fi
+    fi
 }
 
 check_gpu_operator() {
-    print_section "Checking GPU operator"
+    print_section "Checking ${DEVICE_TYPE^^} operator"
 
-    # Check if GPU operator pods exist and are running
-    local gpu_operator_pods
-    gpu_operator_pods=$(kubectl get pods -A -lapp=gpu-operator --no-headers 2>/dev/null || echo "")
+    if [[ "$DEVICE_TYPE" == "xpu" ]]; then
+        # Path 1: Intel Device Plugin pods (app=intel-gpu-plugin or intel-device-plugins-operator)
+        local intel_plugin_pods
+        intel_plugin_pods=$(kubectl get pods -A -lapp=intel-gpu-plugin --no-headers 2>/dev/null || echo "")
+        if [[ -z "$intel_plugin_pods" ]]; then
+            intel_plugin_pods=$(kubectl get pods -A -lcontrol-plane=controller-manager --no-headers 2>/dev/null | grep -i intel || echo "")
+        fi
 
-    if [[ -z "$gpu_operator_pods" ]]; then
-        print_status $RED "❌ GPU operator not found in the cluster"
-        print_status $YELLOW "Dynamo requires GPU operator to be installed and running."
-        print_status $BLUE "Please install GPU operator before proceeding with deployment."
-        return 1
-    fi
+        # Path 2: Intel GPU DRA driver pods (namespace intel-gpu-resource-driver)
+        local intel_dra_pods
+        intel_dra_pods=$(kubectl get pods -n intel-gpu-resource-driver --no-headers 2>/dev/null || echo "")
 
-    # Check if any GPU operator pods are running
-    local running_pods
-    running_pods=$(echo "$gpu_operator_pods" | grep -c "Running" || echo "0")
-    local total_pods
-    total_pods=$(echo "$gpu_operator_pods" | wc -l)
+        if [[ -z "$intel_plugin_pods" ]] && [[ -z "$intel_dra_pods" ]]; then
+            print_status $RED "❌ No Intel XPU driver/plugin found in the cluster"
+            print_status $YELLOW "Dynamo requires one of:"
+            print_status $YELLOW "  - Intel GPU Device Plugin: https://intel.github.io/intel-device-plugins-for-kubernetes/master/operator/README.html"
+            print_status $YELLOW "  - Intel GPU DRA driver:    https://github.com/intel/intel-resource-drivers-for-kubernetes"
+            return 1
+        fi
 
-    if [[ $running_pods -eq 0 ]]; then
-        print_status $RED "❌ GPU operator pods are not running"
-        print_status $YELLOW "Found $total_pods GPU operator pod(s) but none are in Running state:"
-        echo "$gpu_operator_pods"
-        return 1
-    elif [[ $running_pods -lt $total_pods ]]; then
-        print_status $YELLOW "⚠️  GPU operator partially running: $running_pods/$total_pods pods running"
-        echo "$gpu_operator_pods"
-        print_status $GREEN "✅ GPU operator is available (with warnings)"
+        if [[ -n "$intel_dra_pods" ]]; then
+            local dra_running dra_total
+            dra_running=$(echo "$intel_dra_pods" | grep -c "Running" || echo "0")
+            dra_total=$(echo "$intel_dra_pods" | wc -l)
+            if [[ $dra_running -eq 0 ]]; then
+                print_status $RED "❌ Intel GPU DRA driver pods are not running ($dra_total found):"
+                echo "$intel_dra_pods"
+                return 1
+            fi
+            print_status $GREEN "✅ Intel GPU DRA driver is running ($dra_running/$dra_total pods, ns: intel-gpu-resource-driver)"
+        fi
+
+        if [[ -n "$intel_plugin_pods" ]]; then
+            local plugin_running plugin_total
+            plugin_running=$(echo "$intel_plugin_pods" | grep -c "Running" || echo "0")
+            plugin_total=$(echo "$intel_plugin_pods" | wc -l)
+            if [[ $plugin_running -eq 0 ]]; then
+                print_status $RED "❌ Intel Device Plugin pods are not running ($plugin_total found):"
+                echo "$intel_plugin_pods"
+                return 1
+            fi
+            print_status $GREEN "✅ Intel Device Plugin is running ($plugin_running/$plugin_total pods)"
+        fi
+
         return 0
     else
-        print_status $GREEN "✅ GPU operator is running ($running_pods/$total_pods pods)"
-        return 0
+        # Check if NVIDIA GPU operator pods exist and are running
+        local gpu_operator_pods
+        gpu_operator_pods=$(kubectl get pods -A -lapp=gpu-operator --no-headers 2>/dev/null || echo "")
+
+        if [[ -z "$gpu_operator_pods" ]]; then
+            print_status $RED "❌ NVIDIA GPU operator not found in the cluster"
+            print_status $YELLOW "Dynamo requires GPU operator to be installed and running."
+            print_status $BLUE "Please install GPU operator before proceeding with deployment."
+            return 1
+        fi
+
+        local running_pods
+        running_pods=$(echo "$gpu_operator_pods" | grep -c "Running" || echo "0")
+        local total_pods
+        total_pods=$(echo "$gpu_operator_pods" | wc -l)
+
+        if [[ $running_pods -eq 0 ]]; then
+            print_status $RED "❌ GPU operator pods are not running"
+            print_status $YELLOW "Found $total_pods GPU operator pod(s) but none are in Running state:"
+            echo "$gpu_operator_pods"
+            return 1
+        elif [[ $running_pods -lt $total_pods ]]; then
+            print_status $YELLOW "⚠️  GPU operator partially running: $running_pods/$total_pods pods running"
+            echo "$gpu_operator_pods"
+            print_status $GREEN "✅ GPU operator is available (with warnings)"
+            return 0
+        else
+            print_status $GREEN "✅ GPU operator is running ($running_pods/$total_pods pods)"
+            return 0
+        fi
     fi
 }
 
