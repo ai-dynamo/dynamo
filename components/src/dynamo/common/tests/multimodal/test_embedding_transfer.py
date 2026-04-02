@@ -22,7 +22,6 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 
 pytestmark = [
-    pytest.mark.asyncio,
     pytest.mark.unit,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
