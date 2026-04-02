@@ -59,7 +59,7 @@ typedef struct {
 // Router bindings API
 query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *component_c_str,
-                                     bool decode_fallback,
+                                     bool enforce_disagg,
                                      RouterHandles **out_handle);
 
 query_router_result_t route_prefill_request(RouterHandles *handle,
@@ -101,8 +101,11 @@ import (
 	"time"
 	"unsafe"
 
+	ctrl "sigs.k8s.io/controller-runtime"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 )
+
+var logger = ctrl.Log.WithName("dynamo-kv-scorer")
 
 var (
 	ffiOnce sync.Once
@@ -110,7 +113,7 @@ var (
 
 	ffiNamespace     string
 	ffiComponent     string
-	ffiDecodeFallback bool
+	ffiEnforceDisagg bool
 
 	routerInitialized bool
 
@@ -120,12 +123,16 @@ var (
 )
 
 func loadDynamoConfig() {
-	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiDecodeFallback = getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
+	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
 	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
-	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v\n",
-		ffiNamespace, ffiComponent, ffiDecodeFallback)
+	logger.Info("Dynamo KV Scorer config loaded",
+		"namespace", ffiNamespace,
+		"component", ffiComponent,
+		"enforce_disagg", ffiEnforceDisagg,
+		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
+		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
 
 func getEnvOrDefault(key, def string) string {
@@ -164,11 +171,20 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			C.bool(ffiDecodeFallback),
+			C.bool(ffiEnforceDisagg),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
-			ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			switch rc {
+			case C.QUERY_ROUTER_ERR_DISAGG_ENFORCED:
+				ffiErr = fmt.Errorf(
+					"create_routers failed: no prefill workers found. "+
+						"If running in aggregated mode, set DYN_DECODE_FALLBACK=true to allow decode-only routing. "+
+						"If running in disaggregated mode, ensure prefill workers are deployed and discoverable in namespace %q",
+					ffiNamespace)
+			default:
+				ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			}
 			return
 		}
 		routerInitialized = true

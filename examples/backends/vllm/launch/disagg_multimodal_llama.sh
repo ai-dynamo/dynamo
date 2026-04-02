@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 set -ex
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 HEAD_NODE=0
 MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -47,13 +50,27 @@ done
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+if [[ $HEAD_NODE -eq 1 ]]; then
+    print_launch_banner --multimodal "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
+else
+    print_launch_banner --no-curl "Launching Disaggregated Multimodal Llama 4 (Multi-Node)" "$MODEL_NAME" "$HTTP_PORT"
+fi
+
 # Use TCP transport to avoid NATS payload limits for multimodal
 export DYN_REQUEST_PLANE=tcp
 
 # Configure model-specific args
+GPU_MEM="0.80"
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+else
+    GPU_MEM_ARGS="--gpu-memory-utilization $GPU_MEM"
+fi
 MODEL_SPECIFIC_ARGS=""
 if [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
-    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80"
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 $GPU_MEM_ARGS"
 fi
 
 if [[ $HEAD_NODE -eq 1 ]]; then
@@ -91,5 +108,5 @@ else
         "${EXTRA_ARGS[@]}" &
 fi
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

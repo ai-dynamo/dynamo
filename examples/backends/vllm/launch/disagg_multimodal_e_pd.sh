@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
@@ -57,11 +60,13 @@ done
 PD_MAX_MODEL_LEN="16384"
 
 
-echo "=================================================="
-echo "Disaggregated Multimodal Serving (E + PD)"
-echo "=================================================="
-echo "Model: $MODEL_NAME"
-echo "=================================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="2 GPUs"
+fi
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_LABEL)" "$MODEL_NAME" "$HTTP_PORT"
 
 
 # Start frontend (no router mode)
@@ -70,15 +75,14 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer: 1 = local file (safetensors), 0 = NIXL RDMA
-export TRANSFER_LOCAL=${TRANSFER_LOCAL:-1}
-
 # GPU assignments (override via environment variables)
+# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
@@ -102,7 +106,6 @@ echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)...
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
-  --multimodal-worker \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
@@ -115,5 +118,5 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

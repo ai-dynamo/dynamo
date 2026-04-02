@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,6 +15,33 @@ if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
+def get_gms_lock_mode(extra_config: dict):
+    """Resolve GMS lock mode from model_loader_extra_config.
+
+    Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
+    """
+    from gpu_memory_service.common.types import RequestedLockType
+
+    if extra_config.get("gms_read_only", False):
+        logger.info("[GMS] gms_read_only=True, forcing RO mode")
+        return RequestedLockType.RO
+    return RequestedLockType.RW_OR_RO
+
+
+def strip_gms_model_loader_config(load_config, load_format: str):
+    """Copy a loader config with GMS-only keys removed for backend loaders."""
+    extra_config = getattr(load_config, "model_loader_extra_config", {}) or {}
+    return replace(
+        load_config,
+        load_format=load_format,
+        model_loader_extra_config={
+            key: value
+            for key, value in extra_config.items()
+            if not key.startswith("gms_")
+        },
+    )
 
 
 def setup_meta_tensor_workaround() -> None:
@@ -29,10 +57,9 @@ def setup_meta_tensor_workaround() -> None:
 def finalize_gms_write(
     allocator: "GMSClientMemoryManager", model: torch.nn.Module
 ) -> int:
-    """Finalize GMS write mode: register tensors, commit, switch to read.
-    This is typically called when the (writing) model loader finishes, and
-    is ready to commit the weights so that other engines can import these
-    weights and read them.
+    """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
+
+    Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
 
     Args:
         allocator: The GMS client memory manager in write mode.
@@ -40,22 +67,20 @@ def finalize_gms_write(
 
     Returns:
         Total bytes committed.
-
-    Raises:
-        RuntimeError: If commit fails.
     """
     from gpu_memory_service.client.torch.module import register_module_tensors
+    from gpu_memory_service.common.types import RequestedLockType
 
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 
-    # Wait for all writes to weights (from caller) to complete before mode switch
+    # Synchronize before commit — caller's writes must be visible
     torch.cuda.synchronize()
 
-    if not allocator.commit():
-        raise RuntimeError("GMS commit failed")
+    allocator.commit()
 
-    allocator.switch_to_read()
+    allocator.connect(RequestedLockType.RO)
+    allocator.remap_all_vas()
 
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",

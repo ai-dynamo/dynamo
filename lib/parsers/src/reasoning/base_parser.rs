@@ -82,6 +82,15 @@ impl BasicReasoningParser {
 }
 
 impl ReasoningParser for BasicReasoningParser {
+    fn set_in_reasoning(&mut self, in_reasoning: bool) {
+        self._in_reasoning = in_reasoning;
+        if in_reasoning {
+            // Mark the start token as already stripped so the parser doesn't
+            // look for it in the stream — the template already injected it.
+            self.stripped_think_start = true;
+        }
+    }
+
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
         let has_think_tag = text.contains(&self.think_start_token);
         let in_reasoning = self._in_reasoning || has_think_tag;
@@ -108,6 +117,10 @@ impl ReasoningParser for BasicReasoningParser {
 
         while cursor < text.len() {
             if currently_reasoning {
+                // Skip leading start token if present (handles force_reasoning + explicit <think>)
+                if text[cursor..].starts_with(&self.think_start_token) {
+                    cursor += self.think_start_token.len();
+                }
                 // We're inside a reasoning block — look for end token
                 if let Some(end_offset) = text[cursor..].find(&self.think_end_token) {
                     reasoning_parts.push(&text[cursor..cursor + end_offset]);
@@ -173,6 +186,17 @@ impl ReasoningParser for BasicReasoningParser {
                 self.stripped_think_start = true;
                 self._in_reasoning = true;
                 continue;
+            }
+
+            // Buffer is a prefix of the start token (e.g., "<thi" for "<think>") — wait
+            // for more data before deciding whether to strip it or emit as reasoning.
+            // Only applies when force_reasoning=true and we haven't stripped the tag yet.
+            if !self.stripped_think_start
+                && self._in_reasoning
+                && !current_text.is_empty()
+                && self.think_start_token.starts_with(current_text.as_str())
+            {
+                break;
             }
 
             if self._in_reasoning {

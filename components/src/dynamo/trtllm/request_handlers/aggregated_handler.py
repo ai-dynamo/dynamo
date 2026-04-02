@@ -4,7 +4,10 @@
 """Handler for aggregated (prefill + decode) mode with optional encoder disaggregation."""
 
 import logging
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Optional, Union
+
+import torch
 
 from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -33,11 +36,13 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         """Generate response, optionally using remote encoder for multimodal."""
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
-        embeddings = None
+        embeddings: Optional[Union[torch.Tensor, dict]] = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:
             messages = request.get("extra_args", {}).get(
@@ -47,7 +52,6 @@ class AggregatedHandler(HandlerBase):
                 messages
             )
             if image_urls:
-                logging.info(f"AggregatedHandler: image_urls={image_urls}")
                 result = await fetch_embeddings_from_encoder(
                     image_urls,
                     request,
@@ -55,7 +59,7 @@ class AggregatedHandler(HandlerBase):
                     self._encoder_cache,
                 )
                 if isinstance(result, list):
-                    embeddings = result
+                    embeddings = result  # type: ignore[assignment]
                 else:
                     ep_disaggregated_params = result
 

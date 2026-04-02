@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated TRT-LLM deployment: prefill/decode split with UCX KV transfer.
+# Tested with dynamo 1.0 (TRT-LLM PyTorch backend).
+#
+# Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
+# KV cache (attention + Mamba SSM state) is transferred between workers via UCX.
+#
+# IMPORTANT: Must use UCX backend, not NIXL. NIXL and MOONCAKE backends do not
+# support hybrid models with Mamba SSM state:
+#   ValueError: NIXL or MOONCAKE backend does not support hybrid models with
+#   RNN (Mamba) states. Please use UCX or MPI backend for cache transfer with
+#   hybrid models.
+#
+# Dynamo 0.9.1 compatibility notes:
+#   - Change image tags from :1.0.0 to :0.9.1
+#   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
+#   - With deepseek_r1 parser, enable_thinking: false will not work correctly
+#   - Keep enable_block_reuse: false in both kv_cache_config blocks. Current
+#     TRT-LLM builds still disable block reuse for Nemotron-H / Mamba hybrid cache.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-super-prefill-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    max_batch_size: 16
+    max_num_tokens: 8192
+    trust_remote_code: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.85
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is still unsupported,
+      # and explicit true still trips:
+      #   "mamba hybrid cache requires block reuse to be disabled"
+      # Keep this explicit instead of relying on TRT-LLM's silent model default.
+      enable_block_reuse: false
+    moe_config:
+      backend: TRTLLM
+    cache_transceiver_config:
+      # UCX is required for hybrid Mamba+Attention models.
+      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
+      backend: UCX
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    disable_overlap_scheduler: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-super-decode-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    max_batch_size: 16
+    max_num_tokens: 8192
+    trust_remote_code: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.85
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is still unsupported,
+      # and explicit true still trips:
+      #   "mamba hybrid cache requires block reuse to be disabled"
+      # Keep this explicit instead of relying on TRT-LLM's silent model default.
+      enable_block_reuse: false
+    moe_config:
+      backend: TRTLLM
+    cache_transceiver_config:
+      # UCX is required for hybrid Mamba+Attention models.
+      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
+      backend: UCX
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    disable_overlap_scheduler: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-fp8-trtllm-disagg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # Round-robin routing is the simplest correct choice here.
+          # Nemotron-H on TRT-LLM has block reuse disabled, so KV-overlap
+          # routing does not provide a real cache reuse benefit.
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+    TrtllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            # TRT-LLM startup is slow (~7 min) due to CUDA graph compilation
+            failureThreshold: 600
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          env:
+          - name: HF_HOME
+            value: "/opt/models"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --disaggregation-mode prefill \
+              --dyn-tool-call-parser nemotron_nano \
+              --dyn-reasoning-parser nemotron_nano
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: nemotron-super-prefill-config
+            readOnly: true
+        volumes:
+        - configMap:
+            name: nemotron-super-prefill-config
+          name: nemotron-super-prefill-config
+    TrtllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          env:
+          - name: HF_HOME
+            value: "/opt/models"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --disaggregation-mode decode \
+              --dyn-tool-call-parser nemotron_nano \
+              --dyn-reasoning-parser nemotron_nano
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: nemotron-super-decode-config
+            readOnly: true
+        volumes:
+        - configMap:
+            name: nemotron-super-decode-config
+          name: nemotron-super-decode-config

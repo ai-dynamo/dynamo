@@ -6,7 +6,7 @@ use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregate
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
@@ -46,6 +46,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
+        self.inner.data_parallel_start_rank = data_parallel_start_rank;
+    }
+
+    #[setter]
     fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
         self.inner.data_parallel_size = data_parallel_size;
     }
@@ -53,6 +58,19 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_enable_local_indexer(&mut self, enable_local_indexer: bool) {
         self.inner.enable_local_indexer = enable_local_indexer;
+    }
+
+    #[setter]
+    fn set_exclude_tools_when_tool_choice_none(
+        &mut self,
+        exclude_tools_when_tool_choice_none: bool,
+    ) {
+        self.inner.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none;
+    }
+
+    #[setter]
+    fn set_enable_eagle(&mut self, enable_eagle: bool) {
+        self.inner.enable_eagle = enable_eagle;
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -115,6 +133,11 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn exclude_tools_when_tool_choice_none(&self) -> bool {
+        self.inner.exclude_tools_when_tool_choice_none
+    }
+
+    #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
         for (key, value) in self.inner.runtime_data.clone() {
@@ -153,5 +176,10 @@ impl ModelRuntimeConfig {
             .disaggregated_endpoint
             .as_ref()
             .and_then(|e| e.bootstrap_port)
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }

@@ -6,7 +6,7 @@ from typing import Tuple
 
 import yaml
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,
@@ -168,7 +168,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ):
+    ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
             cfg, backend="vllm", sub_component_type=component_type

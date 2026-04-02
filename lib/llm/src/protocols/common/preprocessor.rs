@@ -1,15 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::BlockExtraInfo;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -54,6 +57,11 @@ pub struct RoutingHints {
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// Worker IDs provided externally and not discovered by the router.
+    /// When set, only workers in this set are considered during scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -74,7 +82,7 @@ pub struct PrefillResult {
     pub disaggregated_params: serde_json::Value,
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+    pub prompt_tokens_details: Option<dynamo_protocols::types::PromptTokensDetails>,
 }
 
 /// Optional multimodal routing-only data.
@@ -94,6 +102,8 @@ pub struct MmRoutingInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 
@@ -175,6 +185,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Optional request timestamp in milliseconds forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]

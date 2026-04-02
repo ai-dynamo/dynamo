@@ -22,6 +22,7 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 ARG DYNAMO_DOCS_VERSION=dev
 ENV DYNAMO_DOCS_VERSION=$DYNAMO_DOCS_VERSION
 
+# TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt-get update && \

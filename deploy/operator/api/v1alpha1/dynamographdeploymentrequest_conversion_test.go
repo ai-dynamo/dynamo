@@ -101,6 +101,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 
 	rawDGD, _ := json.Marshal(map[string]interface{}{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
 	rawPlanner, _ := json.Marshal(map[string]interface{}{"enable_load_scaling": false})
+	autoApplyFalse := false
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -110,7 +111,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
 			Model:     "Qwen/Qwen3-32B",
 			Backend:   v1beta1.BackendTypeVllm,
-			AutoApply: false,
+			AutoApply: &autoApplyFalse,
 			Image:     "nvcr.io/nvidia/dynamo:0.3.2",
 			SLA: &v1beta1.SLASpec{
 				TTFT: &ttft,
@@ -158,7 +159,7 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	if string(dst.Spec.Backend) != src.Spec.Backend {
 		t.Errorf("Backend: got %q, want %q", dst.Spec.Backend, src.Spec.Backend)
 	}
-	if dst.Spec.AutoApply != src.Spec.AutoApply {
+	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
 	}
 

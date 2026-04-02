@@ -10,11 +10,11 @@ overlap, and forwards the request to that worker.
 
 Usage:
     python -m examples.backends.vllm.mm_router_worker \
-        --model Qwen/Qwen2.5-VL-7B-Instruct \
+        --model Qwen/Qwen3-VL-8B-Instruct \
         --namespace default \
         --component mm_router \
         --endpoint generate \
-        --downstream-component VllmWorker \
+        --downstream-component backend \
         --downstream-endpoint generate
 """
 
@@ -44,13 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        default="Qwen/Qwen3-VL-8B-Instruct",
         help="Model path or HuggingFace model ID",
     )
     parser.add_argument(
         "--block-size",
         type=int,
-        default=32,
+        default=16,
         help="KV cache block size",
     )
 
@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--downstream-component",
         type=str,
-        default="VllmWorker",
+        default="backend",
         help="Downstream vLLM workers' component name",
     )
     parser.add_argument(

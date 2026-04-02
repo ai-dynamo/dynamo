@@ -8,17 +8,17 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true }
-dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true }
+dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
-validator = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
@@ -29,14 +29,18 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+validator = { workspace = true }
 
 # crate-specific
 ndarray = "0.16"
+slotmap = "1"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+rustc-hash = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
 rstest = "0.18.2"
+tempfile = { workspace = true }

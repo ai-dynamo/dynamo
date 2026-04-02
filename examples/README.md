@@ -26,9 +26,9 @@ This directory contains practical examples demonstrating how to deploy and use D
 
 Learn fundamental Dynamo concepts through these introductory examples:
 
-- **[Quickstart](/examples/basics/quickstart/README.md)** - Simple aggregated serving example with vLLM backend
-- **[Disaggregated Serving](/examples/basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node](/examples/basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
+- **[Quickstart](/docs/getting-started/quickstart.md)** - Simple local Dynamo setup across supported backends
+- **[Disaggregated Serving](/docs/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
+- **[Multi-node TensorRT-LLM](/docs/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
 
 ## Framework Support
 
@@ -46,7 +46,7 @@ Platform-specific deployment guides for production environments:
 - **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **Google GKE** - _Coming soon_
+- **[Google GKE](/examples/deployments/GKE/)** - Deploy Dynamo on Google Kubernetes Engine
 
 ## Runtime Examples
 
@@ -56,7 +56,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](/examples/basics/quickstart/README.md) for a simple local deployment, or explore [Disaggregated Serving](/examples/basics/disaggregated_serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](/docs/getting-started/quickstart.md) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
@@ -82,4 +82,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](/docs/pages/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](/docs/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.

@@ -95,11 +95,11 @@ The script only prompts for Docker registry information when needed:
 ## What Each Step Does
 
 ### Step 1: Build nixlbench Docker Image
-- Downloads NIXL source code (version 0.6.0) from GitHub
+- Downloads NIXL source code (version 0.10.1) from GitHub
 - Extracts and navigates to the build directory
 - Pauses for user confirmation before building
 - Builds Docker image with specified registry and architecture
-- Tags image as: `{registry}/nixlbench:0.6.0-{arch}`
+- Tags image as: `{registry}/nixlbench:0.10.1-{arch}`
 
 ### Step 2: Update Deployment YAML File
 - Copies base deployment template (`nixlbench-deployment.yaml`)
@@ -231,7 +231,7 @@ This will help diagnose:
 
 2. **Image Pull Issues**:
    - Verify registry credentials are configured
-   - Check image exists: `docker pull {registry}/nixlbench:0.6.0-{arch}`
+   - Check image exists: `docker pull {registry}/nixlbench:0.10.1-{arch}`
    - Ensure image was pushed successfully after build
 
 3. **Build Failures**:

@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
+    dynamo_nvtx_range,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -16,11 +18,7 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter,
-        metrics::RouterRequestMetrics,
-        protocols::{TokensWithHashes, WorkerWithDpRank},
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -50,7 +48,7 @@ struct RequestGuard {
     chooser: Arc<KvRouter>,
     context_id: String,
     tracker: Option<Arc<RequestTracker>>,
-    request_metrics: Option<Arc<RouterRequestMetrics>>,
+    request_metrics: Arc<RouterRequestMetrics>,
     cumulative_osl: usize,
     metrics_recorded: bool,
     freed: bool,
@@ -87,8 +85,10 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
-                if let (Some(m), Some(ttft)) = (&self.request_metrics, tracker.ttft_ms()) {
-                    m.time_to_first_token_seconds.observe(ttft / 1000.0);
+                if let Some(ttft) = tracker.ttft_ms() {
+                    self.request_metrics
+                        .time_to_first_token_seconds
+                        .observe(ttft / 1000.0);
                 }
             }
             self.first_token_recorded = true;
@@ -116,9 +116,10 @@ impl RequestGuard {
                 if let Some(ref tracker) = self.tracker {
                     tracker.record_osl(self.cumulative_osl);
                     tracker.record_finish();
-                    if let (Some(m), Some(avg_itl)) = (&self.request_metrics, tracker.avg_itl_ms())
-                    {
-                        m.inter_token_latency_seconds.observe(avg_itl / 1000.0);
+                    if let Some(avg_itl) = tracker.avg_itl_ms() {
+                        self.request_metrics
+                            .inter_token_latency_seconds
+                            .observe(avg_itl / 1000.0);
                     }
                 }
 
@@ -144,10 +145,10 @@ impl RequestGuard {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
         }
-        if let Some(ref m) = self.request_metrics {
-            m.output_sequence_tokens.observe(self.cumulative_osl as f64);
-            m.requests_total.inc();
-        }
+        self.request_metrics
+            .output_sequence_tokens
+            .observe(self.cumulative_osl as f64);
+        self.request_metrics.requests_total.inc();
     }
 }
 
@@ -175,6 +176,11 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
+        // Eagerly register router request metrics (as zeros) so they are
+        // scrapeable before any requests arrive. Both the frontend pipeline
+        // and the standalone router create KvPushRouter, so this covers both.
+        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+
         KvPushRouter { inner, chooser }
     }
 
@@ -188,11 +194,13 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
+        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
@@ -207,6 +215,7 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
+            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -217,7 +226,8 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
-                    None,
+                    expected_output_tokens,
+                    allowed_worker_ids,
                 )
                 .await?;
 
@@ -259,7 +269,12 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
+            .get_overlap_blocks(
+                routing_token_ids,
+                block_mm_infos,
+                worker,
+                lora_name.as_deref(),
+            )
             .await?;
 
         if !is_query_only {
@@ -267,6 +282,7 @@ impl KvPushRouter {
                 .add_request(
                     context_id.to_string(),
                     routing_token_ids,
+                    block_mm_infos,
                     overlap_blocks,
                     expected_output_tokens,
                     worker,
@@ -346,13 +362,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // so the indexer can track cache state based on routing decisions.
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
             let mut tokens_with_hashes =
-                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size());
+                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                    .with_is_eagle(self.chooser.is_eagle());
+            if let Some(infos) = block_mm_infos {
+                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+            }
+            if let Some(lora_name) = lora_name {
+                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+            }
             if let Err(e) = self
                 .chooser
-                .indexer()
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .record_routing_decision(tokens_with_hashes, worker)
                 .await
             {
                 tracing::warn!(
@@ -366,7 +390,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
-        let request_metrics = RouterRequestMetrics::get();
+        let request_metrics =
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
@@ -376,14 +401,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
-            if let (Some(m), Some(hit_rate)) = (&request_metrics, tracker.kv_hit_rate()) {
-                m.kv_hit_rate.observe(hit_rate);
+            tracker.record_router_queue_depth(self.chooser.pending_count());
+            if let Some(hit_rate) = tracker.kv_hit_rate() {
+                request_metrics.kv_hit_rate.observe(hit_rate);
             }
         }
-        if let Some(ref m) = request_metrics {
-            m.input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
-        }
+        request_metrics
+            .input_sequence_tokens
+            .observe(request.token_ids.len() as f64);
 
         // Handle query-only requests: early return with worker info
         if is_query_only {

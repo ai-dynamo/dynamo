@@ -17,6 +17,13 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: DYN_DECODE_FALLBACK
+              value: "true"
       eppConfig:
         # This config uses the same disagg-profile-handler as disaggregated deployments.
         # The handler's graceful degradation feature makes this possible:
@@ -46,9 +53,11 @@ spec:
             - name: decode
               plugins:
                 - pluginRef: decode-filter
+                  weight: 1
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
+                  weight: 1
     VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
@@ -57,6 +66,14 @@ spec:
           mountPoint: /opt/models
       sharedMemory:
         size: 20Gi
+      frontendSidecar:
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
           env:
@@ -75,64 +92,6 @@ spec:
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-              # Frontend sidecar: receives requests from kGateway on port 8000
-        # and routes them to the vLLM worker in the same pod
-        containers:
-          - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-            command:
-              - python3
-            args:
-              - -m
-              - dynamo.frontend
-              - --router-mode
-              - direct
-            ports:
-              - containerPort: 8000
-                name: http
-                protocol: TCP
-            envFrom:
-              - secretRef:
-                  name: hf-token-secret
-            env:
-              - name: DYNAMO_PORT
-                value: "8000"
-              - name: DYN_HTTP_PORT
-                value: "8000"
-              - name: DYN_NAMESPACE
-                value: my-model-vllm-agg
-              - name: DYN_COMPONENT
-                value: frontend
-              - name: DYN_DISCOVERY_BACKEND
-                value: kubernetes
-              - name: DYN_PARENT_DGD_K8S_NAME
-                value: llama3-70b-agg
-              - name: DYN_PARENT_DGD_K8S_NAMESPACE
-                value: my-model
-              - name: POD_NAME
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.name
-              - name: POD_NAMESPACE
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.namespace
-              - name: POD_UID
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.uid
-            livenessProbe:
-              httpGet:
-                path: /live
-                port: http
-              initialDelaySeconds: 15
-              periodSeconds: 10
-            readinessProbe:
-              httpGet:
-                path: /health
-                port: http
-              initialDelaySeconds: 10
-              periodSeconds: 10
       replicas: 1
       resources:
         limits:

@@ -7,7 +7,7 @@ use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use anyhow::Context as _;
-use dynamo_async_openai::types::{ChatCompletionMessageContent, FinishReason};
+use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::{DistributedRuntime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -201,15 +201,15 @@ async fn evaluate(
     entry: &mut Entry,
     template: Option<Arc<RequestTemplate>>,
 ) -> anyhow::Result<String> {
-    let user_message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let user_message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 entry.text.clone(),
             ),
             name: None,
         },
     );
-    let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
         .model(
             template
@@ -238,8 +238,9 @@ async fn evaluate(
         match (item.data.as_ref(), item.event.as_deref()) {
             (Some(data), _) => {
                 // Normal case
-                let choice = data.choices.first();
-                let chat_comp = choice.as_ref().unwrap();
+                let Some(chat_comp) = data.inner.choices.first() else {
+                    continue;
+                };
                 if let Some(c) = &chat_comp.delta.content {
                     match c {
                         ChatCompletionMessageContent::Text(text) => {
@@ -252,12 +253,8 @@ async fn evaluate(
                     }
                 }
                 entry.finish_reason = chat_comp.finish_reason;
-                if chat_comp.finish_reason.is_some() {
-                    tracing::trace!(
-                        request_id,
-                        "finish reason: {:?}",
-                        chat_comp.finish_reason.unwrap()
-                    );
+                if let Some(finish_reason) = chat_comp.finish_reason.as_ref() {
+                    tracing::trace!(request_id, "finish reason: {:?}", finish_reason);
                     break;
                 }
             }

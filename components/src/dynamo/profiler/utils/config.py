@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 import logging
 import math
 import shlex
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -59,6 +62,7 @@ class Service(BaseModel):
     resources: Optional[ServiceResources] = None
     extraPodSpec: Optional[PodSpec] = None
     subComponentType: Optional[str] = None
+    multinode: Optional[MultinodeConfig | dict[str, Any]] = None
     model_config = {"extra": "allow"}
 
 
@@ -98,9 +102,9 @@ class DgdPlannerServiceConfig(BaseModel):
     replicas: int = 1
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
-            image="my-registry/dynamo-runtime:my-tag",  # placeholder
+            image="my-registry/dynamo-planner:my-tag",  # placeholder
             workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
-            command=["python3", "-m", "dynamo.planner.planner_sla"],
+            command=["python3", "-m", "dynamo.planner"],
             args=[],
         )
     )
@@ -141,7 +145,30 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     return args
 
 
-def append_argument(args: list[str], to_append) -> list[str]:
+def sanitize_cli_args(args: list[str]) -> list[str]:
+    """Strip valued arguments whose value is the literal string ``"None"``.
+
+    AIC's rule engine uses Jinja2 ``compile_expression`` which converts
+    undefined variables to Python ``None``.  When that ``None`` is
+    serialized into CLI args it becomes the four-character string
+    ``"None"``, which is never a valid CLI value and causes backends
+    (e.g. sglang ``--kv-cache-dtype None``) to reject the argument.
+    """
+    result = list(args)
+    i = 0
+    while i < len(result) - 1:
+        if result[i].startswith("--") and result[i + 1] == "None":
+            logger.warning(
+                "Stripping CLI arg %s with invalid value 'None'",
+                result[i],
+            )
+            del result[i : i + 2]
+        else:
+            i += 1
+    return result
+
+
+def append_argument(args: list[str], to_append: str | list[str]) -> list[str]:
     idx = find_arg_index(args)
     if isinstance(to_append, list):
         args[idx:idx] = to_append
@@ -191,7 +218,9 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
     return override_dict, args
 
 
-def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int):
+def set_multinode_config(
+    worker_service: Service, gpu_count: int, num_gpus_per_node: int
+) -> None:
     """Helper function to set multinode configuration based on GPU count and GPUs per node."""
     if gpu_count <= num_gpus_per_node:
         # Single node: remove multinode configuration if present
@@ -261,7 +290,7 @@ def get_worker_service_from_config(
     config: Config,
     backend: str = "sglang",
     sub_component_type: SubComponentType = SubComponentType.DECODE,
-):
+) -> Service:
     """Helper function to get a worker service from config.
 
     First tries to find service by subComponentType, then falls back to component name.
@@ -287,8 +316,8 @@ def get_worker_service_from_config(
 
 
 def setup_worker_service_resources(
-    worker_service, gpu_count: int, num_gpus_per_node: Optional[int] = None
-):
+    worker_service: Service, gpu_count: int, num_gpus_per_node: Optional[int] = None
+) -> None:
     """Helper function to set up worker service resources (requests and limits)."""
     # Handle multinode configuration if num_gpus_per_node is provided
     if num_gpus_per_node is not None:
@@ -309,7 +338,9 @@ def setup_worker_service_resources(
         else gpu_count
     )
 
-    def _update_resource_dict(resource_dict: dict[str, str], gpu_value: int):
+    def _update_resource_dict(
+        resource_dict: dict[str, str | dict[str, Any]], gpu_value: int
+    ) -> None:
         """Helper function to update gpu and custom rdma/ib fields in a resource dictionary.
 
         Args:
@@ -331,7 +362,7 @@ def setup_worker_service_resources(
         _update_resource_dict(worker_service.resources.requests, gpu_value)
 
 
-def validate_and_get_worker_args(worker_service, backend):
+def validate_and_get_worker_args(worker_service: Service, backend: str) -> list[str]:
     """Helper function to validate worker service and get its arguments.
 
     Args:
@@ -355,7 +386,7 @@ def validate_and_get_worker_args(worker_service, backend):
     return break_arguments(args)
 
 
-def set_argument_value(args: list, arg_name: str, value: str):
+def set_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
     """Helper function to set an argument value, adding it if not present."""
     try:
         idx = args.index(arg_name)
@@ -366,7 +397,7 @@ def set_argument_value(args: list, arg_name: str, value: str):
 
 
 def update_image(config: dict, image: str) -> dict:
-    """Update container image for all DGD services (frontend, planner, workers).
+    """Update container image for non-planner DGD services.
 
     This is a shared utility function used by all backend config modifiers.
 
@@ -379,8 +410,9 @@ def update_image(config: dict, image: str) -> dict:
     """
     cfg = Config.model_validate(config)
 
-    # Update image for all services
     for service_name, service_config in cfg.spec.services.items():
+        if getattr(service_config, "componentType", None) == "planner":
+            continue
         if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
             service_config.extraPodSpec.mainContainer.image = image
             logger.debug(f"Updated image for {service_name} to {image}")

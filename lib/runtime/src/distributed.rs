@@ -1,19 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::{Component, Instance};
+use crate::component::{
+    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+};
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
+use crate::{discovery, system_status_server, transports};
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
 };
-use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
@@ -35,6 +36,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
@@ -64,6 +66,7 @@ pub struct DistributedRuntime {
     component_registry: component::Registry,
 
     instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -145,7 +148,7 @@ impl DistributedRuntime {
                 (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             DiscoveryBackend::KvStore(kv_selector) => {
-                tracing::info!("Initializing KV store discovery backend: {}", kv_selector);
+                tracing::info!("Initializing KV store discovery backend: {kv_selector}");
                 let runtime_clone = runtime.clone();
                 let store = match kv_selector {
                     kv::Selector::Etcd(etcd_config) => {
@@ -185,6 +188,7 @@ impl DistributedRuntime {
             discovery_metadata,
             component_registry,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
@@ -227,7 +231,7 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {}", addr);
+                    tracing::info!("System status server started successfully on {addr}");
 
                     // Store system status server information
                     let system_status_server_info =
@@ -243,7 +247,7 @@ impl DistributedRuntime {
                         .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("System status server startup failed: {}", e);
+                    tracing::error!("System status server startup failed: {e}");
                 }
             }
         } else {
@@ -274,7 +278,7 @@ impl DistributedRuntime {
                     config.canary_wait_time_secs,
                     config.health_check_request_timeout_secs
                 ),
-                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+                Err(e) => tracing::error!("Health check manager failed to start: {e}"),
             }
         }
 
@@ -390,6 +394,10 @@ impl DistributedRuntime {
         self.instance_sources.clone()
     }
 
+    pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
+        self.routing_occupancy_states.clone()
+    }
+
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
     /// Component, to allow it to publish to NATS. KV Router is the only user.
     ///
@@ -402,7 +410,7 @@ impl DistributedRuntime {
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
             // NATS not available - this is expected in approximate mode (--no-kv-events)
-            tracing::trace!("Skipping NATS publish (NATS not configured): {}", subject);
+            tracing::trace!("Skipping NATS publish (NATS not configured): {subject}");
             return Ok(());
         };
         Ok(nats_client.client().publish(subject, payload).await?)
@@ -619,20 +627,15 @@ impl DistributedConfig {
 /// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane
     Nats,
     /// Use HTTP/2 for request plane
     Http,
     /// Use raw TCP for request plane with msgpack support
+    #[default]
     Tcp,
-}
-
-impl Default for RequestPlaneMode {
-    fn default() -> Self {
-        Self::Tcp
-    }
 }
 
 impl fmt::Display for RequestPlaneMode {

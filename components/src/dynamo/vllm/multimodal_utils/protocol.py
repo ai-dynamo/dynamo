@@ -157,6 +157,7 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = True
+    stream_options: Optional[dict] = None
 
 
 class MultiModalInput(BaseModel):

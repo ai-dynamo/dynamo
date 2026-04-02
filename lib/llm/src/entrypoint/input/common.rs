@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::{
     backend::{Backend, ExecutionContext},
@@ -9,7 +10,9 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -26,6 +29,7 @@ use crate::{
 };
 
 use anyhow::Context as _;
+use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -43,6 +47,45 @@ pub struct PreparedEngine {
     pub inspect_template: bool,
     pub card: Option<ModelDeploymentCard>,
     pub request_template: Option<RequestTemplate>,
+}
+
+async fn wait_for_min_initial_workers(
+    client: &Client,
+    min_initial_workers: usize,
+) -> anyhow::Result<()> {
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    if min_initial_workers == 1 {
+        client.wait_for_instances().await?;
+        return Ok(());
+    }
+
+    let mut watcher = client.instance_avail_watcher();
+    loop {
+        let available = watcher.borrow_and_update().len();
+        if available >= min_initial_workers {
+            return Ok(());
+        }
+
+        tokio::time::timeout(Duration::from_secs(120), watcher.changed())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "timed out waiting for {} initial workers for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "instance watcher closed before {} workers appeared for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?;
+    }
 }
 
 impl PreparedEngine {
@@ -129,7 +172,7 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer_hf()?)
+            >(model.card(), inner_engine, model.card().tokenizer()?)
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -148,7 +191,7 @@ pub async fn prepare_engine(
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -163,9 +206,9 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
             .into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
     Ok(frontend
@@ -185,9 +228,9 @@ pub async fn build_routed_pipeline<Req, Resp>(
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    decode_fallback: bool,
+    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -204,7 +247,7 @@ where
     let PromptFormatter::OAI(formatter) =
         PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
             .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
@@ -214,9 +257,9 @@ where
         worker_monitor,
         chooser,
         preprocessor,
-        hf_tokenizer,
+        tokenizer,
         prefill_chooser,
-        decode_fallback,
+        enforce_disagg,
         migration_limit,
         metrics,
     )
@@ -232,9 +275,9 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    decode_fallback: bool,
+    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -250,8 +293,9 @@ where
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -262,6 +306,8 @@ where
     } else {
         client.clone()
     };
+
+    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
     // Get threshold value and wrap monitor for PushRouter
     // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
@@ -280,25 +326,31 @@ where
         )
         .await?;
 
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
     let service_backend = match router_mode {
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random | RouterMode::RoundRobin => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, decode_fallback));
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

@@ -92,14 +92,16 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 		return nil, fmt.Errorf("Dynamo FFI init for decode scorer failed: %w", err)
 	}
 
-	return NewDynDecodeScorer(handle.Context()).WithName(name), nil
+	enforceDisagg := getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	return NewDynDecodeScorer(handle.Context(), enforceDisagg).WithName(name), nil
 }
 
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
-func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
+func NewDynDecodeScorer(ctx context.Context, enforceDisagg bool) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:   plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState: plugins.NewPluginState(ctx),
+		typedName:     plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState:   plugins.NewPluginState(ctx),
+		enforceDisagg: enforceDisagg,
 	}
 }
 
@@ -116,6 +118,7 @@ func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 type DynDecodeScorer struct {
 	typedName      plugins.TypedName
 	pluginState    *plugins.PluginState
+	enforceDisagg  bool
 	firstTokenSeen sync.Map
 }
 
@@ -167,10 +170,16 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	if isDisaggregated {
 		req.Headers[RoutingModeHeader] = "disaggregated"
-		// In disagg mode, the prefill worker was selected by the prefill scorer profile.
-		// The prefill worker ID would need to be communicated from the prefill profile result.
-		// For now we set the mode header; the prefill worker header will be set
-		// when the framework processes the prefill profile result.
+		if prefillID, ok := req.Headers[PrefillWorkerIDHeader]; ok {
+			logger.V(logutil.DEFAULT).Info("DynDecodeScorer: prefill worker header present",
+				"prefillWorkerID", prefillID)
+		} else if s.enforceDisagg {
+			logger.V(logutil.DEFAULT).Error(nil,
+				"DynDecodeScorer: prefill worker header missing and enforce_disagg=true")
+		} else {
+			logger.V(logutil.DEFAULT).Error(nil,
+				"DynDecodeScorer: x-prefill-instance-id header missing — DynPrefillScorer did not set it")
+		}
 	} else {
 		req.Headers[RoutingModeHeader] = "aggregated"
 	}

@@ -87,6 +87,10 @@ pub struct NvExtResponse {
     /// Contains the tokenized prompt for reuse in Stage 2
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
+
+    /// Routed expert capture payload (SGLang-specific)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_experts: Option<serde_json::Value>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -135,7 +139,8 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id", "timing", which has a 1:1 mapping with the NvExtResponse names
+    /// Supported fields include "worker_id", "timing", "routed_experts",
+    /// which map to fields in NvExtResponse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
@@ -156,16 +161,23 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
+
+    /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 }
 
 /// Hints from the agent/caller about request characteristics.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]
 pub struct AgentHints {
-    /// Latency sensitivity in seconds for queue ordering.
-    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
+    /// Unified request priority.
+    /// Higher values mean "more important" at the Dynamo API level.
+    /// Dynamo uses this for router queue ordering and normalizes it per backend
+    /// before forwarding engine priority values.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latency_sensitivity: Option<f64>,
+    pub priority: Option<i32>,
 
     /// Expected output sequence length (number of output tokens).
     /// Used as a hint for routing decisions to estimate resource requirements
@@ -181,13 +193,12 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculative_prefill: Option<bool>,
 
-    /// Backend engine scheduling priority.
-    /// Forwarded to the engine's generate call for queue ordering, KV cache eviction,
-    /// and preemption decisions. Interpretation is backend-specific:
-    /// vLLM uses lower-is-higher, SGLang uses higher-is-higher (configurable).
+    /// Deprecated alias for router-only priority.
+    /// Kept as an undocumented fallback while callers migrate to `priority`.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i32>,
+    #[schema(ignore)]
+    pub latency_sensitivity: Option<f64>,
 }
 
 impl Default for NvExt {
@@ -237,6 +248,7 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
+        assert_eq!(nv_ext.request_timestamp_ms, None);
     }
 
     // Test valid builder configurations

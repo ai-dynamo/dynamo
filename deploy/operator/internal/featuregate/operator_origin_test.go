@@ -27,7 +27,7 @@ import (
 func TestOperatorOriginFeatureGate_IsEnabled(t *testing.T) {
 	gate := OperatorOriginFeatureGate{
 		Name:             "TestFeature",
-		MinOriginVersion: *semver.MustParse("1.0.0-dev"),
+		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
 
 	tests := []struct {
@@ -55,7 +55,7 @@ func TestOperatorOriginFeatureGate_IsEnabled(t *testing.T) {
 		{
 			name: "origin version at threshold = enabled",
 			annotations: map[string]string{
-				consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0-dev",
+				consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 			},
 			want: true,
 		},

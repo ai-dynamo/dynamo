@@ -5,12 +5,14 @@ import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -28,8 +30,7 @@ from dynamo.sglang.args import Config
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
-    Properly handles IPv6 addresses by wrapping them in square brackets.
-    Uses SGLang's maybe_wrap_ipv6_address for consistent formatting.
+    Properly handles IPv6 addresses using SGLang's NetworkAddress utility.
 
     Args:
         endpoint_template: ZMQ endpoint template with wildcard (e.g., "tcp://*:5557")
@@ -44,9 +45,12 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         >>> format_zmq_endpoint("tcp://*:5557", "2a02:6b8:c46:2b4:0:74c1:75b0:0")
         'tcp://[2a02:6b8:c46:2b4:0:74c1:75b0:0]:5557'
     """
-    # Use SGLang's utility to wrap IPv6 addresses in brackets
-    formatted_ip = maybe_wrap_ipv6_address(ip_address)
-    return endpoint_template.replace("*", formatted_ip)
+    parsed = urlparse(endpoint_template)
+    if parsed.scheme != "tcp" or parsed.port is None:
+        raise ValueError(
+            f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
+        )
+    return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -94,13 +98,14 @@ class DynamoSglangPublisher:
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
-            self._ctx = zmq.asyncio.Context()  # type: ignore
+            self._ctx = zmq.asyncio.Context()
             self._sock = get_zmq_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
-                True,  # type: ignore
+                True,
             )
         else:
             self._ctx = None

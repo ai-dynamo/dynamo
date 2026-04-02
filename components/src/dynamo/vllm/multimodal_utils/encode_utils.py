@@ -64,8 +64,8 @@ def get_qwen_image_features(
         if grid_thw is None:
             raise ValueError("grid_thw is not provided")
         grid_thw = grid_thw.tolist()
-        image_embeds = vision_encoder(pixel_values, grid_thw=grid_thw)
-        return image_embeds
+        image_features = vision_encoder(pixel_values, grid_thw=grid_thw)
+        return image_features
 
     pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
 
@@ -127,7 +127,7 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
+    return embeddings
 
 
 def get_encoder_components(

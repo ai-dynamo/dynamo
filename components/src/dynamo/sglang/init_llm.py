@@ -5,15 +5,17 @@ import asyncio
 import logging
 import os
 import time
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -27,13 +29,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     logging.info("Start of prefill disaggregation warmup ...")
     try:
         from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-        from sglang.srt.sampling.sampling_params import SamplingParams
 
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_new_tokens=8,
-            ignore_eos=True,
-        )
+        sampling_params = {
+            "temperature": 0.0,
+            "max_new_tokens": 8,
+            "ignore_eos": True,
+        }
 
         async def _do_warmup():
             results = await engine.async_generate(
@@ -61,15 +62,21 @@ async def init_decode(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+    snapshot_engine: Optional[sgl.Engine] = None,
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    start_time = time.time()
-    engine = sgl.Engine(server_args=server_args)
-    load_time = time.time() - start_time
+    # Use pre-created engine if provided (snapshot mode)
+    if snapshot_engine is not None:
+        engine = snapshot_engine
+        load_time = 0.0
+    else:
+        start_time = time.time()
+        engine = sgl.Engine(server_args=server_args)
+        load_time = time.time() - start_time
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
@@ -95,9 +102,14 @@ async def init_decode(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -145,13 +157,18 @@ async def init_prefill(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+    snapshot_engine: Optional[sgl.Engine] = None,
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (snapshot mode)
+    if snapshot_engine is not None:
+        engine = snapshot_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"

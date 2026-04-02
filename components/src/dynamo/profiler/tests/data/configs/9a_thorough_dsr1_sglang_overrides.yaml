@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 9a: Thorough sweep for DeepSeek-R1 on SGLang with DGD overrides.
+# Overrides are derived by comparing the base sglang disagg template
+# (examples/backends/sglang/deploy/disagg.yaml) with the DSR1 recipe
+# (recipes/deepseek-r1/sglang/disagg-8gpu/deploy.yaml), excluding
+# parallelization-mapping fields (--tp, --dp, --ep-size,
+# --enable-dp-attention) which are swept by the profiler.
+model: "deepseek-ai/DeepSeek-R1"
+backend: sglang
+image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 16
+  numGpusPerNode: 8
+modelCache:
+  pvcName: model-cache
+  pvcMountPath: /opt/model
+workload:
+  isl: 4000
+  osl: 1000
+sla:
+  ttft: 2000.0
+  itl: 50.0
+searchStrategy: thorough
+overrides:
+  dgd:
+    spec:
+      services:
+        decode:
+          sharedMemory:
+            size: 80Gi
+          extraPodSpec:
+            mainContainer:
+              workingDir: /workspace
+              args:
+                - --mem-fraction-static
+                - "0.75"
+                - --prefill-round-robin-balance
+                - --watchdog-timeout
+                - "3600"
+        prefill:
+          sharedMemory:
+            size: 80Gi
+          extraPodSpec:
+            mainContainer:
+              workingDir: /workspace
+              args:
+                - --mem-fraction-static
+                - "0.75"
+                - --load-balance-method
+                - round_robin
+                - --watchdog-timeout
+                - "3600"

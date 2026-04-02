@@ -12,11 +12,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    kv_router::KvRouterConfig, local_model::LocalModel, model_card::ModelDeploymentCard,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -37,7 +38,7 @@ pub struct RouterConfig {
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for busy detection
     pub load_threshold_config: LoadThresholdConfig,
-    pub decode_fallback: bool,
+    pub enforce_disagg: bool,
 }
 
 impl RouterConfig {
@@ -46,7 +47,7 @@ impl RouterConfig {
             router_mode,
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
-            decode_fallback: false,
+            enforce_disagg: false,
         }
     }
 
@@ -55,8 +56,8 @@ impl RouterConfig {
         self
     }
 
-    pub fn with_decode_fallback(mut self, decode_fallback: bool) -> Self {
-        self.decode_fallback = decode_fallback;
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
         self
     }
 }
