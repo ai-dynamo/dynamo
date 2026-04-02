@@ -54,9 +54,9 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
-				APIGroups: []string{apiGroupCore},
-				Resources: []string{"endpoints"},
-				Verbs:     []string{"get", "list", "watch"},
+			APIGroups: []string{apiGroupCore},
+			Resources: []string{"endpoints", "pods"},
+			Verbs:     []string{"get", "list", "watch"},
 			},
 			{
 				APIGroups: []string{"discovery.k8s.io"},
