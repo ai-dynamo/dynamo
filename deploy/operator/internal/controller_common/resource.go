@@ -250,21 +250,37 @@ func CopySpec(source, destination client.Object) error {
 }
 
 func getSpec(obj client.Object) (any, error) {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return nil, err
 	}
-	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
-	// Extract only the spec from source
-	spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
+	u := &unstructured.Unstructured{Object: sourceMap}
+
+	// Prefer "spec" for backward-compatible hashing of resources that have it.
+	spec, found, err := unstructured.NestedFieldCopy(u.Object, "spec")
 	if err != nil {
 		return nil, err
 	}
-	if !found {
+	if found {
+		return spec, nil
+	}
+
+	// For resources without a spec (ConfigMaps, Secrets, RoleBindings, etc.),
+	// hash all content fields — everything except the standard Kubernetes
+	// envelope (apiVersion, kind, metadata) and controller-managed status.
+	content := make(map[string]interface{})
+	for k, v := range u.Object {
+		switch k {
+		case "apiVersion", "kind", "metadata", "status":
+			continue
+		default:
+			content[k] = v
+		}
+	}
+	if len(content) == 0 {
 		return nil, nil
 	}
-	return spec, nil
+	return content, nil
 }
 
 // SpecChangeResult contains the result of spec change detection

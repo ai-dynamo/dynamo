@@ -117,7 +117,7 @@ def leader_pod_is_healthy():
     try:
         ip = socket.gethostbyname(host)
     except socket.gaierror:
-        return False, "DNS resolution failed", None
+        return False, "DNS resolution failed", None, None
     try:
         req = urllib.request.Request(
             f"{_k8s_api()}?fieldSelector=status.podIP={ip}",
@@ -126,7 +126,7 @@ def leader_pod_is_healthy():
         resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(), timeout=5).read())
         pods = resp.get("items", [])
         if not pods:
-            return False, f"no pod found with IP {ip}", None
+            return False, f"no pod found with IP {ip}", None, ip
         pod = pods[0]
         name = pod["metadata"].get("name", "unknown")
         uid = pod["metadata"].get("uid", "unknown")
@@ -134,12 +134,12 @@ def leader_pod_is_healthy():
         deletion_ts = pod["metadata"].get("deletionTimestamp")
         info = f"ip={ip} pod={name} uid={uid} phase={phase} deletionTimestamp={deletion_ts}"
         if deletion_ts:
-            return False, f"pod {name} is terminating", info
+            return False, f"pod {name} is terminating", info, ip
         if phase != "Running":
-            return False, f"pod {name} phase is {phase}", info
-        return True, "", info
+            return False, f"pod {name} phase is {phase}", info, ip
+        return True, "", info, ip
     except Exception as e:
-        return False, f"K8s API error: {e}", None
+        return False, f"K8s API error: {e}", None, None
 
 print(f"Waiting for leader master port at {host}:{port}...", flush=True)
 time.sleep(5)
@@ -147,10 +147,10 @@ start = time.monotonic()
 last_status = start
 last_err = ""
 while True:
-    healthy, reason, pod_info = leader_pod_is_healthy()
+    healthy, reason, pod_info, leader_ip = leader_pod_is_healthy()
     if healthy:
         try:
-            s = socket.create_connection((host, port), timeout=2)
+            s = socket.create_connection((leader_ip, port), timeout=2)
             s.close()
             elapsed = time.monotonic() - start
             print(f"Leader master port ready (waited {elapsed:.1f}s) [{pod_info}]", flush=True)
