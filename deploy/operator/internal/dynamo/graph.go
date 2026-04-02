@@ -1532,6 +1532,10 @@ func GenerateGrovePodCliqueSet(
 			if isGMS && r.Role != RoleGMS {
 				clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
 			}
+			if discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes && (r.Role == RoleMain || r.Role == RoleLeader) {
+				clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+				clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+			}
 			annotations, err := generateAnnotations(component)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
