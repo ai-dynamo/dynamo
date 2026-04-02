@@ -12,7 +12,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_async_openai::types::{ChatCompletionMessageContent, StopReason};
+use dynamo_protocols::types::{ChatCompletionMessageContent, StopReason};
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -26,7 +26,7 @@ pub struct DeltaAggregator {
     /// Timestamp (Unix epoch) indicating when the response was created.
     created: u32,
     /// Optional usage statistics for the completion request.
-    usage: Option<dynamo_async_openai::types::CompletionUsage>,
+    usage: Option<dynamo_protocols::types::CompletionUsage>,
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
@@ -34,7 +34,7 @@ pub struct DeltaAggregator {
     /// Optional error message if an error occurs during aggregation.
     error: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
 }
@@ -47,21 +47,21 @@ struct DeltaChoice {
     /// The accumulated text content for the choice.
     text: String,
     /// The role associated with this message (e.g., `system`, `user`, `assistant`).
-    role: Option<dynamo_async_openai::types::Role>,
+    role: Option<dynamo_protocols::types::Role>,
     /// The reason the completion was finished (if applicable).
-    finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+    finish_reason: Option<dynamo_protocols::types::FinishReason>,
     /// The stop string or token that triggered the stop condition.
     stop_reason: Option<StopReason>,
     /// Optional log probabilities for the chat choice.
-    logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
+    logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.
-    tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>>,
+    tool_calls: Option<Vec<dynamo_protocols::types::ChatCompletionMessageToolCall>>,
 
     /// Optional reasoning content for the chat choice.
     reasoning_content: Option<String>,
 
     /// Accumulated content parts for multimodal responses
-    content_parts: Vec<dynamo_async_openai::types::ChatCompletionResponseContentPart>,
+    content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
 }
 
 impl Default for DeltaAggregator {
@@ -72,15 +72,15 @@ impl Default for DeltaAggregator {
 }
 
 fn convert_tool_chunk_to_message_tool_call(
-    chunk: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
-) -> Option<dynamo_async_openai::types::ChatCompletionMessageToolCall> {
+    chunk: &dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
+) -> Option<dynamo_protocols::types::ChatCompletionMessageToolCall> {
     // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
     if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
         if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
-            Some(dynamo_async_openai::types::ChatCompletionMessageToolCall {
+            Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
                 id: id.clone(),
                 r#type: r#type.clone(),
-                function: dynamo_async_openai::types::FunctionCall {
+                function: dynamo_protocols::types::FunctionCall {
                     name: name.clone(),
                     arguments: arguments.clone(),
                 },
@@ -197,7 +197,7 @@ impl DeltaAggregator {
                         {
                             // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
                             let converted_tool_calls: Vec<
-                                dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                                dynamo_protocols::types::ChatCompletionMessageToolCall,
                             > = tool_calls
                                 .iter()
                                 .filter_map(convert_tool_chunk_to_message_tool_call)
@@ -227,7 +227,7 @@ impl DeltaAggregator {
                         // Update logprobs
                         if let Some(logprobs) = &choice.logprobs {
                             let state_lps = state_choice.logprobs.get_or_insert(
-                                dynamo_async_openai::types::ChatChoiceLogprobs {
+                                dynamo_protocols::types::ChatChoiceLogprobs {
                                     content: None,
                                     refusal: None,
                                 },
@@ -260,14 +260,14 @@ impl DeltaAggregator {
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
-            .map(dynamo_async_openai::types::ChatChoice::from)
+            .map(dynamo_protocols::types::ChatChoice::from)
             .collect();
 
         choices.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,
                 usage: aggregator.usage,
@@ -285,8 +285,8 @@ impl DeltaAggregator {
 }
 
 #[allow(deprecated)]
-impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
-    /// Converts a [`DeltaChoice`] into an [`dynamo_async_openai::types::ChatChoice`].
+impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
+    /// Converts a [`DeltaChoice`] into an [`dynamo_protocols::types::ChatChoice`].
     ///
     /// # Note
     /// The `function_call` field is deprecated.
@@ -297,7 +297,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
         {
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         } else {
             delta.finish_reason
         };
@@ -313,8 +313,8 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             None
         };
 
-        dynamo_async_openai::types::ChatChoice {
-            message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+        dynamo_protocols::types::ChatChoice {
+            message: dynamo_protocols::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
                 content,
                 tool_calls: delta.tool_calls,
@@ -390,8 +390,8 @@ mod tests {
     fn create_test_delta(
         index: u32,
         text: &str,
-        role: Option<dynamo_async_openai::types::Role>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+        role: Option<dynamo_protocols::types::Role>,
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
         logprob: Option<f32>,
         tool_calls: Option<&str>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
@@ -402,11 +402,11 @@ mod tests {
 
         let tool_call_chunks = if let Some(tool_calls) = tool_calls {
             Some(vec![
-                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
-                    r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
-                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                    r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                    function: Some(dynamo_protocols::types::FunctionCallStream {
                         name: tool_calls["name"].as_str().map(|s| s.to_string()),
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
@@ -416,7 +416,7 @@ mod tests {
             None
         };
 
-        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(text.to_string())),
             function_call: None,
             tool_calls: tool_call_chunks,
@@ -426,19 +426,17 @@ mod tests {
         };
         let logprobs = logprob.map(|lp| {
             let token = text.to_string();
-            dynamo_async_openai::types::ChatChoiceLogprobs {
-                content: Some(vec![
-                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
-                        token: token.clone(),
-                        logprob: lp,
-                        bytes: token_to_utf8_bytes(&token),
-                        top_logprobs: vec![],
-                    },
-                ]),
+            dynamo_protocols::types::ChatChoiceLogprobs {
+                content: Some(vec![dynamo_protocols::types::ChatCompletionTokenLogprob {
+                    token: token.clone(),
+                    logprob: lp,
+                    bytes: token_to_utf8_bytes(&token),
+                    top_logprobs: vec![],
+                }]),
                 refusal: None,
             }
         });
-        let choice = dynamo_async_openai::types::ChatChoiceStream {
+        let choice = dynamo_protocols::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
@@ -447,7 +445,7 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
                 created: 1234567890,
@@ -498,7 +496,7 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "Hello,",
-            Some(dynamo_async_openai::types::Role::User),
+            Some(dynamo_protocols::types::Role::User),
             None,
             None,
             None,
@@ -528,7 +526,7 @@ mod tests {
             &ChatCompletionMessageContent::Text("Hello,".to_string())
         );
         assert!(choice.finish_reason.is_none());
-        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
         assert!(response.inner.service_tier.is_none());
     }
 
@@ -540,7 +538,7 @@ mod tests {
         let annotated_delta1 = create_test_delta(
             0,
             "Hello,",
-            Some(dynamo_async_openai::types::Role::User),
+            Some(dynamo_protocols::types::Role::User),
             None,
             Some(-0.1),
             None,
@@ -549,7 +547,7 @@ mod tests {
             0,
             " world!",
             None,
-            Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::Stop),
             Some(-0.2),
             None,
         );
@@ -575,9 +573,9 @@ mod tests {
         );
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
-        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
         assert_eq!(
             choice
                 .logprobs
@@ -608,7 +606,7 @@ mod tests {
         let annotated_delta1 = create_test_delta(
             0,
             "Hello",
-            Some(dynamo_async_openai::types::Role::User),
+            Some(dynamo_protocols::types::Role::User),
             None,
             None,
             None,
@@ -619,7 +617,7 @@ mod tests {
             0,
             "world",
             None,
-            Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::Stop),
             None,
             None,
         );
@@ -646,9 +644,9 @@ mod tests {
         );
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
-        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
     }
 
     #[allow(deprecated)]
@@ -657,7 +655,7 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "test_model".to_string(),
                 created: 1234567890,
@@ -665,10 +663,10 @@ mod tests {
                 usage: None,
                 system_fingerprint: None,
                 choices: vec![
-                    dynamo_async_openai::types::ChatChoiceStream {
+                    dynamo_protocols::types::ChatChoiceStream {
                         index: 0,
-                        delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                            role: Some(dynamo_async_openai::types::Role::Assistant),
+                        delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                            role: Some(dynamo_protocols::types::Role::Assistant),
                             content: Some(ChatCompletionMessageContent::Text(
                                 "Choice 0".to_string(),
                             )),
@@ -677,14 +675,14 @@ mod tests {
                             refusal: None,
                             reasoning_content: None,
                         },
-                        finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                        finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                         stop_reason: None,
                         logprobs: None,
                     },
-                    dynamo_async_openai::types::ChatChoiceStream {
+                    dynamo_protocols::types::ChatChoiceStream {
                         index: 1,
-                        delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                            role: Some(dynamo_async_openai::types::Role::Assistant),
+                        delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                            role: Some(dynamo_protocols::types::Role::Assistant),
                             content: Some(ChatCompletionMessageContent::Text(
                                 "Choice 1".to_string(),
                             )),
@@ -693,7 +691,7 @@ mod tests {
                             refusal: None,
                             reasoning_content: None,
                         },
-                        finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                        finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                         stop_reason: None,
                         logprobs: None,
                     },
@@ -731,11 +729,11 @@ mod tests {
         );
         assert_eq!(
             choice0.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
         assert_eq!(
             choice0.message.role,
-            dynamo_async_openai::types::Role::Assistant
+            dynamo_protocols::types::Role::Assistant
         );
 
         let choice1 = &response.inner.choices[1];
@@ -746,11 +744,11 @@ mod tests {
         );
         assert_eq!(
             choice1.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
         assert_eq!(
             choice1.message.role,
-            dynamo_async_openai::types::Role::Assistant
+            dynamo_protocols::types::Role::Assistant
         );
     }
 
@@ -763,8 +761,8 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "I'll check the weather for you.",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Stop), // Original finish reason is Stop
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop), // Original finish reason is Stop
             None,
             Some(tool_call_json),
         );
@@ -794,7 +792,7 @@ mod tests {
         // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         );
     }
 
@@ -806,8 +804,8 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "Let me search for that.",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Length), // Original finish reason is Length
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length), // Original finish reason is Length
             None,
             Some(tool_call_json),
         );
@@ -837,7 +835,7 @@ mod tests {
         // Verify that finish reason was overridden to ToolCalls despite original being Length
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         );
     }
 
@@ -849,7 +847,7 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "I'll calculate that for you.",
-            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_protocols::types::Role::Assistant),
             None, // Original finish reason is None
             None,
             Some(tool_call_json),
@@ -880,7 +878,7 @@ mod tests {
         // Verify that finish reason was set to ToolCalls despite original being None
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         );
     }
 
@@ -890,8 +888,8 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "This is a regular response without tool calls.",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
             None,
             None, // No tool calls
         );
@@ -919,7 +917,7 @@ mod tests {
         // Verify that original finish reason (Stop) is preserved
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
     }
 
@@ -930,8 +928,8 @@ mod tests {
         let mut annotated_delta = create_test_delta(
             0,
             "Response with empty tool calls array.",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Length),
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
             None,
             None,
         );
@@ -964,7 +962,7 @@ mod tests {
         // Verify that original finish reason (Length) is preserved since tool calls are empty
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Length)
+            Some(dynamo_protocols::types::FinishReason::Length)
         );
     }
 
@@ -977,8 +975,8 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "Hey Dude ! What's the weather in San Francisco in Fahrenheit?",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
             None,
             Some(tool_call_json),
         );
@@ -1027,11 +1025,11 @@ mod tests {
         // The finish_reason should be ToolCalls
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         );
         assert_eq!(
             choice.message.role,
-            dynamo_async_openai::types::Role::Assistant
+            dynamo_protocols::types::Role::Assistant
         );
     }
 
@@ -1044,8 +1042,8 @@ mod tests {
         let annotated_delta = create_test_delta(
             0,
             "Getting weather for New York",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Stop), // This should be overridden
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop), // This should be overridden
             None,
             Some(tool_call_json),
         );
@@ -1066,7 +1064,7 @@ mod tests {
         // The finish_reason should be ToolCalls, not Stop, because tool calls are present
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
         );
 
         // Verify tool calls are present

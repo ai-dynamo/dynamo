@@ -1535,7 +1535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-async-openai"
+name = "dynamo-protocols"
 version = "1.0.0"
 dependencies = [
  "async-openai-macros",
@@ -1621,7 +1621,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-async-openai",
+ "dynamo-protocols",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1729,7 +1729,7 @@ name = "dynamo-parsers"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dynamo-async-openai",
+ "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_stream::stream;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
 };
@@ -116,7 +116,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_async_openai::types::StopReason>,
+    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -124,9 +124,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(
-                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
-            ),
+            content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                content.to_string(),
+            )),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -543,8 +543,8 @@ impl JailedStream {
                         if let Some(ref content) = choice.delta.content {
                             // Jailing only applies to text content
                             let text_content = match content {
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Parts(_) => None,
                             };
 
                             if let Some(text) = text_content {
@@ -676,7 +676,7 @@ impl JailedStream {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
                 // Create a finalization response carrying forward real stream metadata
                 let dummy_response = NvCreateChatCompletionStreamResponse {
-                    inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                    inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                         id: last_stream_id,
                         object: "chat.completion.chunk".to_string(),
                         created: last_stream_created,
@@ -932,7 +932,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+            r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),

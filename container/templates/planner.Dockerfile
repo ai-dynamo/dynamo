@@ -63,9 +63,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
-# startup and targeted planner/profiler unit tests.
+# startup and the component-local planner-family test suites.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
-COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
@@ -75,7 +74,7 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
-COPY --from=planner_builder /bin/dash /usr/bin/sh
+COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
 COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
 COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
@@ -90,7 +89,7 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     LD_LIBRARY_PATH="/opt/dynamo/lib" \
     PATH="/opt/dynamo/venv/bin:/usr/local/bin/etcd:/usr/local/bin:/bin" \
-    PYTHONPATH="/workspace"
+    PYTHONPATH="/workspace/components/src:/workspace"
 
 WORKDIR /workspace
 USER dynamo
