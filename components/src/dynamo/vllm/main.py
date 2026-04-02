@@ -558,7 +558,11 @@ def setup_vllm_engine(
 
     # Pass benchmark config to InstrumentedScheduler via additional_config.
     if hasattr(config, "_benchmark_additional_config"):
-        vllm_config.additional_config["benchmark"] = config._benchmark_additional_config
+        bench = config._benchmark_additional_config
+        if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
+            short_id = fpm_worker_id[-8:]
+            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+        vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 
     factory = []

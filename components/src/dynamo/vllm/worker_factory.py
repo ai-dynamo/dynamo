@@ -604,7 +604,7 @@ class WorkerFactory:
             logger.info("[Shadow] Engine awake, registering with discovery")
 
         # Wait for self-benchmark to complete before registering.
-        bench_cfg = getattr(config, "_benchmark_additional_config", None)
+        bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
             handler._benchmark_results = await _wait_and_load_benchmark(
                 bench_cfg, vllm_config
@@ -791,7 +791,7 @@ class WorkerFactory:
         )
 
         # Wait for self-benchmark to complete before registering.
-        bench_cfg = getattr(config, "_benchmark_additional_config", None)
+        bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
             handler._benchmark_results = await _wait_and_load_benchmark(
                 bench_cfg, vllm_config
