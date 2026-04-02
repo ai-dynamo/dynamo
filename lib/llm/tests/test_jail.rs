@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
-};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 #[cfg(test)]
@@ -16,7 +16,7 @@ mod tests {
     // Test utilities module - shared test infrastructure
     pub(crate) mod test_utils {
         use super::*;
-        use dynamo_async_openai::types::ChatCompletionMessageContent;
+        use dynamo_protocols::types::ChatCompletionMessageContent;
 
         /// Helper to extract text from ChatCompletionMessageContent
         pub fn extract_text(content: &ChatCompletionMessageContent) -> &str {
@@ -48,7 +48,7 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -91,7 +91,7 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -138,7 +138,7 @@ mod tests {
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -186,7 +186,7 @@ mod tests {
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices,
                     created: 1234567890,
@@ -234,7 +234,7 @@ mod tests {
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices,
                     created: 1234567890,
@@ -328,7 +328,7 @@ mod tests {
                 assert!(
                     choice.delta.content.is_none()
                         || choice.delta.content.as_ref().is_none_or(|c| match c {
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) =>
+                            dynamo_protocols::types::ChatCompletionMessageContent::Text(t) =>
                                 t.is_empty(),
                             _ => false,
                         }),
@@ -2384,7 +2384,7 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
-    use dynamo_async_openai::types::ChatCompletionMessageContent;
+    use dynamo_protocols::types::ChatCompletionMessageContent;
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
@@ -2416,7 +2416,7 @@ mod parallel_jail_tests {
             .collect();
 
         let response = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
                 created: 1234567890,
@@ -2491,7 +2491,7 @@ mod parallel_jail_tests {
 
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::ChatCompletionToolType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );

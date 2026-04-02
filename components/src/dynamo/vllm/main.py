@@ -576,6 +576,10 @@ def setup_vllm_engine(
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
+    # update block_size in vllm_config based on final engine cache info for later use
+    runtime_values = get_engine_cache_info(engine_client)
+    vllm_config.cache_config.block_size = runtime_values["block_size"]
+
     return (
         engine_client,
         vllm_config,

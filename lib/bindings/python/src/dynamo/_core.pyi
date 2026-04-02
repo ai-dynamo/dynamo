@@ -1179,7 +1179,6 @@ class KvRouterConfig:
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
-        router_enable_cache_control: bool = False,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """
@@ -1211,8 +1210,6 @@ class KvRouterConfig:
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
-            router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
-                cache_control service mesh endpoint (default: False).
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
@@ -2035,4 +2032,3 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
-

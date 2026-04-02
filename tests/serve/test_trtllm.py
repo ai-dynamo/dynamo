@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.serve.common import (
+    SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
@@ -294,6 +295,49 @@ trtllm_configs = {
         ],
         env={
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
+    # LLaVA raw-embeddings E/PD test
+    # Validates the raw-embeddings code path where pre-computed vision embeddings
+    # (.pt tensor file) are sent via file:// URL instead of a raw image URL.
+    #
+    # Flow:
+    #   1. Launch script generates embeddings using standalone HF vision encoder
+    #   2. Encode + Aggregated PD workers start for LLaVA
+    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.pt
+    #
+    # Uses gpu_2: encode worker on GPU 0, PD worker on GPU 1.
+    # The 7B LLaVA model requires two GPUs because both encode and PD workers
+    # load the full model (~14GB each in bfloat16), exceeding a single L4's 22GB.
+    # Runs in the multi-GPU pre-merge CI (marker: pre_merge and trtllm and gpu_2).
+    "raw_embeddings_epd": TRTLLMConfig(
+        name="raw_embeddings_epd",
+        directory=SERVE_TEST_DIR,
+        script_name="agg_raw_embeddings_llava.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(
+                900
+            ),  # Embeddings generation (~60s) + model load (~120s) + inference
+        ],
+        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=600,
+        # Embeddings generation + worker startup takes longer than normal
+        delayed_start=180,
+        request_payloads=[
+            multimodal_payload_default(
+                image_url="file:///tmp/llava_embeddings.pt",
+                text="Describe what this image shows.",
+                expected_response=["bench", "person", "image", "picture"],
+            )
+        ],
+        env={
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+            "PD_CUDA_VISIBLE_DEVICES": "1",
         },
     ),
     # TensorRT-LLM video diffusion test using Wan2.1-T2V-1.3B model.
