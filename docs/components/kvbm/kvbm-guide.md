@@ -377,16 +377,16 @@ or the storage backend requires a different method for setting `O_DIRECT`.
 export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
-2. If you are using **IBM Storage Scale (GPFS)**, the default `fcntl`-based `O_DIRECT` setup is
-silently ignored by GPFS. Set the disk allocator type to use `O_DIRECT` at file open time instead:
+2. If your filesystem ignores `fcntl(F_SETFL, O_DIRECT)` (e.g., IBM Storage Scale), set the
+disk allocator type to pass `O_DIRECT` at file open time instead:
 
 ```bash
-export DYN_KVBM_DISK_ALLOCATOR_TYPE=ibm-scale
+export DYN_KVBM_DISK_ALLOCATOR_TYPE=open-direct
 ```
 
 Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
 - `default`: Apply `O_DIRECT` via `fcntl` after file creation. Works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
-- `ibm-scale`: Pass `O_DIRECT` to `mkostemp` at file open time. Required for IBM Storage Scale (GPFS), which ignores `fcntl(F_SETFL, O_DIRECT)`.
+- `open-direct`: Pass `O_DIRECT` to `mkostemp` at file open time. Required on filesystems where `fcntl(F_SETFL, O_DIRECT)` is ignored (e.g., IBM Storage Scale).
 
 3. If you encounter "write all error" or EINVAL (errno 22), or need to debug without `O_DIRECT`:
 

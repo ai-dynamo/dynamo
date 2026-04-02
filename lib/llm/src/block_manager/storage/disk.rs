@@ -24,7 +24,7 @@ const DISK_ALLOCATOR_TYPE_KEY: &str = "DYN_KVBM_DISK_ALLOCATOR_TYPE";
 /// Strategy for applying O_DIRECT to disk cache files.
 ///
 /// Different storage backends require different approaches to setting O_DIRECT.
-/// For example, IBM Storage Scale (GPFS) ignores `fcntl(F_SETFL, O_DIRECT)`,
+/// For example, IBM Storage Scale ignores `fcntl(F_SETFL, O_DIRECT)`,
 /// requiring O_DIRECT to be passed at file open time instead.
 ///
 /// Implementations are selected via the `DYN_KVBM_DISK_ALLOCATOR_TYPE` env var.
@@ -108,7 +108,7 @@ impl DiskOpenStrategy for DefaultDirectIo {
                 tracing::error!(
                     "Failed to set O_DIRECT on file descriptor {}: {}. \
                      This may indicate filesystem doesn't support O_DIRECT via fcntl. \
-                     Consider setting {}=ibm-scale for IBM Storage Scale, \
+                     Consider setting {}=open-direct for filesystems like IBM Storage Scale, \
                      or {}=true to disable O_DIRECT entirely.",
                     raw_fd,
                     e,
@@ -122,7 +122,7 @@ impl DiskOpenStrategy for DefaultDirectIo {
                     .unwrap_or("<invalid utf8>");
                 let _ = unlink(file_name);
                 return Err(StorageError::AllocationFailed(format!(
-                    "Failed to set O_DIRECT: {}. Try {}=ibm-scale or {}=true",
+                    "Failed to set O_DIRECT: {}. Try {}=open-direct or {}=true",
                     e, DISK_ALLOCATOR_TYPE_KEY, DISK_DISABLE_O_DIRECT_KEY
                 )));
             }
@@ -139,20 +139,17 @@ impl DiskOpenStrategy for DefaultDirectIo {
     }
 }
 
-/// IBM Storage Scale (GPFS) strategy: pass O_DIRECT directly to mkostemp.
+/// Open-direct strategy: pass O_DIRECT directly to mkostemp at file open time.
 ///
-/// IBM Storage Scale ignores `fcntl(F_SETFL, O_DIRECT)`, so O_DIRECT must be
-/// specified at file open time. This strategy passes O_DIRECT as a flag to
-/// mkostemp instead of applying it post-creation via fcntl.
-///
-/// Reference: IBM Storage Scale documentation notes that setting O_DIRECT via
-/// fcntl on an open file is silently ignored by GPFS.
+/// Some filesystems (e.g., IBM Storage Scale) ignore `fcntl(F_SETFL, O_DIRECT)`,
+/// so O_DIRECT must be specified at file open time. This strategy passes O_DIRECT
+/// as a flag to mkostemp instead of applying it post-creation via fcntl.
 #[derive(Debug, Default)]
 pub struct MkostempDirectIo;
 
 impl DiskOpenStrategy for MkostempDirectIo {
     fn name(&self) -> &str {
-        "ibm-scale"
+        "open-direct"
     }
 
     fn open_temp_file(
@@ -188,7 +185,7 @@ impl DiskOpenStrategy for MkostempDirectIo {
 
         if !disable_o_direct {
             tracing::debug!(
-                "O_DIRECT enabled via mkostemp for IBM Storage Scale (fd={})",
+                "O_DIRECT enabled via mkostemp at open time (fd={})",
                 raw_fd
             );
         }
@@ -201,19 +198,20 @@ impl DiskOpenStrategy for MkostempDirectIo {
 ///
 /// Supported values:
 /// - `"default"` (default): Apply O_DIRECT via fcntl after file creation.
-/// - `"ibm-scale"`: Pass O_DIRECT to mkostemp at file open time (required for GPFS).
+/// - `"open-direct"`: Pass O_DIRECT to mkostemp at file open time (required for filesystems
+///   like IBM Storage Scale where fcntl-based O_DIRECT is ignored).
 fn disk_open_strategy_from_env() -> Result<Box<dyn DiskOpenStrategy>, StorageError> {
     match std::env::var(DISK_ALLOCATOR_TYPE_KEY).as_deref() {
         Ok("default") | Err(_) => {
             tracing::info!("Using default fcntl disk open strategy");
             Ok(Box::new(DefaultDirectIo))
         }
-        Ok("ibm-scale") => {
-            tracing::info!("Using IBM Storage Scale disk open strategy (O_DIRECT via mkostemp)");
+        Ok("open-direct") => {
+            tracing::info!("Using open-direct disk open strategy (O_DIRECT via mkostemp)");
             Ok(Box::new(MkostempDirectIo))
         }
         Ok(unknown) => Err(StorageError::AllocationFailed(format!(
-            "Unknown {}={:?}. Supported values: \"default\", \"ibm-scale\"",
+            "Unknown {}={:?}. Supported values: \"default\", \"open-direct\"",
             DISK_ALLOCATOR_TYPE_KEY, unknown
         ))),
     }
@@ -840,14 +838,15 @@ mod tests {
         }
     }
 
-    /// Test that disk_open_strategy_from_env returns MkostempDirectIo for "ibm-scale".
+    /// Test that disk_open_strategy_from_env returns MkostempDirectIo for "open-direct".
     #[test]
-    fn test_strategy_from_env_ibm_scale() {
+    fn test_strategy_from_env_open_direct() {
         unsafe {
-            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "ibm-scale");
+            std::env::set_var(DISK_ALLOCATOR_TYPE_KEY, "open-direct");
         }
-        let strategy = disk_open_strategy_from_env().expect("ibm-scale strategy should succeed");
-        assert_eq!(strategy.name(), "ibm-scale");
+        let strategy =
+            disk_open_strategy_from_env().expect("open-direct strategy should succeed");
+        assert_eq!(strategy.name(), "open-direct");
         unsafe {
             std::env::remove_var(DISK_ALLOCATOR_TYPE_KEY);
         }
