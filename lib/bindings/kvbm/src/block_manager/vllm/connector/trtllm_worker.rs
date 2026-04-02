@@ -178,7 +178,9 @@ fn build_nccl_config(
             (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
                 tracing::info!(
                     "Creating NCCL config for replicated mode: rank={}, world_size={}, comm_ptr={:#x}",
-                    r, ws, ptr
+                    r,
+                    ws,
+                    ptr
                 );
                 use cudarc::nccl::sys::ncclComm_t;
                 Ok(unsafe { NcclConfig::enabled(ptr as ncclComm_t, r, ws) })
@@ -186,13 +188,16 @@ fn build_nccl_config(
             (Some(r), Some(ws), Some(0)) => anyhow::bail!(
                 "NCCL replicated mode requires a valid communicator: rank={}, world_size={}, \
                  nccl_comm_ptr=0 (invalid). Provide a non-null nccl_comm_ptr or omit all for sharded mode.",
-                r, ws
+                r,
+                ws
             ),
             (r, ws, ptr) if wants_replicated => anyhow::bail!(
                 "NCCL replicated mode requires rank, world_size, and nccl_comm_ptr together; \
                  partial configuration is not allowed. Got rank={:?}, world_size={:?}, \
                  nccl_comm_ptr={:?}. Provide all three or omit all for sharded mode.",
-                r, ws, ptr
+                r,
+                ws,
+                ptr
             ),
             _ => Ok(NcclConfig::disabled()),
         }
@@ -204,7 +209,9 @@ fn build_nccl_config(
                 "NCCL replicated mode requested (rank={:?}, world_size={:?}, nccl_comm_ptr={:?}) \
                  but kvbm was not built with the 'nccl' feature. Rebuild with --features nccl \
                  or omit rank/world_size/nccl_comm_ptr for sharded mode.",
-                nccl_rank, world_size, nccl_comm_ptr
+                nccl_rank,
+                world_size,
+                nccl_comm_ptr
             );
         }
         Ok(NcclConfig::disabled())
