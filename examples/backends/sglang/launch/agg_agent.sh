@@ -4,7 +4,7 @@
 #
 # Aggregated serving with agent controller: session control, sticky routing,
 # KV event tracking, and reasoning/tool-call parsing.
-# GPUs: 1
+# GPUs: 2
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
