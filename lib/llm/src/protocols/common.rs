@@ -387,6 +387,7 @@ pub struct GuidedDecodingOptions {
 
 impl GuidedDecodingOptions {
     /// Construct without validation
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -410,6 +411,7 @@ impl GuidedDecodingOptions {
     }
 
     /// Construct and validate (fallible)
+    #[allow(clippy::too_many_arguments)]
     pub fn validated(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -426,6 +428,7 @@ impl GuidedDecodingOptions {
     }
 
     /// Construct only if one field is Some (fallible)
+    #[allow(clippy::too_many_arguments)]
     pub fn from_optional(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -931,7 +934,16 @@ mod tests {
         assert!(opts.is_err());
 
         // Choice set but empty vector should not count as set
-        let opts = GuidedDecodingOptions::from_optional(None, None, Some(vec![]), None, None, None, None, None);
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            Some(vec![]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_none());
@@ -954,7 +966,8 @@ mod tests {
         assert_eq!(val.choice, Some(vec!["A".to_string()]));
 
         // structural_tag set returns Ok(Some)
-        let structural_tag = Some(serde_json::json!({"type": "triggered_tags", "triggers": ["</think>"]}));
+        let structural_tag =
+            Some(serde_json::json!({"type": "triggered_tags", "triggers": ["</think>"]}));
         let opts = GuidedDecodingOptions::from_optional(
             None,
             None,
@@ -975,7 +988,16 @@ mod tests {
     #[test]
     fn test_guided_grammar_deep_nesting_rejected() {
         let grammar = "(".repeat(501) + "a" + &")".repeat(501);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None, None);
+        let result = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            Some(grammar),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nesting depth"));
     }
@@ -983,7 +1005,16 @@ mod tests {
     #[test]
     fn test_guided_grammar_acceptable_nesting_ok() {
         let grammar = "(".repeat(500) + "a" + &")".repeat(500);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None, None);
+        let result = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            Some(grammar),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok());
     }
 }
