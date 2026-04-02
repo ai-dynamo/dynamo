@@ -1260,6 +1260,7 @@ def _test_router_decisions_disagg(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     durable_kv_events: bool = False,
+    enable_bootstrap: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1405,11 +1406,16 @@ def _test_router_decisions_disagg(
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
 
-                        # Verify timing info is present and valid
+                        # Verify timing info is present and valid.
+                        # kv_transfer_latency_ms is only measured on the original
+                        # prefill path, not the bootstrap path where decode is
+                        # dispatched before prefill completes.
                         assert (
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
-                        verify_response_timing(timing_info, disagg=True)
+                        verify_response_timing(
+                            timing_info, disagg=not enable_bootstrap
+                        )
 
                     # Small delay between requests
                     await asyncio.sleep(1)

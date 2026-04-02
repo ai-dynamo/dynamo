@@ -1147,6 +1147,7 @@ def test_router_decisions_disagg(
                     frontend_port=frontend_port,
                     test_payload=TEST_PAYLOAD,
                     request_plane="nats",
+                    enable_bootstrap=enable_disagg_bootstrap,
                 )
     else:
         # Start decode workers first
@@ -1190,6 +1191,7 @@ def test_router_decisions_disagg(
                     frontend_port=frontend_port,
                     test_payload=TEST_PAYLOAD,
                     request_plane="nats",
+                    enable_bootstrap=enable_disagg_bootstrap,
                 )
 
 
