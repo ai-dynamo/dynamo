@@ -123,8 +123,12 @@ pub struct PhysicalLayoutBuilder<C, L, M> {
     config: Option<LayoutConfig>,
     layout_kind: Option<LayoutKind>,
     memory_plan: Option<MemoryPlan>,
-    device_backend: DeviceBackend,
-    device_id: u32,
+    // TODO(v2-layout-builder): `_device_backend` and `_device_id` are kept
+    // for compatibility/default allocation plumbing. If future audits confirm
+    // allocation paths can pass backend/device explicitly, remove these
+    // fields and simplify builder state/into_parts/from_parts signatures.
+    _device_backend: DeviceBackend,
+    _device_id: u32,
     _config: PhantomData<C>,
     _layout: PhantomData<L>,
     _memory: PhantomData<M>,
@@ -143,8 +147,8 @@ impl PhysicalLayoutBuilder<NoConfig, NoLayout, NoMemory> {
             config: None,
             layout_kind: None,
             memory_plan: None,
-            device_backend,
-            device_id,
+            _device_backend: device_backend,
+            _device_id: device_id,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -168,8 +172,8 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
             self.config,
             self.layout_kind,
             self.memory_plan,
-            self.device_backend,
-            self.device_id,
+            self._device_backend,
+            self._device_id,
         )
     }
 
@@ -186,8 +190,8 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
             config,
             layout_kind,
             memory_plan,
-            device_backend,
-            device_id,
+            _device_backend: device_backend,
+            _device_id: device_id,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -270,8 +274,8 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         self,
         device_id: Option<u32>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        let device_backend = self.device_backend;
-        let actual_device_id = device_id.unwrap_or(self.device_id);
+        let device_backend = self._device_backend;
+        let actual_device_id = device_id.unwrap_or(self._device_id);
         let numa_aware = device_id.is_some();
         self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned {
             numa_aware,
@@ -285,7 +289,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         self,
         device_id: u32,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        let device_backend = self.device_backend;
+        let device_backend = self._device_backend;
         self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device {
             device_backend,
             device_id,
@@ -411,8 +415,8 @@ fn resolve_memory_plan(
     agent: &NixlAgent,
     plan: MemoryPlan,
     sizes: &[usize],
-    device_backend: DeviceBackend,
-    device_id: u32,
+    _device_backend: DeviceBackend,
+    _device_id: u32,
 ) -> Result<Vec<MemoryEntry>> {
     match plan {
         MemoryPlan::Provided(entries) => {
@@ -428,7 +432,9 @@ fn resolve_memory_plan(
                 .map(MemoryEntry::ensure_registered)
                 .collect()
         }
-        MemoryPlan::Allocate(strategy) => allocate_regions(agent, strategy, sizes, device_backend, device_id),
+        MemoryPlan::Allocate(strategy) => {
+            allocate_regions(agent, strategy, sizes, _device_backend, _device_id)
+        }
     }
 }
 
@@ -436,8 +442,8 @@ fn allocate_regions(
     agent: &NixlAgent,
     strategy: AllocationKind,
     sizes: &[usize],
-    device_backend: DeviceBackend,
-    device_id: u32,
+    _device_backend: DeviceBackend,
+    _device_id: u32,
 ) -> Result<Vec<MemoryEntry>> {
     if sizes.is_empty() {
         return Ok(Vec::new());
