@@ -43,8 +43,7 @@ SEARCH_TOOL = {
 
 pytestmark = [
     pytest.mark.vllm,
-    # vllm frontend doesn't need or use the GPU, but in CI pytorch seems to look for the Device
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.parallel,
