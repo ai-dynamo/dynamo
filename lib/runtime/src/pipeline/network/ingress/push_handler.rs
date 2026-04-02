@@ -219,6 +219,10 @@ where
 
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
+        tracing::info!(
+            request_id = %control_msg.id,
+            "request received"
+        );
         tracing::trace!("received request: {:?}", request);
         let request: context::Context<T> = Context::with_id(request, control_msg.id);
 
@@ -358,6 +362,11 @@ where
 
         // Ensure the metrics guard is not dropped until the end of the function.
         drop(_inflight_guard);
+
+        tracing::info!(
+            request_id = %context.id(),
+            "request completed"
+        );
 
         Ok(())
     }
