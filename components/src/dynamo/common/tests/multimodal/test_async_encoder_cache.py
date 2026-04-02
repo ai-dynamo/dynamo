@@ -14,6 +14,12 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 class TestAsyncEncoderCacheBasicOperations:
     """Tests for basic operations."""

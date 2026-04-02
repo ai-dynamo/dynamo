@@ -10,7 +10,15 @@ to <think> blocks in the content field before chat template rendering.
 
 import copy
 
+import pytest
+
 from dynamo.common.utils.input_params import _inject_reasoning_content
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 class TestInjectReasoningContent:
