@@ -11,9 +11,17 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 try:
     from dynamo.trtllm.request_handlers.handler_base import HandlerBase
