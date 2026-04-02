@@ -271,6 +271,18 @@ STUB_MODULES = [
     "vllm.v1.core",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
+    "vllm.v1.request",
+    "vllm.reasoning.qwen3_reasoning_parser",
+    "vllm.reasoning.mistral_reasoning_parser",
+    "vllm.tool_parsers.hermes_tool_parser",
+    "vllm.tokenizers.mistral",
+    "vllm.tool_parsers.mistral_tool_parser",
+    "PIL",
+    "PIL.Image",
+    "mistral_common",
+    "mistral_common.tokens",
+    "mistral_common.tokens.tokenizers",
+    "mistral_common.tokens.tokenizers.base",
     "vllm.v1.metrics.loggers",
     "aiconfigurator.cli",
     "aiconfigurator.cli.main",
@@ -574,9 +586,37 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
             _pydantic.ConfigDict = lambda **kw: {}  # type: ignore[attr-defined]
             _pydantic.ValidationError = type("ValidationError", (Exception,), {})  # type: ignore[attr-defined]
 
+        # Special case: typing_extensions must re-export real typing constructs
+        # so that class Foo(TypedDict) and type annotations work.
+        if "typing_extensions" in stubber.stubbed:
+            import typing
+
+            _te = sys.modules["typing_extensions"]
+            for attr in (
+                "TypedDict",
+                "Required",
+                "NotRequired",
+                "Protocol",
+                "runtime_checkable",
+                "Annotated",
+                "get_type_hints",
+            ):
+                setattr(_te, attr, getattr(typing, attr, lambda *a, **kw: None))
+
         # Special case: vllm needs __version__
         if "vllm" in sys.modules and "vllm" in stubber.stubbed:
             sys.modules["vllm"].__version__ = "0.0.0"  # type: ignore[attr-defined]
+
+        # Special case: vllm EC connector classes are used as dataclass bases,
+        # which requires real classes (MagicMock lacks __mro__).
+        for mod_attr in [
+            ("vllm.distributed.ec_transfer.ec_connector.base", "ECConnectorMetadata"),
+            ("vllm.distributed.ec_transfer.ec_connector.base", "ECConnectorRole"),
+            ("vllm.v1.core.sched.output", "SchedulerOutput"),
+        ]:
+            mod_name, cls_name = mod_attr
+            if mod_name in stubber.stubbed:
+                setattr(sys.modules[mod_name], cls_name, type(cls_name, (), {}))
 
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
@@ -656,10 +696,13 @@ def main() -> int:
             json.dump(asdict(report), f, indent=2)
         LOG.info("Wrote JSON report to %s", args.json)
 
-    # Fail only if tests are missing required markers.
-    # Collection errors (exitcode 2) are expected in environments without
-    # full runtime deps and should not block the marker check.
-    return 1 if report.total_missing > 0 else 0
+    # Fail if any tests are missing required markers.
+    # Collection errors (exitcode 2) are tolerated because different
+    # environments (pre-commit, CI, local) have different dependencies
+    # installed, making zero-error collection impractical to guarantee.
+    if report.total_missing > 0:
+        return 1
+    return 0 if exitcode == 2 else exitcode
 
 
 if __name__ == "__main__":
