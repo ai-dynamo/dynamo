@@ -216,7 +216,7 @@ pub struct AgentHints {
 
 // Re-export CacheControl types from dynamo-async-openai where they are canonically defined
 // alongside the Anthropic protocol types they originate from.
-pub use dynamo_async_openai::types::anthropic::{CacheControl, CacheControlType};
+pub use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
 impl Default for NvExt {
     fn default() -> Self {

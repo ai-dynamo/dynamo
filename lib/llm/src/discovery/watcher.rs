@@ -34,6 +34,7 @@ use crate::{
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
+            audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
@@ -685,7 +686,19 @@ impl ModelWatcher {
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
 
-            // TODO: add audio models support
+            if card.model_type.supports_audios() {
+                let audios_router = PushRouter::<
+                    NvCreateAudioSpeechRequest,
+                    Annotated<NvAudioSpeechResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    self.router_config.router_mode,
+                    None,
+                    None,
+                )
+                .await?;
+                worker_set.audios_engine = Some(Arc::new(audios_router));
+            }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router = PushRouter::<

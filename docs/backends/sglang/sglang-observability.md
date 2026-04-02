@@ -137,7 +137,7 @@ Dynamo RPC (NATS transport)
     |
     v
 SGLang Handler (Python)
-  handler_base.py:_get_trace_header(context)
+  dynamo.common.utils.otel_tracing.build_trace_headers(context)
   builds W3C traceparent: "00-{trace_id}-{span_id}-01"
     |
     v
