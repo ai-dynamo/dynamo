@@ -2137,6 +2137,7 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "criterion 0.5.1",
+ "crossbeam-queue",
  "cudarc",
  "dashmap 6.1.0",
  "derive-getters",
