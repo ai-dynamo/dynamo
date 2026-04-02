@@ -265,6 +265,9 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	now := time.Now()
 	checkpointWorkerActive := false
 	if lease != nil && lease.Spec.LeaseDurationSeconds != nil {
+		// The snapshot-agent owns and renews this lease while it is still finalizing
+		// checkpoint state. A Job can complete before the agent writes the terminal
+		// checkpoint annotation, so we keep requeuing until the lease is no longer active.
 		lastRenewal := lease.Spec.RenewTime
 		if lastRenewal == nil {
 			lastRenewal = lease.Spec.AcquireTime
