@@ -39,7 +39,7 @@ THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
-    pytest.mark.pre_merge,
+    pytest.mark.pre_merge, # all tests take <1 min to run finish on RTX 6000
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
