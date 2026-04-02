@@ -99,13 +99,13 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
         return prompt_token_ids
 
     input_ids = getattr(prompt_token_ids, "input_ids", None)
-    if isinstance(input_ids, list):
-        return input_ids
+    if input_ids is not None and not isinstance(input_ids, str):
+        return list(input_ids)
 
     if isinstance(prompt_token_ids, dict):
         dict_input_ids = prompt_token_ids.get("input_ids")
-        if isinstance(dict_input_ids, list):
-            return dict_input_ids
+        if dict_input_ids is not None and not isinstance(dict_input_ids, str):
+            return list(dict_input_ids)
 
     return list(prompt_token_ids)
 

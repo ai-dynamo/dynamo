@@ -124,6 +124,7 @@ async def init_decode(
     session_control_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
     )
+    shutdown_endpoints.append(session_control_endpoint)
 
     try:
         await asyncio.gather(

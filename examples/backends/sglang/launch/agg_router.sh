@@ -54,8 +54,10 @@ fi
 
 MODEL="Qwen/Qwen3-14B-FP8"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-131072}"
+ORIGINAL_MAX_POS_EMBED=32768
+YARN_FACTOR=$(( CONTEXT_LENGTH / ORIGINAL_MAX_POS_EMBED ))
 MODEL_OVERRIDE_ARGS=$(cat <<EOF
-{"rope_theta":1000000,"max_position_embeddings":${CONTEXT_LENGTH},"rope_scaling":{"rope_type":"yarn","rope_theta":1000000,"factor":4.0,"original_max_position_embeddings":32768}}
+{"rope_theta":1000000,"max_position_embeddings":${CONTEXT_LENGTH},"rope_scaling":{"rope_type":"yarn","rope_theta":1000000,"factor":${YARN_FACTOR}.0,"original_max_position_embeddings":${ORIGINAL_MAX_POS_EMBED}}}
 EOF
 )
 

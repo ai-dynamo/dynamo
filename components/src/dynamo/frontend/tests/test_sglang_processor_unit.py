@@ -433,7 +433,8 @@ class TestCreateParsers:
 class TestNormalizePromptTokenIds:
     def test_batch_encoding_like_object_uses_input_ids(self):
         class FakeBatchEncoding:
-            input_ids = [11, 22, 33]
+            def __init__(self):
+                self.input_ids = [11, 22, 33]
 
             def __iter__(self):
                 yield from ("input_ids", "attention_mask")

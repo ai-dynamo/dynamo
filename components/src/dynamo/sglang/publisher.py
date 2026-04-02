@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from urllib.parse import urlparse
 
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 

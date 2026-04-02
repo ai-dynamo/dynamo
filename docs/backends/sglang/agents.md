@@ -299,7 +299,7 @@ resp2 = client.chat.completions.create(
     model="Qwen/Qwen3-14B-FP8",
     messages=[
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": "Rank Federer's 20 Grand Slam titles by artistic beauty."},
+        {"role": "user", "content": "Rank Federer's 20 Grand Slam titles by artistic beauty of the final. Consider shot selection, outfit, and crowd reaction."},
         {"role": "assistant", "content": t1},
         {"role": "user", "content": "Now explain why the 2017 Australian Open final against Nadal was the single greatest moment in competitive sports. Include the fifth set backhand winner."},
     ],
@@ -310,12 +310,17 @@ resp2 = client.chat.completions.create(
         }
     }
 )
+t2 = "".join(c.choices[0].delta.content or "" for c in resp2)
 
 # Turn 3: Close session (KV freed after generation completes)
 resp3 = client.chat.completions.create(
     model="Qwen/Qwen3-14B-FP8",
     messages=[
         {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "Rank Federer's 20 Grand Slam titles by artistic beauty of the final. Consider shot selection, outfit, and crowd reaction."},
+        {"role": "assistant", "content": t1},
+        {"role": "user", "content": "Now explain why the 2017 Australian Open final against Nadal was the single greatest moment in competitive sports. Include the fifth set backhand winner."},
+        {"role": "assistant", "content": t2},
         {"role": "user", "content": "Compose a closing argument for why Federer's career transcends sport and enters the realm of fine art."},
     ],
     stream=True,
@@ -328,6 +333,7 @@ resp3 = client.chat.completions.create(
         }
     }
 )
+t3 = "".join(c.choices[0].delta.content or "" for c in resp3)
 ```
 
 ### Interaction with Priority Eviction
