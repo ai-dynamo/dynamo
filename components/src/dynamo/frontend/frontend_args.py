@@ -93,8 +93,6 @@ class FrontendConfig(KvRouterConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
-        if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError("--enable-cache-control requires --router-mode=kv")
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -186,10 +184,18 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
             help="How to route the request. power-of-two picks 2 random workers and "
-            "routes to the one with fewer in-flight requests. In disaggregated prefill "
-            "mode, power-of-two skips bootstrap optimization and falls back to the "
-            "synchronous prefill path.",
-            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
+            "routes to the one with fewer in-flight requests. least-loaded routes to "
+            "the worker with the fewest active requests. In disaggregated prefill mode, "
+            "both power-of-two and least-loaded skip bootstrap optimization and fall "
+            "back to the synchronous prefill path.",
+            choices=[
+                "round-robin",
+                "random",
+                "power-of-two",
+                "kv",
+                "direct",
+                "least-loaded",
+            ],
         )
         add_argument(
             g,

@@ -72,7 +72,7 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DECODE_GPU="${DYN_DECODE_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
     MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
     PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
-    SHARED_GPU_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --workers-per-gpu 2)
+    SHARED_GPU_FRACTION=$(build_gpu_mem_args vllm --workers-per-gpu 2)
     PREFILL_GPU_MEM="${DYN_PREFILL_GPU_MEM:-${SHARED_GPU_FRACTION:-0.45}}"
     DECODE_GPU_MEM="${DYN_DECODE_GPU_MEM:-${SHARED_GPU_FRACTION:-0.45}}"
     SHARED_ARGS=(
@@ -86,9 +86,9 @@ else
     PREFILL_GPU="${DYN_PREFILL_WORKER_GPU:-0}"
     DECODE_GPU="${DYN_DECODE_WORKER_GPU:-1}"
     MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-    GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN")
-    PREFILL_GPU_MEM="${DYN_PREFILL_GPU_MEM:-${GPU_MEM_FRACTION:-0.9}}"
-    DECODE_GPU_MEM="${DYN_DECODE_GPU_MEM:-${GPU_MEM_FRACTION:-0.9}}"
+    GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+    PREFILL_GPU_MEM="${DYN_PREFILL_GPU_MEM:-${GPU_MEM_ARGS:-0.9}}"
+    DECODE_GPU_MEM="${DYN_DECODE_GPU_MEM:-${GPU_MEM_ARGS:-0.9}}"
     SHARED_ARGS=(--max-model-len "$MAX_MODEL_LEN")
 fi
 

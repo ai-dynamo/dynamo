@@ -104,14 +104,25 @@ impl TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    HfChatTemplate { is_custom: bool, file: CheckedFile },
+    #[serde(rename = "hf_chat_template", alias = "hf_chat_template_jinja")]
+    HfChatTemplateJinja {
+        is_custom: bool,
+        file: CheckedFile,
+    },
+    HfChatTemplateJson {
+        is_custom: bool,
+        file: CheckedFile,
+    },
 }
 
 impl PromptFormatterArtifact {
     pub fn checksum(&self) -> String {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => {
+                c.checksum().to_string()
+            }
         }
     }
 
@@ -119,21 +130,24 @@ impl PromptFormatterArtifact {
     pub fn is_local(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.is_local(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.is_local(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.is_local(),
         }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.update_dir(dir),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.update_dir(dir),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.update_dir(dir),
         }
     }
 
     pub fn is_custom(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(_) => false,
-            PromptFormatterArtifact::HfChatTemplate { is_custom, .. } => *is_custom,
+            PromptFormatterArtifact::HfChatTemplateJinja { is_custom, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { is_custom, .. } => *is_custom,
         }
     }
 }
@@ -452,7 +466,12 @@ impl ModelDeploymentCard {
             }
             None => {
                 anyhow::bail!(
-                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                    "ModelDeploymentCard for '{}' does not have a tokenizer. \
+                     Provide a supported tokenizer file (tokenizer.json, tiktoken.model, \
+                     or *.tiktoken), use --use-<framework>-tokenizer to delegate \
+                     tokenization to the backend, or use a non-Rust chat processor \
+                     (e.g. --dyn-chat-processor vllm).",
+                    self.display_name
                 );
             }
         }
@@ -548,10 +567,16 @@ impl ModelDeploymentCard {
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
-        if let Some(PromptFormatterArtifact::HfChatTemplate {
-            file: src_file,
-            is_custom,
-        }) = self.chat_template_file.as_mut()
+        if let Some(
+            PromptFormatterArtifact::HfChatTemplateJinja {
+                file: src_file,
+                is_custom,
+            }
+            | PromptFormatterArtifact::HfChatTemplateJson {
+                file: src_file,
+                is_custom,
+            },
+        ) = self.chat_template_file.as_mut()
         {
             if *is_custom {
                 tracing::info!(
@@ -676,7 +701,7 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                Some(TokenizerKind::from_disk(local_path)?),
+                TokenizerKind::from_disk(local_path)?,
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
@@ -703,7 +728,7 @@ impl ModelDeploymentCard {
                 )
             })?;
 
-            Some(PromptFormatterArtifact::HfChatTemplate {
+            Some(PromptFormatterArtifact::HfChatTemplateJinja {
                 is_custom: custom_template_path.is_some(),
                 file: CheckedFile::from_disk(template_path)?,
             })
@@ -996,40 +1021,72 @@ impl PromptFormatterArtifact {
     }
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate {
+        // Try chat_template.jinja first (raw Jinja template)
+        let jinja_path = directory.join("chat_template.jinja");
+        if jinja_path.exists() {
+            let f = CheckedFile::from_disk(&jinja_path)
+                .with_context(|| format!("Failed to load {}", jinja_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJinja {
                 file: f,
                 is_custom: false,
-            })),
-            Err(_) => Ok(None),
+            }));
         }
+
+        // Try chat_template.json (JSON with "chat_template" key, e.g. Qwen3-Omni)
+        let json_path = directory.join("chat_template.json");
+        if json_path.exists() {
+            let f = CheckedFile::from_disk(&json_path)
+                .with_context(|| format!("Failed to load {}", json_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJson {
+                file: f,
+                is_custom: false,
+            }));
+        }
+
+        Ok(None)
     }
 }
 
 impl TokenizerKind {
-    pub fn from_disk(directory: &Path) -> Result<Self> {
+    /// Try to discover a tokenizer in the given directory.
+    ///
+    /// Returns `Ok(Some(..))` when a supported tokenizer is found,
+    /// `Ok(None)` when no tokenizer files are present (e.g. models that
+    /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
+    /// layouts or filesystem failures that should be treated as hard errors.
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
+        // Helper: probe a single well-known file.  Returns Ok(None) when the
+        // file simply does not exist, Ok(Some(..)) on success, and Err for
+        // anything else (unreadable file, checksum failure, etc.).
+        fn probe(path: std::path::PathBuf) -> Result<Option<CheckedFile>> {
+            if !path.exists() {
+                return Ok(None);
+            }
+            Ok(Some(CheckedFile::from_disk(path)?))
+        }
+
         // 1. Try tokenizer.json (HuggingFace)
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
-            return Ok(Self::HfTokenizerJson(f));
+        if let Some(f) = probe(directory.join("tokenizer.json"))? {
+            return Ok(Some(Self::HfTokenizerJson(f)));
         }
 
         // 2. Try tiktoken.model
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
-            return Ok(Self::TikTokenModel(f));
+        if let Some(f) = probe(directory.join("tiktoken.model"))? {
+            return Ok(Some(Self::TikTokenModel(f)));
         }
 
         // 3. Search for any *.tiktoken file
         let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
+            .with_context(|| format!("Failed to read directory {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("Failed to iterate directory {}", directory.display()))?
             .into_iter()
-            .flatten()
-            .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
             .collect();
 
         if tiktoken_files.len() == 1 {
-            if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
-                return Ok(Self::TikTokenModel(f));
-            }
+            let f = CheckedFile::from_disk(tiktoken_files[0].path())?;
+            return Ok(Some(Self::TikTokenModel(f)));
         } else if tiktoken_files.len() > 1 {
             let names: Vec<_> = tiktoken_files
                 .iter()
@@ -1042,10 +1099,13 @@ impl TokenizerKind {
             );
         }
 
-        anyhow::bail!(
-            "No tokenizer.json or tiktoken model file found in {}",
+        tracing::warn!(
+            "No supported tokenizer found in {} \
+             (expected tokenizer.json or a tiktoken file). \
+             Features that depend on the Rust tokenizer will not be available.",
             directory.display()
-        )
+        );
+        Ok(None)
     }
 }
 

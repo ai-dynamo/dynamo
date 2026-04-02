@@ -63,7 +63,7 @@ done
 
 export DYN_REQUEST_PLANE=tcp
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS")
+GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
 
 print_launch_banner --no-curl "Launching Aggregated Video Serving" "$MODEL_NAME" "$HTTP_PORT" \
     "Backend:     dynamo.vllm --enable-multimodal" \
@@ -90,7 +90,7 @@ CUDA_VISIBLE_DEVICES="$GPU_DEVICE" \
         --model "$MODEL_NAME" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
-        ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} \
+        $GPU_MEM_ARGS \
         "${EXTRA_ARGS[@]}" &
 
 wait_any_exit

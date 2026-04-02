@@ -323,7 +323,7 @@ class PreSweptResultsHelper:
 if __name__ == "__main__":
     # demo of how to use merge_raw_data
     merge_raw_data(
-        "/home/jasonzho/repo/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D/selected_prefill_interpolation/raw_data.npz",
+        "/home/jasonzho/repo/dynamo/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/selected_prefill_interpolation/raw_data.npz",
         configs={
             "gpu_type": "h200_sxm",
             "model": "nvidia/Llama-3.1-8B-Instruct-FP8",
@@ -339,7 +339,7 @@ if __name__ == "__main__":
         mode="prefill",
     )
     merge_raw_data(
-        "/home/jasonzho/repo/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D/selected_decode_interpolation/raw_data.npz",
+        "/home/jasonzho/repo/dynamo/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/selected_decode_interpolation/raw_data.npz",
         configs={
             "gpu_type": "h200_sxm",
             "model": "nvidia/Llama-3.1-8B-Instruct-FP8",
