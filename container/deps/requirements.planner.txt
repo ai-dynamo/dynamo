@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Dependencies for planner, profiler, global_planner, and deploy utils.
+# Dependencies required by the planner, profiler, and global_planner services.
 
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@5d419f99d60fdae0d3911cba06a9b571f3b2965c
 aiofiles<=25.1.0

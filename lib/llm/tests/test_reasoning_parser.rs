@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
-};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
 
@@ -39,7 +39,7 @@ fn create_mock_response_chunk(
     };
 
     let response = NvCreateChatCompletionStreamResponse {
-        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
             created: 1234567890,

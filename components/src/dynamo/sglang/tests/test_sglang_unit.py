@@ -29,8 +29,8 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.gpu_1,  # needs sglang installed (GPU node) but uses no GPU
-    pytest.mark.max_vram_gib(0),
+    pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
+    pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
 ]
 # Create SGLang-specific CLI args fixture

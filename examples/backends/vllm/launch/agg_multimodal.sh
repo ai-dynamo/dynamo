@@ -69,7 +69,7 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
@@ -79,7 +79,9 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}"
+    $GPU_MEM_ARGS \
+    $MODEL_EXTRA_ARGS \
+    "${EXTRA_ARGS[@]}"
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

@@ -8,7 +8,7 @@ use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
-use crate::logging::make_request_span;
+use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
@@ -221,7 +221,7 @@ pub async fn spawn_system_status_server(
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
         })
-        .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");

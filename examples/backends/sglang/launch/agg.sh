@@ -55,7 +55,7 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
+GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
@@ -75,7 +75,7 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --enable-metrics \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 

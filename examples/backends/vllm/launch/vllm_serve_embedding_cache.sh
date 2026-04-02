@@ -28,12 +28,18 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
     }")
 fi
 
-GPU_MEM_UTIL="${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-.9}"
+GPU_MEM_UTIL=".9"
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+else
+    GPU_MEM_ARGS="--gpu-memory-utilization $GPU_MEM_UTIL"
+fi
 
 CUDA_VISIBLE_DEVICES=2 \
 vllm serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \
-    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    $GPU_MEM_ARGS \
     "${EC_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"

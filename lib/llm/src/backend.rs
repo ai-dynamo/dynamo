@@ -43,7 +43,7 @@ use crate::protocols::{
     },
 };
 use crate::tokenizers::{DecodeStream, Tokenizer};
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::StopReason;
 
 /// Represents the output stream from the execution engine
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;

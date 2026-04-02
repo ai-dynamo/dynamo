@@ -218,16 +218,16 @@ async fn test_metrics_with_mock_model() {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, mock model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model("mockmodel")
             .messages(vec![message])
             .max_tokens(50u32)
@@ -419,16 +419,16 @@ mod integration_tests {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, MDC model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model(model.service_name())
             .messages(vec![message])
             .max_tokens(50u32)

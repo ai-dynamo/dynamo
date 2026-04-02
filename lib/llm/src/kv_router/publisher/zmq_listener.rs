@@ -8,8 +8,9 @@ use std::time::Duration;
 use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zeromq::{Socket, SocketRecv, SubSocket};
+use zeromq::SocketRecv;
 
+use crate::utils::zmq::connect_sub_socket_with_retry;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
@@ -41,17 +42,16 @@ pub(super) async fn start_zmq_listener(
     );
 
     let warning_count = Arc::new(AtomicU32::new(0));
-    let mut socket = SubSocket::new();
-
-    if let Err(e) = socket.subscribe(&zmq_topic).await {
-        tracing::error!("Failed to subscribe on ZMQ socket: {}", e);
+    let Some(mut socket) = connect_sub_socket_with_retry(
+        &zmq_endpoint,
+        Some(&zmq_topic),
+        &cancellation_token,
+        "ZMQ listener",
+    )
+    .await
+    else {
         return;
-    }
-
-    if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_endpoint}: {e}");
-        return;
-    }
+    };
 
     let mut consecutive_errors = 0u32;
     #[expect(unused_assignments)]

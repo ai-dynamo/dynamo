@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -140,7 +141,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
 
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
+        trace_header = build_trace_headers(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
             **input_param,

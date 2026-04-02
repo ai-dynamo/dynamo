@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is estimated from model parameters below. Override individual
-# knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
+# Per-worker VRAM is controlled via build_gpu_mem_args (see gpu_utils.sh).
+# Override individual knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-model-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~4.0 GiB per worker (~8.0 GiB total)
@@ -26,7 +25,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2)
+GPU_MEM_ARGS=$(build_gpu_mem_args vllm --workers-per-gpu 2)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
@@ -49,7 +48,7 @@ python3 -m dynamo.vllm \
   --enforce-eager \
   --disaggregation-mode decode \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" &
 
 # Wait for decode worker to initialize before starting prefill worker
@@ -70,7 +69,7 @@ python3 -m dynamo.vllm \
   --enforce-eager \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 

@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use derive_getters::Dissolve;
-use dynamo_async_openai::{Client, config::OpenAIConfig, error::OpenAIError};
+use dynamo_protocols::{Client, config::OpenAIConfig, error::OpenAIError};
 use futures::Stream;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -285,7 +285,7 @@ pub type ByotResponseStream = DataStream<Result<Value, OpenAIError>>;
 
 /// Type alias for pure OpenAI chat response stream
 pub type OpenAIChatResponseStream =
-    DataStream<Result<dynamo_async_openai::types::CreateChatCompletionStreamResponse, OpenAIError>>;
+    DataStream<Result<dynamo_protocols::types::CreateChatCompletionStreamResponse, OpenAIError>>;
 
 /// A wrapped HTTP response stream that combines a stream with its context
 /// This provides a unified interface for HTTP client responses
@@ -381,7 +381,7 @@ pub type ByotHttpResponseStream = HttpResponseStream<Result<Value, OpenAIError>>
 
 /// Type alias for HttpResponseStream with pure OpenAI responses
 pub type OpenAIHttpResponseStream = HttpResponseStream<
-    Result<dynamo_async_openai::types::CreateChatCompletionStreamResponse, OpenAIError>,
+    Result<dynamo_protocols::types::CreateChatCompletionStreamResponse, OpenAIError>,
 >;
 
 /// Pure OpenAI client using standard async-openai types
@@ -401,7 +401,7 @@ impl PureOpenAIClient {
     /// Uses a client-managed context
     pub async fn chat_stream(
         &self,
-        request: dynamo_async_openai::types::CreateChatCompletionRequest,
+        request: dynamo_protocols::types::CreateChatCompletionRequest,
     ) -> Result<OpenAIHttpResponseStream, HttpClientError> {
         let ctx = self.base.create_context();
         self.chat_stream_with_context(request, ctx).await
@@ -410,7 +410,7 @@ impl PureOpenAIClient {
     /// Create streaming chat completions with a custom context
     pub async fn chat_stream_with_context(
         &self,
-        request: dynamo_async_openai::types::CreateChatCompletionRequest,
+        request: dynamo_protocols::types::CreateChatCompletionRequest,
         context: HttpRequestContext,
     ) -> Result<OpenAIHttpResponseStream, HttpClientError> {
         let ctx_arc: Arc<dyn AsyncEngineContext> = Arc::new(context.clone());

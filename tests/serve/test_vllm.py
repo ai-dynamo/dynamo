@@ -54,9 +54,9 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 
 # vLLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
-# TODO: Now that these tests use dynamic ports and each config has a max_vram_gib marker,
+# TODO: Now that these tests use dynamic ports and each config has VRAM markers,
 # optimize the runtime by bin-packing multiple engine deployments in parallel on the same GPU.
-# A future collector/launcher can sum max_vram_gib values to decide how many tests fit
+# A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
 # concurrently without exceeding available VRAM.
 vllm_configs = {
     "aggregated": VLLMConfig(
@@ -65,8 +65,13 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
-            pytest.mark.timeout(300),  # ~7x observed 42.2s; old value before profiling
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -93,7 +98,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
             pytest.mark.post_merge,
         ],
@@ -122,7 +130,10 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
@@ -145,7 +156,10 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.1),  # observed peak 7.4 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
             pytest.mark.skipif(
@@ -170,8 +184,13 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.1),  # observed peak 7.3 GiB (+10% safety)
-            pytest.mark.timeout(300),  # ~7x observed 43.0s; old value before profiling
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -187,8 +206,13 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.1),  # observed peak 7.3 GiB (+10% safety)
-            pytest.mark.timeout(300),  # ~7x observed 42.3s; old value before profiling
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -299,13 +323,17 @@ vllm_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
+    # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
+    # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
+    # PD worker honors build_gpu_mem_args for parallel execution.
     "multimodal_e_pd_qwen": VLLMConfig(
         name="multimodal_e_pd_qwen",
         directory=vllm_dir,
         script_name="disagg_multimodal_e_pd.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(24.6),  # observed peak 22.3 GiB (+10% safety)
+            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
+            # uses hardcoded fractions (encode=0.1, PD=0.7) that scale with GPU size.
             pytest.mark.timeout(340),  # ~5x observed 68.4s; 2B model loads slower on CI
             pytest.mark.pre_merge,
         ],
@@ -339,7 +367,10 @@ vllm_configs = {
         # post_merge because needs real NIXL not stub
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(10.2),  # observed peak 9.3 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_710_490_000
+            ),  # KV cache cap (2x safety over min=855_244_800)
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
         ],
@@ -373,21 +404,25 @@ vllm_configs = {
     # NOTE: disagg_multimodal_epd.sh uses --kv-cache-memory-bytes=512MB for P/D
     # workers. Per vLLM CacheConfig, kv_cache_memory_bytes (when not-None) ignores
     # gpu_memory_utilization (ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/),
-    # so _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE has no effect. Regardless of GPU_MEM
+    # so KV cache overrides have no effect. Regardless of GPU_MEM
     # fractions (0.1/0.4/0.4), the 3 workers combined consistently use ~17.6 GiB
     # total on this GPU.
+    # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
+    # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
+    # P/D workers honor build_gpu_mem_args for parallel execution.
     "multimodal_disagg_qwen": VLLMConfig(
         name="multimodal_disagg_qwen",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(19.4),  # observed peak 17.6 GiB (+10% safety)
+            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
+            # uses hardcoded fractions via DYN_*_GPU_MEM that scale with GPU size.
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=360,
+        timeout=300,
         env={
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
@@ -421,7 +456,10 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(21.6),  # observed peak 19.6 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
             pytest.mark.timeout(
                 360
             ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
@@ -455,7 +493,10 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(18.9),  # observed peak 17.1 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
             pytest.mark.timeout(
                 300
             ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
@@ -703,7 +744,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(21.9),  # observed peak 19.9 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                4_074_898_000
+            ),  # KV cache cap (2x safety over min=2_037_448_704)
             pytest.mark.timeout(
                 420
             ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
@@ -742,7 +786,10 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(8.6),  # observed peak 7.8 GiB (+10% safety)
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
             pytest.mark.pre_merge,
         ],

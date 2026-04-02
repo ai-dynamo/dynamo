@@ -17,7 +17,7 @@ func main() {
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
-	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint restore")
+	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	flag.Parse()
 

@@ -81,6 +81,13 @@ ARG EPP_IMAGE={{ context.dynamo.epp_image }}
 ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
 {% endif %}
 
+{% if target == "planner" %}
+ARG PLANNER_BUILD_IMAGE={{ context.dynamo.planner_build_image }}
+ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
+ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
+ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
+{% endif %}
+
 {% if framework == "vllm" -%}
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF={{ context[framework][device_key].vllm_ref }}

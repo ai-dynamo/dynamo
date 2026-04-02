@@ -20,6 +20,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
 | **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
 | **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
@@ -30,6 +31,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
+| **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
 
 ### KV Event Transport Modes (within `--router-mode kv`)
@@ -214,6 +216,8 @@ We can then use the default routing methods exposed by the client class to send 
 - **Random routing**: Default strategy, available via `client.generate()` or `client.random()`
 - **Round-robin routing**: Cycles through available workers via `client.round_robin()`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
+- **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
+  In disaggregated prefill paths it skips bootstrap optimization and uses the synchronous prefill path, matching power-of-two routing.
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 

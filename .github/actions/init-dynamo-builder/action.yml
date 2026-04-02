@@ -52,6 +52,10 @@ inputs:
     description: 'CUDA version (12.9, 13.0). Optional for general flavor.'
     required: false
     default: ''
+  fresh_builder:
+    description: 'Skip remote worker routing and always use the K8s driver. Set by callers that want a fresh, isolated builder per run.'
+    required: false
+    default: 'false'
 
   # Passthrough inputs for bootstrap-buildkit (kubernetes fallback)
   ephemeral_storage:
@@ -88,6 +92,7 @@ runs:
   steps:
     - name: Route buildkit workers
       id: route-buildkit
+      if: inputs.fresh_builder != 'true'
       continue-on-error: true
       shell: bash
       run: |
@@ -108,6 +113,7 @@ runs:
 
     - name: Prepare worker addresses and platform
       id: prepare
+      if: inputs.fresh_builder != 'true'
       shell: bash
       env:
         AMD64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}
@@ -138,6 +144,7 @@ runs:
       with:
         builder_name: ${{ inputs.builder_name }}
         buildkit_worker_addresses: ${{ steps.prepare.outputs.worker_addresses }}
+        fresh_builder: ${{ inputs.fresh_builder }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}
         replicas: ${{ inputs.replicas }}

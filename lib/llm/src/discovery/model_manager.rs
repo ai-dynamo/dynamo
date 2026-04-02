@@ -24,6 +24,7 @@ use crate::{
     types::{
         generic::tensor::TensorStreamingEngine,
         openai::{
+            audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
@@ -290,6 +291,16 @@ impl ModelManager {
             .get_videos_engine()
     }
 
+    pub fn get_audios_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_audios_engine()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -452,6 +463,27 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.videos_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
+    pub fn add_audios_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIAudiosStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_audios_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_audios_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }

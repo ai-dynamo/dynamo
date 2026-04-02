@@ -104,6 +104,20 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 	}, nil
 }
 
+// ReadProcessDetailsOrDefault preserves pid-scoped logging even when proc parsing fails.
+func ReadProcessDetailsOrDefault(procRoot string, pid int) ProcessDetails {
+	details := ProcessDetails{
+		ObservedPID:   pid,
+		OutermostPID:  pid,
+		InnermostPID:  pid,
+		NamespacePIDs: []int{pid},
+	}
+	if process, err := ReadProcessDetails(procRoot, pid); err == nil {
+		details = process
+	}
+	return details
+}
+
 // ReadProcessTable snapshots every numeric proc entry under procRoot.
 // Used by restore-side PID remap and diagnostics after CRIU restore.
 func ReadProcessTable(procRoot string) ([]ProcessDetails, error) {

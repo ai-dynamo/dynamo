@@ -102,7 +102,7 @@ class DgdPlannerServiceConfig(BaseModel):
     replicas: int = 1
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
-            image="my-registry/dynamo-runtime:my-tag",  # placeholder
+            image="my-registry/dynamo-planner:my-tag",  # placeholder
             workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
             command=["python3", "-m", "dynamo.planner"],
             args=[],
@@ -397,7 +397,7 @@ def set_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
 
 
 def update_image(config: dict, image: str) -> dict:
-    """Update container image for all DGD services (frontend, planner, workers).
+    """Update container image for non-planner DGD services.
 
     This is a shared utility function used by all backend config modifiers.
 
@@ -410,8 +410,9 @@ def update_image(config: dict, image: str) -> dict:
     """
     cfg = Config.model_validate(config)
 
-    # Update image for all services
     for service_name, service_config in cfg.spec.services.items():
+        if getattr(service_config, "componentType", None) == "planner":
+            continue
         if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
             service_config.extraPodSpec.mainContainer.image = image
             logger.debug(f"Updated image for {service_name} to {image}")

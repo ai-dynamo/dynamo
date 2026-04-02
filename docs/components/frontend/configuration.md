@@ -45,7 +45,6 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | Event processing threads. >1 enables concurrent radix tree |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `4.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
-| `--enable-cache-control` / `--no-enable-cache-control` | `DYN_ENABLE_CACHE_CONTROL` | `false` | Enable TTL-based cache pinning (requires `--router-mode=kv`) |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## Fault Tolerance

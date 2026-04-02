@@ -66,13 +66,13 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 **Components:**
 
-- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding and [MultimodalPDWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for prefilling and decoding.
+- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding and [DecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
 **Workflow:**
 
-The EncodeWorkerHandler encodes the image and passes the embeddings to the MultimodalPDWorkerHandler via NATS and RDMA. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
+The EncodeWorkerHandler encodes the image and passes the embeddings to the DecodeWorkerHandler via NATS and RDMA. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 
 ```mermaid
 flowchart LR
@@ -130,7 +130,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 **Components:**
 
-- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding, [MultimodalDecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for decoding, and [MultimodalPDWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for prefilling.
+- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding, [DecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for decoding, and [PrefillWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for prefilling.
 - processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 

@@ -39,7 +39,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
-| `cache_control` | object | `None` | Router | KV cache pinning hint with TTL. See [Cache Control](#cache-control). |
 
 ### Header Overrides
 
@@ -130,31 +129,6 @@ Backend details:
 }
 ```
 
-## Cache Control
-
-> [!WARNING]
-> Cache control is experimental and available on development branches only. The API may change.
-
-The `cache_control` object enables explicit KV cache pinning with a TTL. When set, the router fires a `pin_prefix` call to the backend worker after generation completes, protecting the conversation's KV cache from eviction for the specified duration.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `cache_control.type` | `string` | — | Cache control type. Currently only `"ephemeral"` is supported. |
-| `cache_control.ttl` | `string` | `"300"` | TTL as integer seconds (`"600"`) or shorthand (`"5m"`, `"1h"`). Clamped to [300, 3600] seconds. |
-
-```json
-{
-    "nvext": {
-        "cache_control": {
-            "type": "ephemeral",
-            "ttl": "1h"
-        }
-    }
-}
-```
-
-Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
-
 ## Response Extensions
 
 When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
@@ -190,4 +164,4 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and cache pinning |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling and eviction policies |

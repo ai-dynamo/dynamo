@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel
 
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.llm import ModelType
@@ -91,8 +92,7 @@ def parse_request_type(
         return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
 
     if modality is OutputModality.AUDIO:
-        # Audio protocol types are not yet defined; pass through the raw dict.
-        return raw_request, RequestType.AUDIO_GENERATION
+        return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
 
     # Text Modality
     return raw_request, RequestType.CHAT_COMPLETION

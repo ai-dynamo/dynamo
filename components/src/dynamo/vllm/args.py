@@ -153,21 +153,11 @@ def update_dynamo_config_with_engine(
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
 
-    if dynamo_config.route_to_encoder:
-        dynamo_config.component = "processor"
+    # Multi-modal related component/endpoint resolution
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        dynamo_config.component = "encode"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_encode_worker:
-        dynamo_config.component = "encoder"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_decode_worker:
-        dynamo_config.component = "decoder"
-        dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.multimodal_worker
-        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
-    ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
+    # Standard component/endpoint resolution
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"
@@ -237,9 +227,8 @@ def update_engine_config_with_dynamo(
         engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
-        engine_config.block_size = 16
         logger.debug(
-            f"Setting reasonable default of {engine_config.block_size} for block_size"
+            "block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend."
         )
 
     if _uses_nixl_connector(engine_config):
@@ -283,6 +272,41 @@ def update_engine_config_with_dynamo(
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
+
+    if dynamo_config.benchmark_mode is not None:
+        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+            logger.warning(
+                "--benchmark-mode is not supported for multimodal workers. "
+                "Benchmark data will be collected but not served via endpoint."
+            )
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        elif existing_cls is not None and "InstrumentedScheduler" not in str(
+            existing_cls
+        ):
+            raise ValueError(
+                f"--benchmark-mode requires InstrumentedScheduler but "
+                f"--scheduler-cls is set to '{existing_cls}'. Either remove "
+                f"--scheduler-cls or use a subclass of InstrumentedScheduler."
+            )
+        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+            "mode": dynamo_config.benchmark_mode,
+            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
+            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
+            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
+            "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
+            "output_path": dynamo_config.benchmark_output_path,
+            "timeout": dynamo_config.benchmark_timeout,
+        }
+        logger.info(
+            "Benchmark mode=%s configured (output=%s)",
+            dynamo_config.benchmark_mode,
+            dynamo_config.benchmark_output_path,
+        )
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():

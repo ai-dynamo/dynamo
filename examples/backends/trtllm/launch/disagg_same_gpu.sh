@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is estimated from model parameters below. Override individual
-# knobs (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
+# Per-worker VRAM is controlled via env vars (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS).
+# TODO: unify with build_gpu_mem_args once trtllm --override-engine-args JSON
+# merging is supported.
 #
 # NOTE — trtllm fraction semantics differ from vllm/sglang:
 #   vllm/sglang:  fraction of TOTAL VRAM  (weights + KV + activations all inside)
@@ -30,7 +30,9 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --max-model-len "$MAX_SEQ_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS" --workers-per-gpu 2)
+# TODO: unify with build_gpu_mem_args once trtllm --override-engine-args JSON
+# merging is supported.
+GPU_MEM_FRACTION="${GPU_MEM_FRACTION:-}"
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -68,7 +70,10 @@ done
 # Always override free_gpu_memory_fraction so the script controls KV cache size,
 # matching how vllm (--gpu-memory-utilization) and sglang (--mem-fraction-static)
 # pass memory parameters from the launch script.
-OVERRIDE_PAIRS="\"kv_cache_config\": {\"free_gpu_memory_fraction\": ${GPU_MEM_FRACTION}}"
+OVERRIDE_PAIRS=""
+if [[ -n "$GPU_MEM_FRACTION" ]]; then
+    OVERRIDE_PAIRS="\"kv_cache_config\": {\"free_gpu_memory_fraction\": ${GPU_MEM_FRACTION}}"
+fi
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1

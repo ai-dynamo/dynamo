@@ -26,9 +26,9 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
@@ -107,7 +107,7 @@ fn load_test_data(file_path: &str) -> TestData {
             .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: id.clone(),
                     choices,
                     created: 1234567890,

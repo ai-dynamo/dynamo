@@ -158,6 +158,52 @@ class OmniArgGroup(ArgGroup):
             help="Disable torch.compile and force eager execution for diffusion models.",
         )
 
+        # TTS parameters
+        tts_g = parser.add_argument_group(
+            "Omni TTS Options",
+            "TTS/audio-specific parameters for vLLM-Omni speech generation.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-instructions-length",
+            env_var="DYN_OMNI_TTS_MAX_INSTRUCTIONS_LENGTH",
+            default=500,
+            arg_type=int,
+            help="Maximum character length for TTS voice instructions.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-new-tokens-min",
+            env_var="DYN_OMNI_TTS_MAX_NEW_TOKENS_MIN",
+            default=1,
+            arg_type=int,
+            help="Minimum allowed value for max_new_tokens in TTS requests.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-new-tokens-max",
+            env_var="DYN_OMNI_TTS_MAX_NEW_TOKENS_MAX",
+            default=4096,
+            arg_type=int,
+            help="Maximum allowed value for max_new_tokens in TTS requests.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-ref-audio-timeout",
+            env_var="DYN_OMNI_TTS_REF_AUDIO_TIMEOUT",
+            default=15,
+            arg_type=int,
+            help="Timeout in seconds for downloading reference audio URLs.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-ref-audio-max-bytes",
+            env_var="DYN_OMNI_TTS_REF_AUDIO_MAX_BYTES",
+            default=50 * 1024 * 1024,
+            arg_type=int,
+            help="Maximum size in bytes for reference audio files (default: 50MB).",
+        )
+
         # Diffusion parallel configuration
         add_argument(
             g,
@@ -216,6 +262,13 @@ class OmniConfig(DynamoRuntimeConfig):
     ulysses_degree: int = 1
     ring_degree: int = 1
     cfg_parallel_size: int = 1
+
+    # TTS parameters
+    tts_max_instructions_length: int = 500
+    tts_max_new_tokens_min: int = 1
+    tts_max_new_tokens_max: int = 4096
+    tts_ref_audio_timeout: int = 15
+    tts_ref_audio_max_bytes: int = 50 * 1024 * 1024
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)

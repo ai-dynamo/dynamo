@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	cudaCheckpointBinary = "/usr/local/sbin/cuda-checkpoint"
+	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
@@ -39,14 +39,14 @@ func unlock(ctx context.Context, pid int, log logr.Logger) error {
 }
 
 func getState(ctx context.Context, pid int) (string, error) {
-	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, "--get-state", "--pid", strconv.Itoa(pid))
+	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-state", "--pid", strconv.Itoa(pid))
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
-		return "", fmt.Errorf("cuda-checkpoint --get-state failed for pid %d: %w (output: %s)", pid, err, state)
+		return "", fmt.Errorf("cuda-checkpoint-helper --get-state failed for pid %d: %w (output: %s)", pid, err, state)
 	}
 	if state == "" {
-		return "", fmt.Errorf("cuda-checkpoint --get-state returned empty state for pid %d", pid)
+		return "", fmt.Errorf("cuda-checkpoint-helper --get-state returned empty state for pid %d", pid)
 	}
 	return state, nil
 }
@@ -56,22 +56,14 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	cmd := exec.CommandContext(ctx, cudaCheckpointBinary, args...)
-	details := common.ProcessDetails{
-		ObservedPID:   pid,
-		OutermostPID:  pid,
-		InnermostPID:  pid,
-		NamespacePIDs: []int{pid},
-	}
-	if process, err := common.ReadProcessDetails("/proc", pid); err == nil {
-		details = process
-	}
+	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	details := common.ReadProcessDetailsOrDefault("/proc", pid)
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	duration := time.Since(start)
 	out := strings.TrimSpace(string(output))
 	if err != nil {
-		log.Error(err, "cuda-checkpoint command failed",
+		log.Error(err, "cuda-checkpoint-helper command failed",
 			"pid", pid,
 			"outermost_pid", details.OutermostPID,
 			"innermost_pid", details.InnermostPID,
@@ -80,9 +72,9 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 			"duration", duration,
 			"output", out,
 		)
-		return fmt.Errorf("cuda-checkpoint %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
+		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
-	log.Info("cuda-checkpoint command succeeded",
+	log.Info("cuda-checkpoint-helper command succeeded",
 		"pid", pid,
 		"outermost_pid", details.OutermostPID,
 		"innermost_pid", details.InnermostPID,

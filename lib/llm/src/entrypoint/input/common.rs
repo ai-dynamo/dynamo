@@ -336,9 +336,10 @@ where
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::PowerOfTwoChoices => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

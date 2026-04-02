@@ -374,10 +374,12 @@ async def parse_args(args: list[str]) -> Config:
         )
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. When stream_output=True,
-    # SGLang sends disjoint segments which Dynamo passes through directly.
-    # Force stream_output=True for optimal streaming performance.
-    server_args.stream_output = True
+    # tokens since last output), not cumulative tokens.
+    # sglang renamed stream_output -> incremental_streaming_output in PR #20614.
+    if hasattr(ServerArgs, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
+    else:
+        server_args.stream_output = True
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(

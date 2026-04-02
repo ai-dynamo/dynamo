@@ -107,6 +107,22 @@ func TestReadProcessDetails(t *testing.T) {
 	}
 }
 
+func TestReadProcessDetailsOrDefault(t *testing.T) {
+	details := ReadProcessDetailsOrDefault(t.TempDir(), 1234)
+	if details.ObservedPID != 1234 {
+		t.Fatalf("ObservedPID = %d, want 1234", details.ObservedPID)
+	}
+	if details.OutermostPID != 1234 {
+		t.Fatalf("OutermostPID = %d, want 1234", details.OutermostPID)
+	}
+	if details.InnermostPID != 1234 {
+		t.Fatalf("InnermostPID = %d, want 1234", details.InnermostPID)
+	}
+	if len(details.NamespacePIDs) != 1 || details.NamespacePIDs[0] != 1234 {
+		t.Fatalf("NamespacePIDs = %v, want [1234]", details.NamespacePIDs)
+	}
+}
+
 func TestReadProcessTable(t *testing.T) {
 	procRoot := t.TempDir()
 	writeEntry := func(pid int, status string, cmdline string) {

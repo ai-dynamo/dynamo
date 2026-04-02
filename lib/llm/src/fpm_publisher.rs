@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use zeromq::{Socket, SocketRecv, SubSocket};
+use zeromq::SocketRecv;
 
+use crate::utils::zmq::connect_sub_socket_with_retry;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
@@ -61,15 +62,11 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
     ) {
-        let mut socket = SubSocket::new();
-        if let Err(e) = socket.subscribe("").await {
-            tracing::error!("FPM relay: failed to subscribe on ZMQ socket: {e}");
+        let Some(mut socket) =
+            connect_sub_socket_with_retry(&zmq_endpoint, None, &cancel, "FPM relay").await
+        else {
             return;
-        }
-        if let Err(e) = socket.connect(&zmq_endpoint).await {
-            tracing::error!("FPM relay: failed to connect ZMQ SUB to {zmq_endpoint}: {e}");
-            return;
-        }
+        };
         tracing::info!("FPM relay: connected to {zmq_endpoint}");
 
         let mut consecutive_errors: u32 = 0;

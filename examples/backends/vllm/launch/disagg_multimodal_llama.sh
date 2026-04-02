@@ -61,10 +61,16 @@ fi
 export DYN_REQUEST_PLANE=tcp
 
 # Configure model-specific args
-GPU_MEM=${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-0.80}
+GPU_MEM="0.80"
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+else
+    GPU_MEM_ARGS="--gpu-memory-utilization $GPU_MEM"
+fi
 MODEL_SPECIFIC_ARGS=""
 if [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
-    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization $GPU_MEM"
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --max-model-len=208960 $GPU_MEM_ARGS"
 fi
 
 if [[ $HEAD_NODE -eq 1 ]]; then

@@ -84,13 +84,13 @@ def _parse_config() -> PlannerConfig:
 
 
 @dynamo_worker()
-async def worker(runtime: DistributedRuntime):
-    config = _parse_config()
+async def worker(runtime: DistributedRuntime, config: PlannerConfig):
     await init_planner(runtime, config)
 
 
 def main():
-    asyncio.run(worker())  # type: ignore[call-arg]
+    config = _parse_config()
+    asyncio.run(worker(config))  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":

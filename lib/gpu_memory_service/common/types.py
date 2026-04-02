@@ -8,10 +8,9 @@ from enum import Enum, auto
 
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
-    ClearAllRequest,
     CommitRequest,
-    ExportRequest,
-    FreeRequest,
+    ExportAllocationRequest,
+    FreeAllocationRequest,
     GetAllocationRequest,
     GetAllocationStateRequest,
     GetLockStateRequest,
@@ -89,8 +88,7 @@ def derive_state(has_rw: bool, ro_count: int, committed: bool) -> ServerState:
 RW_REQUIRED: frozenset[type] = frozenset(
     {
         AllocateRequest,
-        FreeRequest,
-        ClearAllRequest,
+        FreeAllocationRequest,
         MetadataPutRequest,
         MetadataDeleteRequest,
         CommitRequest,
@@ -99,7 +97,7 @@ RW_REQUIRED: frozenset[type] = frozenset(
 
 RO_ALLOWED: frozenset[type] = frozenset(
     {
-        ExportRequest,
+        ExportAllocationRequest,
         GetAllocationRequest,
         ListAllocationsRequest,
         MetadataGetRequest,

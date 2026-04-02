@@ -251,7 +251,9 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
+- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
+  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
+  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)

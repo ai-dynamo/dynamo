@@ -115,8 +115,9 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
 // userInfo is used for identity-based validation (replica protection).
 // If userInfo is nil, replica changes for DGDSA-enabled services are rejected (fail closed).
+// operatorPrincipal is the full Kubernetes SA username of the operator for authorization.
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo, operatorPrincipal string) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
 	// Validate immutable fields
@@ -131,7 +132,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 
 	// Validate replicas changes for services with scaling adapter enabled
 	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
-	if err := v.validateReplicasChanges(old, userInfo); err != nil {
+	if err := v.validateReplicasChanges(old, userInfo, operatorPrincipal); err != nil {
 		return warnings, err
 	}
 
@@ -224,9 +225,9 @@ func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
 // Only authorized service accounts (operator controller, planner) can modify these fields.
 // If userInfo is nil, all replica changes for DGDSA-enabled services are rejected (fail closed).
-func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) error {
+func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo, operatorPrincipal string) error {
 	// If the request comes from an authorized service account, allow the change
-	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(*userInfo) {
+	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(operatorPrincipal, *userInfo) {
 		return nil
 	}
 

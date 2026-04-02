@@ -103,6 +103,40 @@ class I2VPayload(VideoGenerationPayload):
 
 
 @dataclass
+class AudioSpeechPayload(BasePayload):
+    """Payload for /v1/audio/speech endpoint."""
+
+    endpoint: str = "/v1/audio/speech"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "audio" in content_type:
+            # Binary audio response
+            audio_bytes = response.content
+            assert len(audio_bytes) > 100, (
+                f"Audio response too small ({len(audio_bytes)} bytes), "
+                f"likely not valid audio"
+            )
+            return f"binary_audio_{len(audio_bytes)}_bytes"
+        # JSON response (error or url format)
+        result = response.json()
+        assert (
+            result.get("status") != "failed"
+        ), f"Audio generation failed: {result.get('error', 'unknown')}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in audio response"
+        entry = result["data"][0]
+        if "url" in entry and entry["url"]:
+            return entry["url"]
+        assert entry.get("b64_json"), "Audio response b64_json is empty"
+        return "b64_audio_returned"
+
+
+@dataclass
 class VLLMOmniConfig(EngineConfig):
     """Configuration for vLLM-Omni test scenarios."""
 
@@ -198,6 +232,30 @@ vllm_omni_configs = {
                         "guidance_scale_2": 1.0,
                         "seed": 42,
                     },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "omni_audio": VLLMOmniConfig(
+        name="omni_audio",
+        directory=vllm_dir,
+        script_name="agg_omni_audio.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "input": "Hello, this is a test of Dynamo audio generation.",
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "voice": "vivian",
+                    "language": "English",
                 },
                 repeat_count=1,
                 expected_response=[],

@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
-    CreateChatCompletionStreamResponse, Role,
-};
 use dynamo_llm::protocols::{
     Annotated, ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
@@ -16,6 +12,10 @@ use dynamo_llm::protocols::{
         },
         completions::NvCreateCompletionResponse,
     },
+};
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+    CreateChatCompletionStreamResponse, Role,
 };
 use futures::StreamExt;
 
