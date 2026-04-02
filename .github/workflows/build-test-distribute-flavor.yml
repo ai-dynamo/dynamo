@@ -248,6 +248,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
+      OTLP_ENDPOINT: ${{ secrets.OTLP_ENDPOINT }}
+      OTLP_TOKEN: ${{ secrets.OTLP_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -348,6 +350,8 @@ jobs:
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
+      OTLP_ENDPOINT: ${{ secrets.OTLP_ENDPOINT }}
+      OTLP_TOKEN: ${{ secrets.OTLP_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
