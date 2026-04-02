@@ -8,7 +8,7 @@ so each image only installs what it needs.
 | File | Purpose |
 |------|---------|
 | `requirements.common.txt` | Core deps shared by all containers |
-| `requirements.planner.txt` | Planner, profiler, and global_planner deps, installed only in `dynamo-planner` |
+| `requirements.planner.txt` | Planner, profiler, and global_planner deps |
 | `requirements.frontend.txt` | Frontend deps |
 | `requirements.vllm.txt` | vLLM-specific deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |

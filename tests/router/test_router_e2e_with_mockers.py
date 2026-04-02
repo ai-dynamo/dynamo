@@ -9,17 +9,15 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
-import importlib.util
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
 import pytest
 
-from dynamo.router.tests.support.common import (
+from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_python_router_bindings,
@@ -31,15 +29,15 @@ from dynamo.router.tests.support.common import (
     _test_router_query_instance_id,
     _test_router_two_routers,
 )
-from dynamo.router.tests.support.constants import ROUTER_MODEL_NAME
-from dynamo.router.tests.support.helper import (
+from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
     wait_for_indexer_workers_active,
 )
-from dynamo.router.tests.support.managed_process import ManagedProcess
-from dynamo.router.tests.support.port_utils import (
+from tests.utils.constants import ROUTER_MODEL_NAME
+from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import (
     allocate_contiguous_ports,
     allocate_ports,
     deallocate_ports,
@@ -49,21 +47,10 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 
-
-def _has_aiconfigurator() -> bool:
-    try:
-        return importlib.util.find_spec("aiconfigurator") is not None
-    except ValueError:
-        return "aiconfigurator" in sys.modules
-
-
-HAS_AICONFIGURATOR = _has_aiconfigurator()
-
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
-    pytest.mark.planner,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -73,9 +60,9 @@ BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
 BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
-MOCKER_PROFILE_DATA_DIR = (
-    Path(__file__).resolve().parents[6]
-    / "components/src/dynamo/mocker/tests/data/profile_samples/H200_TP1P_TP1D"
+PLANNER_PROFILE_DATA_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
 
 
@@ -674,21 +661,13 @@ class DisaggMockerProcess:
         pytest.param(
             "kv",
             False,
-            {"planner_profile_data": MOCKER_PROFILE_DATA_DIR},
-            marks=[pytest.mark.planner],
-            id="kv-profile-data",
+            {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
+            id="kv-planner",
         ),
         pytest.param(
             "kv",
             False,
             {"aic_perf_model": True, "aic_system": "h200_sxm"},
-            marks=[
-                pytest.mark.aiconfigurator,
-                pytest.mark.skipif(
-                    not HAS_AICONFIGURATOR,
-                    reason="aiconfigurator is not installed in this test image",
-                ),
-            ],
             id="kv-aic",
         ),
         pytest.param("kv", True, {}, id="kv-durable"),

@@ -9,6 +9,7 @@ from .replay_utils import (
     _assert_basic_report_counts,
     _assert_basic_report_metrics,
     _assert_replay_cli_outputs,
+    _planner_profile_data_dir_path,
     _run_replay_cli,
     _write_cli_smoke_trace,
     _write_multiturn_trace,
@@ -56,11 +57,16 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
 
 
 @pytest.mark.timeout(30)
-def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data_npz(
-    tmp_path,
+@pytest.mark.parametrize("planner_profile_data_kind", ["dir", "npz"])
+def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
+    tmp_path, planner_profile_data_kind
 ):
-    report_path = tmp_path / "synthetic_report_npz.json"
-    planner_profile_data = _write_planner_profile_data_npz(tmp_path)
+    report_path = tmp_path / f"synthetic_report_{planner_profile_data_kind}.json"
+    planner_profile_data = (
+        _planner_profile_data_dir_path()
+        if planner_profile_data_kind == "dir"
+        else _write_planner_profile_data_npz(tmp_path)
+    )
 
     completed = _run_replay_cli(
         tmp_path,

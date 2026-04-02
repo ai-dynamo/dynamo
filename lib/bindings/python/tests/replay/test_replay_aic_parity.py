@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
-import sys
-
 import pytest
 
 from dynamo.replay import run_synthetic_trace_replay
@@ -15,25 +12,10 @@ from .replay_utils import (
     _run_aic_static_point,
 )
 
-
-def _has_aiconfigurator() -> bool:
-    try:
-        return importlib.util.find_spec("aiconfigurator") is not None
-    except ValueError:
-        return "aiconfigurator" in sys.modules
-
-
-HAS_AICONFIGURATOR = _has_aiconfigurator()
-
 pytestmark = [
-    pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
-    pytest.mark.skipif(
-        not HAS_AICONFIGURATOR,
-        reason="aiconfigurator is not installed in this test image",
-    ),
     pytest.mark.unit,
 ]
 
