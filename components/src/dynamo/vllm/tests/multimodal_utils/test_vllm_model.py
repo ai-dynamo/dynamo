@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for DynamoMultimodalEmbeddingCacheConnector."""
+"""Unit tests for multimodal model utilities."""
 
+
+from unittest.mock import patch
 
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.model import construct_qwen_decode_mm_data
+from dynamo.vllm.multimodal_utils.model import (
+    construct_qwen_decode_mm_data,
+    is_qwen_vl_model,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -15,6 +20,51 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.multimodal,
 ]
+
+
+class TestIsQwenVlModel:
+    """Test architecture-based Qwen VL detection."""
+
+    @pytest.mark.parametrize(
+        "arch",
+        [
+            "Qwen2VLForConditionalGeneration",
+            "Qwen2_5_VLForConditionalGeneration",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+        ],
+    )
+    def test_positive_qwen_vl_architectures(self, arch):
+        with patch(
+            "dynamo.vllm.multimodal_utils.model._get_model_architectures",
+            return_value=(arch,),
+        ):
+            assert is_qwen_vl_model("any/model") is True
+
+    @pytest.mark.parametrize(
+        "arch",
+        [
+            "Qwen3ForCausalLM",
+            "LlavaForConditionalGeneration",
+            "LlamaForCausalLM",
+            "MistralForCausalLM",
+        ],
+    )
+    def test_negative_non_qwen_vl_architectures(self, arch):
+        with patch(
+            "dynamo.vllm.multimodal_utils.model._get_model_architectures",
+            return_value=(arch,),
+        ):
+            assert is_qwen_vl_model("any/model") is False
+
+    def test_empty_architectures(self):
+        with patch(
+            "dynamo.vllm.multimodal_utils.model._get_model_architectures",
+            return_value=(),
+        ):
+            assert is_qwen_vl_model("any/model") is False
 
 
 class TestMultiModalUtils:
