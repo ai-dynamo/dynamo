@@ -741,6 +741,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 		{"B200", nvidiacomv1beta1.GPUSKUTypeB200SXM},
 		{"A100", nvidiacomv1beta1.GPUSKUTypeA100SXM},
 		{"L40S", nvidiacomv1beta1.GPUSKUTypeL40S},
+		{"GB10", nvidiacomv1beta1.GPUSKUTypeGB10},
 	}
 
 	for _, p := range patterns {
