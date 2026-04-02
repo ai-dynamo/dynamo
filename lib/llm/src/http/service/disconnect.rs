@@ -222,7 +222,7 @@ pub fn monitor_for_disconnects(
                         request_type = %inflight_guard.request_type(),
                         error_type = "cancelled",
                         elapsed_ms = %inflight_guard.elapsed_ms(),
-                        "request cancelled by client"
+                        "request cancelled"
                     );
                     break;
                 }

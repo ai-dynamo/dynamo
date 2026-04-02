@@ -1051,7 +1051,7 @@ impl Drop for InflightGuard {
         match self.status {
             Status::Error => {
                 let detail = match self.error_type {
-                    ErrorType::Cancelled => "client disconnected before completion",
+                    ErrorType::Cancelled => "cancelled before completion",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
@@ -1383,12 +1383,8 @@ impl Drop for ResponseMetricCollector {
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
         let span = tracing::Span::current();
-        if self.isl > 0 {
-            span.record("input_tokens", self.isl as u32);
-        }
-        if self.osl > 0 {
-            span.record("output_tokens", self.osl as u32);
-        }
+        span.record("input_tokens", self.isl as u32);
+        span.record("output_tokens", self.osl as u32);
         if let Some(ttft_ms) = self.ttft_ms {
             span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
         }
