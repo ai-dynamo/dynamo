@@ -46,18 +46,14 @@ def _require_vllm_video_media() -> tuple[Any, Any, Any]:
 
 
 class VideoLoader:
-    CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_VIDEO_CACHE_SIZE", "8"))
-    NUM_FRAMES_DEFAULT = int(os.environ.get("DYN_MM_VIDEO_NUM_FRAMES", "8"))
+    NUM_FRAMES_DEFAULT = int(os.environ.get("DYN_MM_VIDEO_NUM_FRAMES", "32"))
 
     def __init__(
         self,
-        cache_size: int = CACHE_SIZE_MAXIMUM,
         http_timeout: float = 60.0,
         num_frames: int = NUM_FRAMES_DEFAULT,
         enable_frontend_decoding: bool = False,
     ) -> None:
-        del cache_size
-
         self._http_timeout = int(http_timeout)
         self._num_frames = num_frames
         self._enable_frontend_decoding = enable_frontend_decoding
@@ -99,6 +95,8 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         connector = self._get_vllm_media_connector()
         normalized_url = self._normalize_video_url(video_url)
+        # TODO: Add caching for repeated remote `video_url` downloads to avoid
+        # refetching the same asset across requests.
         return await connector.load_from_url_async(
             normalized_url,
             self._create_vllm_video_io(),
