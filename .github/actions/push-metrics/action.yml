@@ -64,7 +64,7 @@ runs:
         TEST_TYPE: ${{ inputs.test-type }}
         ARCH: ${{ inputs.arch }}
         CUDA_VERSION: ${{ inputs.cuda-version }}
-        JOB_STATUS: ${{ inputs.job-status || job.status }}
+        JOB_STATUS: ${{ inputs.job-status }}
         JOB_STARTED_AT: ${{ github.run_started_at }}
       run: |
         REPO_ROOT="$(cd "${{ github.action_path }}/../../.." && pwd)"
