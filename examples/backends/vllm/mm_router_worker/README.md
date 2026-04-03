@@ -54,9 +54,7 @@ If the model is gated/private, also set `HF_TOKEN`.
 
 ### vLLM Version Requirement
 
-This MM router depends on vLLM PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) (`[feat] Add per-block extra_keys to KV events`) so Dynamo can reconstruct MM-aware block hashes from KV events.
-
-PR #33304 is included natively in vLLM 0.17.0+. No manual patching is required — Dynamo requires vLLM 0.17.0 or newer.
+Requires vLLM >= 0.17.0.
 
 ## Usage
 
