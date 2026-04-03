@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver
 import pytest
 import torch
-import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 
@@ -50,6 +50,7 @@ class _FakeManager:
         self.calls.append("remap_all_vas")
         self.is_unmapped = False
 
+
 @pytest.fixture
 def build_impl(monkeypatch):
     monkeypatch.setattr(
@@ -81,7 +82,12 @@ def build_impl(monkeypatch):
             }[tag],
         )
         monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", fake_use_mem_pool)
-        return GMSMemorySaverImpl(device_index=0, mode=None), weights, kv_cache, pool_calls
+        return (
+            GMSMemorySaverImpl(device_index=0, mode=None),
+            weights,
+            kv_cache,
+            pool_calls,
+        )
 
     return build
 
