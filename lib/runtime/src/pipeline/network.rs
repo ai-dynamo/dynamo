@@ -431,3 +431,12 @@ pub struct NetworkStreamWrapper<U> {
     pub data: Option<U>,
     pub complete_final: bool,
 }
+
+/// Batched variant of [`NetworkStreamWrapper`] that sends multiple items in a single
+/// network message. Reduces per-token serialization, codec encoding, and TCP write
+/// overhead by batching up to N tokens into one frame.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NetworkStreamBatch<U> {
+    pub items: Vec<U>,
+    pub complete_final: bool,
+}

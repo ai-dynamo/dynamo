@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::panic;
+use dashmap::DashMap;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::{
     collections::HashMap,
@@ -82,7 +83,8 @@ impl ServerOptions {
 pub struct TcpStreamServer {
     local_ip: String,
     local_port: u16,
-    state: Arc<Mutex<State>>,
+    shared_state: Arc<SharedState>,
+    startup_state: Mutex<StartupState>,
 }
 
 // pub struct TcpStreamReceiver {
@@ -118,10 +120,25 @@ struct RequestedRecvConnection {
 //     pub receiver: Option<oneshot::Receiver<StreamReceiver>>,
 // }
 
+/// Lock-free shared state for concurrent subject registration and lookup.
+/// Uses DashMap to avoid mutex contention at high request rates.
+struct SharedState {
+    tx_subjects: DashMap<String, RequestedSendConnection>,
+    rx_subjects: DashMap<String, RequestedRecvConnection>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            tx_subjects: DashMap::new(),
+            rx_subjects: DashMap::new(),
+        }
+    }
+}
+
+/// State only used during server startup (handle is set once).
 #[derive(Default)]
-struct State {
-    tx_subjects: HashMap<String, RequestedSendConnection>,
-    rx_subjects: HashMap<String, RequestedRecvConnection>,
+struct StartupState {
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -179,9 +196,9 @@ impl TcpStreamServer {
             }
         };
 
-        let state = Arc::new(Mutex::new(State::default()));
+        let shared_state = Arc::new(SharedState::default());
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone())
+        let local_port = Self::start(local_ip.clone(), options.port, shared_state.clone())
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
@@ -192,22 +209,20 @@ impl TcpStreamServer {
         Ok(Arc::new(Self {
             local_ip,
             local_port,
-            state,
+            shared_state,
+            startup_state: Mutex::new(StartupState::default()),
         }))
     }
 
-    #[allow(clippy::await_holding_lock)]
-    async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
+    async fn start(
+        local_ip: String,
+        local_port: u16,
+        shared_state: Arc<SharedState>,
+    ) -> Result<u16> {
         let addr = format!("{}:{}", local_ip, local_port);
-        let state_clone = state.clone();
-        let mut guard = state.lock().await;
-        if guard.handle.is_some() {
-            panic!("TcpStreamServer already started");
-        }
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
-        let handle = tokio::spawn(tcp_listener(addr, state_clone, ready_tx));
-        guard.handle = Some(handle);
-        drop(guard);
+        let _handle = tokio::spawn(tcp_listener(addr, shared_state, ready_tx));
+        // Note: handle is fire-and-forget; the listener runs for the lifetime of the server.
         let local_port = ready_rx.await??;
         Ok(local_port)
     }
@@ -252,8 +267,7 @@ impl ResponseService for TcpStreamServer {
                 connection: pending_sender_tx,
             };
 
-            let mut state = self.state.lock().await;
-            state
+            self.shared_state
                 .tx_subjects
                 .insert(sender_subject.clone(), connection_info);
 
@@ -282,8 +296,7 @@ impl ResponseService for TcpStreamServer {
                 connection: pending_recver_tx,
             };
 
-            let mut state = self.state.lock().await;
-            state
+            self.shared_state
                 .rx_subjects
                 .insert(receiver_subject.clone(), connection_info);
 
@@ -318,7 +331,7 @@ impl ResponseService for TcpStreamServer {
 // to the sender
 async fn tcp_listener(
     addr: String,
-    state: Arc<Mutex<State>>,
+    state: Arc<SharedState>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -379,7 +392,7 @@ async fn tcp_listener(
 
     // #[instrument(level = "trace"), skip(state)]
     // todo - clone before spawn and trace process_stream
-    async fn handle_connection(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
+    async fn handle_connection(stream: tokio::net::TcpStream, state: Arc<SharedState>) {
         let result = process_stream(stream, state).await;
         match result {
             Ok(_) => tracing::trace!("successfully processed tcp connection"),
@@ -393,7 +406,7 @@ async fn tcp_listener(
 
     /// This method is responsible for the internal tcp stream handshake
     /// The handshake will specialize the stream as a request/sender or response/receiver stream
-    async fn process_stream(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
+    async fn process_stream(stream: tokio::net::TcpStream, state: Arc<SharedState>) -> Result<()> {
         // split the socket in to a reader and writer
         let (read_half, write_half) = tokio::io::split(stream);
 
@@ -437,14 +450,14 @@ async fn tcp_listener(
 
     async fn process_response_stream(
         subject: String,
-        state: Arc<Mutex<State>>,
+        state: Arc<SharedState>,
         mut reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
         writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
     ) -> Result<()> {
         let response_stream = state
-            .lock().await
             .rx_subjects
             .remove(&subject)
+            .map(|(_, v)| v)
             .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
 
         // unwrap response_stream

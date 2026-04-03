@@ -8,6 +8,7 @@ use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::protocols::maybe_error::MaybeError;
+use futures::FutureExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -302,38 +303,44 @@ where
 
         let context = stream.context();
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
+        // Batch token responses to reduce per-token serialization/TCP overhead.
+        // Instead of sending each token individually, we collect up to TOKEN_BATCH_SIZE
+        // tokens that are immediately available and send them in one network message.
+        const TOKEN_BATCH_SIZE: usize = 8;
         let mut send_complete_final = true;
-        while let Some(resp) = stream.next().await {
-            tracing::trace!("Sending response: {:?}", resp);
-            let resp_wrapper = NetworkStreamWrapper {
-                data: Some(resp),
+        let mut batch: Vec<U> = Vec::with_capacity(TOKEN_BATCH_SIZE);
+        loop {
+            // Await the next token from the stream
+            let item = stream.next().await;
+            match item {
+                Some(resp) => batch.push(resp),
+                None => break, // stream ended
+            }
+            // Drain any immediately-available tokens without awaiting
+            while batch.len() < TOKEN_BATCH_SIZE {
+                match stream.next().now_or_never() {
+                    Some(Some(resp)) => batch.push(resp),
+                    _ => break,
+                }
+            }
+            // Send the batch
+            let batch_wrapper = NetworkStreamBatch {
+                items: std::mem::replace(&mut batch, Vec::with_capacity(TOKEN_BATCH_SIZE)),
                 complete_final: false,
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+            let batch_bytes = serde_json::to_vec(&batch_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(batch_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
+            if (publisher.send(batch_bytes.into()).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
-                    // Say there are 2 threads accessing `context`, the sequence can be either:
-                    // 1. context.stop_generating (other) -> publisher.send failure (this)
-                    //    -> context.is_stopped (this)
-                    // 2. publisher.send failure (this) -> context.stop_generating (other)
-                    //    -> context.is_stopped (this)
-                    // Case 1 can happen when client closed the connection after receiving the
-                    // complete response from frontend. Hence, send failure can be expected in this
-                    // case.
                     tracing::warn!("Failed to publish response for stream {}", context.id());
                 } else {
-                    // Otherwise, this is an error.
                     tracing::error!("Failed to publish response for stream {}", context.id());
                     context.stop_generating();
                 }
-                // Account errors in all cases, including cancellation. Therefore this metric can be
-                // inflated.
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
@@ -343,11 +350,12 @@ where
             }
         }
         if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
+            // Send complete_final as a batch message for consistency
+            let final_wrapper = NetworkStreamBatch::<U> {
+                items: Vec::new(),
                 complete_final: true,
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+            let resp_bytes = serde_json::to_vec(&final_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
