@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       run_deploy_operator:
-        description: "Run deploy operator and deployment tests"
+        description: 'Run deploy operator and deployment tests'
         required: false
         type: boolean
         default: false
@@ -25,9 +25,11 @@ env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
+
 
   changed-files:
     runs-on: ubuntu-latest
@@ -43,7 +45,7 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
       - name: Check for changes
@@ -58,14 +60,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [
-        changed-files,
-        planner-pipeline,
-        vllm-pipeline,
-        sglang-pipeline,
-        trtllm-pipeline,
-        operator,
-      ] # THIS list determines blocking jobs
+    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -74,19 +69,13 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs:
-      [
-        deploy-operator,
-        deploy-test-vllm,
-        deploy-test-sglang,
-        deploy-test-trtllm,
-        deploy-test-gaie,
-      ]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+
 
   # ============================================================================
   # Operator
@@ -105,13 +94,13 @@ jobs:
       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          arch: "linux/amd64,linux/arm64"
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -133,7 +122,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: "1.25"
+          go-version: '1.25'
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -154,7 +143,7 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         env:
-          NO_CACHE_FLAG: "" # placeholder for future logic to add no cache flag if needed
+          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-operator"
@@ -184,9 +173,10 @@ jobs:
             echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
           done
 
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # ============================================================================
+
+# ============================================================================
+# FRAMEWORK PIPELINES (Build → Test → Copy)
+# ============================================================================
   # ============================================================================
   # PLANNER PIPELINE
   # ============================================================================
@@ -199,12 +189,12 @@ jobs:
       framework: dynamo
       builder_flavor: general
       target: planner
-      platform: "linux/amd64"
+      platform: 'linux/amd64'
       cpu_only: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
       run_cpu_only_tests: true
-      cpu_only_test_markers: "pre_merge and planner and gpu_0"
+      cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
@@ -222,18 +212,18 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       copy_timeout_minutes: 10
       run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      cpu_only_test_markers: "pre_merge and vllm and gpu_0"
+      cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      single_gpu_test_markers: "pre_merge and vllm and gpu_1"
+      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      multi_gpu_test_markers: "pre_merge and vllm and (gpu_2 or gpu_4)"
+      multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -248,17 +238,17 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       copy_timeout_minutes: 10
       run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      cpu_only_test_markers: "pre_merge and sglang and gpu_0"
+      cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      single_gpu_test_markers: "pre_merge and sglang and gpu_1"
+      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      multi_gpu_test_markers: "pre_merge and sglang and (gpu_2 or gpu_4)"
+      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -273,17 +263,17 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       copy_timeout_minutes: 10
       run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      cpu_only_test_markers: "pre_merge and trtllm and gpu_0"
+      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      single_gpu_test_markers: "pre_merge and trtllm and gpu_1"
+      single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      multi_gpu_test_markers: "pre_merge and trtllm and (gpu_2 or gpu_4)"
+      multi_gpu_test_markers: 'pre_merge and trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -298,7 +288,7 @@ jobs:
     with:
       framework: vllm
       target: dev
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -313,7 +303,7 @@ jobs:
     with:
       framework: sglang
       target: dev
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -328,29 +318,17 @@ jobs:
     with:
       framework: trtllm
       target: dev
-      platform: "linux/amd64,linux/arm64"
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false
     secrets: inherit
 
-  # ============================================================================
-  # FRONTEND IMAGE BUILD
-  # ============================================================================
-  frontend-image:
-    name: Frontend Image
-    needs: [changed-files]
-    if: needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-frontend-image.yaml
-    with:
-      skip_change_detection: true
-    secrets: inherit
-
-    # ============================================================================
-    # DEPLOYMENT JOBS
-    # Deploy operator and run end-to-end tests on Kubernetes cluster
-    # ============================================================================
+   # ============================================================================
+   # DEPLOYMENT JOBS
+   # Deploy operator and run end-to-end tests on Kubernetes cluster
+   # ============================================================================
 
   deploy-operator:
     if: |
@@ -367,17 +345,17 @@ jobs:
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup vCluster and operator
-        id: setup
-        uses: ./.github/actions/setup-dynamo-operator
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+    - uses: actions/checkout@v4
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
     if: |
@@ -430,96 +408,19 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
-  # ============================================================================
-  # GAIE DEPLOY TEST
-  # ============================================================================
-  deploy-test-gaie:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.vllm == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.frontend-image.result == 'success' &&
-      needs.vllm-pipeline.result == 'success'
-    runs-on: prod-default-small-v2
-    needs: [changed-files, deploy-operator, frontend-image, vllm-pipeline]
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    name: deploy-test-gaie
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
-      - name: Check if vCluster exists
-        id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      - name: Self-bootstrap vCluster (rerun)
-        if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-      - name: Connect to vCluster
-        id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
-        with:
-          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
-        shell: bash
-        env:
-          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
-        run: |
-          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
-          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
-          export NAMESPACE=default
-          bash deploy/inference-gateway/scripts/install_gaie_crd_kgateway.sh
-          rm -f ${{ github.workspace }}/.kubeconfig_gaie
-      - name: Run GAIE Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
-          namespace: default
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          test_name: gaie
-          extra_pytest_args: >-
-            -m framework_with_gaie
-            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
-
   deploy-cleanup:
     if: always()
-    needs:
-      [
-        deploy-operator,
-        deploy-test-vllm,
-        deploy-test-sglang,
-        deploy-test-trtllm,
-        deploy-test-gaie,
-      ]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-default-small-v2
     steps:
-      - uses: actions/checkout@v4
-      - name: Teardown vCluster
-        if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-        uses: ./.github/actions/teardown-dynamo-operator
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+    - uses: actions/checkout@v4
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   # ============================================================================
   # CLEANUP JOBS
@@ -530,26 +431,18 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs:
-      [
-        planner-pipeline,
-        vllm-pipeline,
-        sglang-pipeline,
-        trtllm-pipeline,
-        operator,
-        changed-files,
-      ]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
-      - name: Create K8s builders (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
-        continue-on-error: true
-        with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: "" # k8s builder
-          skip_bootstrap: true
-      - name: Builder Cleanup in case of k8s builder
-        shell: bash
-        run: |
-          docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        buildkit_worker_addresses: '' # k8s builder
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
