@@ -156,3 +156,35 @@ def test_skip_existing_results(
     # Only rate=8 should have run.
     assert mock_aiperf.call_count == 1
     assert mock_aiperf.call_args.kwargs["sweep_value"] == 8
+
+
+@patch("benchmarks.multimodal.sweep.orchestrator.run_aiperf_single")
+@patch("benchmarks.multimodal.sweep.orchestrator.ServerManager")
+def test_skip_all_results_no_server_start(
+    mock_server_cls: MagicMock,
+    mock_aiperf: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """When all runs have results, the server should never start."""
+    config = _make_config(
+        tmp_path,
+        num_configs=1,
+        num_input_files=1,
+        restart_server_every_benchmark=False,
+    )
+    mock_server = mock_server_cls.return_value
+    mock_server.is_running = False
+
+    # Pre-create results for both rates.
+    input_tag = Path(config.input_files[0]).stem
+    for rate in [4, 8]:
+        artifact_dir = (
+            tmp_path / "results" / input_tag / "cfg-0" / f"request_rate{rate}"
+        )
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "profile_export_aiperf.json").write_text("{}")
+
+    run_sweep(config, repo_root=tmp_path)
+
+    assert mock_aiperf.call_count == 0
+    assert mock_server.start.call_count == 0
