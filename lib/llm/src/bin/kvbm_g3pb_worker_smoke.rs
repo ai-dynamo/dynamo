@@ -21,7 +21,7 @@ use dynamo_llm::block_manager::config::{
 use dynamo_llm::block_manager::distributed::{
     G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbCommitRequest, G3pbFetchBlocksResponse,
     G3pbFetchRequest, G3pbOfferRequest, G3pbPutBlock, G3pbQueryHit, G3pbQueryRequest,
-    G3pbRequestPlaneClient, G3pbStageBlocksRequest, discover_g3pb_peers,
+    G3pbPeerResolver, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
     route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
@@ -396,10 +396,11 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(G3PB_NAMESPACE)?
         .component(G3PB_COMPONENT_NAME)?;
     let request_client = G3pbRequestPlaneClient::new(g3pb_component).await?;
+    let peer_resolver = G3pbPeerResolver::new(request_client.clone()).await?;
     let mut rpc_timings = Vec::new();
 
     let health_start = Instant::now();
-    let discovered_peers = discover_g3pb_peers(&request_client).await?;
+    let discovered_peers = peer_resolver.snapshot().await;
     for resolved in discovered_peers.instances() {
         println!(
             "remote backend ready: instance_id={} endpoint={}",

@@ -25,6 +25,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::Duration;
+use tokio::sync::RwLock as AsyncRwLock;
 
 const DEFAULT_METADATA_SHARDS: usize = 16;
 pub const G3PB_NAMESPACE: &str = "kvbm-g3pb";
@@ -35,6 +36,17 @@ pub const G3PB_ENDPOINT_NAME: &str = "g3pb";
 pub struct G3pbPeer {
     pub instance_id: u64,
     pub endpoint: String,
+    pub hostname: String,
+}
+
+impl G3pbPeer {
+    pub fn routing_id(&self) -> u64 {
+        if self.hostname.is_empty() {
+            return self.instance_id;
+        }
+
+        compute_hash_v2(self.hostname.as_bytes(), 0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +94,7 @@ pub struct G3pbOfferRequest {
 pub struct G3pbHealthResponse {
     pub instance_id: u64,
     pub listen: String,
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1092,7 +1105,7 @@ pub fn select_g3pb_owner(sequence_hash: SequenceHash, peers: &[G3pbPeer]) -> Opt
     peers
         .iter()
         .cloned()
-        .max_by_key(|peer| rendezvous_score(sequence_hash, peer.instance_id))
+        .max_by_key(|peer| rendezvous_score(sequence_hash, peer.routing_id()))
 }
 
 fn rendezvous_score(sequence_hash: SequenceHash, instance_id: u64) -> u64 {
@@ -1291,6 +1304,12 @@ pub struct G3pbDiscoveredPeers {
     peers_by_instance: HashMap<u64, G3pbPeerInstance>,
 }
 
+#[derive(Clone)]
+pub struct G3pbPeerResolver {
+    request_client: G3pbRequestPlaneClient,
+    peers: Arc<AsyncRwLock<G3pbDiscoveredPeers>>,
+}
+
 impl G3pbRequestPlaneClient {
     pub async fn new(component: Component) -> Result<Self> {
         let client = component.endpoint(G3PB_ENDPOINT_NAME).client().await?;
@@ -1301,6 +1320,10 @@ impl G3pbRequestPlaneClient {
 
     pub fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
+    }
+
+    pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.router.client.instance_avail_watcher()
     }
 
     async fn request(&self, instance_id: u64, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
@@ -1429,6 +1452,46 @@ impl G3pbRequestPlaneClient {
     }
 }
 
+impl G3pbPeerResolver {
+    pub async fn new(request_client: G3pbRequestPlaneClient) -> Result<Self> {
+        let initial = discover_g3pb_peers(&request_client).await?;
+        let peers = Arc::new(AsyncRwLock::new(initial));
+        let resolver = Self {
+            request_client,
+            peers,
+        };
+        resolver.spawn_refresh_task();
+        Ok(resolver)
+    }
+
+    fn spawn_refresh_task(&self) {
+        let request_client = self.request_client.clone();
+        let peers = self.peers.clone();
+        let mut watcher = request_client.instance_avail_watcher();
+
+        tokio::spawn(async move {
+            loop {
+                if watcher.changed().await.is_err() {
+                    break;
+                }
+
+                match discover_g3pb_peers(&request_client).await {
+                    Ok(refreshed) => {
+                        *peers.write().await = refreshed;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to refresh G3PB peer snapshot from discovery watch");
+                    }
+                }
+            }
+        });
+    }
+
+    pub async fn snapshot(&self) -> G3pbDiscoveredPeers {
+        self.peers.read().await.clone()
+    }
+}
+
 impl G3pbDiscoveredPeers {
     pub fn from_health_responses(discovered: Vec<(u64, G3pbHealthResponse)>) -> Result<Self> {
         let mut peers_by_instance = HashMap::with_capacity(discovered.len());
@@ -1436,6 +1499,7 @@ impl G3pbDiscoveredPeers {
             let peer = G3pbPeer {
                 instance_id: health.instance_id,
                 endpoint: health.listen,
+                hostname: health.hostname,
             };
             let resolved = G3pbPeerInstance {
                 peer: peer.clone(),
@@ -1465,13 +1529,13 @@ impl G3pbDiscoveredPeers {
             .values()
             .map(|resolved| resolved.peer.clone())
             .collect();
-        peers.sort_by_key(|peer| peer.instance_id);
+        peers.sort_by_key(|peer| peer.routing_id());
         peers
     }
 
     pub fn instances(&self) -> Vec<G3pbPeerInstance> {
         let mut instances: Vec<_> = self.peers_by_instance.values().cloned().collect();
-        instances.sort_by_key(|resolved| resolved.peer.instance_id);
+        instances.sort_by_key(|resolved| resolved.peer.routing_id());
         instances
     }
 
@@ -1772,14 +1836,17 @@ mod tests {
             G3pbPeer {
                 instance_id: 101,
                 endpoint: "tcp://peer-10".to_string(),
+                hostname: "g3pb-10".to_string(),
             },
             G3pbPeer {
                 instance_id: 202,
                 endpoint: "tcp://peer-20".to_string(),
+                hostname: "g3pb-20".to_string(),
             },
             G3pbPeer {
                 instance_id: 303,
                 endpoint: "tcp://peer-30".to_string(),
+                hostname: "g3pb-30".to_string(),
             },
         ]
     }
@@ -1825,6 +1892,7 @@ mod tests {
                 G3pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10-a".to_string(),
+                    hostname: "g3pb-10-a".to_string(),
                 },
             ),
             (
@@ -1832,6 +1900,7 @@ mod tests {
                 G3pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10-b".to_string(),
+                    hostname: "g3pb-10-b".to_string(),
                 },
             ),
         ])
@@ -1844,13 +1913,14 @@ mod tests {
     }
 
     #[test]
-    fn discovered_peers_sort_instances_by_instance_id() {
+    fn discovered_peers_sort_instances_by_routing_id() {
         let discovered = G3pbDiscoveredPeers::from_health_responses(vec![
             (
                 303,
                 G3pbHealthResponse {
                     instance_id: 30,
                     listen: "tcp://peer-30".to_string(),
+                    hostname: "g3pb-30".to_string(),
                 },
             ),
             (
@@ -1858,6 +1928,7 @@ mod tests {
                 G3pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10".to_string(),
+                    hostname: "g3pb-10".to_string(),
                 },
             ),
             (
@@ -1865,10 +1936,20 @@ mod tests {
                 G3pbHealthResponse {
                     instance_id: 20,
                     listen: "tcp://peer-20".to_string(),
+                    hostname: "g3pb-20".to_string(),
                 },
             ),
         ])
         .unwrap();
+
+        let expected = {
+            let mut instances = discovered.instances();
+            instances.sort_by_key(|resolved| resolved.peer.routing_id());
+            instances
+                .into_iter()
+                .map(|resolved| resolved.peer.instance_id)
+                .collect::<Vec<_>>()
+        };
 
         assert_eq!(
             discovered
@@ -1876,7 +1957,7 @@ mod tests {
                 .into_iter()
                 .map(|resolved| resolved.peer.instance_id)
                 .collect::<Vec<_>>(),
-            vec![10, 20, 30]
+            expected
         );
     }
 

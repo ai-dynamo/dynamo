@@ -564,6 +564,7 @@ impl G3pbBackendService {
             G3pbRpcRequest::Health => Ok(G3pbRpcResponse::Health(G3pbHealthResponse {
                 instance_id: self.agent.instance_id(),
                 listen: self.endpoint_id.clone(),
+                hostname: std::env::var("HOSTNAME").unwrap_or_default(),
             })),
             G3pbRpcRequest::PutBlocks(blocks) => {
                 self.agent.put_blocks(blocks).await;
