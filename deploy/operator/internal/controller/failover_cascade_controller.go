@@ -110,16 +110,17 @@ func (r *FailoverCascadeReconciler) inCooldown(key string, podCreationTime time.
 	return r.Now().Sub(lastCascade) < cascadeCooldown // case 3
 }
 
-// setCooldown records the current time as the last cascade event for the
-// given engine group. Subsequent events for the same generation will be
-// suppressed until cascadeCooldown elapses.
-func (r *FailoverCascadeReconciler) setCooldown(key string) {
+// setCooldown records the given timestamp as the last cascade event for the
+// engine group. The caller is expected to capture the time BEFORE issuing the
+// DeleteAllOf so that any replacement pods created by Grove during the
+// deletion have a CreationTimestamp strictly after this value.
+func (r *FailoverCascadeReconciler) setCooldown(key string, t time.Time) {
 	r.cooldownMu.Lock()
 	defer r.cooldownMu.Unlock()
 	if r.cooldowns == nil {
 		r.cooldowns = make(map[string]time.Time)
 	}
-	r.cooldowns[key] = r.Now()
+	r.cooldowns[key] = t
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete;deletecollection
@@ -192,6 +193,11 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// The label selector matches on both the dynamo failover label (our label)
 	// and the three Grove labels (to scope to exactly this group).
 	// GracePeriodSeconds(0) sends SIGKILL immediately — no graceful shutdown.
+	//
+	// IMPORTANT: capture the time BEFORE the delete so that any replacement
+	// pods Grove creates while DeleteAllOf is in-flight will have a
+	// CreationTimestamp strictly after cascadeTime. This ensures inCooldown()
+	// correctly recognises them as new-generation and does not suppress them.
 	groupLabels := client.MatchingLabels{
 		commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
 		groveLabelPCSG:             pcsg,
@@ -199,13 +205,14 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPodIndex:         podIndex,
 	}
 
+	cascadeTime := r.Now()
 	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
 
 	// Step 6: Record the cascade for cooldown tracking and emit a Kubernetes
 	// event so operators can see what happened via kubectl describe / kubectl get events.
-	r.setCooldown(groupKey)
+	r.setCooldown(groupKey, cascadeTime)
 
 	logger.Info("cascade-deleted engine group",
 		"trigger", pod.Name,
