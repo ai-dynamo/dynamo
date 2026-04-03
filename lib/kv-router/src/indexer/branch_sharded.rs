@@ -60,7 +60,10 @@ use crate::protocols::*;
 /// isolation is needed in the future.
 #[allow(dead_code)]
 struct ShardReadPool {
-    sender: flume::Sender<(Vec<LocalBlockHash>, tokio::sync::oneshot::Sender<OverlapScores>)>,
+    sender: flume::Sender<(
+        Vec<LocalBlockHash>,
+        tokio::sync::oneshot::Sender<OverlapScores>,
+    )>,
     _threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -71,7 +74,10 @@ impl ShardReadPool {
         let mut threads = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
             let backend = Arc::clone(&backend);
-            let rx: flume::Receiver<(Vec<LocalBlockHash>, tokio::sync::oneshot::Sender<OverlapScores>)> = rx.clone();
+            let rx: flume::Receiver<(
+                Vec<LocalBlockHash>,
+                tokio::sync::oneshot::Sender<OverlapScores>,
+            )> = rx.clone();
             threads.push(std::thread::spawn(move || {
                 while let Ok((seq, resp_tx)) = rx.recv() {
                     let result = backend.find_matches(&seq, false);
@@ -203,16 +209,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     /// # Panics
     ///
     /// Panics if `shards` is empty.
-    pub fn new(
-        shards: Vec<ThreadPoolIndexer<T>>,
-        prefix_depth: usize,
-        kv_block_size: u32,
-    ) -> Self {
+    pub fn new(shards: Vec<ThreadPoolIndexer<T>>, prefix_depth: usize, kv_block_size: u32) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
         let num_shards = shards.len();
 
-        let shards: Vec<Arc<ThreadPoolIndexer<T>>> =
-            shards.into_iter().map(Arc::new).collect();
+        let shards: Vec<Arc<ThreadPoolIndexer<T>>> = shards.into_iter().map(Arc::new).collect();
 
         Self {
             shards,
@@ -342,8 +343,10 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         let shard_ns = t_shard.elapsed().as_nanos() as u64;
 
         self.timing_calls.fetch_add(1, Ordering::Relaxed);
-        self.timing_sum_routing_ns.fetch_add(routing_ns, Ordering::Relaxed);
-        self.timing_sum_shard_ns.fetch_add(shard_ns, Ordering::Relaxed);
+        self.timing_sum_routing_ns
+            .fetch_add(routing_ns, Ordering::Relaxed);
+        self.timing_sum_shard_ns
+            .fetch_add(shard_ns, Ordering::Relaxed);
 
         result
     }
@@ -357,7 +360,11 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         let sequence = compute_block_hash_for_seq(
             tokens,
             self.kv_block_size,
-            BlockHashOptions { lora_name, is_eagle, block_mm_infos: None },
+            BlockHashOptions {
+                lora_name,
+                is_eagle,
+                block_mm_infos: None,
+            },
         );
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         match self.lookup_shard(branch_key) {
@@ -389,7 +396,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 //    Compute FNV from this batch's own blocks.  For root events
                 //    shorter than `prefix_depth` this is a partial key; a future
                 //    continuation in case A will extend it to the full depth.
-                let (shard_idx, new_fnv_state) = if let Some(parent_hash) = &store_data.parent_hash {
+                let (shard_idx, new_fnv_state) = if let Some(parent_hash) = &store_data.parent_hash
+                {
                     if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
                         // Case A: parent is shallow — extend FNV accumulator.
                         let (parent_fnv, parent_depth) = *entry;
@@ -412,7 +420,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                             None
                         };
                         (shard, state)
-                    } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
+                    } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0)
+                    {
                         // Case B: deep chain — inherit.
                         (shard, None)
                     } else {
@@ -456,10 +465,11 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
 
                 // Propagate partial FNV state on the last block of this batch so
                 // the next continuation in the chain can extend it.
-                if let Some(fnv_state) = new_fnv_state {
-                    if let Some(last_block) = store_data.blocks.last() {
-                        self.block_to_fnv_state.insert(last_block.block_hash.0, fnv_state);
-                    }
+                if let Some(fnv_state) = new_fnv_state
+                    && let Some(last_block) = store_data.blocks.last()
+                {
+                    self.block_to_fnv_state
+                        .insert(last_block.block_hash.0, fnv_state);
                 }
 
                 self.shards[shard_idx].apply_event(event).await;
@@ -474,14 +484,11 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
 
                 for &block_hash in &remove_data.block_hashes {
                     self.block_to_fnv_state.remove(&block_hash.0);
-                    let found_shard = self
-                        .block_to_shard
-                        .get_mut(&block_hash.0)
-                        .map(|mut e| {
-                            let shard_idx = e.0;
-                            e.1 = e.1.saturating_sub(1);
-                            shard_idx
-                        });
+                    let found_shard = self.block_to_shard.get_mut(&block_hash.0).map(|mut e| {
+                        let shard_idx = e.0;
+                        e.1 = e.1.saturating_sub(1);
+                        shard_idx
+                    });
                     match found_shard {
                         Some(shard_idx) => {
                             // Delete the entry only once the last holder has evicted.
@@ -503,8 +510,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                     if blocks.is_empty() {
                         continue;
                     }
-                    self.shard_block_counts[shard_idx]
-                        .fetch_sub(blocks.len(), Ordering::Relaxed);
+                    self.shard_block_counts[shard_idx].fetch_sub(blocks.len(), Ordering::Relaxed);
                     let shard_event = RouterEvent {
                         worker_id: event.worker_id,
                         storage_tier: event.storage_tier,
