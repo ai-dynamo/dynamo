@@ -73,8 +73,7 @@ rather than hardcoding the URI:
 # Resolve base image from context.yaml (requires: pip install pyyaml)
 BASE_IMAGE=$(python container/compliance/resolve_base_image.py \
   --framework vllm \
-  --cuda-version 12.9 \
-  --arch amd64)
+  --cuda-version 12.9)
 
 # Extract target image
 docker buildx build \
@@ -113,7 +112,6 @@ python container/compliance/process_results.py \
 | `--framework` | *(required)* | `vllm`, `sglang`, `trtllm`, or `dynamo` |
 | `--target` | `runtime` | `runtime` or `frontend` |
 | `--cuda-version` | — | Required for runtime targets (e.g. `12.9`, `13.0`, `13.1`) |
-| `--arch` | `amd64` | `amd64`, `arm64`, `linux/amd64`, or `linux/arm64` |
 | `--context-yaml` | `container/context.yaml` | Path to context.yaml |
 
 ### process_results.py flags
@@ -126,14 +124,14 @@ python container/compliance/process_results.py \
 
 ## Base image reference
 
-| Framework | CUDA | Arch | Base image |
-|-----------|------|------|------------|
-| `vllm` | 12.9 | — | `vllm/vllm-openai:v0.18.0` |
-| `vllm` | 13.0 | — | `vllm/vllm-openai:v0.18.0-cu130` |
-| `sglang` | 12.9 | — | `lmsysorg/sglang:v0.5.9-runtime` |
-| `sglang` | 13.0 | — | `lmsysorg/sglang:v0.5.9-cu130-runtime` |
-| `trtllm` | 13.1 | — | `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04` |
-| `dynamo` frontend | — | — | `nvcr.io/nvidia/base/ubuntu:noble-20250619` |
+| Framework | CUDA | Base image |
+|-----------|------|------------|
+| `vllm` | 12.9 | `vllm/vllm-openai:v0.18.0` |
+| `vllm` | 13.0 | `vllm/vllm-openai:v0.18.0-cu130` |
+| `sglang` | 12.9 | `lmsysorg/sglang:v0.5.9-runtime` |
+| `sglang` | 13.0 | `lmsysorg/sglang:v0.5.9-cu130-runtime` |
+| `trtllm` | 13.1 | `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04` |
+| `dynamo` frontend | — | `nvcr.io/nvidia/base/ubuntu:noble-20250619` |
 
 These values are sourced from `container/context.yaml`; the table above reflects the current defaults.
 
