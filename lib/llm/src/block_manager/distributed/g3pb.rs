@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::block_manager::WorkerID;
 use crate::block_manager::block::nixl::{BlockDescriptorList, SerializedNixlBlockSet};
 use crate::block_manager::storage::Storage;
 use crate::tokens::{SequenceHash, compute_hash_v2};
@@ -34,7 +33,7 @@ pub const G3PB_ENDPOINT_NAME: &str = "g3pb";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbPeer {
-    pub worker_id: WorkerID,
+    pub instance_id: u64,
     pub endpoint: String,
 }
 
@@ -47,7 +46,7 @@ pub struct G3pbPutBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbQueryHit {
-    pub worker_id: WorkerID,
+    pub instance_id: u64,
     pub sequence_hash: SequenceHash,
     pub size_bytes: usize,
     pub checksum: Option<[u8; 32]>,
@@ -81,7 +80,7 @@ pub struct G3pbOfferRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G3pbHealthResponse {
-    pub worker_id: WorkerID,
+    pub instance_id: u64,
     pub listen: String,
 }
 
@@ -141,7 +140,7 @@ pub struct G3pbStageBlocksRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct G3pbStageBlocksResponse {
-    pub worker_id: WorkerID,
+    pub instance_id: u64,
     pub blockset: SerializedNixlBlockSet,
     pub descriptors: BlockDescriptorList,
 }
@@ -158,7 +157,7 @@ pub struct G3pbLoadRemoteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct G3pbFetchBlocksResponse {
-    pub worker_id: WorkerID,
+    pub instance_id: u64,
     pub blockset: SerializedNixlBlockSet,
     pub descriptors: BlockDescriptorList,
 }
@@ -167,11 +166,11 @@ pub struct G3pbFetchBlocksResponse {
 pub enum G3pbError {
     #[error("no live G3PB peers are available")]
     NoPeers,
-    #[error("owning G3PB peer {worker_id} is not available")]
-    UnknownPeer { worker_id: WorkerID },
-    #[error("requested G3PB blocks were not found on peer {worker_id}: {sequence_hashes:?}")]
+    #[error("owning G3PB peer instance {instance_id} is not available")]
+    UnknownPeer { instance_id: u64 },
+    #[error("requested G3PB blocks were not found on peer instance {instance_id}: {sequence_hashes:?}")]
     NotFound {
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: Vec<SequenceHash>,
     },
     #[error(
@@ -192,12 +191,12 @@ pub trait G3pbPeerStorage: Send + Sync {
     async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError>;
     async fn query_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit>;
     async fn fetch_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError>;
 }
@@ -270,7 +269,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 
     async fn query_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit> {
         let guard = self.blocks.read().expect("g3pb peer storage poisoned");
@@ -278,7 +277,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
             .iter()
             .filter_map(|sequence_hash| {
                 guard.get(sequence_hash).map(|entry| G3pbQueryHit {
-                    worker_id,
+                    instance_id,
                     sequence_hash: *sequence_hash,
                     size_bytes: entry.meta.size_bytes,
                     checksum: entry.meta.checksum,
@@ -289,7 +288,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 
     async fn fetch_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
         let guard = self.blocks.read().expect("g3pb peer storage poisoned");
@@ -314,7 +313,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 
         if !missing.is_empty() {
             return Err(G3pbError::NotFound {
-                worker_id,
+                instance_id,
                 sequence_hashes: missing,
             });
         }
@@ -863,7 +862,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
             self.foyer_insert(block.meta.sequence_hash, block.payload.clone())
                 .await
                 .map_err(|_| G3pbError::NotFound {
-                    worker_id: 0,
+                    instance_id: 0,
                     sequence_hashes: vec![block.meta.sequence_hash],
                 })?;
 
@@ -933,7 +932,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
 
     async fn query_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit> {
         let mut hits = Vec::new();
@@ -959,7 +958,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 if let Some(meta) = guard.get(sequence_hash) {
                     if meta.payload_ready {
                         hits.push(G3pbQueryHit {
-                            worker_id,
+                            instance_id,
                             sequence_hash: *sequence_hash,
                             size_bytes: meta.size_bytes,
                             checksum: None,
@@ -974,7 +973,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
 
     async fn fetch_blocks(
         &self,
-        worker_id: WorkerID,
+        instance_id: u64,
         sequence_hashes: &[SequenceHash],
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
         let tick = self.next_tick();
@@ -1056,7 +1055,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                         .foyer_get(sequence_hash)
                         .await
                         .map_err(|_| G3pbError::NotFound {
-                            worker_id,
+                            instance_id,
                             sequence_hashes: vec![sequence_hash],
                         })? {
                         Some(p) => p,
@@ -1080,7 +1079,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
 
         if !missing.is_empty() {
             return Err(G3pbError::NotFound {
-                worker_id,
+                instance_id,
                 sequence_hashes: missing,
             });
         }
@@ -1093,13 +1092,13 @@ pub fn select_g3pb_owner(sequence_hash: SequenceHash, peers: &[G3pbPeer]) -> Opt
     peers
         .iter()
         .cloned()
-        .max_by_key(|peer| rendezvous_score(sequence_hash, peer.worker_id))
+        .max_by_key(|peer| rendezvous_score(sequence_hash, peer.instance_id))
 }
 
-fn rendezvous_score(sequence_hash: SequenceHash, worker_id: WorkerID) -> u64 {
+fn rendezvous_score(sequence_hash: SequenceHash, instance_id: u64) -> u64 {
     let mut bytes = [0u8; 16];
     bytes[..8].copy_from_slice(&sequence_hash.to_le_bytes());
-    bytes[8..].copy_from_slice(&worker_id.to_le_bytes());
+    bytes[8..].copy_from_slice(&instance_id.to_le_bytes());
     compute_hash_v2(&bytes, 0)
 }
 
@@ -1107,15 +1106,15 @@ fn route_items_by_g3pb_owner<T, F>(
     items: impl IntoIterator<Item = T>,
     peers: &[G3pbPeer],
     sequence_hash: F,
-) -> Result<HashMap<WorkerID, Vec<T>>, G3pbError>
+) -> Result<HashMap<u64, Vec<T>>, G3pbError>
 where
     F: Fn(&T) -> SequenceHash,
 {
-    let mut routed = HashMap::<WorkerID, Vec<T>>::new();
+    let mut routed = HashMap::<u64, Vec<T>>::new();
 
     for item in items {
         let owner = select_g3pb_owner(sequence_hash(&item), peers).ok_or(G3pbError::NoPeers)?;
-        routed.entry(owner.worker_id).or_default().push(item);
+        routed.entry(owner.instance_id).or_default().push(item);
     }
 
     Ok(routed)
@@ -1142,7 +1141,7 @@ where
 pub fn route_g3pb_sequence_hashes_by_owner(
     sequence_hashes: &[SequenceHash],
     peers: &[G3pbPeer],
-) -> Result<HashMap<WorkerID, Vec<SequenceHash>>, G3pbError> {
+) -> Result<HashMap<u64, Vec<SequenceHash>>, G3pbError> {
     route_items_by_g3pb_owner(sequence_hashes.iter().copied(), peers, |sequence_hash| {
         *sequence_hash
     })
@@ -1151,41 +1150,41 @@ pub fn route_g3pb_sequence_hashes_by_owner(
 pub fn route_g3pb_put_blocks_by_owner(
     blocks: Vec<G3pbPutBlock>,
     peers: &[G3pbPeer],
-) -> Result<HashMap<WorkerID, Vec<G3pbPutBlock>>, G3pbError> {
+) -> Result<HashMap<u64, Vec<G3pbPutBlock>>, G3pbError> {
     route_items_by_g3pb_owner(blocks, peers, |block| block.sequence_hash)
 }
 
 pub fn route_g3pb_transfer_blocks_by_owner(
     blocks: Vec<G3pbTransferBlock>,
     peers: &[G3pbPeer],
-) -> Result<HashMap<WorkerID, Vec<G3pbTransferBlock>>, G3pbError> {
+) -> Result<HashMap<u64, Vec<G3pbTransferBlock>>, G3pbError> {
     route_items_by_g3pb_owner(blocks, peers, |block| block.meta.sequence_hash)
 }
 
 #[derive(Clone)]
 pub struct G3pbStorageAgent {
-    worker_id: WorkerID,
+    instance_id: u64,
     storage: Arc<dyn G3pbPeerStorage>,
     #[cfg(test)]
     query_delay: Option<Duration>,
 }
 
 impl G3pbStorageAgent {
-    pub fn new(worker_id: WorkerID) -> Self {
-        Self::new_with_storage(worker_id, Arc::new(InMemoryG3pbPeerStorage::default()))
+    pub fn new(instance_id: u64) -> Self {
+        Self::new_with_storage(instance_id, Arc::new(InMemoryG3pbPeerStorage::default()))
     }
 
-    pub fn new_with_storage(worker_id: WorkerID, storage: Arc<dyn G3pbPeerStorage>) -> Self {
+    pub fn new_with_storage(instance_id: u64, storage: Arc<dyn G3pbPeerStorage>) -> Self {
         Self {
-            worker_id,
+            instance_id,
             storage,
             #[cfg(test)]
             query_delay: None,
         }
     }
 
-    pub fn worker_id(&self) -> WorkerID {
-        self.worker_id
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     #[cfg(test)]
@@ -1253,7 +1252,7 @@ impl G3pbStorageAgent {
         }
 
         self.storage
-            .query_blocks(self.worker_id, sequence_hashes)
+            .query_blocks(self.instance_id, sequence_hashes)
             .await
     }
 
@@ -1262,7 +1261,7 @@ impl G3pbStorageAgent {
         sequence_hashes: &[SequenceHash],
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
         self.storage
-            .fetch_blocks(self.worker_id, sequence_hashes)
+            .fetch_blocks(self.instance_id, sequence_hashes)
             .await
     }
 
@@ -1273,7 +1272,7 @@ impl G3pbStorageAgent {
 
 pub struct G3pbStorageClient {
     peers: Vec<G3pbPeer>,
-    agents: HashMap<WorkerID, Arc<G3pbStorageAgent>>,
+    agents: HashMap<u64, Arc<G3pbStorageAgent>>,
 }
 
 #[derive(Clone)]
@@ -1289,7 +1288,7 @@ pub struct G3pbPeerInstance {
 
 #[derive(Debug, Clone, Default)]
 pub struct G3pbDiscoveredPeers {
-    peers_by_worker: HashMap<WorkerID, G3pbPeerInstance>,
+    peers_by_instance: HashMap<u64, G3pbPeerInstance>,
 }
 
 impl G3pbRequestPlaneClient {
@@ -1432,10 +1431,10 @@ impl G3pbRequestPlaneClient {
 
 impl G3pbDiscoveredPeers {
     pub fn from_health_responses(discovered: Vec<(u64, G3pbHealthResponse)>) -> Result<Self> {
-        let mut peers_by_worker = HashMap::with_capacity(discovered.len());
+        let mut peers_by_instance = HashMap::with_capacity(discovered.len());
         for (instance_id, health) in discovered {
             let peer = G3pbPeer {
-                worker_id: health.worker_id,
+                instance_id: health.instance_id,
                 endpoint: health.listen,
             };
             let resolved = G3pbPeerInstance {
@@ -1443,44 +1442,44 @@ impl G3pbDiscoveredPeers {
                 instance_id,
             };
 
-            if let Some(previous) = peers_by_worker.insert(health.worker_id, resolved) {
+            if let Some(previous) = peers_by_instance.insert(health.instance_id, resolved) {
                 anyhow::bail!(
-                    "duplicate remote worker_id {} discovered at instance {} and {}",
-                    health.worker_id,
+                    "duplicate remote instance_id {} discovered at instance {} and {}",
+                    health.instance_id,
                     previous.instance_id,
                     instance_id
                 );
             }
         }
 
-        Ok(Self { peers_by_worker })
+        Ok(Self { peers_by_instance })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.peers_by_worker.is_empty()
+        self.peers_by_instance.is_empty()
     }
 
     pub fn peers(&self) -> Vec<G3pbPeer> {
         let mut peers: Vec<_> = self
-            .peers_by_worker
+            .peers_by_instance
             .values()
             .map(|resolved| resolved.peer.clone())
             .collect();
-        peers.sort_by_key(|peer| peer.worker_id);
+        peers.sort_by_key(|peer| peer.instance_id);
         peers
     }
 
     pub fn instances(&self) -> Vec<G3pbPeerInstance> {
-        let mut instances: Vec<_> = self.peers_by_worker.values().cloned().collect();
-        instances.sort_by_key(|resolved| resolved.peer.worker_id);
+        let mut instances: Vec<_> = self.peers_by_instance.values().cloned().collect();
+        instances.sort_by_key(|resolved| resolved.peer.instance_id);
         instances
     }
 
-    pub fn instance_id(&self, worker_id: WorkerID) -> Result<u64> {
-        self.peers_by_worker
-            .get(&worker_id)
+    pub fn instance_id(&self, instance_id: u64) -> Result<u64> {
+        self.peers_by_instance
+            .get(&instance_id)
             .map(|resolved| resolved.instance_id)
-            .ok_or_else(|| anyhow::anyhow!("missing backend instance for worker {worker_id}"))
+            .ok_or_else(|| anyhow::anyhow!("missing backend instance for instance_id {instance_id}"))
     }
 
     pub async fn load_remote_blockset(
@@ -1499,8 +1498,8 @@ impl G3pbDiscoveredPeers {
                 .await
                 .with_context(|| {
                     format!(
-                        "failed to publish local blockset to worker {}",
-                        resolved.peer.worker_id
+                        "failed to publish local blockset to instance {}",
+                        resolved.peer.instance_id
                     )
                 })?;
         }
@@ -1522,7 +1521,7 @@ pub async fn discover_g3pb_peers(
 }
 
 impl G3pbStorageClient {
-    pub fn new(peers: Vec<G3pbPeer>, agents: HashMap<WorkerID, Arc<G3pbStorageAgent>>) -> Self {
+    pub fn new(peers: Vec<G3pbPeer>, agents: HashMap<u64, Arc<G3pbStorageAgent>>) -> Self {
         Self { peers, agents }
     }
 
@@ -1532,11 +1531,11 @@ impl G3pbStorageClient {
 
     pub async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) -> Result<(), G3pbError> {
         let routed = route_g3pb_put_blocks_by_owner(blocks, &self.peers)?;
-        for (worker_id, blocks) in routed {
+        for (instance_id, blocks) in routed {
             let agent = self
                 .agents
-                .get(&worker_id)
-                .ok_or(G3pbError::UnknownPeer { worker_id })?;
+                .get(&instance_id)
+                .ok_or(G3pbError::UnknownPeer { instance_id })?;
             agent.put_blocks(blocks).await;
         }
 
@@ -1548,14 +1547,14 @@ impl G3pbStorageClient {
         blocks: Vec<G3pbPutBlock>,
     ) -> Result<Vec<G3pbPutBlock>, G3pbError> {
         let routed = route_g3pb_put_blocks_by_owner(blocks.clone(), &self.peers)?;
-        let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
-        for (worker_id, owner_blocks) in routed {
+        let mut accepted_by_owner = HashMap::<u64, HashSet<SequenceHash>>::new();
+        for (instance_id, owner_blocks) in routed {
             let agent = self
                 .agents
-                .get(&worker_id)
-                .ok_or(G3pbError::UnknownPeer { worker_id })?;
+                .get(&instance_id)
+                .ok_or(G3pbError::UnknownPeer { instance_id })?;
             let accepted = agent.offer_blocks(&owner_blocks).await;
-            accepted_by_owner.insert(worker_id, accepted.into_iter().collect());
+            accepted_by_owner.insert(instance_id, accepted.into_iter().collect());
         }
 
         Ok(filter_accepted_put_blocks(
@@ -1570,15 +1569,15 @@ impl G3pbStorageClient {
         blocks: Vec<G3pbPutBlock>,
     ) -> Result<Vec<G3pbPutBlock>, G3pbError> {
         let routed = route_g3pb_put_blocks_by_owner(blocks.clone(), &self.peers)?;
-        let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
-        for (worker_id, owner_blocks) in routed {
+        let mut accepted_by_owner = HashMap::<u64, HashSet<SequenceHash>>::new();
+        for (instance_id, owner_blocks) in routed {
             let agent = self
                 .agents
-                .get(&worker_id)
-                .ok_or(G3pbError::UnknownPeer { worker_id })?;
+                .get(&instance_id)
+                .ok_or(G3pbError::UnknownPeer { instance_id })?;
             let accepted = agent.offer_and_put_blocks(owner_blocks).await;
             accepted_by_owner.insert(
-                worker_id,
+                instance_id,
                 accepted
                     .into_iter()
                     .map(|block| block.sequence_hash)
@@ -1598,15 +1597,15 @@ impl G3pbStorageClient {
         blocks: Vec<G3pbTransferBlock>,
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
         let routed = route_g3pb_transfer_blocks_by_owner(blocks.clone(), &self.peers)?;
-        let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
-        for (worker_id, owner_blocks) in routed {
+        let mut accepted_by_owner = HashMap::<u64, HashSet<SequenceHash>>::new();
+        for (instance_id, owner_blocks) in routed {
             let agent = self
                 .agents
-                .get(&worker_id)
-                .ok_or(G3pbError::UnknownPeer { worker_id })?;
+                .get(&instance_id)
+                .ok_or(G3pbError::UnknownPeer { instance_id })?;
             let accepted = agent.offered_payload_blocks(owner_blocks).await?;
             accepted_by_owner.insert(
-                worker_id,
+                instance_id,
                 accepted
                     .into_iter()
                     .map(|block| block.meta.sequence_hash)
@@ -1626,15 +1625,15 @@ impl G3pbStorageClient {
         blocks: Vec<G3pbTransferBlock>,
     ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
         let routed = route_g3pb_transfer_blocks_by_owner(blocks.clone(), &self.peers)?;
-        let mut accepted_by_owner = HashMap::<WorkerID, HashSet<SequenceHash>>::new();
-        for (worker_id, owner_blocks) in routed {
+        let mut accepted_by_owner = HashMap::<u64, HashSet<SequenceHash>>::new();
+        for (instance_id, owner_blocks) in routed {
             let agent = self
                 .agents
-                .get(&worker_id)
-                .ok_or(G3pbError::UnknownPeer { worker_id })?;
+                .get(&instance_id)
+                .ok_or(G3pbError::UnknownPeer { instance_id })?;
             let accepted = agent.offer_and_put_payload_blocks(owner_blocks).await?;
             accepted_by_owner.insert(
-                worker_id,
+                instance_id,
                 accepted
                     .into_iter()
                     .map(|block| block.meta.sequence_hash)
@@ -1658,9 +1657,9 @@ impl G3pbStorageClient {
 
         let queries = grouped
             .into_iter()
-            .filter_map(|(worker_id, sequence_hashes)| {
+            .filter_map(|(instance_id, sequence_hashes)| {
                 self.agents
-                    .get(&worker_id)
+                    .get(&instance_id)
                     .cloned()
                     .map(|agent| async move { agent.query_blocks(&sequence_hashes).await })
             });
@@ -1680,8 +1679,8 @@ impl G3pbStorageClient {
             route_g3pb_sequence_hashes_by_owner(sequence_hashes, &self.peers).unwrap_or_default();
 
         let mut fetched = Vec::new();
-        for (worker_id, owner_hashes) in grouped {
-            let Some(agent) = self.agents.get(&worker_id) else {
+        for (instance_id, owner_hashes) in grouped {
+            let Some(agent) = self.agents.get(&instance_id) else {
                 continue;
             };
 
@@ -1708,7 +1707,7 @@ impl G3pbStorageClient {
 fn filter_accepted_put_blocks<F>(
     blocks: Vec<G3pbPutBlock>,
     owner_for: F,
-    accepted_by_owner: &HashMap<WorkerID, HashSet<SequenceHash>>,
+    accepted_by_owner: &HashMap<u64, HashSet<SequenceHash>>,
 ) -> Vec<G3pbPutBlock>
 where
     F: Fn(SequenceHash) -> Option<G3pbPeer>,
@@ -1720,7 +1719,7 @@ where
             |(mut accepted_blocks, mut seen), block| {
                 let sequence_hash = block.sequence_hash;
                 let is_accepted = owner_for(sequence_hash)
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                    .and_then(|owner| accepted_by_owner.get(&owner.instance_id))
                     .is_some_and(|accepted| accepted.contains(&sequence_hash));
 
                 if is_accepted && seen.insert(sequence_hash) {
@@ -1736,7 +1735,7 @@ where
 fn filter_accepted_transfer_blocks<F>(
     blocks: Vec<G3pbTransferBlock>,
     owner_for: F,
-    accepted_by_owner: &HashMap<WorkerID, HashSet<SequenceHash>>,
+    accepted_by_owner: &HashMap<u64, HashSet<SequenceHash>>,
 ) -> Vec<G3pbTransferBlock>
 where
     F: Fn(SequenceHash) -> Option<G3pbPeer>,
@@ -1748,7 +1747,7 @@ where
             |(mut accepted_blocks, mut seen), block| {
                 let sequence_hash = block.meta.sequence_hash;
                 let is_accepted = owner_for(sequence_hash)
-                    .and_then(|owner| accepted_by_owner.get(&owner.worker_id))
+                    .and_then(|owner| accepted_by_owner.get(&owner.instance_id))
                     .is_some_and(|accepted| accepted.contains(&sequence_hash));
 
                 if is_accepted && seen.insert(sequence_hash) {
@@ -1771,15 +1770,15 @@ mod tests {
     fn peers() -> Vec<G3pbPeer> {
         vec![
             G3pbPeer {
-                worker_id: 10,
+                instance_id: 101,
                 endpoint: "tcp://peer-10".to_string(),
             },
             G3pbPeer {
-                worker_id: 20,
+                instance_id: 202,
                 endpoint: "tcp://peer-20".to_string(),
             },
             G3pbPeer {
-                worker_id: 30,
+                instance_id: 303,
                 endpoint: "tcp://peer-30".to_string(),
             },
         ]
@@ -1819,19 +1818,19 @@ mod tests {
     }
 
     #[test]
-    fn discovered_peers_reject_duplicate_worker_ids() {
+    fn discovered_peers_reject_duplicate_instance_ids() {
         let err = G3pbDiscoveredPeers::from_health_responses(vec![
             (
                 101,
                 G3pbHealthResponse {
-                    worker_id: 10,
+                    instance_id: 10,
                     listen: "tcp://peer-10-a".to_string(),
                 },
             ),
             (
                 202,
                 G3pbHealthResponse {
-                    worker_id: 10,
+                    instance_id: 10,
                     listen: "tcp://peer-10-b".to_string(),
                 },
             ),
@@ -1840,31 +1839,31 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("duplicate remote worker_id 10 discovered")
+                .contains("duplicate remote instance_id 10 discovered")
         );
     }
 
     #[test]
-    fn discovered_peers_sort_instances_by_worker_id() {
+    fn discovered_peers_sort_instances_by_instance_id() {
         let discovered = G3pbDiscoveredPeers::from_health_responses(vec![
             (
                 303,
                 G3pbHealthResponse {
-                    worker_id: 30,
+                    instance_id: 30,
                     listen: "tcp://peer-30".to_string(),
                 },
             ),
             (
                 101,
                 G3pbHealthResponse {
-                    worker_id: 10,
+                    instance_id: 10,
                     listen: "tcp://peer-10".to_string(),
                 },
             ),
             (
                 202,
                 G3pbHealthResponse {
-                    worker_id: 20,
+                    instance_id: 20,
                     listen: "tcp://peer-20".to_string(),
                 },
             ),
@@ -1875,9 +1874,9 @@ mod tests {
             discovered
                 .instances()
                 .into_iter()
-                .map(|resolved| (resolved.peer.worker_id, resolved.instance_id))
+                .map(|resolved| resolved.peer.instance_id)
                 .collect::<Vec<_>>(),
-            vec![(10, 101), (20, 202), (30, 303)]
+            vec![10, 20, 30]
         );
     }
 
@@ -1909,7 +1908,7 @@ mod tests {
 
         let hits = agent.query_blocks(&[11, 12, 13]).await;
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].worker_id, 7);
+        assert_eq!(hits[0].instance_id, 7);
         assert_eq!(hits[0].size_bytes, 4);
         assert_eq!(hits[1].size_bytes, 2);
 
@@ -1953,7 +1952,7 @@ mod tests {
         assert!(matches!(
             err,
             G3pbError::NotFound {
-                worker_id: 3,
+                instance_id: 3,
                 sequence_hashes
             } if sequence_hashes == vec![44]
         ));
@@ -2061,10 +2060,10 @@ mod tests {
     async fn client_put_and_query_route_by_owner() {
         let peer_list = peers();
         let owner = select_g3pb_owner(1234, &peer_list).unwrap();
-        let agent = Arc::new(G3pbStorageAgent::new(owner.worker_id));
+        let agent = Arc::new(G3pbStorageAgent::new(owner.instance_id));
         let client = G3pbStorageClient::new(
             peer_list,
-            HashMap::from_iter([(owner.worker_id, agent.clone())]),
+            HashMap::from_iter([(owner.instance_id, agent.clone())]),
         );
 
         client
@@ -2078,7 +2077,7 @@ mod tests {
 
         let hits = client.query_blocks(&[1234, 9999]).await;
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[&1234].worker_id, owner.worker_id);
+        assert_eq!(hits[&1234].instance_id, owner.instance_id);
         assert_eq!(hits[&1234].size_bytes, 64);
     }
 
@@ -2089,14 +2088,14 @@ mod tests {
 
         for peer in &peer_list {
             agents.insert(
-                peer.worker_id,
-                Arc::new(G3pbStorageAgent::new(peer.worker_id)),
+                peer.instance_id,
+                Arc::new(G3pbStorageAgent::new(peer.instance_id)),
             );
         }
 
         let existing_hash = 200_u64;
         let existing_owner = select_g3pb_owner(existing_hash, &peer_list).unwrap();
-        agents[&existing_owner.worker_id]
+        agents[&existing_owner.instance_id]
             .put_blocks(vec![G3pbPutBlock {
                 sequence_hash: existing_hash,
                 size_bytes: 8,
@@ -2146,8 +2145,8 @@ mod tests {
         let mut agents = HashMap::new();
         for peer in &peer_list {
             agents.insert(
-                peer.worker_id,
-                Arc::new(G3pbStorageAgent::new(peer.worker_id)),
+                peer.instance_id,
+                Arc::new(G3pbStorageAgent::new(peer.instance_id)),
             );
         }
 
@@ -2208,13 +2207,13 @@ mod tests {
 
         for sequence_hash in &sequence_hashes {
             let owner = select_g3pb_owner(*sequence_hash, &peer_list).unwrap();
-            agents.entry(owner.worker_id).or_insert_with(|| {
+            agents.entry(owner.instance_id).or_insert_with(|| {
                 Arc::new(
-                    G3pbStorageAgent::new(owner.worker_id)
+                    G3pbStorageAgent::new(owner.instance_id)
                         .with_query_delay(Duration::from_millis(75)),
                 )
             });
-            agents[&owner.worker_id]
+            agents[&owner.instance_id]
                 .put_blocks(vec![G3pbPutBlock {
                     sequence_hash: *sequence_hash,
                     size_bytes: 8,
@@ -2236,7 +2235,7 @@ mod tests {
     async fn client_treats_missing_fetches_as_cache_miss() {
         let peer_list = peers();
         let owner = select_g3pb_owner(1234, &peer_list).unwrap();
-        let agent = Arc::new(G3pbStorageAgent::new(owner.worker_id));
+        let agent = Arc::new(G3pbStorageAgent::new(owner.instance_id));
         agent
             .put_blocks(vec![G3pbPutBlock {
                 sequence_hash: 1234,
@@ -2246,7 +2245,7 @@ mod tests {
             .await;
 
         let client =
-            G3pbStorageClient::new(peer_list, HashMap::from_iter([(owner.worker_id, agent)]));
+            G3pbStorageClient::new(peer_list, HashMap::from_iter([(owner.instance_id, agent)]));
         let fetched = client.fetch_blocks(&[1234]).await;
         assert!(fetched.is_empty());
     }
@@ -2301,7 +2300,7 @@ mod tests {
         assert!(matches!(
             agent.fetch_blocks(&[1001]).await,
             Err(G3pbError::NotFound {
-                worker_id: 77,
+                instance_id: 77,
                 sequence_hashes,
             }) if sequence_hashes == vec![1001]
         ));

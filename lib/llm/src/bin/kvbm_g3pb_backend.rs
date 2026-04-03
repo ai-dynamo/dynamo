@@ -32,7 +32,7 @@ use dynamo_runtime::{
 use serde_json::json;
 
 fn make_descriptor_list(
-    worker_id: u64,
+    instance_id: u64,
     block_set_idx: usize,
     mutability: BlockMutability,
     block_indices: Vec<usize>,
@@ -42,8 +42,11 @@ fn make_descriptor_list(
         "block descriptor list cannot be empty"
     );
 
+    // BlockDescriptorList still uses the lower-level transfer schema field
+    // name `worker_id`; for G3PB remote peers we populate it with the
+    // discovery/routing `instance_id`.
     Ok(serde_json::from_value(json!({
-        "worker_id": worker_id,
+        "worker_id": instance_id,
         "block_set_idx": block_set_idx,
         "mutability": mutability,
         "block_indices": block_indices,
@@ -52,7 +55,6 @@ fn make_descriptor_list(
 
 #[derive(Clone, Debug)]
 struct Args {
-    worker_id: u64,
     device_id: usize,
     host_blocks: usize,
     page_size: usize,
@@ -69,7 +71,6 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            worker_id: 41,
             device_id: 0,
             host_blocks: 64,
             page_size: 32,
@@ -92,12 +93,6 @@ impl Args {
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
-                "--worker-id" => {
-                    args.worker_id = it
-                        .next()
-                        .context("missing value for --worker-id")?
-                        .parse()?
-                }
                 "--device-id" => {
                     args.device_id = it
                         .next()
@@ -167,7 +162,6 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g3pb_backend
-  --worker-id <id>                backend worker id (default 41)
   --device-id <id>                CUDA device id for pinned host registration (default 0)
   --host-blocks <n>               pinned host staging capacity (default 64)
   --page-size <n>                 KVBM page size (default 32)
@@ -212,7 +206,7 @@ struct G3pbPeerRuntimeState {
 }
 
 struct G3pbPeerRuntime {
-    worker_id: u64,
+    instance_id: u64,
     block_manager: HostBlockManager,
     blockset: dynamo_llm::block_manager::block::nixl::SerializedNixlBlockSet,
     state: RwLock<G3pbPeerRuntimeState>,
@@ -225,13 +219,13 @@ impl G3pbPeerRuntime {
         tick
     }
 
-    async fn new(args: &Args) -> Result<Self> {
-        let agent = build_agent(args.worker_id)?;
+    async fn new(args: &Args, instance_id: u64) -> Result<Self> {
+        let agent = build_agent(instance_id)?;
         let cancel_token = CancellationToken::new();
         let config = KvBlockManagerConfig::builder()
             .runtime(
                 KvManagerRuntimeConfig::builder()
-                    .worker_id(args.worker_id)
+                    .worker_id(instance_id)
                     .cancellation_token(cancel_token)
                     .use_nixl_agent(agent)
                     .build()?,
@@ -257,7 +251,7 @@ impl G3pbPeerRuntime {
         let blockset = block_manager.export_local_blockset()?;
 
         Ok(Self {
-            worker_id: args.worker_id,
+            instance_id,
             block_manager,
             blockset,
             state: RwLock::new(G3pbPeerRuntimeState::default()),
@@ -329,10 +323,10 @@ impl G3pbPeerRuntime {
         drop(state);
 
         Ok(G3pbStageBlocksResponse {
-            worker_id: self.worker_id,
+            instance_id: self.instance_id,
             blockset: self.blockset.clone(),
             descriptors: make_descriptor_list(
-                self.worker_id,
+                self.instance_id,
                 block_set_idx,
                 BlockMutability::Mutable,
                 block_ids,
@@ -384,7 +378,7 @@ impl G3pbPeerRuntime {
                 if let Some(block) = state.committed.get_mut(sequence_hash) {
                     block.last_access_tick = tick;
                     hits.push(G3pbQueryHit {
-                        worker_id: self.worker_id,
+                        instance_id: self.instance_id,
                         sequence_hash: *sequence_hash,
                         size_bytes: block.staged.meta.size_bytes,
                         checksum: block.staged.meta.checksum,
@@ -421,7 +415,7 @@ impl G3pbPeerRuntime {
             let tick = Self::next_access_tick(&mut state);
             let Some(block) = state.committed.get_mut(sequence_hash) else {
                 return Err(G3pbError::NotFound {
-                    worker_id: self.worker_id,
+                    instance_id: self.instance_id,
                     sequence_hashes: vec![*sequence_hash],
                 });
             };
@@ -432,20 +426,20 @@ impl G3pbPeerRuntime {
         }
 
         let block_set_idx = block_set_idx.ok_or(G3pbError::NotFound {
-            worker_id: self.worker_id,
+            instance_id: self.instance_id,
             sequence_hashes: sequence_hashes.to_vec(),
         })?;
         Ok(G3pbFetchBlocksResponse {
-            worker_id: self.worker_id,
+            instance_id: self.instance_id,
             blockset: self.blockset.clone(),
             descriptors: make_descriptor_list(
-                self.worker_id,
+                self.instance_id,
                 block_set_idx,
                 BlockMutability::Immutable,
                 block_ids,
             )
             .map_err(|_| G3pbError::NotFound {
-                worker_id: self.worker_id,
+                instance_id: self.instance_id,
                 sequence_hashes: sequence_hashes.to_vec(),
             })?,
         })
@@ -545,14 +539,14 @@ struct G3pbEndpointHandler {
 }
 
 impl G3pbBackendService {
-    async fn new(args: &Args) -> Result<Self> {
+    async fn new(args: &Args, instance_id: u64) -> Result<Self> {
         let mut config = G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
         config.g2_capacity_bytes = args.g2_bytes;
         config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
         config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
         let storage = Arc::new(G3pbCacheStorage::new(config).await?);
-        let agent = Arc::new(G3pbStorageAgent::new_with_storage(args.worker_id, storage));
-        let runtime = Arc::new(G3pbPeerRuntime::new(args).await?);
+        let agent = Arc::new(G3pbStorageAgent::new_with_storage(instance_id, storage));
+        let runtime = Arc::new(G3pbPeerRuntime::new(args, instance_id).await?);
 
         Ok(Self {
             endpoint_id: format!("{G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}"),
@@ -561,14 +555,14 @@ impl G3pbBackendService {
         })
     }
 
-    fn worker_id(&self) -> u64 {
-        self.agent.worker_id()
+    fn instance_id(&self) -> u64 {
+        self.agent.instance_id()
     }
 
     async fn handle_rpc(&self, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
         match request {
             G3pbRpcRequest::Health => Ok(G3pbRpcResponse::Health(G3pbHealthResponse {
-                worker_id: self.agent.worker_id(),
+                instance_id: self.agent.instance_id(),
                 listen: self.endpoint_id.clone(),
             })),
             G3pbRpcRequest::PutBlocks(blocks) => {
@@ -657,8 +651,8 @@ impl AsyncEngine<SingleIn<G3pbRpcRequest>, ManyOut<Annotated<G3pbRpcResponse>>, 
     }
 }
 
-fn build_agent(worker_id: u64) -> Result<NixlAgent> {
-    let agent = NixlAgent::new(&worker_id.to_string())?;
+fn build_agent(instance_id: u64) -> Result<NixlAgent> {
+    let agent = NixlAgent::new(&instance_id.to_string())?;
     let (_, ucx_params) = agent.get_plugin_params("UCX")?;
     agent.create_backend("UCX", &ucx_params)?;
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
@@ -669,11 +663,12 @@ fn build_agent(worker_id: u64) -> Result<NixlAgent> {
 async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-    let service = Arc::new(G3pbBackendService::new(&args).await?);
+    let instance_id = distributed.connection_id();
+    let service = Arc::new(G3pbBackendService::new(&args, instance_id).await?);
 
     println!(
-        "kvbm_g3pb_backend registering worker_id={} on {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}",
-        service.worker_id()
+        "kvbm_g3pb_backend registering instance_id={} on {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}",
+        service.instance_id()
     );
     service.serve(&distributed).await
 }

@@ -402,8 +402,8 @@ async fn app(runtime: Runtime) -> Result<()> {
     let discovered_peers = discover_g3pb_peers(&request_client).await?;
     for resolved in discovered_peers.instances() {
         println!(
-            "remote backend ready: worker_id={} endpoint={} instance_id={}",
-            resolved.peer.worker_id, resolved.peer.endpoint, resolved.instance_id
+            "remote backend ready: instance_id={} endpoint={}",
+            resolved.peer.instance_id, resolved.peer.endpoint
         );
     }
     rpc_timings.push(RpcTiming {
@@ -444,15 +444,15 @@ async fn app(runtime: Runtime) -> Result<()> {
     let offered_by_owner = route_g3pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
     let offer_ops = offered_by_owner.len();
     let offer_start = Instant::now();
-    let offers = join_all(offered_by_owner.into_iter().map(|(worker_id, blocks)| {
+    let offers = join_all(offered_by_owner.into_iter().map(|(instance_id, blocks)| {
         let request_client = request_client.clone();
-        let instance_id = discovered_peers.instance_id(worker_id);
+        let instance_id = discovered_peers.instance_id(instance_id);
         async move {
             let instance_id = instance_id?;
             let offer = request_client
                 .offer(instance_id, G3pbOfferRequest { blocks })
                 .await?;
-            Ok::<_, anyhow::Error>((worker_id, offer.accepted))
+            Ok::<_, anyhow::Error>((instance_id, offer.accepted))
         }
     }))
     .await;
@@ -462,18 +462,18 @@ async fn app(runtime: Runtime) -> Result<()> {
         elapsed: offer_start.elapsed(),
     });
 
-    let mut accepted_by_worker = HashMap::<u64, HashSet<u64>>::new();
+    let mut accepted_by_instance = HashMap::<u64, HashSet<u64>>::new();
     for result in offers {
-        let (worker_id, accepted) = result?;
-        println!("worker {worker_id} offer accepted hashes: {:?}", accepted);
-        accepted_by_worker.insert(worker_id, accepted.into_iter().collect());
+        let (instance_id, accepted) = result?;
+        println!("instance {instance_id} offer accepted hashes: {:?}", accepted);
+        accepted_by_instance.insert(instance_id, accepted.into_iter().collect());
     }
 
     let accepted_blocks: Vec<G3pbPutBlock> = blocks
         .iter()
         .filter(|block| {
             select_g3pb_owner(block.sequence_hash, &remote_workers)
-                .and_then(|owner| accepted_by_worker.get(&owner.worker_id))
+                .and_then(|owner| accepted_by_instance.get(&owner.instance_id))
                 .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
         })
         .cloned()
@@ -482,13 +482,13 @@ async fn app(runtime: Runtime) -> Result<()> {
     let host_pool = block_manager
         .host()
         .context("local block manager has no host pool for G3pb staging")?;
-    let mut imported_workers = HashSet::new();
+    let mut imported_instances = HashSet::new();
     let staged_by_owner = route_g3pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
     let stage_put_ops = staged_by_owner.len();
     let stage_put_start = Instant::now();
-    let staged_responses = join_all(staged_by_owner.into_iter().map(|(worker_id, blocks)| {
+    let staged_responses = join_all(staged_by_owner.into_iter().map(|(instance_id, blocks)| {
         let request_client = request_client.clone();
-        let instance_id = discovered_peers.instance_id(worker_id);
+        let instance_id = discovered_peers.instance_id(instance_id);
         async move {
             let instance_id = instance_id?;
             let response = request_client
@@ -499,7 +499,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                     },
                 )
                 .await?;
-            Ok::<_, anyhow::Error>((worker_id, instance_id, blocks, response))
+            Ok::<_, anyhow::Error>((instance_id, blocks, response))
         }
     }))
     .await;
@@ -511,8 +511,8 @@ async fn app(runtime: Runtime) -> Result<()> {
     let mut commit_put_elapsed = Duration::ZERO;
     let mut commit_put_ops = 0usize;
     for result in staged_responses {
-        let (worker_id, instance_id, blocks, response) = result?;
-        if imported_workers.insert(worker_id) {
+        let (instance_id, blocks, response) = result?;
+        if imported_instances.insert(instance_id) {
             block_manager.import_remote_blockset(response.blockset.clone())?;
         }
 
@@ -540,7 +540,7 @@ async fn app(runtime: Runtime) -> Result<()> {
             .await?;
         commit_put_elapsed += commit_put_start.elapsed();
         commit_put_ops += 1;
-        println!("uploaded accepted blocks to worker {worker_id} via staged NIXL transfer");
+        println!("uploaded accepted blocks to instance {instance_id} via staged NIXL transfer");
     }
     rpc_timings.push(RpcTiming {
         label: "commit_put",
@@ -555,27 +555,27 @@ async fn app(runtime: Runtime) -> Result<()> {
         for result in join_all(
             duplicate_offer_routes
                 .into_iter()
-                .map(|(worker_id, blocks)| {
+                .map(|(instance_id, blocks)| {
                     let request_client = request_client.clone();
-                    let instance_id = discovered_peers.instance_id(worker_id);
+                    let instance_id = discovered_peers.instance_id(instance_id);
                     async move {
                         let instance_id = instance_id?;
                         let offer = request_client
                             .offer(instance_id, G3pbOfferRequest { blocks })
                             .await?;
-                        Ok::<_, anyhow::Error>((worker_id, offer.accepted))
+                        Ok::<_, anyhow::Error>((instance_id, offer.accepted))
                     }
                 }),
         )
         .await
         {
-            let (worker_id, accepted) = result?;
+            let (instance_id, accepted) = result?;
             anyhow::ensure!(
                 accepted.is_empty(),
-                "duplicate offer unexpectedly accepted hashes on worker {worker_id}: {:?}",
+                "duplicate offer unexpectedly accepted hashes on instance {instance_id}: {:?}",
                 accepted
             );
-            println!("duplicate offer on worker {worker_id} correctly accepted nothing");
+            println!("duplicate offer on instance {instance_id} correctly accepted nothing");
         }
     }
 
@@ -590,9 +590,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     for result in join_all(
         query_routes
             .into_iter()
-            .map(|(worker_id, sequence_hashes)| {
+            .map(|(instance_id, sequence_hashes)| {
                 let request_client = request_client.clone();
-                let instance_id = discovered_peers.instance_id(worker_id);
+                let instance_id = discovered_peers.instance_id(instance_id);
                 async move {
                     let instance_id = instance_id?;
                     let hits = request_client
@@ -641,9 +641,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     let fetch_responses = join_all(
         fetch_routes
             .into_iter()
-            .map(|(worker_id, sequence_hashes)| {
+            .map(|(instance_id, sequence_hashes)| {
                 let request_client = request_client.clone();
-                let instance_id = discovered_peers.instance_id(worker_id);
+                let instance_id = discovered_peers.instance_id(instance_id);
                 async move {
                     let instance_id = instance_id?;
                     let fetched: G3pbFetchBlocksResponse = request_client
@@ -654,7 +654,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                             },
                         )
                         .await?;
-                    Ok::<_, anyhow::Error>((worker_id, sequence_hashes, fetched))
+                    Ok::<_, anyhow::Error>((instance_id, sequence_hashes, fetched))
                 }
             }),
     )
@@ -665,9 +665,9 @@ async fn app(runtime: Runtime) -> Result<()> {
         elapsed: fetch_start.elapsed(),
     });
     for result in fetch_responses {
-        let (worker_id, sequence_hashes, fetched) = result?;
+        let (instance_id, sequence_hashes, fetched) = result?;
         fetched_transfer_count += sequence_hashes.len();
-        if imported_workers.insert(worker_id) {
+        if imported_instances.insert(instance_id) {
             block_manager.import_remote_blockset(fetched.blockset.clone())?;
         }
 
@@ -752,8 +752,8 @@ async fn app(runtime: Runtime) -> Result<()> {
     println!("remote hits:");
     for hit in hits {
         println!(
-            "  worker_id={} sequence_hash={} size_bytes={}",
-            hit.worker_id, hit.sequence_hash, hit.size_bytes
+            "  instance_id={} sequence_hash={} size_bytes={}",
+            hit.instance_id, hit.sequence_hash, hit.size_bytes
         );
     }
     println!(
