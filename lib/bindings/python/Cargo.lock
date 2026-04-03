@@ -1543,7 +1543,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "bytes",
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
