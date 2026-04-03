@@ -355,7 +355,42 @@ async def test_gaie_deployment(
             capture_output=True,
             text=True,
         )
-        logger.info(f"Pods after creation: {pod_check.stdout.strip()}")
+        logger.info(f"Pods after creation:\n{pod_check.stdout.strip()}")
+
+        # Debug: describe each pod to see scheduling/pull/readiness issues
+        for pod_line in pod_check.stdout.strip().splitlines()[1:]:
+            pod_name = pod_line.split()[0] if pod_line.split() else None
+            if pod_name:
+                desc = subprocess.run(
+                    ["kubectl", "describe", "pod", pod_name, "-n", namespace],
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info(f"Describe pod {pod_name}:\n{desc.stdout[-2000:]}")
+
+        # Debug: check events for scheduling/image pull issues
+        events = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "events",
+                "-n",
+                namespace,
+                "--sort-by=.lastTimestamp",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"Events in namespace:\n{events.stdout[-3000:]}")
+
+        # Debug: check kgateway pods
+        kgw_pods = subprocess.run(
+            ["kubectl", "get", "pods", "-n", "kgateway-system"],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"kgateway-system pods:\n{kgw_pods.stdout.strip()}")
+
         epp_pods = deployment.get_pods(["Epp"])
         epp_pod_list = epp_pods.get("Epp", [])
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
