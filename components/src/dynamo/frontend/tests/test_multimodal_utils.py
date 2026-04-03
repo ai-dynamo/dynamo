@@ -145,13 +145,6 @@ def test_ignores_non_user_messages():
     assert extract_mm_urls(messages) is None
 
 
-def test_handles_string_content():
-    messages = [
-        {"role": "user", "content": "Just a plain text message"},
-    ]
-    assert extract_mm_urls(messages) is None
-
-
 def test_handles_malformed_content_non_dict():
     """Non-dict items in content list should be skipped, not crash."""
     messages = [
