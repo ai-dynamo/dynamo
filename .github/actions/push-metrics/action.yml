@@ -48,10 +48,6 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Install metrics dependencies
-      shell: bash
-      run: pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null || true
-
     - name: Push CI/CD metrics
       if: always()
       shell: bash
@@ -70,6 +66,8 @@ runs:
         REPO_ROOT="$(cd "${{ github.action_path }}/../../.." && pwd)"
         SCRIPT_DIR="${REPO_ROOT}/deploy/metrics"
         export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
+
+        python3 -m pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null || true
 
         python3 "${SCRIPT_DIR}/cicd_push.py" \
           ${OTLP_ENDPOINT:+--otlp-endpoint "$OTLP_ENDPOINT"} \
