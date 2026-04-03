@@ -17,7 +17,7 @@ MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
 #   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
-#   - Limiting P/D workers to image=1,video=0,audio=0 (--limit-mm-per-prompt)
+#   - Limiting P/D workers to image=3,video=3,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
 SINGLE_GPU=false
 
@@ -105,7 +105,7 @@ PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager"
-    PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
+    PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
 fi
 
 # Start encode worker
