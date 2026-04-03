@@ -93,7 +93,7 @@ pub async fn tensor_response_stream(
         model,
         Endpoint::Tensor,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);

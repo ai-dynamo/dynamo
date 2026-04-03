@@ -447,7 +447,7 @@ async fn completions_single(
         &model,
         Endpoint::Completions,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
@@ -583,7 +583,7 @@ async fn completions_batch(
         &model,
         Endpoint::Completions,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
@@ -761,7 +761,7 @@ async fn embeddings(
         model,
         Endpoint::Embeddings,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
@@ -1134,7 +1134,7 @@ async fn chat_completions(
         &model,
         Endpoint::ChatCompletions,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     // Handle unsupported fields - if Some(resp) is returned by
@@ -1511,7 +1511,7 @@ async fn responses(
         &model,
         Endpoint::Responses,
         streaming,
-        request.id().to_string(),
+        request.id(),
     );
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
@@ -1963,7 +1963,7 @@ async fn images(
         &model,
         Endpoint::Images,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
@@ -2049,7 +2049,7 @@ async fn videos(
         &model,
         Endpoint::Videos,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
@@ -2109,12 +2109,10 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
-        Endpoint::Videos,
-        true,
-        request.id().to_string(),
-    );
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -2282,7 +2280,7 @@ async fn audio_speech(
         &model,
         Endpoint::Audios,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);

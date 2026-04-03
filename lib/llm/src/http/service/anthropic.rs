@@ -278,7 +278,7 @@ async fn anthropic_messages(
         &model,
         Endpoint::AnthropicMessages,
         streaming,
-        request.id().to_string(),
+        request.id(),
     );
 
     tracing::trace!("Issuing generate call for Anthropic messages");

@@ -919,7 +919,7 @@ impl Metrics {
         model: &str,
         endpoint: Endpoint,
         streaming: bool,
-        request_id: String,
+        request_id: &str,
     ) -> InflightGuard {
         let request_type = if streaming {
             RequestType::Stream
@@ -932,7 +932,7 @@ impl Metrics {
             model.to_string().to_lowercase(),
             endpoint,
             request_type,
-            request_id,
+            request_id.to_string(),
         )
     }
 
@@ -977,7 +977,6 @@ impl InflightGuard {
         let timer = Instant::now();
         metrics.inc_inflight_gauge(&model);
 
-        // Record model on the enclosing span so all logs inherit it
         tracing::Span::current().record("model", model.as_str());
 
         tracing::info!(
@@ -2190,12 +2189,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-                String::new(),
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_ok();
         } // guard drops here
 
@@ -2222,12 +2219,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-                String::new(),
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
         } // guard drops here
 
@@ -2254,12 +2249,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let _guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-                String::new(),
-            );
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
         } // guard drops with default error_type=Internal
 
@@ -2336,34 +2329,28 @@ mod tests {
 
         // Record 2 validation errors, 3 internal errors, 1 success
         for _ in 0..2 {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-                String::new(),
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
             drop(guard);
         }
 
         for _ in 0..3 {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::Completions,
-                false,
-                String::new(),
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Completions, false, "");
             guard.mark_error(ErrorType::Internal);
             drop(guard);
         }
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::Embeddings,
-                false,
-                String::new(),
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Embeddings, false, "");
             guard.mark_ok();
             drop(guard);
         }

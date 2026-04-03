@@ -92,7 +92,7 @@ pub async fn completion_response_stream(
         model,
         Endpoint::Completions,
         streaming,
-        request_id.clone(),
+        &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
