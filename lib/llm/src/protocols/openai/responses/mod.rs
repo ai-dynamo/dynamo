@@ -14,6 +14,7 @@ use dynamo_protocols::types::responses::{
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
@@ -80,7 +81,7 @@ impl AnnotationsProvider for NvCreateResponse {
         self.nvext
             .as_ref()
             .and_then(|nvext| nvext.annotations.as_ref())
-            .map(|annotations| annotations.contains(&annotation.to_string()))
+            .map(|annotations| annotations.iter().any(|a| a == annotation))
             .unwrap_or(false)
     }
 }
@@ -254,11 +255,22 @@ fn convert_input_items_to_messages(
                 Item::Message(msg_item) => match msg_item {
                     MessageItem::Input(msg) => {
                         let chat_msg = match msg.role {
-                            InputRole::System | InputRole::Developer => {
+                            InputRole::System => {
                                 let text = convert_input_content_to_text(&msg.content);
                                 ChatCompletionRequestMessage::System(
                                     ChatCompletionRequestSystemMessage {
                                         content: ChatCompletionRequestSystemMessageContent::Text(
+                                            text,
+                                        ),
+                                        name: None,
+                                    },
+                                )
+                            }
+                            InputRole::Developer => {
+                                let text = convert_input_content_to_text(&msg.content);
+                                ChatCompletionRequestMessage::Developer(
+                                    ChatCompletionRequestDeveloperMessage {
+                                        content: ChatCompletionRequestDeveloperMessageContent::Text(
                                             text,
                                         ),
                                         name: None,
@@ -357,12 +369,20 @@ fn convert_input_items_to_messages(
                     }
                 };
                 let chat_msg = match easy.role {
-                    ResponseRole::System | ResponseRole::Developer => {
+                    ResponseRole::System => {
                         ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
                             content: ChatCompletionRequestSystemMessageContent::Text(content_text),
                             name: None,
                         })
                     }
+                    ResponseRole::Developer => ChatCompletionRequestMessage::Developer(
+                        ChatCompletionRequestDeveloperMessage {
+                            content: ChatCompletionRequestDeveloperMessageContent::Text(
+                                content_text,
+                            ),
+                            name: None,
+                        },
+                    ),
                     ResponseRole::User => {
                         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                             content: ChatCompletionRequestUserMessageContent::Text(content_text),
@@ -702,6 +722,27 @@ pub fn chat_completion_to_response(
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
+    // Convert CompletionUsage to ResponseUsage if available
+    let usage = chat_resp.usage.as_ref().map(|u| ResponseUsage {
+        input_tokens: u.prompt_tokens,
+        input_tokens_details: InputTokenDetails {
+            cached_tokens: u
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0),
+        },
+        output_tokens: u.completion_tokens,
+        output_tokens_details: OutputTokenDetails {
+            reasoning_tokens: u
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
+        },
+        total_tokens: u.total_tokens,
+    });
+
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
 
@@ -851,23 +892,7 @@ pub fn chat_completion_to_response(
         safety_identifier: None,
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
-        usage: chat_resp.usage.map(|u| ResponseUsage {
-            input_tokens: u.prompt_tokens,
-            input_tokens_details: InputTokenDetails {
-                cached_tokens: u
-                    .prompt_tokens_details
-                    .map(|d| d.cached_tokens.unwrap_or(0))
-                    .unwrap_or(0),
-            },
-            output_tokens: u.completion_tokens,
-            output_tokens_details: OutputTokenDetails {
-                reasoning_tokens: u
-                    .completion_tokens_details
-                    .map(|d| d.reasoning_tokens.unwrap_or(0))
-                    .unwrap_or(0),
-            },
-            total_tokens: u.total_tokens,
-        }),
+        usage,
     };
 
     Ok(NvResponse {
