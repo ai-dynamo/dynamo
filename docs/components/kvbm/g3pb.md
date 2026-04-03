@@ -105,6 +105,37 @@ on the NIXL transfer path.
 - Stable peer hostnames matter. Ephemeral container IDs are poor shard
   identities.
 
+## Current Storage Choice
+
+The current peer-local storage backend uses `foyer`.
+
+We chose it for practical reasons:
+
+- it already gives us a hybrid cache structure that fits the peer-backed model
+- it supports `io_uring`
+- it supports sharding across multiple disks
+- it supports persistence across process restart
+- it provides a more capable LRU-style eviction policy based on recent access
+
+This was informed by previous good experience with it in earlier Chroma
+workplane work.
+
+The tradeoff is that this does not give us direct remote-disk access as a KVBM
+transfer tier.
+
+That is also partly intentional:
+
+- remote disks are often slow or operationally unreliable
+- some remote media may be spinning or network-backed
+- holding remote GPU-visible staging for the duration of a slow disk read would
+  tie up remote memory until local onboard completes
+
+So the current choice is to keep peer distribution and cache ownership simple
+first, and defer direct remote-disk integration.
+
+This is not meant to be permanent. We are open to replacing or removing
+`foyer` later if a better disk/storage design emerges.
+
 ## Current Scope
 
 Today, the implemented surface is:
