@@ -247,28 +247,24 @@ bash launch/disagg_multimodal_llama.sh
 
 **Components:**
 
-- workers: [VideoEncodeWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/video_encode_worker.py) for decoding video into frames, and [VllmPDWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
-- frontend: HTTP endpoint to handle incoming requests.
+- worker: Standard `python -m dynamo.vllm --enable-multimodal` backend.
+- frontend: Standard `python -m dynamo.frontend` OpenAI-compatible endpoint.
 
 **Workflow:**
 
-The VideoEncodeWorker decodes the video into frames. Unlike the image pipeline which generates embeddings, this pipeline passes raw frames directly to the VllmPDWorker via NATS and RDMA.
+The Rust preprocessor tokenizes the request and forwards `multi_modal_data` with `video_url` entries. The vLLM backend decodes video URLs into sampled RGB frames and attaches them to `TokensPrompt(multi_modal_data=...)` for standard multimodal processing.
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --video_url--> video_encode_worker
-  video_encode_worker --> processor
-  video_encode_worker --frames--> pd_worker
-  pd_worker --> video_encode_worker
+  HTTP --> frontend
+  frontend --> vllm_worker
+  vllm_worker --> frontend
 ```
 
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/video_agg.sh
 ```
 
@@ -278,7 +274,7 @@ bash launch/video_agg.sh
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+      "model": "Qwen/Qwen3-VL-2B-Instruct",
       "messages": [
         {
           "role": "user",
@@ -305,24 +301,20 @@ curl http://localhost:8000/v1/chat/completions \
 
 **Workflow:**
 
-For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. The VideoEncodeWorker is connected directly to the prefill worker, decoding the video into frames and passing them via RDMA.
+The Rust preprocessor tokenizes the request and forwards `multi_modal_data` with `video_url` entries. The prefill worker decodes the video into sampled RGB frames locally, runs the multimodal prefill, and forwards KV state to the decode worker through the normal disaggregated vLLM path.
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --video_url--> video_encode_worker
-  video_encode_worker --> processor
-  video_encode_worker --frames--> prefill_worker
-  prefill_worker --> video_encode_worker
+  HTTP --> frontend
+  frontend --> prefill_worker
   prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
+  decode_worker --> frontend
 ```
 
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/video_disagg.sh
 ```
 
@@ -655,7 +647,6 @@ The following models have been tested with Dynamo's vLLM multimodal backend:
 - **Qwen3-VL** - `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
 - **LLaVA 1.5** - `llava-hf/llava-1.5-7b-hf`
 - **Llama 4 Maverick** - `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-- **LLaVA Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
 - **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
 
 For a complete list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should work with Simple Aggregated Mode but may not be explicitly tested.

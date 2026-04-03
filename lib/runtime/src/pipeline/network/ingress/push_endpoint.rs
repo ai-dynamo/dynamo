@@ -102,7 +102,7 @@ impl PushEndpoint {
                         instance_id,
                     )
                 } else {
-                    tracing::info_span!("handle_payload")
+                    tracing::info_span!(target: "request_span", "handle_payload")
                 };
 
                 tokio::spawn(async move {
