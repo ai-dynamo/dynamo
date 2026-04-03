@@ -52,11 +52,13 @@ class _FakeManager:
 
 
 @pytest.fixture
-def build_impl(monkeypatch):
+def build_impl(monkeypatch, tmp_path):
     monkeypatch.setattr(
         gms_memory_saver,
         "get_socket_path",
-        lambda device_index, tag: f"/tmp/gms-test-{device_index}-{tag}.sock",
+        lambda device_index, tag: str(
+            tmp_path / f"gms-test-{device_index}-{tag}.sock"
+        ),
     )
 
     def build(
