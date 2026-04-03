@@ -20,12 +20,12 @@ use dynamo_llm::block_manager::config::{
 };
 use dynamo_llm::block_manager::distributed::{
     G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbCommitRequest, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbOfferRequest, G3pbPutBlock, G3pbQueryHit, G3pbQueryRequest,
-    G3pbPeerResolver, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
+    G3pbFetchRequest, G3pbOfferRequest, G3pbPeerResolver, G3pbPutBlock, G3pbQueryHit,
+    G3pbQueryRequest, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
     route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
-use dynamo_llm::block_manager::offload::max_remote_transfer_batch_size;
+use dynamo_llm::block_manager::offload::max_transfer_batch_size;
 use dynamo_llm::block_manager::storage::{
     DeviceAllocator, PinnedAllocator, PinnedStorage, nixl::NixlAgent,
 };
@@ -361,7 +361,7 @@ fn build_transfer_context(
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: 4,
-        max_transfer_batch_size: max_remote_transfer_batch_size(),
+        max_transfer_batch_size: max_transfer_batch_size(),
         num_outer_components: 1,
         num_layers: 1,
     };
@@ -466,7 +466,10 @@ async fn app(runtime: Runtime) -> Result<()> {
     let mut accepted_by_instance = HashMap::<u64, HashSet<u64>>::new();
     for result in offers {
         let (instance_id, accepted) = result?;
-        println!("instance {instance_id} offer accepted hashes: {:?}", accepted);
+        println!(
+            "instance {instance_id} offer accepted hashes: {:?}",
+            accepted
+        );
         accepted_by_instance.insert(instance_id, accepted.into_iter().collect());
     }
 
@@ -639,26 +642,24 @@ async fn app(runtime: Runtime) -> Result<()> {
     let mut fetched_transfer_count = 0usize;
     let fetch_ops = fetch_routes.len();
     let fetch_start = Instant::now();
-    let fetch_responses = join_all(
-        fetch_routes
-            .into_iter()
-            .map(|(instance_id, sequence_hashes)| {
-                let request_client = request_client.clone();
-                let instance_id = discovered_peers.instance_id(instance_id);
-                async move {
-                    let instance_id = instance_id?;
-                    let fetched: G3pbFetchBlocksResponse = request_client
-                        .fetch(
-                            instance_id,
-                            G3pbFetchRequest {
-                                sequence_hashes: sequence_hashes.clone(),
-                            },
-                        )
-                        .await?;
-                    Ok::<_, anyhow::Error>((instance_id, sequence_hashes, fetched))
-                }
-            }),
-    )
+    let fetch_responses = join_all(fetch_routes.into_iter().map(
+        |(instance_id, sequence_hashes)| {
+            let request_client = request_client.clone();
+            let instance_id = discovered_peers.instance_id(instance_id);
+            async move {
+                let instance_id = instance_id?;
+                let fetched: G3pbFetchBlocksResponse = request_client
+                    .fetch(
+                        instance_id,
+                        G3pbFetchRequest {
+                            sequence_hashes: sequence_hashes.clone(),
+                        },
+                    )
+                    .await?;
+                Ok::<_, anyhow::Error>((instance_id, sequence_hashes, fetched))
+            }
+        },
+    ))
     .await;
     rpc_timings.push(RpcTiming {
         label: "fetch",

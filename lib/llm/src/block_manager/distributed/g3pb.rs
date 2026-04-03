@@ -181,7 +181,9 @@ pub enum G3pbError {
     NoPeers,
     #[error("owning G3PB peer instance {instance_id} is not available")]
     UnknownPeer { instance_id: u64 },
-    #[error("requested G3PB blocks were not found on peer instance {instance_id}: {sequence_hashes:?}")]
+    #[error(
+        "requested G3PB blocks were not found on peer instance {instance_id}: {sequence_hashes:?}"
+    )]
     NotFound {
         instance_id: u64,
         sequence_hashes: Vec<SequenceHash>,
@@ -638,7 +640,8 @@ impl G3pbCacheStorage {
                 Some(self.read_from_g2(offset, meta.size_bytes).await)
                     .map(|_| G3pbCacheLocation::G2 { offset })
             }
-            G3pbCacheLocation::Foyer => match self.prune_if_missing_from_foyer(sequence_hash).await {
+            G3pbCacheLocation::Foyer => match self.prune_if_missing_from_foyer(sequence_hash).await
+            {
                 Ok(true) => Some(G3pbCacheLocation::Foyer),
                 Ok(false) | Err(_) => None,
             },
@@ -1578,7 +1581,9 @@ impl G3pbDiscoveredPeers {
         self.peers_by_instance
             .get(&instance_id)
             .map(|resolved| resolved.instance_id)
-            .ok_or_else(|| anyhow::anyhow!("missing backend instance for instance_id {instance_id}"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing backend instance for instance_id {instance_id}")
+            })
     }
 
     pub async fn load_remote_blockset(
@@ -2452,7 +2457,14 @@ mod tests {
 
         assert!(agent.query_blocks(&[sequence_hash]).await.is_empty());
         assert!(!storage.metadata.contains_key(sequence_hash)?);
-        assert!(agent.fetch_blocks(&[sequence_hash]).await.unwrap_err().to_string().contains("not found"));
+        assert!(
+            agent
+                .fetch_blocks(&[sequence_hash])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not found")
+        );
 
         Ok(())
     }
