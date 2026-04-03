@@ -12,12 +12,17 @@ aggregated and disaggregated determinism tests.
 import importlib.util
 import os
 import re
+import signal
+import subprocess
+import sys
+import threading
 import time
 from collections import defaultdict
+from datetime import datetime
 from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 import pytest
 import requests
@@ -250,6 +255,278 @@ class ApiTester:
 class ServerType(str, Enum):
     vllm = "vllm"
     trtllm = "trtllm"
+
+
+# Default model used across KVBM tests (can be overridden via KVBM_MODEL_ID env var)
+DEFAULT_KVBM_MODEL = os.environ.get(
+    "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+)
+
+
+class LLMServerManager:
+    """Manages LLM server lifecycle for KVBM testing.
+
+    Supports both vLLM and TRT-LLM backends with configurable model,
+    cache sizes, and GPU memory fractions.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        port: Optional[int] = None,
+        cpu_cache_blocks: Optional[int] = None,
+        gpu_cache_blocks: Optional[int] = None,
+        log_dir: Optional[Path] = None,
+        server_type: Optional[str] = ServerType.vllm,
+        model: Optional[str] = None,
+        trtllm_gpu_memory_fraction: float = 0.10,
+    ):
+        self.server_type = server_type
+        self.model = model or DEFAULT_KVBM_MODEL
+        if port is not None:
+            self.port = port
+            self.port_allocated = False
+        elif os.environ.get("KVBM_SERVER_PORT"):
+            self.port = int(os.environ["KVBM_SERVER_PORT"])
+            self.port_allocated = False
+        else:
+            self.port = allocate_port(start_port=8000)
+            self.port_allocated = True
+        self.base_url = base_url or f"http://localhost:{self.port}"
+        self.metrics_port = allocate_port(start_port=6880)
+        self.metrics_port_allocated = True
+        self.process: Optional[subprocess.Popen] = None
+        self.cpu_cache_blocks = cpu_cache_blocks
+        self.gpu_cache_blocks = gpu_cache_blocks
+
+        # Prepare logging
+        self.log_dir = log_dir or Path(".")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config_str = (
+            f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
+        )
+        self.server_log_file = (
+            self.log_dir / f"{self.server_type}_server_{config_str}_{timestamp}.log"
+        )
+        self.server_stdout_file: Optional[TextIO] = None
+        self._tee_threads: List[threading.Thread] = []
+
+        # Environment for the process
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "RUST_BACKTRACE": "1",
+                "NATS_SERVER": "nats://localhost:4222",
+                "ETCD_ENDPOINTS": "http://localhost:2379",
+                "DYN_KVBM_METRICS": "true",
+                "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
+                "VLLM_BATCH_INVARIANT": "1",
+            }
+        )
+
+        # CPU cache blocks override via env
+        if cpu_cache_blocks is not None:
+            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        if self.server_type == ServerType.vllm:
+            self._set_up_vllm_config(gpu_cache_blocks)
+        elif self.server_type == ServerType.trtllm:
+            self._set_up_trtllm_config(gpu_cache_blocks, trtllm_gpu_memory_fraction)
+        else:
+            raise ValueError(
+                f"{self.server_type} is not supported yet in the KVBM test suite"
+            )
+
+    def _set_up_vllm_config(self, gpu_cache_blocks):
+        self.env["VLLM_SERVER_DEV_MODE"] = "1"
+
+        self.server_cmd = [
+            "vllm",
+            "serve",
+            "--block-size",
+            "16",
+            "--port",
+            str(self.port),
+            "--kv-transfer-config",
+            '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
+            self.model,
+            "--attention-config.backend",
+            "FLASH_ATTN",
+            "--max-model-len",
+            "8000",
+        ]
+
+        if gpu_cache_blocks is not None:
+            self.server_cmd.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
+
+    def _set_up_trtllm_config(self, gpu_cache_blocks, gpu_memory_fraction):
+        config_path = os.environ.get(
+            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
+        )
+        llm_api_config: Dict[str, Any] = {}
+        llm_api_config["cuda_graph_config"] = None
+        llm_api_config["kv_cache_config"] = {
+            "enable_partial_reuse": False,
+            "free_gpu_memory_fraction": gpu_memory_fraction,
+        }
+        llm_api_config["kv_connector_config"] = {
+            "connector_module": "kvbm.trtllm_integration.connector",
+            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
+            "connector_worker_class": "DynamoKVBMConnectorWorker",
+        }
+
+        if gpu_cache_blocks is not None:
+            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
+            llm_api_config["kv_cache_config"]["max_tokens"] = (
+                int(gpu_cache_blocks) * 32
+            )  # TRTLLM defaults 32 tokens per block
+
+        self.server_cmd = [
+            "trtllm-serve",
+            self.model,
+            "--host",
+            "localhost",
+            "--port",
+            str(self.port),
+            "--backend",
+            "pytorch",
+            "--extra_llm_api_options",
+            config_path,
+        ]
+
+        import yaml
+
+        with open(config_path, "w") as f:
+            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
+
+    def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
+        """Read from pipe and write to both log file and stdout (tee)."""
+        try:
+            for line in iter(pipe.readline, ""):
+                if not line:
+                    break
+                log_file.write(line)
+                log_file.flush()
+                sys.stdout.write(f"[{prefix}] {line}")
+                sys.stdout.flush()
+        except (ValueError, OSError):
+            pass
+        finally:
+            pipe.close()
+
+    def start_server(self, timeout: int = 300) -> bool:
+        """Start LLM server and wait for readiness."""
+        if self.is_server_running():
+            self.stop_server()
+            time.sleep(2)
+
+        self.server_stdout_file = open(self.server_log_file.with_suffix(".log"), "w")
+
+        header = f"=== {self.server_type} Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
+        self.server_stdout_file.write(header)
+        self.server_stdout_file.flush()
+        print(f"[{self.server_type}] {header}", end="")
+
+        self.process = subprocess.Popen(
+            self.server_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=self.env,
+            preexec_fn=os.setsid,
+            text=True,
+            bufsize=1,
+        )
+
+        self._tee_threads = [
+            threading.Thread(
+                target=self._tee_output,
+                args=(self.process.stdout, self.server_stdout_file, self.server_type),
+                daemon=True,
+            ),
+        ]
+        for t in self._tee_threads:
+            t.start()
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.is_server_running():
+                try:
+                    requests.get(
+                        f"http://localhost:{self.metrics_port}/metrics", timeout=5
+                    )
+                    return True
+                except requests.exceptions.RequestException:
+                    print(
+                        f"Warning: server healthy but metrics port {self.metrics_port} not reachable yet"
+                    )
+            if self.process.poll() is not None:
+                for t in self._tee_threads:
+                    t.join(timeout=2)
+                self._close_log_files()
+                return False
+            time.sleep(5)
+
+        self.stop_server()
+        return False
+
+    def stop_server(self):
+        """Stop LLM server and close logs."""
+        if self.process:
+            try:
+                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                try:
+                    self.process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    self.process.wait()
+            except (ProcessLookupError, OSError):
+                pass
+            finally:
+                self.process = None
+        for t in self._tee_threads:
+            t.join(timeout=2)
+        self._tee_threads = []
+        self._close_log_files()
+
+        if self.port_allocated:
+            deallocate_port(self.port)
+            self.port_allocated = False
+        if self.metrics_port_allocated:
+            deallocate_port(self.metrics_port)
+            self.metrics_port_allocated = False
+
+    def _close_log_files(self):
+        if self.server_stdout_file:
+            self.server_stdout_file.write(
+                f"\n=== Server Stopped at {datetime.now()} ===\n"
+            )
+            self.server_stdout_file.close()
+            self.server_stdout_file = None
+
+    def is_server_running(self) -> bool:
+        try:
+            response = requests.get(f"{self.base_url}/health", timeout=5)
+            if response.status_code != 200:
+                return False
+
+            test_payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_completion_tokens": 1,
+                "temperature": 0,
+            }
+
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions",
+                headers={"Content-Type": "application/json"},
+                json=test_payload,
+                timeout=10,
+            )
+            return response.status_code == 200
+
+        except requests.exceptions.RequestException:
+            return False
 
 
 class DeterminismTester(ApiTester):

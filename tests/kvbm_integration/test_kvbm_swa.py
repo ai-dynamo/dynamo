@@ -18,24 +18,17 @@ Tests (both vLLM and TRT-LLM):
 
 import logging
 import os
-import signal
-import subprocess
-import sys
-import threading
-import time
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO
 
 import pytest
 import requests
 
-from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
 from .common import llm_server_kvbm  # noqa: F401
 from .common import (
     DeterminismTester,
+    LLMServerManager,
     ServerType,
     assert_deterministic,
     check_module_available,
@@ -120,240 +113,6 @@ def reset_cache(base_url: str) -> None:
 
 
 # =============================================================================
-# TRT-LLM server manager (adapted from test_determinism_agg.py)
-# =============================================================================
-
-
-class TrtllmSWAServerManager:
-    """Manages TRT-LLM server lifecycle for SWA KVBM testing."""
-
-    def __init__(
-        self,
-        port: Optional[int] = None,
-        cpu_cache_blocks: Optional[int] = None,
-        gpu_cache_blocks: Optional[int] = None,
-        log_dir: Optional[Path] = None,
-    ):
-        self.server_type = ServerType.trtllm
-        if port is not None:
-            self.port = port
-            self.port_allocated = False
-        elif os.environ.get("KVBM_SERVER_PORT"):
-            self.port = int(os.environ["KVBM_SERVER_PORT"])
-            self.port_allocated = False
-        else:
-            self.port = allocate_port(start_port=8000)
-            self.port_allocated = True
-        self.base_url = f"http://localhost:{self.port}"
-        self.metrics_port = allocate_port(start_port=6880)
-        self.metrics_port_allocated = True
-        self.process: Optional[subprocess.Popen] = None
-        self.cpu_cache_blocks = cpu_cache_blocks
-        self.gpu_cache_blocks = gpu_cache_blocks
-
-        # Logging
-        self.log_dir = log_dir or Path(".")
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config_str = (
-            f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
-        )
-        self.server_log_file = (
-            self.log_dir / f"trtllm_swa_server_{config_str}_{timestamp}.log"
-        )
-        self.server_stdout_file: Optional[TextIO] = None
-        self._tee_threads: List[threading.Thread] = []
-
-        # Environment
-        self.env = os.environ.copy()
-        self.env.update(
-            {
-                "RUST_BACKTRACE": "1",
-                "NATS_SERVER": "nats://localhost:4222",
-                "ETCD_ENDPOINTS": "http://localhost:2379",
-                "DYN_KVBM_METRICS": "true",
-                "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
-            }
-        )
-
-        if cpu_cache_blocks is not None:
-            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
-
-        self._set_up_trtllm_config(gpu_cache_blocks)
-
-    def _set_up_trtllm_config(self, gpu_cache_blocks):
-        config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_swa_llm_api_config.yaml"
-        )
-        llm_api_config: Dict[str, Any] = {}
-        # Disable CUDA graph since Connector API doesn't support it yet in TRTLLM
-        llm_api_config["cuda_graph_config"] = None
-        llm_api_config["kv_cache_config"] = {
-            "enable_partial_reuse": False,
-            # Smaller than 8B (0.10) since 1B model uses ~4.4x less KV cache per token
-            "free_gpu_memory_fraction": 0.03,
-        }
-        llm_api_config["kv_connector_config"] = {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        }
-
-        # GPU blocks override
-        if gpu_cache_blocks is not None:
-            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
-            llm_api_config["kv_cache_config"]["max_tokens"] = (
-                int(gpu_cache_blocks) * 32
-            )  # TRTLLM defaults 32 tokens per block
-
-        self.server_cmd = [
-            "trtllm-serve",
-            SWA_MODEL,
-            "--host",
-            "localhost",
-            "--port",
-            str(self.port),
-            "--backend",
-            "pytorch",
-            "--extra_llm_api_options",
-            config_path,
-        ]
-
-        import yaml
-
-        with open(config_path, "w") as f:
-            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
-
-    def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
-        """Read from pipe and write to both log file and stdout (tee)."""
-        try:
-            for line in iter(pipe.readline, ""):
-                if not line:
-                    break
-                log_file.write(line)
-                log_file.flush()
-                sys.stdout.write(f"[{prefix}] {line}")
-                sys.stdout.flush()
-        except (ValueError, OSError):
-            pass
-        finally:
-            pipe.close()
-
-    def start_server(self, timeout: int = 300) -> bool:
-        """Start TRT-LLM server and wait for readiness."""
-        if self.is_server_running():
-            self.stop_server()
-            time.sleep(2)
-
-        self.server_stdout_file = open(self.server_log_file.with_suffix(".log"), "w")
-
-        header = f"=== trtllm Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
-        self.server_stdout_file.write(header)
-        self.server_stdout_file.flush()
-        print(f"[trtllm] {header}", end="")
-
-        self.process = subprocess.Popen(
-            self.server_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=self.env,
-            preexec_fn=os.setsid,
-            text=True,
-            bufsize=1,
-        )
-
-        self._tee_threads = [
-            threading.Thread(
-                target=self._tee_output,
-                args=(self.process.stdout, self.server_stdout_file, "trtllm"),
-                daemon=True,
-            ),
-        ]
-        for t in self._tee_threads:
-            t.start()
-
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self.is_server_running():
-                try:
-                    requests.get(
-                        f"http://localhost:{self.metrics_port}/metrics", timeout=5
-                    )
-                    return True
-                except requests.exceptions.RequestException:
-                    print(
-                        f"Warning: server healthy but metrics port {self.metrics_port} not reachable yet"
-                    )
-            if self.process.poll() is not None:
-                for t in self._tee_threads:
-                    t.join(timeout=2)
-                self._close_log_files()
-                return False
-            time.sleep(5)
-
-        self.stop_server()
-        return False
-
-    def stop_server(self):
-        """Stop TRT-LLM server and close logs."""
-        if self.process:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                try:
-                    self.process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                    self.process.wait()
-            except (ProcessLookupError, OSError):
-                pass
-            finally:
-                self.process = None
-        for t in self._tee_threads:
-            t.join(timeout=2)
-        self._tee_threads = []
-        self._close_log_files()
-
-        if self.port_allocated:
-            deallocate_port(self.port)
-            self.port_allocated = False
-        if self.metrics_port_allocated:
-            deallocate_port(self.metrics_port)
-            self.metrics_port_allocated = False
-
-    def _close_log_files(self):
-        if self.server_stdout_file:
-            self.server_stdout_file.write(
-                f"\n=== Server Stopped at {datetime.now()} ===\n"
-            )
-            self.server_stdout_file.close()
-            self.server_stdout_file = None
-
-    def is_server_running(self) -> bool:
-        try:
-            response = requests.get(f"{self.base_url}/health", timeout=5)
-            if response.status_code != 200:
-                return False
-
-            test_payload = {
-                "model": SWA_MODEL,
-                "messages": [{"role": "user", "content": "test"}],
-                "max_completion_tokens": 1,
-                "temperature": 0,
-            }
-
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers={"Content-Type": "application/json"},
-                json=test_payload,
-                timeout=10,
-            )
-            return response.status_code == 200
-
-        except requests.exceptions.RequestException:
-            return False
-
-
-# =============================================================================
 # vLLM fixtures
 # =============================================================================
 
@@ -388,11 +147,14 @@ def trtllm_server(request, runtime_services):
     if not check_module_available("tensorrt_llm"):
         pytest.skip("tensorrt_llm module not available")
 
-    server_manager = TrtllmSWAServerManager(
+    server_manager = LLMServerManager(
         port=port,
         cpu_cache_blocks=cpu_blocks,
         gpu_cache_blocks=gpu_blocks,
         log_dir=log_dir,
+        server_type=ServerType.trtllm,
+        model=SWA_MODEL,
+        trtllm_gpu_memory_fraction=0.03,
     )
 
     start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
