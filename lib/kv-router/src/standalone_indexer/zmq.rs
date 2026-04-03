@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use dynamo_runtime::transports::zmq::spawn_configured_raw_socket;
+use tokio::sync::mpsc;
 
 pub(super) type MultipartMessage = Vec<Vec<u8>>;
-pub(super) type SharedSocket = Arc<Mutex<zmq::Socket>>;
+pub(super) type SharedSocket = dynamo_runtime::transports::zmq::SharedRawZmqSocket;
+pub(super) type MultipartPumpReceiver = mpsc::UnboundedReceiver<Result<MultipartMessage, String>>;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -52,14 +55,7 @@ async fn spawn_socket<F>(socket_type: zmq::SocketType, configure: F) -> Result<S
 where
     F: FnOnce(&zmq::Socket) -> Result<()> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || -> Result<SharedSocket> {
-        let ctx = zmq::Context::new();
-        let socket = ctx.socket(socket_type)?;
-        configure(&socket)?;
-        Ok(Arc::new(Mutex::new(socket)))
-    })
-    .await
-    .context("failed to join ZMQ socket task")?
+    spawn_configured_raw_socket(socket_type, configure).await
 }
 
 pub(super) async fn connect_sub_socket(endpoint: &str) -> Result<SharedSocket> {
@@ -106,6 +102,27 @@ pub(super) async fn recv_multipart(socket: &SharedSocket) -> Result<Option<Multi
     })
     .await
     .context("failed to join ZMQ recv task")?
+}
+
+pub(super) fn spawn_recv_pump(socket: SharedSocket) -> MultipartPumpReceiver {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            match recv_multipart(&socket).await {
+                Ok(Some(frames)) => {
+                    if tx.send(Ok(frames)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+    rx
 }
 
 pub(super) async fn send_multipart(socket: &SharedSocket, frames: MultipartMessage) -> Result<()> {

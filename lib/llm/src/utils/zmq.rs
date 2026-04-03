@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-
-pub(crate) type MultipartMessage = Vec<Vec<u8>>;
-pub(crate) type SharedSocket = Arc<Mutex<zmq::Socket>>;
+use dynamo_runtime::transports::zmq::{
+    MultipartMessage, SharedRawZmqSocket, spawn_configured_raw_socket,
+};
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -47,27 +47,13 @@ fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
     Ok(())
 }
 
-async fn spawn_socket<F>(socket_type: zmq::SocketType, configure: F) -> Result<SharedSocket>
-where
-    F: FnOnce(&zmq::Socket) -> Result<()> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || -> Result<SharedSocket> {
-        let ctx = zmq::Context::new();
-        let socket = ctx.socket(socket_type)?;
-        configure(&socket)?;
-        Ok(Arc::new(Mutex::new(socket)))
-    })
-    .await
-    .context("failed to join ZMQ socket task")?
-}
-
 pub(crate) async fn connect_sub_socket(
     endpoint: &str,
     topic: Option<&str>,
-) -> Result<SharedSocket> {
+) -> Result<SharedRawZmqSocket> {
     let endpoint = endpoint.to_string();
     let topic = topic.unwrap_or("").to_string();
-    spawn_socket(zmq::SUB, move |socket| {
+    spawn_configured_raw_socket(zmq::SUB, move |socket| {
         configure_receive_socket(socket)?;
         socket.set_subscribe(topic.as_bytes())?;
         socket.connect(&endpoint)?;
@@ -76,9 +62,9 @@ pub(crate) async fn connect_sub_socket(
     .await
 }
 
-pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedSocket> {
+pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedRawZmqSocket> {
     let endpoint = endpoint.to_string();
-    spawn_socket(zmq::PUB, move |socket| {
+    spawn_configured_raw_socket(zmq::PUB, move |socket| {
         configure_send_socket(socket)?;
         socket.bind(&endpoint)?;
         Ok(())
@@ -86,9 +72,9 @@ pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedSocket> {
     .await
 }
 
-pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<SharedSocket> {
+pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<SharedRawZmqSocket> {
     let endpoint = endpoint.to_string();
-    spawn_socket(zmq::ROUTER, move |socket| {
+    spawn_configured_raw_socket(zmq::ROUTER, move |socket| {
         configure_bidirectional_socket(socket)?;
         socket.bind(&endpoint)?;
         Ok(())
@@ -96,21 +82,10 @@ pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<SharedSocket> {
     .await
 }
 
-pub(crate) async fn recv_multipart(socket: &SharedSocket) -> Result<Option<MultipartMessage>> {
-    let socket = Arc::clone(socket);
-    tokio::task::spawn_blocking(move || -> Result<Option<MultipartMessage>> {
-        let socket = socket.lock().expect("ZMQ socket mutex poisoned");
-        match socket.recv_multipart(0) {
-            Ok(frames) => Ok(Some(frames)),
-            Err(zmq::Error::EAGAIN) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    })
-    .await
-    .context("failed to join ZMQ recv task")?
-}
-
-pub(crate) async fn send_multipart(socket: &SharedSocket, frames: MultipartMessage) -> Result<()> {
+pub(crate) async fn send_multipart(
+    socket: &SharedRawZmqSocket,
+    frames: MultipartMessage,
+) -> Result<()> {
     let socket = Arc::clone(socket);
     tokio::task::spawn_blocking(move || -> Result<()> {
         let socket = socket.lock().expect("ZMQ socket mutex poisoned");

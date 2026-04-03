@@ -16,8 +16,8 @@
 //! equivalent of a connection pool per upstream service at the cost of needing an extra internal
 //! routing step per service endpoint.
 
-use anyhow::{Result, anyhow};
-use async_zmq::{Context, Dealer, Router, Sink, SinkExt, StreamExt};
+use anyhow::{Context, Result, anyhow};
+use async_zmq::{Context as AsyncZmqContext, Dealer, Router, Sink, SinkExt, StreamExt};
 use bytes::Bytes;
 use derive_getters::Dissolve;
 use futures::TryStreamExt;
@@ -28,6 +28,66 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
+
+pub type MultipartMessage = Vec<Vec<u8>>;
+pub type SharedRawZmqSocket = Arc<std::sync::Mutex<::zmq::Socket>>;
+pub type MultipartPumpReceiver =
+    mpsc::UnboundedReceiver<std::result::Result<MultipartMessage, String>>;
+
+pub async fn spawn_configured_raw_socket<F>(
+    socket_type: ::zmq::SocketType,
+    configure: F,
+) -> Result<SharedRawZmqSocket>
+where
+    F: FnOnce(&::zmq::Socket) -> Result<()> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || -> Result<SharedRawZmqSocket> {
+        let ctx = ::zmq::Context::new();
+        let socket = ctx.socket(socket_type)?;
+        configure(&socket)?;
+        Ok(Arc::new(std::sync::Mutex::new(socket)))
+    })
+    .await
+    .context("failed to join ZMQ socket task")?
+}
+
+pub fn spawn_multipart_recv_pump(socket: SharedRawZmqSocket) -> MultipartPumpReceiver {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let socket = Arc::clone(&socket);
+            let result =
+                tokio::task::spawn_blocking(move || -> Result<Option<MultipartMessage>> {
+                    let socket = socket.lock().expect("ZMQ socket mutex poisoned");
+                    match socket.recv_multipart(0) {
+                        Ok(frames) => Ok(Some(frames)),
+                        Err(::zmq::Error::EAGAIN) => Ok(None),
+                        Err(error) => Err(error.into()),
+                    }
+                })
+                .await
+                .context("failed to join ZMQ recv task");
+
+            match result {
+                Ok(Ok(Some(frames))) => {
+                    if tx.send(Ok(frames)).is_err() {
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
 
 // Core message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +159,7 @@ impl Server {
     ///
     /// The [ServerExecutionHandle] is the handle for background task executing the [Server].
     pub async fn new(
-        context: &Context,
+        context: &AsyncZmqContext,
         address: &str,
         cancel_token: CancellationToken,
     ) -> Result<(Self, ServerExecutionHandle)> {
@@ -302,7 +362,7 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(context: &Context, address: &str) -> Result<Self> {
+    fn new(context: &AsyncZmqContext, address: &str) -> Result<Self> {
         let dealer = async_zmq::dealer(address)?
             .with_context(context)
             .connect()?;
@@ -356,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_communication() -> Result<()> {
-        let context = Context::new();
+        let context = AsyncZmqContext::new();
         let address = "tcp://127.0.0.1:1337";
         let token = CancellationToken::new();
 

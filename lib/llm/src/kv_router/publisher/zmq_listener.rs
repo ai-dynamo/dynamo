@@ -8,9 +8,11 @@ use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::utils::zmq::{connect_sub_socket, recv_multipart};
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
+use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
+
+use crate::utils::zmq::connect_sub_socket;
 
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
@@ -35,6 +37,7 @@ pub(super) async fn start_zmq_listener(
             return;
         }
     };
+    let mut message_rx = spawn_multipart_recv_pump(socket);
 
     if cancellation_token.is_cancelled() {
         return;
@@ -51,14 +54,14 @@ pub(super) async fn start_zmq_listener(
                 break 'main String::from("cancellation token cancelled");
             }
 
-            msg_result = recv_multipart(&socket) => {
+            msg_result = message_rx.recv() => {
                 let frames = match msg_result {
-                    Ok(Some(frames)) => frames,
-                    Ok(None) => continue,
-                    Err(error) => {
+                    Some(Ok(frames)) => frames,
+                    Some(Err(error)) => {
                         tracing::error!(endpoint = %zmq_endpoint, error = %error, "ZMQ listener recv failed");
                         break 'main format!("ZMQ recv failed: {error}");
                     }
+                    None => break 'main String::from("ZMQ receive pump ended"),
                 };
                 let mut frames = frames;
 

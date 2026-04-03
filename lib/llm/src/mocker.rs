@@ -28,6 +28,7 @@ use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 use dynamo_runtime::{
     component::Component,
     engine::AsyncEngineContextProvider,
@@ -42,7 +43,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::utils::zmq::{bind_pub_socket, bind_router_socket, recv_multipart, send_multipart};
+use crate::utils::zmq::{bind_pub_socket, bind_router_socket, send_multipart};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -110,6 +111,9 @@ impl ZmqKvEventSink {
         } else {
             None
         };
+        let mut replay_rx = router_socket
+            .as_ref()
+            .map(|socket| spawn_multipart_recv_pump(socket.clone()));
 
         tokio::spawn(async move {
             let mut seq_num: u64 = 0;
@@ -123,16 +127,23 @@ impl ZmqKvEventSink {
                     // Replay requests are rare but latency-sensitive — poll first
                     // to prevent starvation under sustained KV event load.
                     replay_result = async {
-                        match router_socket.as_ref() {
-                            Some(sock) => recv_multipart(sock).await,
+                        match replay_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
                             None => std::future::pending().await,
                         }
                     } => {
                         let req_msg = match replay_result {
-                            Ok(Some(req_msg)) => req_msg,
-                            Ok(None) => continue,
-                            Err(error) => {
+                            Some(Ok(req_msg)) => req_msg,
+                            Some(Err(error)) => {
                                 tracing::warn!("Replay ROUTER recv error: {error}");
+                                replay_rx = None;
+                                router_socket = None;
+                                continue;
+                            }
+                            None => {
+                                tracing::warn!("Replay ROUTER receive pump exited");
+                                replay_rx = None;
+                                router_socket = None;
                                 continue;
                             }
                         };

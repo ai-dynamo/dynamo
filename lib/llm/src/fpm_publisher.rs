@@ -14,10 +14,12 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::utils::zmq::{connect_sub_socket, recv_multipart};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
+use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
+
+use crate::utils::zmq::connect_sub_socket;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 
@@ -65,6 +67,7 @@ impl FpmEventRelay {
                 return;
             }
         };
+        let mut message_rx = spawn_multipart_recv_pump(socket);
         tracing::info!("FPM relay: connected to {zmq_endpoint}");
 
         loop {
@@ -74,9 +77,9 @@ impl FpmEventRelay {
                     tracing::info!("FPM relay: shutting down");
                     break;
                 }
-                result = recv_multipart(&socket) => {
+                result = message_rx.recv() => {
                     match result {
-                        Ok(Some(mut frames)) => {
+                        Some(Ok(mut frames)) => {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = frames.swap_remove(2);
@@ -87,12 +90,15 @@ impl FpmEventRelay {
                                 tracing::warn!(
                                     "FPM relay: unexpected ZMQ frame count: expected 3, got {}",
                                     frames.len()
-                                );
+                            );
                             }
                         }
-                        Ok(None) => continue,
-                        Err(e) => {
+                        Some(Err(e)) => {
                             tracing::error!("FPM relay: ZMQ recv failed: {e}");
+                            break;
+                        }
+                        None => {
+                            tracing::error!("FPM relay: ZMQ receive pump ended");
                             break;
                         }
                     }

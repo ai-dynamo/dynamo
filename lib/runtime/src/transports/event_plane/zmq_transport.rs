@@ -31,15 +31,7 @@ use super::codec::MsgpackCodec;
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
-
-/// Parts of a received ZMQ multipart message.
-struct ZmqMessage {
-    #[allow(dead_code)]
-    topic: Vec<u8>,
-    publisher_id: u64,
-    sequence: u64,
-    data: Vec<u8>,
-}
+use crate::transports::zmq::spawn_multipart_recv_pump;
 
 /// ZMQ PUB transport for publishing events.
 ///
@@ -366,58 +358,39 @@ impl ZmqSubTransport {
         broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let mut message_rx = spawn_multipart_recv_pump(socket);
             loop {
-                // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
-                let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(move || -> Result<Option<ZmqMessage>> {
-                    let socket = socket_clone.lock().unwrap();
+                match message_rx.recv().await {
+                    Some(Ok(frames)) => {
+                        if frames.len() != 4 {
+                            tracing::warn!(
+                                frame_count = frames.len(),
+                                "Unexpected multipart frame count in socket pump"
+                            );
+                            continue;
+                        }
+                        let publisher_id_bytes = &frames[1];
+                        if publisher_id_bytes.len() != 8 {
+                            tracing::warn!(
+                                actual = publisher_id_bytes.len(),
+                                "Invalid publisher_id frame in socket pump"
+                            );
+                            continue;
+                        }
+                        let publisher_id =
+                            u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
 
-                    // Receive topic frame (may timeout with EAGAIN)
-                    let topic = match socket.recv_bytes(0) {
-                        Ok(data) => data,
-                        Err(zmq::Error::EAGAIN) => return Ok(None), // Timeout, retry
-                        Err(e) => return Err(e.into()),
-                    };
+                        let sequence_bytes = &frames[2];
+                        if sequence_bytes.len() != 8 {
+                            tracing::warn!(
+                                actual = sequence_bytes.len(),
+                                "Invalid sequence frame in socket pump"
+                            );
+                            continue;
+                        }
+                        let sequence =
+                            u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
 
-                    // Receive publisher_id frame (8 bytes, u64 big-endian)
-                    let publisher_id_bytes = socket.recv_bytes(0)?;
-                    if publisher_id_bytes.len() != 8 {
-                        anyhow::bail!(
-                            "Invalid publisher_id frame: expected 8 bytes, got {}",
-                            publisher_id_bytes.len()
-                        );
-                    }
-                    let publisher_id = u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
-
-                    // Receive sequence frame (8 bytes, u64 big-endian)
-                    let sequence_bytes = socket.recv_bytes(0)?;
-                    if sequence_bytes.len() != 8 {
-                        anyhow::bail!(
-                            "Invalid sequence frame: expected 8 bytes, got {}",
-                            sequence_bytes.len()
-                        );
-                    }
-                    let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
-
-                    // Receive data frame
-                    let data = socket.recv_bytes(0)?;
-
-                    Ok(Some(ZmqMessage {
-                        topic,
-                        publisher_id,
-                        sequence,
-                        data,
-                    }))
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(Some(ZmqMessage {
-                        publisher_id,
-                        sequence,
-                        data: frame_bytes,
-                        ..
-                    }))) => {
                         // Log dedup metadata for debugging
                         tracing::trace!(
                             publisher_id = publisher_id,
@@ -426,7 +399,7 @@ impl ZmqSubTransport {
                         );
 
                         // Parse binary frame
-                        let frame_bytes = Bytes::from(frame_bytes);
+                        let frame_bytes = Bytes::from(frames[3].clone());
                         match Frame::decode(frame_bytes) {
                             Ok(frame) => {
                                 // Broadcast payload to all subscribers
@@ -439,16 +412,12 @@ impl ZmqSubTransport {
                             }
                         }
                     }
-                    Ok(Ok(None)) => {
-                        // Timeout (EAGAIN), continue polling
-                        continue;
-                    }
-                    Ok(Err(e)) => {
+                    Some(Err(e)) => {
                         tracing::error!(error = %e, "ZMQ receive error in socket pump");
                         break;
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Task join error in socket pump");
+                    None => {
+                        tracing::info!("ZMQ socket pump receive channel closed");
                         break;
                     }
                 }

@@ -13,10 +13,11 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::utils::zmq::{connect_sub_socket, recv_multipart};
 use dynamo_kv_router::zmq_wire::RawKvEvent;
+use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 
 use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
+use crate::utils::zmq::connect_sub_socket;
 
 /// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
@@ -76,6 +77,7 @@ async fn run_listener_loop(
     let socket = connect_sub_socket(&endpoint, None)
         .await
         .with_context(|| format!("Failed to connect to ZMQ endpoint {endpoint}"))?;
+    let mut message_rx = spawn_multipart_recv_pump(socket);
 
     tracing::info!(
         "KV event consolidator ZMQ listener successfully connected to {}",
@@ -91,14 +93,14 @@ async fn run_listener_loop(
                 break;
             }
 
-            msg_result = recv_multipart(&socket) => {
+            msg_result = message_rx.recv() => {
                 let frames = match msg_result {
-                    Ok(Some(frames)) => frames,
-                    Ok(None) => continue,
-                    Err(error) => {
+                    Some(Ok(frames)) => frames,
+                    Some(Err(error)) => {
                         tracing::error!("Error receiving ZMQ message: {error}");
                         break;
                     }
+                    None => break,
                 };
 
                 // Parse multipart message: supports both formats

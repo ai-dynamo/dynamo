@@ -904,7 +904,15 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let endpoint = format!("tcp://127.0.0.1:{}", find_open_port());
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
         let topic = String::new();
         let token = dynamo_runtime::CancellationToken::new();
         let next_event_id = Arc::new(AtomicU64::new(0));
@@ -916,7 +924,6 @@ mod tests_startup_helpers {
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let batch = KvEventBatch {
             ts: 0.0,
@@ -959,12 +966,8 @@ mod tests_startup_helpers {
         let _ = listener_handle.await;
     }
 
-    fn find_open_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("failed to bind probe listener")
-            .local_addr()
-            .expect("failed to read probe listener address")
-            .port()
+    fn reserve_open_port() -> std::net::TcpListener {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
     }
 
     //--------------------------------------------------------------------

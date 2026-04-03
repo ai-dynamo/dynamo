@@ -55,6 +55,13 @@ pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
             if host.is_empty() {
                 anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP host");
             }
+            if host.starts_with('[') {
+                if !host.ends_with(']') {
+                    anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing closing `]`");
+                }
+            } else if host.contains(':') {
+                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP port");
+            }
             port.parse::<u16>().map_err(|error| {
                 anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: invalid TCP port: {error}")
             })?;

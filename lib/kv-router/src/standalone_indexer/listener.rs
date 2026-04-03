@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rmp_serde as rmps;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
@@ -16,7 +16,7 @@ use super::indexer::Indexer;
 use super::registry::ListenerRecord;
 use super::zmq::{
     MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
-    send_multipart,
+    send_multipart, spawn_recv_pump,
 };
 
 const WATERMARK_UNSET: u64 = u64::MAX;
@@ -35,7 +35,7 @@ struct ListenerLoop {
     block_size: u32,
     indexer: Indexer,
     cancel: CancellationToken,
-    socket: SharedSocket,
+    message_rx: mpsc::UnboundedReceiver<Result<MultipartMessage, String>>,
     replay_socket: Option<SharedSocket>,
     watermark: Arc<AtomicU64>,
     warning_count: Arc<AtomicU32>,
@@ -50,7 +50,7 @@ impl ListenerLoop {
         block_size: u32,
         indexer: Indexer,
         cancel: CancellationToken,
-        socket: SharedSocket,
+        message_rx: mpsc::UnboundedReceiver<Result<MultipartMessage, String>>,
         replay_socket: Option<SharedSocket>,
         watermark: Arc<AtomicU64>,
     ) -> Self {
@@ -60,7 +60,7 @@ impl ListenerLoop {
             block_size,
             indexer,
             cancel,
-            socket,
+            message_rx,
             replay_socket,
             watermark,
             warning_count: Arc::new(AtomicU32::new(0)),
@@ -289,13 +289,19 @@ impl ListenerLoop {
                     return Ok(());
                 }
 
-                msg_result = recv_multipart(&self.socket) => {
+                msg_result = self.message_rx.recv() => {
                     match msg_result {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => continue,
-                        Err(error) => {
+                        Some(Ok(msg)) => msg,
+                        Some(Err(error)) => {
                             return Err(format!(
                                 "ZMQ recv failed for worker {} dp_rank {}: {error}",
+                                self.worker_id,
+                                self.dp_rank,
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "ZMQ receive pump ended for worker {} dp_rank {}",
                                 self.worker_id,
                                 self.dp_rank,
                             ));
@@ -357,6 +363,7 @@ async fn run_listener(
     let socket = connect_sub_socket(&endpoint)
         .await
         .map_err(|e| format!("failed to connect ZMQ SUB socket to {endpoint}: {e}"))?;
+    let message_rx = spawn_recv_pump(socket);
 
     tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
@@ -388,7 +395,7 @@ async fn run_listener(
         block_size,
         indexer,
         cancel,
-        socket,
+        message_rx,
         replay_socket,
         watermark,
     )
@@ -457,7 +464,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_buffers_messages_during_brief_delay() {
-        let endpoint = format!("tcp://127.0.0.1:{}", find_open_port());
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let mut sub_socket = connect_sub_socket(&endpoint).await.unwrap();
 
@@ -506,7 +521,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_subscriber_connects_before_publisher_bind() {
-        let endpoint = format!("tcp://127.0.0.1:{}", find_open_port());
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
         let sub_socket = connect_sub_socket(&endpoint).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -532,11 +555,7 @@ mod tests {
         assert_eq!(msg, vec![b"probe".to_vec()]);
     }
 
-    fn find_open_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("failed to bind probe listener")
-            .local_addr()
-            .expect("failed to read probe listener address")
-            .port()
+    fn reserve_open_port() -> std::net::TcpListener {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
     }
 }
