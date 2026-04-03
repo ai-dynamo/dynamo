@@ -23,11 +23,11 @@ uv venv --python 3.12 --seed
 uv pip install "ai-dynamo[sglang]"
 ```
 
-This installs Dynamo with the compatible SGLang version.
+This installs the latest stable release of Dynamo with the compatible SGLang version.
 
 ### Install for Development
 
-<Accordion title="Development installation">
+<Accordion title="Development installation in a virtual environment (recommended)">
 Requires Rust and the CUDA toolkit (`nvcc`).
 
 ```bash
@@ -40,30 +40,55 @@ cd $DYNAMO_HOME
 uv pip install -e .
 # install sglang
 git clone https://github.com/sgl-project/sglang.git
+# you can optionally checkout any sglang branch
 cd sglang && uv pip install -e "python"
 ```
 
-This is the ideal way for agents to also develop. You can provide the path to both repos and the virtual environment and have it rerun these commands as it makes changes
+This is the ideal way for agents to develop. You can provide the path to both repos and the virtual environment and have it rerun these commands as it makes changes
 </Accordion>
 
 ### Docker
 
-<Accordion title="Build and run container">
-```bash
-cd $DYNAMO_ROOT
-python container/render.py --framework sglang --output-short-filename
-docker build -f container/rendered.Dockerfile -t dynamo:latest-sglang .
-```
+<Accordion title="Development installation inside SGLang container">
+
+Pull and launch the SGLang runtime image:
 
 ```bash
-docker run \
-    --gpus all -it --rm \
+docker run --gpus all -it --rm \
     --network host --shm-size=10G \
     --ulimit memlock=-1 --ulimit stack=67108864 \
     --ulimit nofile=65536:65536 \
-    --cap-add CAP_SYS_PTRACE --ipc host \
-    dynamo:latest-sglang
+    --ipc host \
+    lmsysorg/sglang:v{sglang_version}
 ```
+
+Inside the container, install build dependencies and Rust:
+
+```bash
+apt-get update -qq && apt-get install -y -qq \
+    build-essential libclang-dev curl git > /dev/null 2>&1
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+pip install maturin[patchelf]
+```
+
+Clone and build Dynamo:
+
+```bash
+cd /sgl-workspace/
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+
+cd lib/bindings/python/
+maturin build -o /tmp
+pip install /tmp/ai_dynamo_runtime*.whl
+
+cd /sgl-workspace/dynamo/
+pip install -e .
+```
+
 </Accordion>
 
 ## Feature Support Matrix
