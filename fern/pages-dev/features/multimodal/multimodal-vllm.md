@@ -228,12 +228,12 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
 | Setting                   | Implementation                                                 | Launch Script               |
 | ------------------------- | -------------------------------------------------------------- | --------------------------- |
-| **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.18+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
+| **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.17+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
 | **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
 
 ### Aggregated Worker
 
-A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely.
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Supported natively with vLLM 0.17+.
 
 ```mermaid
 ---
@@ -248,12 +248,20 @@ flowchart LR
   encode -- save: GPU → CPU --> store[(CPU Embedding Cache<br/>LRU)]
 ```
 
-**Launch:**
-
-<!-- TODO: Add an example of Dynamo+vLLM Agg worker + Embedding Cache -->
+**Launch with Dynamo:**
 
 ```bash
-vllm serve $model \
+bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+    --multimodal-embedding-cache-capacity-gb 10
+```
+
+`dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0.
+
+**Launch with `vllm serve` (standalone, no Dynamo):**
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --ec-transfer-config "{
         \"ec_role\": \"ec_both\",
         \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
@@ -262,7 +270,7 @@ vllm serve $model \
     }"
 ```
 
-This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
+The `multimodal_embedding_cache_capacity_gb` parameter controls the CPU-side LRU cache size in GB (0 = disabled). Requires vLLM 0.17+.
 
 ### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
