@@ -187,6 +187,12 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 				serviceName,
 			))
 		}
+		if oldGMS && newGMS && oldService.Failover.NumShadows != newService.Failover.NumShadows {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].failover.numShadows is immutable; delete and recreate the DynamoGraphDeployment to change it",
+				serviceName,
+			))
+		}
 	}
 
 	// Validate topology constraint immutability

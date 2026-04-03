@@ -2113,6 +2113,37 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "failover cannot be toggled after creation",
 		},
+		{
+			name: "changing numShadows is immutable",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								NumShadows: 1,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								NumShadows: 3,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "failover.numShadows is immutable",
+		},
 	}
 
 	for _, tt := range tests {
