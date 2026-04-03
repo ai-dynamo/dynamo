@@ -11,16 +11,15 @@ available (GPU nodes reachable from the cluster).
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import subprocess
-import time
 import uuid
-from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
 
 import pytest
-import yaml
+
+from tests.utils.managed_deployment import ManagedDGDR
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,6 @@ DGDR_SHORT_NAME = "dgdr"
 # Default timeout values (seconds)
 DEFAULT_PROFILING_TIMEOUT = 3600   # 1h for rapid, up to 4h for thorough
 DEFAULT_DEPLOY_TIMEOUT = 600       # 10 minutes for DGD rollout
-DEFAULT_PHASE_POLL_INTERVAL = 10   # poll every 10 seconds
 
 # Label applied to all test-managed DGDRs so they can be bulk-deleted on cleanup
 DGDR_TEST_LABEL_KEY = "test.dynamo/managed"
@@ -157,6 +155,28 @@ def dgdr_use_mocker(request: pytest.FixtureRequest) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Session-scoped ManagedDGDR client
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def _dgdr_event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+    """Session-scoped event loop shared by all DGDR async helpers."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture(scope="session")
+def managed_dgdr(dgdr_namespace: str, _dgdr_event_loop: asyncio.AbstractEventLoop) -> Generator[ManagedDGDR, None, None]:
+    """Session-scoped async K8s client for DGDR operations."""
+    mgr = ManagedDGDR(namespace=dgdr_namespace, loop=_dgdr_event_loop)
+    mgr.run(mgr.init())
+    yield mgr
+    mgr.run(mgr.close())
+
+
+# ---------------------------------------------------------------------------
 # Simulation-mode helpers (Mocker)
 # ---------------------------------------------------------------------------
 
@@ -220,7 +240,7 @@ def _inject_mocker_config(manifest: Dict[str, Any]) -> None:
     logger.info("Mocker mode enabled for DGDR %s", manifest.get("metadata", {}).get("name", "?"))
 
 
-def _cleanup_mocker_dgd(namespace: str) -> None:
+async def _cleanup_mocker_dgd(mgr: ManagedDGDR) -> None:
     """Delete the shared `mocker-disagg` DGD if it exists.
 
     The mocker profiler always names the generated DGD ``mocker-disagg``.  When
@@ -230,26 +250,24 @@ def _cleanup_mocker_dgd(namespace: str) -> None:
     operator fires ``handleDGDDeleted`` immediately → DGDR reaches Failed.  Deleting
     the DGD between tests guarantees each DGDR starts from a clean slate.
     """
-    result = _run_kubectl(
-        ["get", "dynamographdeployment", MOCKER_DGD_NAME, "-n", namespace, "--ignore-not-found"],
-        check=False,
-    )
-    if MOCKER_DGD_NAME in result.stdout:
-        logger.info("Deleting shared mocker DGD %s/%s to prevent state pollution", namespace, MOCKER_DGD_NAME)
-        _run_kubectl(
-            ["delete", "dynamographdeployment", MOCKER_DGD_NAME, "-n", namespace,
-             "--ignore-not-found", "--timeout=30s"],
-            check=False,
-        )
+    obj = await mgr.get_dgd(MOCKER_DGD_NAME)
+    if obj is not None:
+        logger.info("Deleting shared mocker DGD %s/%s to prevent state pollution", mgr.namespace, MOCKER_DGD_NAME)
+        await mgr.delete_dgd(MOCKER_DGD_NAME)
 
 
 # ---------------------------------------------------------------------------
-# kubectl helpers
+# kubectl helper (kept only for tests that validate CLI behaviour itself)
 # ---------------------------------------------------------------------------
 
 
 def _run_kubectl(args: List[str], check: bool = True, input: Optional[str] = None) -> subprocess.CompletedProcess:
-    """Run a kubectl command, returning the CompletedProcess."""
+    """Run a kubectl command, returning the CompletedProcess.
+
+    This is intentionally kept for the small number of tests that validate
+    kubectl CLI behaviour (short-names, custom-columns, CRD metadata).
+    All DGDR CRUD and phase-polling should use :class:`ManagedDGDR` instead.
+    """
     cmd = ["kubectl"] + args
     logger.debug("Running: %s", " ".join(cmd))
     result = subprocess.run(
@@ -264,156 +282,6 @@ def _run_kubectl(args: List[str], check: bool = True, input: Optional[str] = Non
             result.returncode, cmd, result.stdout, result.stderr
         )
     return result
-
-
-def kubectl_apply(manifest: Dict[str, Any], namespace: str) -> subprocess.CompletedProcess:
-    """Apply a manifest dict via kubectl apply -f -."""
-    yaml_str = yaml.dump(manifest)
-    return _run_kubectl(["apply", "-n", namespace, "-f", "-"], input=yaml_str)
-
-
-def kubectl_apply_raw(yaml_str: str, namespace: str) -> subprocess.CompletedProcess:
-    """Apply a raw YAML string via kubectl apply -f -."""
-    return _run_kubectl(["apply", "-n", namespace, "-f", "-"], input=yaml_str)
-
-
-def kubectl_delete(kind: str, name: str, namespace: str, ignore_not_found: bool = True) -> None:
-    """Delete a Kubernetes resource."""
-    args = ["delete", kind, name, "-n", namespace]
-    if ignore_not_found:
-        args.append("--ignore-not-found")
-    _run_kubectl(args, check=not ignore_not_found)
-
-
-def kubectl_get_json(kind: str, name: str, namespace: str) -> Optional[Dict[str, Any]]:
-    """Get a resource as a parsed JSON dict, or None if not found."""
-    result = _run_kubectl(
-        ["get", kind, name, "-n", namespace, "-o", "json"],
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    return json.loads(result.stdout)
-
-
-def kubectl_list_json(kind: str, namespace: str, label_selector: str = "") -> List[Dict[str, Any]]:
-    """List resources of a kind, returning parsed JSON items."""
-    args = ["get", kind, "-n", namespace, "-o", "json"]
-    if label_selector:
-        args += ["-l", label_selector]
-    result = _run_kubectl(args, check=False)
-    if result.returncode != 0:
-        return []
-    data = json.loads(result.stdout)
-    return data.get("items", [])
-
-
-def kubectl_server_dry_run(manifest: Dict[str, Any], namespace: str) -> subprocess.CompletedProcess:
-    """Apply with --dry-run=server to test admission webhooks without creating resources."""
-    yaml_str = yaml.dump(manifest)
-    return _run_kubectl(
-        ["apply", "-n", namespace, "--dry-run=server", "-f", "-"],
-        check=False,
-        input=yaml_str,
-    )
-
-
-def get_dgdr(name: str, namespace: str) -> Optional[Dict[str, Any]]:
-    """Return the full DGDR resource dict or None if not found."""
-    return kubectl_get_json(DGDR_KIND, name, namespace)
-
-
-def get_dgdr_phase(name: str, namespace: str) -> Optional[str]:
-    """Return status.phase of the named DGDR."""
-    obj = get_dgdr(name, namespace)
-    if obj is None:
-        return None
-    return obj.get("status", {}).get("phase")
-
-
-def get_dgdr_condition(name: str, namespace: str, condition_type: str) -> Optional[Dict[str, Any]]:
-    """Return the named condition dict from status.conditions, or None."""
-    obj = get_dgdr(name, namespace)
-    if obj is None:
-        return None
-    conditions = obj.get("status", {}).get("conditions", [])
-    for c in conditions:
-        if c.get("type") == condition_type:
-            return c
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Wait helpers
-# ---------------------------------------------------------------------------
-
-
-def wait_for_dgdr_phase(
-    name: str,
-    namespace: str,
-    target_phase: str,
-    timeout: int = DEFAULT_PROFILING_TIMEOUT,
-    fail_fast_phases: Optional[List[str]] = None,
-) -> str:
-    """
-    Poll until the DGDR reaches ``target_phase`` or times out.
-
-    ``fail_fast_phases`` lists phases that should immediately abort the wait
-    (e.g. Failed).  Returns the final observed phase.
-    """
-    if fail_fast_phases is None:
-        fail_fast_phases = [PHASE_FAILED]
-
-    deadline = time.monotonic() + timeout
-    last_phase: Optional[str] = None
-
-    while time.monotonic() < deadline:
-        current = get_dgdr_phase(name, namespace)
-        if current != last_phase:
-            logger.info("DGDR %s/%s phase: %s", namespace, name, current)
-            last_phase = current
-
-        if current == target_phase:
-            return current
-        if current in fail_fast_phases:
-            obj = get_dgdr(name, namespace)
-            status = obj.get("status", {}) if obj else {}
-            conditions = status.get("conditions", [])
-            raise AssertionError(
-                f"DGDR {namespace}/{name} reached fail-fast phase {current!r} "
-                f"while waiting for {target_phase!r}. conditions={conditions}"
-            )
-        time.sleep(DEFAULT_PHASE_POLL_INTERVAL)
-
-    raise TimeoutError(
-        f"Timed out after {timeout}s waiting for DGDR {namespace}/{name} "
-        f"to reach phase {target_phase!r}. Last phase: {last_phase!r}"
-    )
-
-
-def wait_for_any_dgdr_phase(
-    name: str,
-    namespace: str,
-    target_phases: List[str],
-    timeout: int = DEFAULT_PROFILING_TIMEOUT,
-) -> str:
-    """Poll until the DGDR reaches any of ``target_phases``.  Returns the matched phase."""
-    deadline = time.monotonic() + timeout
-    last_phase: Optional[str] = None
-
-    while time.monotonic() < deadline:
-        current = get_dgdr_phase(name, namespace)
-        if current != last_phase:
-            logger.info("DGDR %s/%s phase: %s", namespace, name, current)
-            last_phase = current
-        if current in target_phases:
-            return current
-        time.sleep(DEFAULT_PHASE_POLL_INTERVAL)
-
-    raise TimeoutError(
-        f"Timed out after {timeout}s waiting for DGDR {namespace}/{name} "
-        f"to reach any of {target_phases!r}. Last phase: {last_phase!r}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +363,7 @@ def unique_dgdr_name(prefix: str = "test") -> str:
 
 @pytest.fixture
 def dgdr_factory(
+    managed_dgdr: ManagedDGDR,
     dgdr_namespace: str,
     dgdr_profiling_timeout: int,
     dgdr_deploy_timeout: int,
@@ -517,26 +386,21 @@ def dgdr_factory(
         def test_something(dgdr_factory, dgdr_image, dgdr_model):
             manifest = build_dgdr_manifest("my-test", dgdr_model, dgdr_image)
             name = dgdr_factory(manifest)
-            wait_for_dgdr_phase(name, dgdr_namespace, PHASE_DEPLOYED, ...)
+            managed_dgdr.run(managed_dgdr.wait_for_phase(name, PHASE_DEPLOYED, ...))
     """
     created: List[str] = []
-    namespace = dgdr_namespace
     use_mocker = dgdr_use_mocker
 
     def _cleanup_all_test_dgdrs() -> None:
         """Delete all DGDRs bearing the test-managed label (handles orphans from prior runs)."""
-        items = kubectl_list_json(DGDR_KIND, namespace, label_selector=DGDR_TEST_LABEL_SELECTOR)
+        items = managed_dgdr.run(managed_dgdr.list(label_selector=DGDR_TEST_LABEL_SELECTOR))
         for item in items:
             item_name = item.get("metadata", {}).get("name", "")
             if item_name:
-                logger.info("Cleaning up test-managed DGDR %s/%s", namespace, item_name)
-                kubectl_delete(DGDR_KIND, item_name, namespace, ignore_not_found=True)
+                logger.info("Cleaning up test-managed DGDR %s/%s", dgdr_namespace, item_name)
+                managed_dgdr.run(managed_dgdr.delete(item_name))
 
     # Pre-test: remove any orphaned DGDRs left by previously interrupted runs.
-    # NOTE: Do NOT delete mocker-disagg here.  The operator pre-populates
-    # Status.DGDName from the profiling output (generateDGDSpec), so when
-    # handleDeployingPhase runs it immediately tries to GET the DGD by that name.
-    # Deleting mocker-disagg before the test causes handleDGDDeleted to fire.
     _cleanup_all_test_dgdrs()
 
     def _create(manifest: Dict[str, Any]) -> str:
@@ -548,21 +412,28 @@ def dgdr_factory(
         # Inject mocker config if enabled
         if use_mocker:
             _inject_mocker_config(manifest)
-        kubectl_apply(manifest, namespace)
+        managed_dgdr.run(managed_dgdr.create(manifest))
         created.append(name)
-        logger.info("Created DGDR %s/%s", namespace, name)
+        logger.info("Created DGDR %s/%s", dgdr_namespace, name)
         return name
+
+    def _register_for_cleanup(name: str) -> None:
+        """Register an externally-created DGDR name for teardown cleanup."""
+        if name not in created:
+            created.append(name)
+
+    _create.register_for_cleanup = _register_for_cleanup  # type: ignore[attr-defined]
 
     yield _create
 
     # Post-test: delete everything we created (plus any label-matching stragglers)
     for name in reversed(created):
-        logger.info("Cleaning up DGDR %s/%s", namespace, name)
-        kubectl_delete(DGDR_KIND, name, namespace, ignore_not_found=True)
+        logger.info("Cleaning up DGDR %s/%s", dgdr_namespace, name)
+        managed_dgdr.run(managed_dgdr.delete(name))
     _cleanup_all_test_dgdrs()
     # Clean up the shared mocker DGD so the next test starts fresh
     if use_mocker:
-        _cleanup_mocker_dgd(namespace)
+        managed_dgdr.run(_cleanup_mocker_dgd(managed_dgdr))
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +443,7 @@ def dgdr_factory(
 
 @pytest.fixture(scope="session")
 def deployed_dgdr(
+    managed_dgdr: ManagedDGDR,
     dgdr_namespace: str,
     dgdr_image: str,
     dgdr_model: str,
@@ -607,21 +479,23 @@ def deployed_dgdr(
         _inject_mocker_config(manifest)
         # Ensure no stale mocker-disagg DGD from a previous test so the session DGDR
         # gets a clean mocker-disagg on its first deploy attempt.
-        _cleanup_mocker_dgd(dgdr_namespace)
+        managed_dgdr.run(_cleanup_mocker_dgd(managed_dgdr))
 
-    kubectl_apply(manifest, dgdr_namespace)
+    managed_dgdr.run(managed_dgdr.create(manifest))
     logger.info("Session DGDR %s/%s created", dgdr_namespace, name)
 
     try:
         target_phase = PHASE_READY if dgdr_use_mocker else PHASE_DEPLOYED
-        wait_for_dgdr_phase(
-            name, dgdr_namespace, target_phase,
-            timeout=dgdr_profiling_timeout + dgdr_deploy_timeout,
+        managed_dgdr.run(
+            managed_dgdr.wait_for_phase(
+                name, target_phase,
+                timeout=dgdr_profiling_timeout + dgdr_deploy_timeout,
+            )
         )
         logger.info("Session DGDR %s/%s reached %s", dgdr_namespace, name, target_phase)
         yield name
     finally:
-        kubectl_delete(DGDR_KIND, name, dgdr_namespace, ignore_not_found=True)
+        managed_dgdr.run(managed_dgdr.delete(name))
         if dgdr_use_mocker:
-            _cleanup_mocker_dgd(dgdr_namespace)
+            managed_dgdr.run(_cleanup_mocker_dgd(managed_dgdr))
         logger.info("Session DGDR %s/%s cleaned up", dgdr_namespace, name)

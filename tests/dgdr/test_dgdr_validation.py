@@ -22,11 +22,11 @@ Test markers:
 
 from __future__ import annotations
 
-import json
 import logging
 
 import pytest
-import yaml
+
+from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
 from tests.dgdr.conftest import (
     DGDR_API_VERSION,
@@ -34,10 +34,9 @@ from tests.dgdr.conftest import (
     DGDR_SHORT_NAME,
     _run_kubectl,
     build_dgdr_manifest,
-    get_dgdr,
-    kubectl_server_dry_run,
     unique_dgdr_name,
 )
+from tests.utils.managed_deployment import ManagedDGDR
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +53,11 @@ logger = logging.getLogger(__name__)
 class TestDGDRValidation:
     """
     Tests that verify the admission webhook correctly validates DGDR specs
-    before they are persisted.  These tests use --dry-run=server so no
+    before they are persisted.  These tests use server-side dry-run so no
     resources are actually created.
     """
 
-    def test_missing_model_rejected(self, dgdr_namespace: str, dgdr_image: str) -> None:
+    def test_missing_model_rejected(self, managed_dgdr: ManagedDGDR, dgdr_image: str) -> None:
         """
         A DGDR without spec.model must be rejected by the webhook.
         The model field is the only hard-required spec field in v1beta1.
@@ -71,12 +70,10 @@ class TestDGDRValidation:
         # Clear model so the field is absent
         del manifest["spec"]["model"]
 
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode != 0, (
-            "Expected rejection of DGDR with missing model, but apply succeeded"
-        )
+        with pytest.raises(k8s_exceptions.ApiException):
+            managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
-    def test_thorough_with_auto_backend_rejected(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_thorough_with_auto_backend_rejected(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         searchStrategy: thorough + backend: auto must be rejected.
         'thorough' sweeps real GPU engines and requires a concrete backend.
@@ -88,16 +85,14 @@ class TestDGDRValidation:
             backend="auto",
             search_strategy="thorough",
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode != 0, (
-            "Expected rejection of thorough+auto backend DGDR, but apply succeeded"
-        )
-        combined = result.stdout + result.stderr
-        assert "auto" in combined.lower() or "backend" in combined.lower() or "thorough" in combined.lower(), (
-            f"Error message should mention backend/thorough incompatibility. Got: {combined}"
+        with pytest.raises(k8s_exceptions.ApiException) as exc_info:
+            managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
+        error_body = str(exc_info.value)
+        assert "auto" in error_body.lower() or "backend" in error_body.lower() or "thorough" in error_body.lower(), (
+            f"Error message should mention backend/thorough incompatibility. Got: {error_body}"
         )
 
-    def test_invalid_backend_rejected(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_invalid_backend_rejected(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         An unknown backend value must be rejected by the admission webhook.
         Valid values: auto, vllm, sglang, trtllm.
@@ -108,12 +103,10 @@ class TestDGDRValidation:
             image=dgdr_image,
             backend="unknown_backend",
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode != 0, (
-            "Expected rejection of DGDR with invalid backend, but apply succeeded"
-        )
+        with pytest.raises(k8s_exceptions.ApiException):
+            managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
-    def test_invalid_search_strategy_rejected(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_invalid_search_strategy_rejected(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         An unknown searchStrategy value must be rejected by the admission webhook.
         """
@@ -123,12 +116,10 @@ class TestDGDRValidation:
             image=dgdr_image,
             search_strategy="superfast",  # not a valid strategy
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode != 0, (
-            "Expected rejection of DGDR with invalid searchStrategy"
-        )
+        with pytest.raises(k8s_exceptions.ApiException):
+            managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
-    def test_invalid_optimization_type_rejected(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_invalid_optimization_type_rejected(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         An invalid sla.optimizationType value must be rejected by the
         admission webhook. Valid values: latency, throughput.
@@ -139,12 +130,10 @@ class TestDGDRValidation:
             image=dgdr_image,
             sla={"optimizationType": "cost"},  # not valid
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode != 0, (
-            "Expected rejection of DGDR with invalid sla.optimizationType"
-        )
+        with pytest.raises(k8s_exceptions.ApiException):
+            managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
-    def test_valid_minimal_dgdr_accepted(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_valid_minimal_dgdr_accepted(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         A DGDR with only the required fields (model + image) must pass validation.
         All other fields have defaults and are optional.
@@ -154,12 +143,10 @@ class TestDGDRValidation:
             model=dgdr_model,
             image=dgdr_image,
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode == 0, (
-            f"Expected valid minimal DGDR to be accepted. stderr: {result.stderr}"
-        )
+        # Should not raise — accepted by the webhook
+        managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
-    def test_valid_full_spec_accepted(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str) -> None:
+    def test_valid_full_spec_accepted(self, managed_dgdr: ManagedDGDR, dgdr_image: str, dgdr_model: str) -> None:
         """
         A fully-specified v1beta1 DGDR should pass webhook validation.
         Exercises every top-level optional field.
@@ -179,10 +166,8 @@ class TestDGDRValidation:
             hardware={"numGpusPerNode": 8},
             auto_apply=True,
         )
-        result = kubectl_server_dry_run(manifest, dgdr_namespace)
-        assert result.returncode == 0, (
-            f"Expected fully-specified DGDR to be accepted. stderr: {result.stderr}"
-        )
+        # Should not raise — accepted by the webhook
+        managed_dgdr.run(managed_dgdr.server_dry_run(manifest))
 
     def test_v1beta1_is_storage_version(self, dgdr_namespace: str) -> None:
         """
@@ -252,7 +237,12 @@ class TestDGDRVersionConversion:
         """
         A v1alpha1 DynamoGraphDeploymentRequest should be accepted and
         automatically converted to v1beta1 storage by the conversion webhook.
+
+        Note: v1alpha1 manifests use a different spec shape (profilingConfig
+        instead of image) so we must use kubectl here rather than the
+        v1beta1-only ManagedDGDR client.
         """
+        import yaml
         name = unique_dgdr_name("v1a1")
         v1alpha1_manifest = {
             "apiVersion": "nvidia.com/v1alpha1",
@@ -270,27 +260,29 @@ class TestDGDRVersionConversion:
         result = _run_kubectl(["apply", "-n", dgdr_namespace, "-f", "-"],
                               input=yaml_str, check=False)
         if result.returncode == 0:
-            # Register for cleanup
-            dgdr_factory({"metadata": {"name": name}, "apiVersion": DGDR_API_VERSION, "kind": DGDR_KIND, "spec": {"model": dgdr_model, "image": dgdr_image}})
+            # Register for cleanup without re-creating (resource already exists)
+            dgdr_factory.register_for_cleanup(name)
         # Either accepted (0) or rejected for a known conversion reason – just not a 500
         assert result.returncode in (0, 1), (
             f"Unexpected error applying v1alpha1 DGDR: {result.stderr}"
         )
 
-    def test_v1beta1_get_on_v1alpha1_object(self, dgdr_namespace: str, dgdr_image: str, dgdr_model: str, dgdr_factory) -> None:
+    def test_v1beta1_get_on_v1alpha1_object(self, managed_dgdr: ManagedDGDR, dgdr_namespace: str, dgdr_image: str, dgdr_model: str, dgdr_factory) -> None:
         """
         A resource stored as v1beta1 must be retrievable as v1alpha1 via conversion.
         """
+        import json
         name = unique_dgdr_name("conv-get")
         manifest = build_dgdr_manifest(name, model=dgdr_model, image=dgdr_image)
         dgdr_factory(manifest)
 
-        # Retrieve as v1beta1 (storage version)
-        obj_v1beta1 = get_dgdr(name, dgdr_namespace)
+        # Retrieve as v1beta1 (storage version) via ManagedDGDR
+        obj_v1beta1 = managed_dgdr.run(managed_dgdr.get(name))
         assert obj_v1beta1 is not None
         assert obj_v1beta1["apiVersion"] == DGDR_API_VERSION
 
-        # Retrieve as v1alpha1 (should trigger conversion webhook)
+        # Retrieve as v1alpha1 (should trigger conversion webhook).
+        # Must use kubectl here since ManagedDGDR targets v1beta1 only.
         result = _run_kubectl([
             "get", "dynamographdeploymentrequests.v1alpha1.nvidia.com",
             name, "-n", dgdr_namespace, "-o", "json",
