@@ -8,6 +8,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
+export DYN_REQUEST_PLANE=tcp
+
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 

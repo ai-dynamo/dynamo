@@ -93,7 +93,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 MODEL_EXTRA_ARGS=""
 case "$MODEL_NAME" in
     meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
-        MAX_MODEL_LEN="${MAX_MODEL_LEN:-108960}"
+        MAX_MODEL_LEN="108960"
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
