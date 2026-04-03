@@ -61,13 +61,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
     )
     parser.addoption(
-        "--framework",
-        type=str,
-        default=None,
-        help="Framework context for framework-specific test collection/runtime behavior "
-        "(e.g., vllm, sglang, trtllm).",
-    )
-    parser.addoption(
         "--max-vram-gib",
         type=float,
         default=None,

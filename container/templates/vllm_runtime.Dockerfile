@@ -85,8 +85,7 @@ USER dynamo
 # Keep optional framework trees like planner out of /workspace so the upstream
 # runtime does not look like a fully-expanded generic image.
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
-COPY --chmod=775 --chown=dynamo:0 examples/backends/vllm /workspace/examples/backends/vllm
-COPY --chmod=775 --chown=dynamo:0 examples/common /workspace/examples/common
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
