@@ -30,11 +30,14 @@ class FastVideoConfig(EngineConfig):
 
 
 fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/diffusers/local")
+# CI single-GPU lanes run on smaller VRAM runners, so keep smoke tests on a
+# lighter FastVideo model for both pre-merge and nightly.
+fastvideo_smoke_model = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 fastvideo_ci_worker_args = (
-    "--no-dit-layerwise-offload "
-    "--dit-cpu-offload "
+    "--dit-layerwise-offload "
     "--vae-cpu-offload "
-    "--text-encoder-cpu-offload"
+    "--text-encoder-cpu-offload "
+    "--image-encoder-cpu-offload"
 )
 
 fastvideo_configs = {
@@ -49,9 +52,12 @@ fastvideo_configs = {
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
-        model="FastVideo/LTX2-Distilled-Diffusers",
+        model=fastvideo_smoke_model,
         timeout=1800,
-        env={"WORKER_EXTRA_ARGS": fastvideo_ci_worker_args},
+        env={
+            "WORKER_EXTRA_ARGS": fastvideo_ci_worker_args,
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        },
         request_payloads=[video_generation_payload_default()],
     ),
     "aggregated_flash_attn": FastVideoConfig(
@@ -65,12 +71,13 @@ fastvideo_configs = {
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
-        model="FastVideo/LTX2-Distilled-Diffusers",
+        model=fastvideo_smoke_model,
         timeout=1800,
         env={
             "WORKER_EXTRA_ARGS": (
                 f"{fastvideo_ci_worker_args} --attention-backend FLASH_ATTN"
-            )
+            ),
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         },
         request_payloads=[video_generation_payload_default()],
     ),
