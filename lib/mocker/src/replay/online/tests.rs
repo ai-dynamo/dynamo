@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs};
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::ReplayRouterMode;
-use crate::replay::router::ReplayRouter;
 
+use super::ReplayRouter;
 use super::entrypoints::{
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
     simulate_trace_requests, simulate_trace_requests_with_stats,

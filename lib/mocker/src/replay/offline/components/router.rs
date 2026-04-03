@@ -21,13 +21,14 @@ use dynamo_kv_router::{
 use dynamo_tokens::SequenceHash;
 use uuid::Uuid;
 
-use super::shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
-    replay_slots, replay_workers_with_configs,
-};
+use super::{RouterEffects, WorkerAdmission};
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::ReplayRequestHashes;
+use crate::replay::router_shared::{
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
+    replay_slots, replay_workers_with_configs,
+};
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
@@ -216,12 +217,12 @@ impl OfflineReplayRouter {
         })
     }
 
-    pub(crate) fn submit_request_with_hashes(
+    pub(crate) fn on_request_arrival(
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
-    ) -> Result<Option<usize>> {
+    ) -> Result<RouterEffects> {
         let pending = self.build_pending_request(request, replay_hashes)?;
         let should_queue = self
             .queue_threshold
@@ -236,28 +237,50 @@ impl OfflineReplayRouter {
                 request: pending,
             });
             self.next_enqueue_seq += 1;
-            return Ok(None);
+            return Ok(RouterEffects::default());
         }
 
-        self.admit_request(pending).map(Some)
+        Ok(RouterEffects {
+            admissions: vec![WorkerAdmission {
+                uuid: request
+                    .uuid
+                    .expect("offline replay requests must have UUIDs before router submission"),
+                worker_idx: self.admit_request(pending)?,
+            }],
+        })
     }
 
-    pub(crate) fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
-        self.indexer.apply_event(event)
+    pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
+        for event in events {
+            self.indexer.apply_event(event)?;
+        }
+        Ok(RouterEffects::default())
     }
 
-    pub(crate) fn mark_prefill_completed(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
+    pub(crate) fn on_prefill_completed(&mut self, uuid: Uuid) -> Result<RouterEffects> {
         self.slots
             .mark_prefill_completed(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
-        self.drain_pending()
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending()?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
     }
 
-    pub(crate) fn free(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
+    pub(crate) fn on_request_completed(&mut self, uuid: Uuid) -> Result<RouterEffects> {
         self.slots
             .free(&uuid.to_string())
             .map_err(anyhow::Error::from)?;
-        self.drain_pending()
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending()?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
     }
 
     pub(crate) fn pending_count(&self) -> usize {

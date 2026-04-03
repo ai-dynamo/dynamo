@@ -13,10 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::router::ReplayRouter;
 use crate::replay::{ReplayRouterMode, TraceSimulationReport};
 use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
 
+use super::ReplayRouter;
 use super::demux::run_demux;
 use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,

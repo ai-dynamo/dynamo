@@ -493,3 +493,42 @@ pub(super) fn run_concurrency_collect(
     .run()
     .unwrap()
 }
+
+#[cfg(test)]
+pub(super) fn run_trace_workload_collect(
+    config: &OfflineDisaggReplayConfig,
+    trace: Trace,
+    router_config: Option<KvRouterConfig>,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, DisaggRuntimeStats) {
+    DisaggRuntime::new_workload(
+        config,
+        router_config,
+        trace.into_trace_driver().unwrap(),
+        DisaggReplayMode::Trace,
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn run_concurrency_workload_collect(
+    config: &OfflineDisaggReplayConfig,
+    trace: Trace,
+    router_config: Option<KvRouterConfig>,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> (TraceCollector, DisaggRuntimeStats) {
+    DisaggRuntime::new_workload(
+        config,
+        router_config,
+        trace.into_concurrency_driver().unwrap(),
+        DisaggReplayMode::Concurrency { max_in_flight },
+        router_mode,
+    )
+    .unwrap()
+    .run()
+    .unwrap()
+}
