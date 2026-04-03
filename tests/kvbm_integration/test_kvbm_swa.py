@@ -489,15 +489,16 @@ def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
 @pytest.mark.timeout(170)
 def test_swa_offload_and_onboard_trtllm(trtllm_tester, trtllm_server):
     """
-    Test offload → cache reset → onboard cycle with SWA model (TRT-LLM).
+    Test offload → eviction → onboard cycle with SWA model (TRT-LLM).
 
-    Validates that:
+    Uses eviction-based cache clearing instead of reset_prefix_cache
+    (which is not available in TRT-LLM). Validates that:
     - Initial request triggers offload to CPU cache
-    - Cache reset clears GPU cache (via eviction with filler requests)
-    - Repeated request triggers onboard from CPU to GPU
+    - A different request evicts the first from GPU cache
+    - Repeated first request triggers onboard from CPU to GPU
     - Responses are deterministic across the cycle
     """
-    _run_offload_and_onboard(trtllm_tester, trtllm_server)
+    _run_offload_and_onboard_via_eviction(trtllm_tester, trtllm_server)
 
 
 @pytest.mark.trtllm
@@ -590,6 +591,71 @@ def _run_offload_and_onboard(tester, server):
         test_name="SWA Offload/Onboard",
         label1="Initial response",
         label2="After cache reset",
+    )
+
+    print("\n=== TEST PASSED ===")
+
+
+def _run_offload_and_onboard_via_eviction(tester, server):
+    """Offload/onboard test using eviction instead of reset_prefix_cache.
+
+    TRT-LLM does not support the /reset_prefix_cache endpoint, so we evict
+    the first prompt's blocks by sending a different prompt that fills the
+    small GPU cache, then re-send the first prompt to trigger onboarding.
+    """
+    print_test_header("SWA OFFLOAD AND ONBOARD TEST (via eviction)")
+
+    prompt = AELDORA_STORY
+    filler_prompt = (
+        "Read the following entry from the ancient scrolls of Aeloria: " + AELDORA_STORY
+    )
+
+    # Phase 1: Initial request triggers offload
+    print_phase(1, "Initial request (expect offload to CPU)")
+    print(f"Sending request: {prompt[:80]}...")
+
+    response_1 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
+    print(f"Response 1: {response_1}")
+
+    metrics = check_kvbm_metrics("Phase 1", server.metrics_port)
+    assert (
+        metrics["kvbm_offload_blocks_d2h"] > 0
+    ), "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
+    assert (
+        metrics["kvbm_onboard_blocks_h2d"] == 0
+    ), f"Phase 1: Expected 0 onboarded blocks, got {metrics['kvbm_onboard_blocks_h2d']}"
+    print(f"✓ Phase 1: {metrics['kvbm_offload_blocks_d2h']} blocks offloaded")
+
+    # Phase 2: Send different prompt to evict first prompt's blocks from GPU
+    print_phase(2, "Send filler request to evict first prompt from GPU")
+    print(f"Sending filler: {filler_prompt[:80]}...")
+
+    tester.make_request(filler_prompt, max_tokens=MAX_TOKENS)
+
+    metrics_p2 = check_kvbm_metrics("Phase 2", server.metrics_port)
+    print(f"✓ Phase 2: {metrics_p2['kvbm_offload_blocks_d2h']} total blocks offloaded")
+
+    # Phase 3: Re-send first prompt (should onboard from CPU)
+    print_phase(3, "Re-send first request (expect onboard from CPU)")
+    print(f"Sending same request: {prompt[:80]}...")
+
+    response_2 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
+    print(f"Response 2: {response_2}")
+
+    metrics = check_kvbm_metrics("Phase 3", server.metrics_port)
+    assert (
+        metrics["kvbm_onboard_blocks_h2d"] > 0
+    ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after eviction."
+    print(f"✓ Phase 3: {metrics['kvbm_onboard_blocks_h2d']} blocks onboarded from CPU")
+
+    # Verify determinism
+    print_test_header("DETERMINISM VERIFICATION")
+    assert_deterministic(
+        response_1,
+        response_2,
+        test_name="SWA Offload/Onboard",
+        label1="Initial response",
+        label2="After eviction+onboard",
     )
 
     print("\n=== TEST PASSED ===")
