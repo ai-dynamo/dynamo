@@ -23,7 +23,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     Failure,
     Load,
     Scenario,
-    get_scenarios,
+    scenarios,
 )
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 from tests.utils.test_output import resolve_test_output_path
@@ -88,12 +88,11 @@ def get_model_from_deployment(
 
 
 @pytest.fixture
-def scenario(request, scenario_name, client_type):
+def scenario(scenario_name, client_type):
     """Get scenario and optionally override client type from command line.
 
     If --client-type is specified, it overrides the scenario's default client type.
     """
-    scenarios = get_scenarios(request.config.getoption("framework", default=None))
     scenario_obj = scenarios[scenario_name]
 
     # Override client type if specified on command line
@@ -444,7 +443,6 @@ def results_summary():
 
     # Step 2: Process all tests (get results) but only print paired ones
     try:
-        scenarios = get_scenarios()
         # First, silently parse all tests to get results (for any downstream processing)
         parse_test_results(
             log_dir=None,

@@ -20,7 +20,6 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern
 
 from typing_extensions import Required, TypedDict
@@ -908,6 +907,16 @@ def _create_moe_deployments_for_backend(
     return deployments
 
 
+# Create all deployment specifications
+DEPLOYMENT_SPECS: Dict[str, DeploymentInfo] = {}
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("vllm"))
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("sglang"))
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("trtllm"))
+
+# Add MoE deployments for vLLM only
+DEPLOYMENT_SPECS.update(_create_moe_deployments_for_backend("vllm"))
+
+
 # Each failure scenaro contains a list of failure injections
 # Each failure injection has a time in seconds after the pervious injection and
 # a list of failures to inject including the number of failures for each type.
@@ -1106,83 +1115,73 @@ moe_load = Load(
 
 model = None
 
+# Populate Scenarios
 
-def _selected_backends(framework: Optional[str]) -> list[str]:
-    if framework in WORKER_MAP:
-        return [framework]
-    return list(WORKER_MAP.keys())
+scenarios: dict[str, Scenario] = {}
 
+# Map of backend+deploy_type to failure definitions
+backend_failure_map = {}
+for backend in ["vllm", "sglang", "trtllm"]:
+    backend_failure_map[f"{backend}_agg"] = _create_backend_failures(backend, "agg")
+    backend_failure_map[f"{backend}_disagg"] = _create_backend_failures(
+        backend, "disagg"
+    )
 
-def _build_deployment_specs(
-    backends: list[str],
-) -> Dict[str, DeploymentInfo]:
-    deployment_specs: Dict[str, DeploymentInfo] = {}
-    for backend in backends:
-        deployment_specs.update(_create_deployments_for_backend(backend))
+for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
+    backend = deployment_info["backend"]
 
-    if "vllm" in backends:
-        deployment_specs.update(_create_moe_deployments_for_backend("vllm"))
+    # Check if this is an MoE deployment
+    is_moe = deployment_info.get("is_moe", False)
 
-    return deployment_specs
+    # Determine deployment type from deployment name
+    deploy_type = (
+        "agg"
+        if ("agg" in deployment_name and "disagg" not in deployment_name)
+        else "disagg"
+    )
 
-
-def _build_base_scenarios(
-    deployment_specs: Dict[str, DeploymentInfo],
-    backends: list[str],
-) -> dict[str, Scenario]:
-    scenarios: dict[str, Scenario] = {}
-
-    backend_failure_map = {}
-    for backend in backends:
-        backend_failure_map[f"{backend}_agg"] = _create_backend_failures(backend, "agg")
-        backend_failure_map[f"{backend}_disagg"] = _create_backend_failures(
-            backend, "disagg"
+    # Get the appropriate failure set for this backend+deploy_type
+    failure_map_key = f"{backend}_{deploy_type}"
+    if failure_map_key not in backend_failure_map:
+        raise ValueError(
+            f"Unsupported backend+deploy_type: {failure_map_key}. Available: {list(backend_failure_map.keys())}"
         )
 
-    for deployment_name, deployment_info in deployment_specs.items():
-        backend = deployment_info["backend"]
-        is_moe = deployment_info.get("is_moe", False)
-        deploy_type = (
-            "agg"
-            if ("agg" in deployment_name and "disagg" not in deployment_name)
-            else "disagg"
+    failure_set = backend_failure_map[failure_map_key]
+
+    for failure_name, failure in failure_set.items():
+        # Skip prefill failures for aggregated deployments
+        if "prefill" in failure_name and deploy_type == "agg":
+            continue
+
+        scenario_name = f"{deployment_name}-{failure_name}"
+
+        # Use MoE-specific load configuration if it's an MoE model
+        load_config = moe_load if is_moe else load
+
+        # Get model from deployment info or use the global model
+        scenario_model = deployment_info.get("model", model)
+
+        # Create scenario first (without checkers)
+        scenario = Scenario(
+            deployment=deployment_info["spec"],
+            load=load_config,
+            failures=failure,
+            model=scenario_model,
+            backend=backend,
+            checkers=None,  # Will be populated below
+            requires_custom_build=is_moe,  # MoE models require custom builds
         )
 
-        failure_map_key = f"{backend}_{deploy_type}"
-        if failure_map_key not in backend_failure_map:
-            raise ValueError(
-                f"Unsupported backend+deploy_type: {failure_map_key}. Available: {list(backend_failure_map.keys())}"
-            )
+        # Generate checkers for this scenario
+        # This uses the checker factory to determine appropriate validation checks
+        scenario.checkers = _get_checkers_for_scenario(scenario_name, scenario)
 
-        failure_set = backend_failure_map[failure_map_key]
-
-        for failure_name, failure in failure_set.items():
-            if "prefill" in failure_name and deploy_type == "agg":
-                continue
-
-            scenario_name = f"{deployment_name}-{failure_name}"
-            load_config = moe_load if is_moe else load
-            scenario_model = deployment_info.get("model", model)
-            scenario = Scenario(
-                deployment=deployment_info["spec"],
-                load=load_config,
-                failures=failure,
-                model=scenario_model,
-                backend=backend,
-                checkers=None,
-                requires_custom_build=is_moe,
-            )
-            scenario.checkers = _get_checkers_for_scenario(scenario_name, scenario)
-            scenarios[scenario_name] = scenario
-
-    return scenarios
+        scenarios[scenario_name] = scenario
 
 
 # Add token overflow test scenarios
-def add_token_overflow_scenarios(
-    scenarios: dict[str, Scenario],
-    deployment_specs: Dict[str, DeploymentInfo],
-):
+def add_token_overflow_scenarios():
     """
     Add test scenarios for token overflow (prompt > max_seq_len) failures
     """
@@ -1230,11 +1229,11 @@ def add_token_overflow_scenarios(
 
     for config in overflow_test_configs:
         # Skip if deployment doesn't exist
-        if config["deployment_key"] not in deployment_specs:
+        if config["deployment_key"] not in DEPLOYMENT_SPECS:
             continue
 
         overflow_scenario_name = config["name"]
-        deployment_info = deployment_specs[config["deployment_key"]]
+        deployment_info = DEPLOYMENT_SPECS[config["deployment_key"]]
 
         scenario_model = deployment_info.get("model", model)
 
@@ -1314,11 +1313,8 @@ def add_token_overflow_scenarios(
         )
 
 
-def add_rolling_upgrade_scenarios(
-    scenarios: dict[str, Scenario],
-    backends: list[str],
-):
-    for backend in backends:
+def add_rolling_upgrade_scenarios():
+    for backend in ["vllm", "sglang", "trtllm"]:
         for worker_mode in ["agg", "disagg"]:
             yaml_files = {
                 "agg": f"examples/backends/{backend}/deploy/agg.yaml",
@@ -1368,11 +1364,8 @@ def add_rolling_upgrade_scenarios(
             )
 
 
-@lru_cache(maxsize=None)
-def get_scenarios(framework: Optional[str] = None) -> dict[str, Scenario]:
-    backends = _selected_backends(framework)
-    deployment_specs = _build_deployment_specs(backends)
-    scenarios = _build_base_scenarios(deployment_specs, backends)
-    add_token_overflow_scenarios(scenarios, deployment_specs)
-    add_rolling_upgrade_scenarios(scenarios, backends)
-    return scenarios
+# Add the token overflow scenarios
+add_token_overflow_scenarios()
+
+# Add the rolling upgrade scenarios
+add_rolling_upgrade_scenarios()
