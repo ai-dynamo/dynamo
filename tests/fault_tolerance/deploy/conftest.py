@@ -15,7 +15,11 @@
 
 import pytest
 
-from tests.fault_tolerance.deploy.scenarios import scenarios
+from tests.fault_tolerance.deploy.scenarios import get_scenarios
+
+
+def _active_scenarios(config: pytest.Config):
+    return get_scenarios(config.getoption("framework", default=None))
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
@@ -44,6 +48,7 @@ def pytest_generate_tests(metafunc):
     - @pytest.mark.custom_build: For MoE models and other tests requiring custom builds
     """
     if "scenario" in metafunc.fixturenames:
+        scenarios = _active_scenarios(metafunc.config)
         scenario_names = list(scenarios.keys())
         argvalues = []
         ids = []
