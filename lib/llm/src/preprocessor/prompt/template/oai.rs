@@ -486,11 +486,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let rendered = tmpl.render(&ctx)?;
 
         // Debug: log rendered prompt (last 500 chars to see generation prompt + thinking tags)
-        let tail_start = rendered
-            .char_indices()
-            .rev()
-            .nth(499)
-            .map_or(0, |(i, _)| i);
+        let tail_start = rendered.char_indices().rev().nth(499).map_or(0, |(i, _)| i);
         let prompt_tail = &rendered[tail_start..];
         tracing::debug!(
             chat_template_args = ?req.chat_template_args(),
