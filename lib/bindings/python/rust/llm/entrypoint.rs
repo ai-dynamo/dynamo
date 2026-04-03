@@ -500,8 +500,21 @@ async fn select_engine(
                     .unwrap_or_else(|| local_model.card().source_path());
                 let backend_version = mocker_args.aic_backend_version.as_deref();
                 let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                let moe_tp_size = mocker_args.aic_moe_tp_size;
+                let moe_ep_size = mocker_args.aic_moe_ep_size;
+                let attention_dp_size = mocker_args.aic_attention_dp_size;
                 match Python::with_gil(|py| {
-                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                    create_aic_callback(
+                        py,
+                        &backend,
+                        system,
+                        model_name,
+                        tp_size,
+                        backend_version,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                    )
                 }) {
                     Ok(callback) => {
                         tracing::info!(
