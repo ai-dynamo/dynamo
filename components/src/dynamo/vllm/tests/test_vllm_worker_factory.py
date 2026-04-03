@@ -14,7 +14,9 @@ from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_0,
+    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
+    # runners with "Failed to infer device type" even for mock tests.
+    pytest.mark.gpu_1,
     pytest.mark.pre_merge,
 ]
 
