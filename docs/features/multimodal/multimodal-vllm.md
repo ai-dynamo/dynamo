@@ -6,10 +6,11 @@ title: vLLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
 
+<Warning>
 **Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if a multimodal worker mode is enabled without `--enable-multimodal`. This flag is analogous to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
+</Warning>
 
 ## Support Matrix
-
 
 | Modality                 | Aggregated | Disaggregated |
 | ------------------------ | ---------- | ------------- |
@@ -17,27 +18,22 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 | **Video**                | Yes        | Yes           |
 | **Audio** (Experimental) | Yes        | Yes           |
 
-
 ### Supported URL Formats
-
 
 | Format         | Example                              | Description                |
 | -------------- | ------------------------------------ | -------------------------- |
 | **HTTP/HTTPS** | `http://example.com/image.jpg`       | Remote media files         |
 | **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
 
-
 ## Deployment Patterns
 
 The main multimodal vLLM launchers in this repo are:
-
 
 | Pattern                     | Launch Script               | Best For                                                                            |
 | --------------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
 | Aggregated                  | `agg_multimodal.sh`         | Simplest image/video serving from a single multimodal worker                        |
 | E/PD (Encode + PD)          | `disagg_multimodal_e_pd.sh` | Simple example of separating encoder, good for testing embedding-cache workflows    |
 | E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh`  | Disaggregated image/video serving with separate encode, prefill, and decode workers |
-
 
 ## Image/Video Serving
 
@@ -162,8 +158,6 @@ flowchart LR
   pd_worker --> audio_encode_worker
 ```
 
-
-
 **Launch:**
 
 ```bash
@@ -220,8 +214,6 @@ flowchart LR
   decode_worker --> prefill_worker
 ```
 
-
-
 **Launch:**
 
 ```bash
@@ -234,12 +226,10 @@ bash launch/audio_disagg.sh
 
 Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
-
 | Setting                   | Implementation                                                 | Launch Script               |
 | ------------------------- | -------------------------------------------------------------- | --------------------------- |
 | **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.18+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
 | **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
-
 
 ### Aggregated Worker
 
@@ -382,12 +372,4 @@ If a LoRA is loaded on the prefill worker but not on the decode worker, the deco
 
 ## Supported Models
 
-The following models are exercised regularly in this repo or used in the examples above:
-
-- **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
-- **Qwen3-VL** - `Qwen/Qwen3-VL-2B-Instruct`, `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
-- **LLaVA 1.5** - `llava-hf/llava-1.5-7b-hf`
-- **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
-
-For a broader list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should generally work with aggregated serving, though they may not all be explicitly tested in this repo.
-
+For a list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should generally work with aggregated serving, though they may not all be explicitly tested in this repo.
