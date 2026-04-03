@@ -901,7 +901,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let count_events = IndexerArgs::supports_remove(name);
                 let result =
-                    run_benchmark(indexer, artifacts.clone(), &args, dur_ms, count_events).await?;
+                    run_benchmark(indexer, artifacts.clone(), &args, dur_ms, count_events, args.find_matches_concurrency).await?;
 
                 if multi_threaded {
                     if result.block_throughput >= result.offered_block_throughput * 0.95 {
@@ -958,22 +958,7 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
         println!("Sweep results saved to {}", json_path);
     } else {
-        // Pre-compute worker traces once and drop the raw traces/events to free
-        // memory before benchmarking. This avoids holding both the expanded
-        // trace data and the derived worker_traces simultaneously, which is
-        // especially important when --trace-length-factor is large.
-        let worker_traces = prepare_worker_traces(
-            &traces,
-            &events,
-            args.common.block_size,
-            args.common.benchmark_duration_ms,
-            args.common.trace_simulation_duration_ms,
-        )
-        .into_iter()
-        .map(Arc::new)
-        .collect::<Vec<_>>();
         drop(traces);
-        drop(events);
 
         for name in &indexer_names {
             println!("\nBenchmarking indexer: {}", name);
@@ -997,7 +982,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             run_benchmark(
-                indexer,
+                indexer.clone(),
                 artifacts.clone(),
                 &args,
                 args.common.benchmark_duration_ms,

@@ -159,6 +159,7 @@ pub fn load_mooncake_trace(path: &str) -> anyhow::Result<Vec<MooncakeRequest>> {
         requests.push(MooncakeRequest {
             uuid: Uuid::new_v4(),
             timestamp: cursor_ms as u64,
+            input_length: 0,
             hash_ids: raw.hash_ids,
             output_length: raw.output_length,
         });
