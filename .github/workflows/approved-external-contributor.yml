@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Approved External Contributor
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  ok-to-test:
+    runs-on: ubuntu-latest
+    environment: external_collaborator
+    steps:
+      - name: Check if PR is from a fork
+        id: fork_check
+        run: |
+          if [[ "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate approved contributor
+        id: author_check
+        if: steps.fork_check.outputs.is_fork == 'true'
+        env:
+          APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if ! echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e 'if type == "array" then . else error("not an array") end' > /dev/null 2>&1; then
+            echo "Warning: APPROVED_EXTERNAL_CONTRIBUTORS is not a valid JSON array." >&2
+            echo "is_approved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'contains([$author])' > /dev/null; then
+            echo "Author $PR_AUTHOR is in APPROVED_EXTERNAL_CONTRIBUTORS."
+            echo "is_approved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Author $PR_AUTHOR is not in APPROVED_EXTERNAL_CONTRIBUTORS."
+            echo "is_approved=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify commit signatures
+        id: signature_check
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          commit_shas=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits" --jq '.[].sha')
+
+          if [[ -z "$commit_shas" ]]; then
+            echo "Warning: No commits found in PR." >&2
+            echo "all_signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          all_signed=true
+          unsigned_commits='[]'
+
+          while IFS= read -r sha; do
+            verification=$(gh api "repos/$REPO_OWNER/$REPO_NAME/commits/$sha" \
+              --jq '.commit.verification | {verified, reason}')
+            verified=$(echo "$verification" | jq -r '.verified')
+            reason=$(echo "$verification" | jq -r '.reason // "not signed"')
+
+            if [[ "$verified" != "true" ]]; then
+              all_signed=false
+              echo "Warning: Commit ${sha:0:7} is not properly signed: $reason" >&2
+              unsigned_commits=$(jq -cn \
+                --argjson arr "$unsigned_commits" \
+                --arg sha "${sha:0:7}" \
+                --arg reason "$reason" \
+                '$arr + [{"sha": $sha, "reason": $reason}]')
+            else
+              echo "Commit $sha is verified with signature."
+            fi
+          done <<< "$commit_shas"
+
+          if [[ "$all_signed" == "true" ]]; then
+            echo "All commits are properly signed and verified."
+            echo "all_signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Warning: One or more commits are not properly signed." >&2
+            echo "all_signed=false" >> "$GITHUB_OUTPUT"
+            echo "unsigned_commits=$unsigned_commits" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Clean up previous unsigned-commits comments
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          bot_login=$(gh api user --jq '.login')
+          gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
+          | jq -r --arg login "$bot_login" \
+            '.[] | select(.user.login == $login and (.body | contains("<!-- dynamo-ext-contributor: unsigned -->"))) | .id' \
+          | while read -r comment_id; do
+              echo "Deleting stale unsigned-commits comment $comment_id"
+              gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
+            done
+      - name: Comment unsigned commits
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
+        run: |
+          table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
+          body="<!-- dynamo-ext-contributor: unsigned -->
+          ## Unsigned Commits Detected
+
+          The following commits are not GPG-signed and must be signed before CI can run:
+
+          | Commit | Reason |
+          |--------|--------|
+          ${table}
+
+          Please sign your commits and push again. See the [GitHub docs on commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for help."
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO_OWNER/$REPO_NAME" \
+            --body "$body"
+      - name: Comment /ok to test
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO_OWNER/$REPO_NAME" \
+            --body "/ok to test $PR_SHA"
