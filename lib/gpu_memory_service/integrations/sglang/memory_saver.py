@@ -135,23 +135,23 @@ class GMSMemorySaverImpl:
         )
 
     def pause(self, tag: Optional[str] = None) -> None:
-        for tag in _pause_resume_tags(tag):
-            if self.allocators[tag].is_unmapped:
+        for target_tag in _pause_resume_tags(tag):
+            if self.allocators[target_tag].is_unmapped:
                 continue
-            logger.info("[GMS] Unmapping %s", tag)
-            self.allocators[tag].unmap_all_vas()
-            self.allocators[tag].abort()
+            logger.info("[GMS] Unmapping %s", target_tag)
+            self.allocators[target_tag].unmap_all_vas()
+            self.allocators[target_tag].abort()
 
     def resume(self, tag: Optional[str] = None) -> None:
-        for tag in _pause_resume_tags(tag):
-            if not self.allocators[tag].is_unmapped:
+        for target_tag in _pause_resume_tags(tag):
+            if not self.allocators[target_tag].is_unmapped:
                 continue
 
-            logger.info("[GMS] Remapping %s", tag)
-            self.allocators[tag].connect(_TAG_LOCK_TYPES[tag])
-            if tag == "kv_cache":
-                self.allocators[tag].reallocate_all_handles(tag=tag)
-            self.allocators[tag].remap_all_vas()
+            logger.info("[GMS] Remapping %s", target_tag)
+            self.allocators[target_tag].connect(_TAG_LOCK_TYPES[target_tag])
+            if target_tag == "kv_cache":
+                self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
+            self.allocators[target_tag].remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""
