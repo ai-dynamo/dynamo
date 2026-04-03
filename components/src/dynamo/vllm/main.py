@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging
@@ -34,7 +36,13 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.omni.args import OmniConfig
+try:
+    from dynamo.vllm.omni.args import OmniConfig
+
+    OMNI_AVAILABLE = True
+except ImportError:
+    OmniConfig = None
+    OMNI_AVAILABLE = False
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs

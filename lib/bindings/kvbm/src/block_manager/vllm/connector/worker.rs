@@ -32,6 +32,7 @@ pub trait Worker: Send + Sync {
         page_size: usize,
         device_id: usize,
         dtype_width_bytes: usize,
+        device_type: String,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
         device_layout_type: Option<LayoutType>,
@@ -72,8 +73,11 @@ pub struct KvConnectorWorker {
     iteration: u64,
     layers_complete: usize,
 
-    /// cuda events created by the python side
+    /// cuda/ze events created by the python side
     layer_events: Vec<u64>,
+
+    /// Device type (e.g., "cuda", "xpu")
+    device_type: String,
 }
 
 impl KvConnectorWorker {
@@ -112,6 +116,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            device_type: String::new(),
         })
     }
 }
@@ -127,6 +132,7 @@ impl Worker for KvConnectorWorker {
         page_size: usize,
         device_id: usize,
         dtype_width_bytes: usize,
+        device_type: String,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
         device_layout_type: Option<LayoutType>,
@@ -164,6 +170,7 @@ impl Worker for KvConnectorWorker {
         }
 
         self.layer_events = raw_event_handles;
+        self.device_type = device_type;
 
         // Auto-detect device layout type if not explicitly provided
         let detected_device_layout_type = match device_layout_type {
@@ -200,6 +207,7 @@ impl Worker for KvConnectorWorker {
             .page_size(page_size)
             .tensors(vllm_tensors)
             .device_id(device_id)
+            .device_type(self.device_type.clone())
             .dtype_width_bytes(dtype_width_bytes)
             .scheduler_client(Some(self.transfer_client.clone()))
             .device_layout_type(detected_device_layout_type)
@@ -328,7 +336,7 @@ impl Worker for KvConnectorWorker {
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
+            event_sync_blocking_for_device(self.layer_events[self.layers_complete - 1], &self.device_type);
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
@@ -485,13 +493,14 @@ impl PyKvConnectorWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, device_type, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
         page_size: usize,
         device_id: usize,
         dtype_width_bytes: usize,
+        device_type: String,
         kv_caches: Vec<(String, Py<PyAny>)>,
         raw_event_handles: Vec<u64>,
         device_layout_type: Option<PyLayoutType>,
@@ -511,6 +520,7 @@ impl PyKvConnectorWorker {
                 page_size,
                 device_id,
                 dtype_width_bytes,
+                device_type,
                 rust_kv_caches,
                 raw_event_handles,
                 device_layout_type.map(|py_layout| py_layout.into()),
@@ -564,10 +574,28 @@ fn _get_current_context() -> CUcontext {
 }
 
 pub fn event_sync_blocking(event: u64) {
+    cuda_event_sync_blocking(event);
+}
+
+fn cuda_event_sync_blocking(event: u64) {
     let status = unsafe { cuEventSynchronize(event as CUevent) };
     assert_eq!(
         status,
         cudaError_enum::CUDA_SUCCESS,
         "cuEventSynchronize failed"
     );
+}
+
+/// Dispatch event synchronization based on device type.
+///
+/// For XPU/ZE, event sync is handled on the Python side (host wait via
+/// `torch.xpu.Event.synchronize()`) before calling into Rust, so we skip here.
+pub fn event_sync_blocking_for_device(event: u64, device_type: &str) {
+    match device_type {
+        "cuda" => cuda_event_sync_blocking(event),
+        "xpu" | "ze" => {
+            // No-op: XPU events are synchronized on the Python side.
+        }
+        other => panic!("Unsupported device type for event sync: {}", other),
+    }
 }

@@ -4,10 +4,52 @@
 //! CUDA device memory storage.
 
 use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::pinned::StorageBackendOps;
 use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+/// Unified device context backed by a type-erased [`StorageBackendOps`].
+///
+/// Construct via [`DeviceContext::new`] with any backend that implements
+/// `StorageBackendOps` (e.g. `Arc<CudaContext>`, `Arc<ZeContext>`).
+#[derive(Clone)]
+pub struct DeviceContext {
+    /// The underlying backend for memory operations.
+    pub backend: Arc<dyn StorageBackendOps>,
+}
+
+impl std::fmt::Debug for DeviceContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DeviceContext(device={})", self.backend.device_id())
+    }
+}
+
+impl DeviceContext {
+    /// Create a new device context from any backend implementing
+    /// [`StorageBackendOps`].
+    pub fn new<B: StorageBackendOps + 'static>(backend: B) -> Self {
+        Self {
+            backend: Arc::new(backend),
+        }
+    }
+
+    /// Get the backend type (CUDA or Ze).
+    pub fn backend_type(&self) -> super::pinned::BackendType {
+        self.backend.backend_type()
+    }
+
+    /// Check if this context uses CUDA backend.
+    pub fn is_cuda(&self) -> bool {
+        self.backend.backend_type() == super::pinned::BackendType::Cuda
+    }
+
+    /// Check if this context uses Ze backend.
+    pub fn is_ze(&self) -> bool {
+        self.backend.backend_type() == super::pinned::BackendType::Ze
+    }
+}
 
 /// Get or create a CUDA context for the given device.
 pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {

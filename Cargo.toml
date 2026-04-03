@@ -59,6 +59,9 @@ velo-common = { path = "lib/velo-common", version = "0.1.0" }
 velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
 velo-events = { path = "lib/velo-events", version = "0.1.0" }
 
+# Level Zero
+level-zero = { path = "../level-zero-rc/level-zero" }
+
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }

@@ -12,12 +12,12 @@ use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
     block::{
         Block, layout_to_blocks, locality,
-        transfer::{PoolConfig, TransferContext},
+        transfer::{DeviceContextExt, PoolConfig, TransferContext},
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     offload::{max_concurrent_transfers, max_transfer_batch_size},
-    storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    storage::{DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
 use derive_builder::Builder;
@@ -53,11 +53,14 @@ impl WorkerState {
 pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
+    device_type: &str,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
     let mut shape = None;
 
     let mut device_tensors = Vec::with_capacity(tensors.len());
-    let allocator = DeviceAllocator::new(device_id)?;
+    let backend = DeviceBackend::from_str(device_type)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let allocator = DeviceAllocator::new_with_backend(device_id, backend)?;
 
     for tensor in tensors {
         // Check the stride, and ensure our tensor is contiguous.
@@ -120,19 +123,22 @@ async fn perform_allocation_and_build_handler(
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
+    let backend = DeviceBackend::from_str(&worker_config.device_type)
+        .map_err(|e| anyhow::anyhow!(e))?;
     let transfer_context = Arc::new(
         TransferContext::new(
             Arc::new(Some(agent)),
-            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            DeviceAllocator::new_with_backend(device_id, backend)?.ctx().new_stream()?,
             Handle::current(),
             Some(pool_config),
         )
         .map_err(|e| {
             anyhow::anyhow!(
-                "Failed to create transfer context for worker {} with CUDA memory pool: {}. \
-                 This is a critical error - the worker cannot start without CUDA memory pools. \
+                "Failed to create transfer context for worker {} with {} memory pool: {}. \
+                 This is a critical error - the worker cannot start without memory pools. \
                  Please ensure sufficient GPU memory is available on device {}.",
                 worker_id,
+                worker_config.device_type,
                 e,
                 device_id
             )
@@ -148,7 +154,8 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+        let host_ctx = backend.create(device_id)?;
+        let host_allocator = Arc::new(PinnedAllocator::new_with_context(host_ctx));
 
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
@@ -391,6 +398,9 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "0")]
     device_id: usize,
 
+    #[builder(default = "String::from(\"cuda\")")]
+    device_type: String,
+
     #[builder(default = "2")]
     dtype_width_bytes: usize,
 
@@ -437,7 +447,7 @@ impl KvbmWorker {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
         }
 
-        let (device_tensors, shape) = load_and_validate_tensors(&config.tensors, config.device_id)?;
+        let (device_tensors, shape) = load_and_validate_tensors(&config.tensors, config.device_id, &config.device_type)?;
 
         if shape.len() < 3 {
             return Err(anyhow::anyhow!(format!(
