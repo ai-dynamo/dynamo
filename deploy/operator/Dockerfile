@@ -21,7 +21,6 @@ WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
-# The shared snapshot module comes from a named build context.
 COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
