@@ -83,6 +83,31 @@ async def test_extract_multimodal_data_merges_image_embeddings_with_video():
 
 
 @pytest.mark.asyncio
+async def test_extract_multimodal_data_uses_remote_video_embeddings_when_available():
+    handler = _make_handler()
+    video_mm_data = {
+        "video": {
+            "video_embeds": object(),
+            "video_grid_thw": object(),
+            "timestamps": [[0.0, 1.0]],
+        }
+    }
+    handler.embedding_loader = SimpleNamespace(
+        load_video_embeddings=AsyncMock(return_value=video_mm_data)
+    )
+
+    result = await handler._extract_multimodal_data(
+        {"multi_modal_data": {"video_url": [{"Url": "https://example.com/video.mp4"}]}},
+        "req-remote-video",
+        context=None,
+    )
+
+    assert result is not None
+    assert result["video"] is video_mm_data["video"]
+    handler.video_loader.load_video_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_extract_multimodal_data_falls_back_to_image_loader_for_decoded_images():
     handler = _make_handler()
     image = object()

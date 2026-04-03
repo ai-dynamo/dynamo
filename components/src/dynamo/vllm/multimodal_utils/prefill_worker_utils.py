@@ -66,29 +66,49 @@ def _accumulate_embeddings(
     model: str,
     embeddings_dtype: torch.dtype,
     embeddings: torch.Tensor,
-    image_grid_thw,
+    *,
+    modality: str,
+    grid_thw,
+    timestamps: list[list[float]] | None = None,
 ) -> None:
     """Construct model-specific mm_data from embeddings and merge into the
     accumulated ``multi_modal_data`` dict (mutated in-place).
 
-    Handles both video (numpy conversion) and image modalities, including
-    the Qwen-VL dict-style embeddings with ``image_embeds`` + ``image_grid_thw``.
+    Handles both image and video modalities, including the Qwen-VL dict-style
+    embedding inputs.
     """
-    if "video" in model.lower():
-        video_numpy = embeddings.numpy()
+    if modality == "video":
         mm_data = construct_mm_data(
             model,
             embeddings_dtype,
-            video_numpy=video_numpy,
+            video_embeds=embeddings,
+            video_grid_thw=grid_thw,
+            timestamps=timestamps,
         )
-        multi_modal_data["video"].append(mm_data["video"])
+        if "video" not in multi_modal_data:
+            multi_modal_data["video"] = mm_data["video"]
+            return
+
+        multi_modal_data["video"]["video_embeds"] = torch.cat(
+            (
+                multi_modal_data["video"]["video_embeds"],
+                mm_data["video"]["video_embeds"],
+            )
+        )
+        multi_modal_data["video"]["video_grid_thw"] = torch.cat(
+            (
+                multi_modal_data["video"]["video_grid_thw"],
+                mm_data["video"]["video_grid_thw"],
+            )
+        )
+        multi_modal_data["video"]["timestamps"].extend(mm_data["video"]["timestamps"])
         return
 
     mm_data = construct_mm_data(
         model,
         embeddings_dtype,
         image_embeds=embeddings,
-        image_grid_thw=image_grid_thw,
+        image_grid_thw=grid_thw,
     )
 
     if "image" not in multi_modal_data:
@@ -133,15 +153,37 @@ def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
     elif isinstance(img, torch.Tensor):
         multi_modal_data["image"] = img.clone()
 
+    vid = multi_modal_data.get("video")
+    if isinstance(vid, dict):
+        for k, v in vid.items():
+            if isinstance(v, torch.Tensor):
+                vid[k] = v.clone()
+
+
+def _get_cache_key(mm_input: MultiModalInput) -> str:
+    if mm_input.image_url is not None:
+        return get_embedding_hash(mm_input.image_url)
+    if mm_input.video_url is not None:
+        # TODO: Include sampling/processor knobs in the cache key if those
+        # become configurable per request.
+        return get_embedding_hash(f"video::{mm_input.video_url}")
+    raise ValueError("A multimodal input URL is required.")
+
+
+def _group_modality(group: MultiModalGroup) -> str:
+    if group.video_grid_thw is not None:
+        return "video"
+    return "image"
+
 
 async def _fetch_from_encode_workers(
     encode_worker_client: Client,
-    image_urls: List[str],
+    multimodal_inputs: List[MultiModalInput],
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     context=None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
-    """Fan out image URLs to encode workers, load embeddings, and return ready groups.
+    """Fan out multimodal URLs to encode workers, load embeddings, and return ready groups.
 
     For NIXL receivers the returned embeddings are zero-copy views into
     pre-allocated buffers.  The returned ``_PendingRelease`` must be
@@ -152,9 +194,9 @@ async def _fetch_from_encode_workers(
         raise RuntimeError("No encode workers available to process multimodal input")
 
     encode_batch_size = (
-        max(1, len(image_urls) // encode_worker_count)
+        max(1, len(multimodal_inputs) // encode_worker_count)
         if SPLIT_ENCODE
-        else len(image_urls)
+        else len(multimodal_inputs)
     )
 
     encode_request = vLLMMultimodalRequest(
@@ -167,9 +209,7 @@ async def _fetch_from_encode_workers(
     with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
         batch: List[MultiModalGroup] = []
         encode_response_streams = []
-        for url in image_urls:
-            multimodal_input = MultiModalInput()
-            multimodal_input.image_url = url
+        for multimodal_input in multimodal_inputs:
             batch.append(MultiModalGroup(multimodal_input=multimodal_input))
 
             if len(batch) >= encode_batch_size:
@@ -220,7 +260,7 @@ async def _fetch_from_encode_workers(
 
 async def _fetch_embeddings(
     encode_worker_client: Client,
-    image_urls: list[str],
+    multimodal_inputs: list[MultiModalInput],
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
@@ -236,32 +276,36 @@ async def _fetch_embeddings(
     returned ``_PendingRelease`` must be released after consuming the
     tensors.
     """
-    results: list[MultiModalGroup | None] = [None] * len(image_urls)
-    to_fetch: list[tuple[int, str, str | None]] = []
+    results: list[MultiModalGroup | None] = [None] * len(multimodal_inputs)
+    to_fetch: list[tuple[int, MultiModalInput, str | None]] = []
 
     # ── 1. Check cache (no-op when cache is None) ────────────────────
-    for idx, url in enumerate(image_urls):
+    for idx, mm_input in enumerate(multimodal_inputs):
         if cache is not None:
-            key = get_embedding_hash(url)
+            key = _get_cache_key(mm_input)
             cached = cache.get(key)
             if cached is not None:
-                logger.debug(f"[{request_id}] Cache hit for URL index {idx}")
+                logger.debug(
+                    f"[{request_id}] Cache hit for multimodal input index {idx}"
+                )
                 results[idx] = MultiModalGroup(
                     loaded_embedding=cached.tensor,
                     image_grid_thw=cached.image_grid_thw,
+                    video_grid_thw=cached.video_grid_thw,
+                    timestamps=cached.timestamps,
                 )
                 continue
         else:
             key = None
-        to_fetch.append((idx, url, key))
+        to_fetch.append((idx, mm_input, key))
 
     # ── 2. Fetch uncached from encode workers ────────────────────────
     pending: _PendingRelease | None = None
     if to_fetch:
-        miss_urls = [url for _, url, _ in to_fetch]
+        miss_inputs = [mm_input for _, mm_input, _ in to_fetch]
         groups, pending = await _fetch_from_encode_workers(
             encode_worker_client,
-            miss_urls,
+            miss_inputs,
             request_id,
             receiver,
             context=context,
@@ -269,7 +313,7 @@ async def _fetch_embeddings(
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
 
-        for (idx, _url, key), group in zip(to_fetch, groups, strict=True):
+        for (idx, _mm_input, key), group in zip(to_fetch, groups, strict=True):
             if cache is not None and key is not None:
                 assert group.loaded_embedding is not None
                 cache.set(
@@ -277,6 +321,8 @@ async def _fetch_embeddings(
                     CachedEmbedding(
                         tensor=group.loaded_embedding.clone(),
                         image_grid_thw=group.image_grid_thw,
+                        video_grid_thw=group.video_grid_thw,
+                        timestamps=group.timestamps,
                     ),
                 )
             results[idx] = group
@@ -318,9 +364,45 @@ class MultiModalEmbeddingLoader:
         if self._encode_worker_client is None or not image_urls:
             return {}
 
+        multimodal_inputs = [MultiModalInput(image_url=url) for url in image_urls]
+        return await self._load_embedding_groups(
+            multimodal_inputs,
+            request_id,
+            model=model,
+            context=context,
+        )
+
+    async def load_video_embeddings(
+        self,
+        video_urls: list[str],
+        request_id: str,
+        *,
+        model: str,
+        context=None,
+    ) -> Dict[str, Any]:
+        """Fetch remote video embeddings and build engine-ready ``multi_modal_data``."""
+        if self._encode_worker_client is None or not video_urls:
+            return {}
+
+        multimodal_inputs = [MultiModalInput(video_url=url) for url in video_urls]
+        return await self._load_embedding_groups(
+            multimodal_inputs,
+            request_id,
+            model=model,
+            context=context,
+        )
+
+    async def _load_embedding_groups(
+        self,
+        multimodal_inputs: list[MultiModalInput],
+        request_id: str,
+        *,
+        model: str,
+        context=None,
+    ) -> Dict[str, Any]:
         groups, pending = await _fetch_embeddings(
             self._encode_worker_client,
-            image_urls,
+            multimodal_inputs,
             request_id,
             self._receiver,
             cache=self._embedding_cache_manager,
@@ -338,7 +420,11 @@ class MultiModalEmbeddingLoader:
                     model,
                     group.loaded_embedding.dtype,
                     group.loaded_embedding,
-                    group.image_grid_thw,
+                    modality=_group_modality(group),
+                    grid_thw=group.video_grid_thw
+                    if group.video_grid_thw is not None
+                    else group.image_grid_thw,
+                    timestamps=group.timestamps,
                 )
 
         if pending is not None:

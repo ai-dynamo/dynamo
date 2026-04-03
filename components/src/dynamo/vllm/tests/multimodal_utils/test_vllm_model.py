@@ -7,7 +7,10 @@
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.model import construct_qwen_decode_mm_data
+from dynamo.vllm.multimodal_utils.model import (
+    construct_qwen_decode_mm_data,
+    construct_qwen_decode_video_mm_data,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -41,3 +44,18 @@ class TestMultiModalUtils:
             )
             # Embedding values are randomly genearted as placehodler, we only check the shape
             assert mm_data["image"]["image_embeds"].shape == (2, 1024)
+
+    def test_construct_qwen_decode_video_mm_data(self):
+        mm_data = construct_qwen_decode_video_mm_data(
+            video_grid_thw=[[16, 16, 16]],
+            embeddings_shape=[1024, 1024],
+            timestamps=[[0.0] * 16],
+            request_id="video-0",
+        )
+
+        assert "video" in mm_data
+        assert torch.equal(
+            mm_data["video"]["video_grid_thw"], torch.tensor([[16, 16, 16]])
+        )
+        assert mm_data["video"]["video_embeds"].shape == (1024, 1024)
+        assert mm_data["video"]["timestamps"] == [[0.0] * 16]

@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 class CachedEmbedding(NamedTuple):
     tensor: torch.Tensor
     image_grid_thw: list | None = None
+    video_grid_thw: list | None = None
+    timestamps: list[list[float]] | None = None
 
 
 class MultimodalEmbeddingCacheManager:

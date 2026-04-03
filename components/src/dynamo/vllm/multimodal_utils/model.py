@@ -192,10 +192,16 @@ def construct_mm_data(
     model: str,
     embeddings_dtype: torch.dtype,
     image_embeds: Optional[torch.Tensor] = None,
-    video_numpy: Optional[Any] = None,
     image_grid_thw: Optional[List[Any]] = None,
+    video_embeds: Optional[torch.Tensor] = None,
+    video_grid_thw: Optional[List[Any]] = None,
+    timestamps: Optional[List[List[float]]] = None,
+    video_numpy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
+
+    if video_embeds is not None:
+        return _construct_qwen_video_data(video_embeds, video_grid_thw, timestamps)
 
     if video_numpy is not None:
         return {"video": video_numpy}
@@ -229,6 +235,50 @@ def _construct_qwen_image_data(
             "image_grid_thw": grid_thw_tensor,
         }
     }
+
+
+def _construct_qwen_video_data(
+    video_embeds: torch.Tensor,
+    video_grid_thw: Optional[List[Any]],
+    timestamps: Optional[List[List[float]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Construct video data specifically for Qwen models."""
+    if video_grid_thw is None or len(video_grid_thw) == 0:
+        raise ValueError("No video grid provided for Qwen model.")
+    if timestamps is None or len(timestamps) == 0:
+        raise ValueError("timestamps are required for Qwen video embeddings.")
+
+    grid_thw_tensor = torch.tensor(video_grid_thw)
+    video_embeds = video_embeds.squeeze(0) if video_embeds.ndim == 3 else video_embeds
+
+    return {
+        "video": {
+            "video_embeds": video_embeds,
+            "video_grid_thw": grid_thw_tensor,
+            "timestamps": timestamps,
+        }
+    }
+
+
+_placeholder_counter: int = 0
+
+
+def _next_placeholder_fill(dtype: torch.dtype = torch.float16) -> int:
+    """Return a monotonically increasing fill value for placeholder embeddings.
+
+    Used by disaggregated decode to generate unique placeholder tensors that
+    prevent incorrect prefix cache matches between requests with identical
+    grid dimensions.
+    """
+    global _placeholder_counter
+    fill_value = _placeholder_counter
+    _placeholder_counter += 1
+    max_val = (
+        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    )
+    if _placeholder_counter > max_val:
+        _placeholder_counter = 0
+    return fill_value
 
 
 def construct_qwen_decode_mm_data(
@@ -270,19 +320,7 @@ def construct_qwen_decode_mm_data(
     if embeddings_shape is None:
         raise ValueError("embeddings_shape is required for Qwen decode mm data.")
 
-    # WAR: Use request_id hash as seed for unique placeholder values.
-    # This prevents prefix cache from incorrectly matching different images
-    # that happen to have the same dimensions (same image_grid_thw).
-    # bit ops to convert request ID to somewhat unique value that fits in the dtype range
-    if not hasattr(construct_qwen_decode_mm_data, "_counter"):
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
-    fill_value = construct_qwen_decode_mm_data._counter  # type: ignore[attr-defined]
-    construct_qwen_decode_mm_data._counter += 1  # type: ignore[attr-defined]
-    max_val = (
-        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
-    )
-    if construct_qwen_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+    fill_value = _next_placeholder_fill(dtype)
     image_embeds = torch.full(
         embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )
@@ -293,5 +331,37 @@ def construct_qwen_decode_mm_data(
         "image": {
             "image_embeds": image_embeds,
             "image_grid_thw": torch.tensor(image_grid_thw),
+        }
+    }
+
+
+def construct_qwen_decode_video_mm_data(
+    video_grid_thw: Optional[List[Any]],
+    embeddings_shape: Optional[Any],
+    timestamps: Optional[List[List[float]]],
+    request_id: str,
+    *,
+    dtype: torch.dtype = torch.float16,
+) -> Dict[str, Dict[str, Any]]:
+    """Construct schema-valid Qwen video data for vLLM v1 disagg decode."""
+    if video_grid_thw is None or len(video_grid_thw) == 0:
+        raise ValueError("video_grid_thw is required for Qwen video decode mm data.")
+    if embeddings_shape is None:
+        raise ValueError("embeddings_shape is required for Qwen video decode mm data.")
+    if timestamps is None or len(timestamps) == 0:
+        raise ValueError("timestamps are required for Qwen video decode mm data.")
+
+    fill_value = _next_placeholder_fill(dtype)
+    video_embeds = torch.full(
+        embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
+    )
+    if video_embeds.ndim == 3:
+        video_embeds = video_embeds.squeeze(0)
+
+    return {
+        "video": {
+            "video_embeds": video_embeds,
+            "video_grid_thw": torch.tensor(video_grid_thw),
+            "timestamps": timestamps,
         }
     }
