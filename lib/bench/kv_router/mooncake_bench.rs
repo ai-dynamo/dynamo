@@ -5,16 +5,23 @@
 mod common;
 use common::*;
 
+
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+use dynamo_kv_router::indexer::{
+    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ShardSizeSnapshot,
+};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
-    ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
+    ThreadPoolIndexer,
 };
 use dynamo_mocker::loadgen::Trace;
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +55,31 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Branch-sharded CRTC: N independent CRTC shards assigned via an explicit routing
+    /// table keyed on the first K block hashes. New branches are assigned to the
+    /// least-loaded shard. find_matches touches exactly ONE shard (no scatter-gather).
+    /// Unknown branch keys return empty scores immediately without any dispatch.
+    BranchShardedCrtc {
+        /// Number of independent CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads per shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Number of prefix blocks hashed to identify a branch. K=2 is the
+        /// recommended default: depth=1 often produces too few distinct branch
+        /// keys, while depth=2 gives a much larger set of distinguishable branches.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
+
+        /// Number of OS threads per shard dedicated to find_matches (read isolation).
+        /// 0 (default): reads run inline on the calling tokio thread.
+        #[clap(long, default_value = "0")]
+        num_read_threads_per_shard: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -77,6 +109,27 @@ impl IndexerArgs {
                     block_size,
                 ))
             }
+            IndexerArgs::BranchShardedCrtc {
+                num_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+                num_read_threads_per_shard: _,
+            } => {
+                let shards = (0..num_shards)
+                    .map(|_| {
+                        ThreadPoolIndexer::new(
+                            ConcurrentRadixTreeCompressed::new(),
+                            num_event_workers_per_shard,
+                            block_size,
+                        )
+                    })
+                    .collect();
+                Arc::new(BranchShardedIndexer::new_with_options(
+                    shards,
+                    prefix_depth,
+                    block_size,
+                ))
+            }
         }
     }
 
@@ -87,7 +140,10 @@ impl IndexerArgs {
     fn is_multi_threaded(name: &str) -> bool {
         matches!(
             name,
-            "nested-map" | "concurrent-radix-tree" | "concurrent-radix-tree-compressed"
+            "nested-map"
+                | "concurrent-radix-tree"
+                | "concurrent-radix-tree-compressed"
+                | "branch-sharded-crtc"
         )
     }
 
@@ -110,9 +166,16 @@ impl IndexerArgs {
             "concurrent-radix-tree-compressed" => IndexerArgs::ConcurrentRadixTreeCompressed {
                 num_event_workers: nw,
             },
+            "branch-sharded-crtc" => IndexerArgs::BranchShardedCrtc {
+                num_shards: 2,
+                num_event_workers_per_shard: nw,
+                prefix_depth: 2,
+                num_read_threads_per_shard: 0,
+            },
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, \
-                 nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed",
+                "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
+                 nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, \
+                 branch-sharded-crtc",
                 name
             ),
         };
@@ -143,6 +206,23 @@ struct Args {
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
+
+    /// Number of additional concurrent tokio tasks that issue find_matches in a
+    /// tight loop to stress the read path.  These tasks run alongside the normal
+    /// trace-replay workers.  Set to 0 (default) to disable.
+    #[clap(long, default_value = "0")]
+    find_matches_concurrency: usize,
+
+    /// Output path for the shard-size CSV produced when `shard-metrics` feature
+    /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
+    /// An SVG plot is written alongside it (<path>.svg).
+    /// Omit or leave empty to disable shard-size sampling.
+    #[clap(long, default_value = "")]
+    shard_metrics_csv: String,
+
+    /// How often (ms) to sample shard sizes when `--shard-metrics-csv` is set.
+    #[clap(long, default_value = "200")]
+    shard_metrics_interval_ms: u64,
 
     /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
@@ -219,6 +299,193 @@ struct SweepStepResult {
     results: BenchmarkResults,
 }
 
+// ---------------------------------------------------------------------------
+// Shard-size sampling (always compiled; only called when a CSV path is given)
+// ---------------------------------------------------------------------------
+
+/// A single row in the shard-size time-series CSV.
+#[derive(Clone)]
+struct ShardSampleRow {
+    elapsed_ms: u64,
+    snapshot: ShardSizeSnapshot,
+}
+
+/// Spawn a background tokio task that samples `indexer.shard_sizes()` every
+/// `interval_ms` milliseconds until `cancel` is triggered.
+///
+/// Returns a `JoinHandle` that resolves to all collected samples.
+fn start_shard_sampler(
+    indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
+    interval_ms: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<Vec<ShardSampleRow>> {
+    tokio::spawn(async move {
+        let mut rows = Vec::new();
+        let start = Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    for snap in indexer.shard_sizes() {
+                        rows.push(ShardSampleRow { elapsed_ms, snapshot: snap });
+                    }
+                }
+                _ = cancel.cancelled() => break,
+            }
+        }
+        rows
+    })
+}
+
+/// Write the collected shard-size samples to a CSV file.
+fn write_shard_metrics_csv(rows: &[ShardSampleRow], path: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(
+        f,
+        "elapsed_ms,shard_idx,worker_count,block_count,node_count"
+    )?;
+    for r in rows {
+        writeln!(
+            f,
+            "{},{},{},{},{}",
+            r.elapsed_ms,
+            r.snapshot.shard_idx,
+            r.snapshot.worker_count,
+            r.snapshot.block_count,
+            r.snapshot.node_count,
+        )?;
+    }
+    println!("Shard metrics CSV written to {path}");
+    Ok(())
+}
+
+/// Plot per-shard `worker_count` and `block_count` over time and write an SVG.
+///
+/// Draws two panels stacked vertically:
+/// - Top: workers per shard over time
+/// - Bottom: blocks per shard over time
+///
+/// Each shard gets a distinct colour; shards are identified by their `shard_idx`.
+fn plot_shard_metrics(rows: &[ShardSampleRow], svg_path: &str) -> anyhow::Result<()> {
+    use plotters::prelude::*;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    // Collect the set of shard indices present.
+    let mut shard_indices: Vec<usize> = rows.iter().map(|r| r.snapshot.shard_idx).collect();
+    shard_indices.sort_unstable();
+    shard_indices.dedup();
+
+    let max_elapsed = rows.iter().map(|r| r.elapsed_ms).max().unwrap_or(1);
+    let max_workers = rows
+        .iter()
+        .map(|r| r.snapshot.worker_count)
+        .max()
+        .unwrap_or(1);
+    let max_blocks = rows
+        .iter()
+        .map(|r| r.snapshot.block_count)
+        .max()
+        .unwrap_or(1);
+
+    let colors: Vec<RGBColor> = vec![
+        RGBColor(31, 119, 180),
+        RGBColor(255, 127, 14),
+        RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40),
+        RGBColor(148, 103, 189),
+        RGBColor(140, 86, 75),
+    ];
+
+    let root = SVGBackend::new(svg_path, (900, 700)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let (upper, lower) = root.split_vertically(350);
+
+    // --- Top panel: workers per shard ---
+    let mut chart = ChartBuilder::on(&upper)
+        .caption("Workers per shard over time", ("sans-serif", 18))
+        .margin(15)
+        .x_label_area_size(30)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0u64..max_elapsed, 0usize..max_workers + 1)?;
+    chart
+        .configure_mesh()
+        .x_desc("Elapsed (ms)")
+        .y_desc("Workers")
+        .draw()?;
+
+    for (i, &shard_idx) in shard_indices.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let points: Vec<(u64, usize)> = rows
+            .iter()
+            .filter(|r| r.snapshot.shard_idx == shard_idx)
+            .map(|r| (r.elapsed_ms, r.snapshot.worker_count))
+            .collect();
+        let label = format!("shard {shard_idx}");
+        chart
+            .draw_series(LineSeries::new(points, &color))?
+            .label(label)
+            .legend(move |(x, y)| {
+                plotters::element::PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    color.stroke_width(2),
+                )
+            });
+    }
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()?;
+
+    // --- Bottom panel: blocks per shard ---
+    let mut chart2 = ChartBuilder::on(&lower)
+        .caption("Blocks per shard over time", ("sans-serif", 18))
+        .margin(15)
+        .x_label_area_size(30)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0u64..max_elapsed, 0usize..max_blocks + 1)?;
+    chart2
+        .configure_mesh()
+        .x_desc("Elapsed (ms)")
+        .y_desc("Cached blocks")
+        .draw()?;
+
+    for (i, &shard_idx) in shard_indices.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let points: Vec<(u64, usize)> = rows
+            .iter()
+            .filter(|r| r.snapshot.shard_idx == shard_idx)
+            .map(|r| (r.elapsed_ms, r.snapshot.block_count))
+            .collect();
+        let label = format!("shard {shard_idx}");
+        chart2
+            .draw_series(LineSeries::new(points, &color))?
+            .label(label)
+            .legend(move |(x, y)| {
+                plotters::element::PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    color.stroke_width(2),
+                )
+            });
+    }
+    chart2
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()?;
+
+    root.present()?;
+    println!("Shard metrics plot written to {svg_path}");
+    Ok(())
+}
+
 /// Run the benchmark: replay each worker's merged trace against the indexer,
 /// measuring find_matches latency and event processing throughput.
 ///
@@ -231,6 +498,7 @@ async fn run_benchmark(
     args: &Args,
     benchmark_duration_ms: u64,
     count_events: bool,
+    find_matches_concurrency: usize,
 ) -> anyhow::Result<BenchmarkResults> {
     let worker_traces = prepare_worker_traces(artifacts, benchmark_duration_ms);
     let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
@@ -319,10 +587,56 @@ async fn run_benchmark(
         }
     }
 
+    // Spawn additional concurrent find_matches callers if requested.
+    // These tasks run alongside the trace-replay workers to stress the read path.
+    let fm_stop = Arc::new(AtomicBool::new(false));
+    let mut fm_tasks = Vec::new();
+    if find_matches_concurrency > 0 {
+        // Collect all request sequences as a pool for random selection.
+        let seq_pool: Arc<Vec<Vec<LocalBlockHash>>> = Arc::new(
+            worker_traces
+                .iter()
+                .flat_map(|t| t.iter())
+                .filter_map(|entry| match &entry.entry {
+                    WorkerTraceEntry::Request(hashes) => Some(hashes.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
+
+        if !seq_pool.is_empty() {
+            for task_id in 0..find_matches_concurrency {
+                let indexer = indexer.clone();
+                let pool = Arc::clone(&seq_pool);
+                let stop = Arc::clone(&fm_stop);
+                fm_tasks.push(tokio::spawn(async move {
+                    let mut latencies = Vec::new();
+                    let mut idx = task_id % pool.len();
+                    while !stop.load(Ordering::Relaxed) {
+                        let seq = pool[idx].clone();
+                        let start = minstant::Instant::now();
+                        let _ = indexer.find_matches(seq).await;
+                        latencies.push(start.elapsed().as_nanos() as u64);
+                        idx = (idx + 1) % pool.len();
+                    }
+                    latencies
+                }));
+            }
+        }
+    }
+
     let mut latencies = Vec::new();
 
     for task in tasks {
         latencies.extend(task.await??);
+    }
+
+    // Signal concurrent find_matches callers to stop and collect their latencies.
+    fm_stop.store(true, Ordering::Relaxed);
+    for task in fm_tasks {
+        if let Ok(fm_latencies) = task.await {
+            latencies.extend(fm_latencies);
+        }
     }
 
     if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
@@ -389,10 +703,13 @@ async fn run_benchmark(
     };
 
     println!(
-        "Ops Throughput: {} ops/s (requests + events)",
-        ops_throughput
+        "Offered Ops Throughput: {} ops/s | Achieved: {} ops/s (requests + events)",
+        offered_ops_throughput as u64, ops_throughput as u64,
     );
-    println!("Block Throughput: {} block ops/s", block_throughput);
+    println!(
+        "Offered Block Throughput: {} block ops/s | Achieved: {} block ops/s",
+        offered_block_throughput as u64, block_throughput as u64,
+    );
     println!("Latency p99: {}us", latency_p99_us);
 
     Ok(BenchmarkResults {
@@ -543,6 +860,7 @@ async fn main() -> anyhow::Result<()> {
             IndexerArgs::NestedMap { .. } => "nested-map",
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
             IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",
+            IndexerArgs::BranchShardedCrtc { .. } => "branch-sharded-crtc",
         };
         vec![name.to_string()]
     } else {
@@ -640,6 +958,23 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
         println!("Sweep results saved to {}", json_path);
     } else {
+        // Pre-compute worker traces once and drop the raw traces/events to free
+        // memory before benchmarking. This avoids holding both the expanded
+        // trace data and the derived worker_traces simultaneously, which is
+        // especially important when --trace-length-factor is large.
+        let worker_traces = prepare_worker_traces(
+            &traces,
+            &events,
+            args.common.block_size,
+            args.common.benchmark_duration_ms,
+            args.common.trace_simulation_duration_ms,
+        )
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+        drop(traces);
+        drop(events);
+
         for name in &indexer_names {
             println!("\nBenchmarking indexer: {}", name);
             let indexer = if args.compare.is_empty() {
@@ -648,14 +983,82 @@ async fn main() -> anyhow::Result<()> {
                 IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
             };
             let count_events = IndexerArgs::supports_remove(name);
+
+            // Start shard-size sampler if a CSV path was provided.
+            let shard_cancel = CancellationToken::new();
+            let shard_sampler = if !args.shard_metrics_csv.is_empty() {
+                Some(start_shard_sampler(
+                    indexer.clone(),
+                    args.shard_metrics_interval_ms,
+                    shard_cancel.clone(),
+                ))
+            } else {
+                None
+            };
+
             run_benchmark(
                 indexer,
                 artifacts.clone(),
                 &args,
                 args.common.benchmark_duration_ms,
                 count_events,
+                args.find_matches_concurrency,
             )
             .await?;
+
+            // Stop sampler and write CSV + plot.
+            shard_cancel.cancel();
+            if let Some(handle) = shard_sampler {
+                let rows = handle.await?;
+                // In compare mode, prefix the indexer name to distinguish outputs.
+                let csv_path = if args.compare.len() > 1 {
+                    let stem = args.shard_metrics_csv.trim_end_matches(".csv");
+                    format!("{stem}_{name}.csv")
+                } else {
+                    args.shard_metrics_csv.clone()
+                };
+                write_shard_metrics_csv(&rows, &csv_path)?;
+                let svg = format!("{}.svg", csv_path.trim_end_matches(".csv"));
+                plot_shard_metrics(&rows, &svg)?;
+            }
+
+            let report = indexer.timing_report();
+            if !report.is_empty() {
+                println!("{}", report);
+            }
+            let sizes = indexer.shard_sizes();
+            if sizes.len() > 1 {
+                let total_blocks: usize = sizes.iter().map(|s| s.block_count).sum();
+                let total_nodes: usize = sizes.iter().map(|s| s.node_count).sum();
+                println!("Shard block distribution:");
+                for s in &sizes {
+                    let pct = if total_blocks > 0 {
+                        100.0 * s.block_count as f64 / total_blocks as f64
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "  shard {}: {} blocks ({:.1}%), {} workers, {} nodes",
+                        s.shard_idx, s.block_count, pct, s.worker_count, s.node_count
+                    );
+                }
+                if total_nodes > 0 {
+                    println!("  total nodes across shards: {}", total_nodes);
+                }
+            }
+
+            let mut edge_lengths = indexer.node_edge_lengths();
+            if !edge_lengths.is_empty() {
+                let avg = edge_lengths.iter().sum::<usize>() as f64 / edge_lengths.len() as f64;
+                edge_lengths.sort_unstable();
+                let p99 = edge_lengths[edge_lengths.len() * 99 / 100];
+                println!(
+                    "Node edge lengths ({} nodes): avg={:.1} hashes/node, p99={} hashes/node",
+                    edge_lengths.len(),
+                    avg,
+                    p99,
+                );
+            }
         }
     }
 

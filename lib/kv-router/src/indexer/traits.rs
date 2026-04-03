@@ -8,6 +8,23 @@ use std::sync::Arc;
 use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
 
+/// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
+///
+/// `worker_count` and `block_count` are always populated.
+/// `node_count` is populated only when the `shard-metrics` feature is enabled
+/// on the `dynamo-kv-router` crate; otherwise it is `0`.
+#[derive(Debug, Clone)]
+pub struct ShardSizeSnapshot {
+    /// Zero-based shard index.
+    pub shard_idx: usize,
+    /// Distinct `(worker_id, dp_rank)` pairs stored in this shard.
+    pub worker_count: usize,
+    /// Total cached blocks across all workers in this shard.
+    pub block_count: usize,
+    /// Radix-tree node count (only non-zero with `shard-metrics` feature).
+    pub node_count: usize,
+}
+
 #[async_trait]
 pub trait KvIndexerInterface {
     /// Find matches for a given sequence of `LocalBlockHash`es.
@@ -93,6 +110,32 @@ pub trait KvIndexerInterface {
     /// Returns the amount of events still in the queue at the time of the flush.
     /// Used primarily for debugging.
     async fn flush(&self) -> usize;
+
+    /// Return a human-readable timing breakdown of `find_matches` overhead.
+    ///
+    /// Implementations that track per-phase timing (e.g. scatter/gather overhead
+    /// vs. actual shard work) override this to return a multi-line report string.
+    /// The default returns an empty string so callers can skip printing it.
+    fn timing_report(&self) -> String {
+        String::new()
+    }
+
+    /// Return a size snapshot for each shard.
+    ///
+    /// Single-shard indexers return one entry (shard 0).  Multi-shard indexers
+    /// return one entry per shard.  Non-sharded indexers (and implementations
+    /// that don't override this) return an empty `Vec`.
+    ///
+    /// See [`ShardSizeSnapshot`] for the fields exposed per shard.
+    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        vec![]
+    }
+
+    /// Edge lengths (hashes per node) for every non-root node.
+    /// Returns an empty vec for backends that don't support this.
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        vec![]
+    }
 }
 
 // ============================================================================
@@ -124,5 +167,27 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None
+    }
+
+    /// Number of distinct workers registered in this backend.
+    fn worker_count(&self) -> usize {
+        0
+    }
+
+    /// Total cached blocks across all workers.
+    fn block_count(&self) -> usize {
+        0
+    }
+
+    /// Number of radix-tree nodes created since construction.
+    /// Only meaningful when the `shard-metrics` feature is enabled; returns 0 otherwise.
+    fn node_count(&self) -> usize {
+        0
+    }
+
+    /// Edge lengths (hashes per node) for every non-root node in the tree.
+    /// Returns an empty vec for backends that don't support this.
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        vec![]
     }
 }

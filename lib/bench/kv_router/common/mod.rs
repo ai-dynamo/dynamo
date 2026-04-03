@@ -42,11 +42,11 @@ pub struct CommonArgs {
     pub test: bool,
 
     /// Number of GPU blocks available in the mock engine's KV cache.
-    #[clap(long, default_value = "1048576")]
+    #[clap(long, default_value = "16384")]
     pub num_gpu_blocks: usize,
 
     /// Number of tokens per KV cache block.
-    #[clap(long, default_value = "512")]
+    #[clap(long, default_value = "128")]
     pub block_size: u32,
 
     /// Wall-clock duration (ms) over which the trace is replayed during event generation.
@@ -58,7 +58,7 @@ pub struct CommonArgs {
     pub benchmark_duration_ms: u64,
 
     /// Number of unique simulated inference workers.
-    #[clap(short, long, default_value = "256")]
+    #[clap(short, long, default_value = "1000")]
     pub num_unique_inference_workers: usize,
 
     /// How many times to duplicate unique workers during the benchmark phase.
@@ -124,10 +124,19 @@ pub struct MooncakeRequest {
     #[serde(default)]
     pub input_length: usize,
     pub hash_ids: Vec<u64>,
+    #[serde(alias = "output_length", alias = "osl")]
     pub output_length: u64,
 }
 
+
+
 /// Load the mooncake trace from disk into a flat list of requests.
+///
+/// Supports two JSONL formats:
+///   - Legacy: every record has an integer `timestamp` field (absolute ms).
+///   - aiperf: first record has `timestamp` (float), subsequent records have
+///     `delay` (float ms since previous). Absolute timestamps are reconstructed
+///     by accumulating delays.
 pub fn load_mooncake_trace(path: &str) -> anyhow::Result<Vec<MooncakeRequest>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -136,8 +145,23 @@ pub fn load_mooncake_trace(path: &str) -> anyhow::Result<Vec<MooncakeRequest>> {
     let progress = make_progress_bar(None);
 
     let mut requests = Vec::new();
+    let mut cursor_ms: f64 = 0.0;
+
     for line in reader.lines() {
-        requests.push(serde_json::from_str::<MooncakeRequest>(&line?)?);
+        let raw: RawMooncakeRecord = serde_json::from_str(&line?)?;
+
+        if let Some(ts) = raw.timestamp {
+            cursor_ms = ts;
+        } else if let Some(d) = raw.delay {
+            cursor_ms += d;
+        }
+
+        requests.push(MooncakeRequest {
+            uuid: Uuid::new_v4(),
+            timestamp: cursor_ms as u64,
+            hash_ids: raw.hash_ids,
+            output_length: raw.output_length,
+        });
         progress.inc(1);
     }
 
@@ -154,6 +178,14 @@ pub fn partition_trace(
     let mut traces: Vec<Vec<MooncakeRequest>> = (0..num_workers).map(|_| Vec::new()).collect();
     for request in requests {
         traces[rng.random_range(0..num_workers)].push(request);
+    }
+    // Sort each worker's trace by timestamp so that scale_mooncake_trace and
+    // generate_kv_events see monotonically increasing timestamps.  Without this,
+    // mixing requests from multiple sessions (each starting at timestamp=0) into
+    // one worker produces non-monotonic sequences; u64 underflow in the delta
+    // computation then creates sleep durations measured in centuries.
+    for trace in &mut traces {
+        trace.sort_by_key(|r| r.timestamp);
     }
     traces
 }
