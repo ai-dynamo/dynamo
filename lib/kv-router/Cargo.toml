@@ -12,6 +12,11 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[[bin]]
+name = "standalone_indexer_blackhole_publisher"
+path = "src/bin/standalone_indexer_blackhole_publisher.rs"
+required-features = ["standalone-indexer"]
+
 [features]
 default = []
 metrics = ["dep:prometheus"]
