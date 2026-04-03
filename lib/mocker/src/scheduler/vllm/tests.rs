@@ -215,6 +215,10 @@ mod core_behavior {
         assert_eq!(pass.admissions.len(), 2);
         assert!(admitted.contains(&r1));
         assert!(admitted.contains(&r2));
+        assert!(first.first_admit_ms.is_some(), "r1 should have been admitted");
+        assert!(second.first_admit_ms.is_some(), "r2 should have been admitted");
+        assert!(first.first_token_ms.is_some(), "r1 should have emitted a token");
+        assert!(second.first_token_ms.is_some(), "r2 should have emitted a token");
         assert_eq!(first.first_admit_ms, second.first_admit_ms);
         assert_eq!(first.first_token_ms, second.first_token_ms);
     }
