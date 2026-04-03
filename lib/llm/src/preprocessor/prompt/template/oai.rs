@@ -485,18 +485,15 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         };
         let rendered = tmpl.render(&ctx)?;
 
-        // Debug: log rendered prompt (last 500 chars to see generation prompt + thinking tags)
+        // Log rendered prompt length at debug; full content only at trace to avoid leaking PII.
         // Use floor_char_boundary to avoid splitting multibyte UTF-8 characters (e.g. '…', Chinese)
-        let prompt_tail = {
-            let safe_start = rendered.floor_char_boundary(rendered.len().saturating_sub(500));
-            &rendered[safe_start..]
-        };
-        tracing::debug!(
-            chat_template_args = ?req.chat_template_args(),
-            prompt_tail = %prompt_tail,
-            prompt_len = rendered.len(),
-            "Chat template rendered (showing last ~500 bytes)"
-        );
+        let prompt_len = rendered.len();
+        tracing::debug!(prompt_len, "Chat template rendered");
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let safe_start = rendered.floor_char_boundary(prompt_len.saturating_sub(500));
+            let prompt_tail = &rendered[safe_start..];
+            tracing::trace!(prompt_tail = %prompt_tail, "Chat template rendered tail");
+        }
 
         Ok(rendered)
     }
@@ -1741,5 +1738,33 @@ NORMAL_MODE
             "must have exactly one <think> block (from template), got {} in: {}",
             think_count, rendered
         );
+    }
+
+    /// Regression test: floor_char_boundary slicing must not panic on multibyte UTF-8.
+    /// Covers Chinese characters, emoji, and the ellipsis character that caused the
+    /// original production panic.
+    #[test]
+    fn test_floor_char_boundary_multibyte_no_panic() {
+        // Build a string >500 bytes with multibyte chars so the slicing logic is exercised.
+        // '…' is 3 bytes, '中' is 3 bytes, '🚀' is 4 bytes.
+        let multibyte = "中文测试…🚀".repeat(100); // ~1900 bytes
+        assert!(multibyte.len() > 500);
+
+        let safe_start = multibyte.floor_char_boundary(multibyte.len().saturating_sub(500));
+        let tail = &multibyte[safe_start..];
+
+        // The slice must be valid UTF-8 (implicit — &str guarantees this) and non-empty.
+        assert!(!tail.is_empty());
+        // safe_start must land on a char boundary (no panic from indexing).
+        assert!(multibyte.is_char_boundary(safe_start));
+    }
+
+    /// Edge case: string shorter than 500 bytes — saturating_sub yields 0, full string returned.
+    #[test]
+    fn test_floor_char_boundary_short_string() {
+        let short = "你好🌍";
+        let safe_start = short.floor_char_boundary(short.len().saturating_sub(500));
+        assert_eq!(safe_start, 0);
+        assert_eq!(&short[safe_start..], short);
     }
 }
