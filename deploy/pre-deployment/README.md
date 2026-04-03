@@ -192,9 +192,9 @@ kubectl get resourceslice -o wide
 # Should show entries with DRIVER=gpu.intel.com
 ```
 
-Verify XPU devices on the node:
+Verify XPU devices discovered by the DRA driver:
 ```bash
-kubectl get node <node-name> -o json | jq '.status.allocatable | to_entries[] | select(.key | startswith("gpu.intel.com"))'
+kubectl get resourceslice -o json | jq '.items[] | select(.spec.driver=="gpu.intel.com") | {node: .spec.nodeName, devices: [.spec.devices[].name]}'
 ```
 
 #### Path 2: Intel GPU Device Plugin (traditional)

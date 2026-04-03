@@ -150,11 +150,23 @@ check_cluster_resources() {
         # Path 1: Intel Device Plugin — sets node label gpu.intel.com/product
         # Note: gpu.intel.com/i915 / gpu.intel.com/xe are allocatable *resources*, not labels.
         local plugin_node_count
-        plugin_node_count=$(kubectl get nodes -l 'gpu.intel.com/product' -o name 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+        local plugin_kubectl_out
+        plugin_kubectl_out=$(kubectl get nodes -l 'gpu.intel.com/product' -o name 2>&1)
+        if [[ $? -ne 0 && "$plugin_kubectl_out" != *"No resources found"* ]]; then
+            print_status $YELLOW "⚠️  kubectl error querying Intel XPU node labels: $plugin_kubectl_out"
+        fi
+        plugin_node_count=$(echo "$plugin_kubectl_out" | grep -c '^node/' 2>/dev/null || true)
+        plugin_node_count=$(( ${plugin_node_count:-0} + 0 ))
 
         # Path 2: Intel GPU DRA driver — publishes ResourceSlice with driverName=gpu.intel.com
         local dra_slice_count
-        dra_slice_count=$(kubectl get resourceslice -o jsonpath='{range .items[?(@.spec.driver=="gpu.intel.com")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l | tr -d ' ')
+        local dra_kubectl_out
+        dra_kubectl_out=$(kubectl get resourceslice -o jsonpath='{range .items[?(@.spec.driver=="gpu.intel.com")]}{.metadata.name}{"\n"}{end}' 2>&1)
+        if [[ $? -ne 0 && "$dra_kubectl_out" != *"No resources found"* ]]; then
+            print_status $YELLOW "⚠️  kubectl error querying ResourceSlice: $dra_kubectl_out"
+        fi
+        dra_slice_count=$(echo "$dra_kubectl_out" | grep -c '[^[:space:]]' 2>/dev/null || true)
+        dra_slice_count=$(( ${dra_slice_count:-0} + 0 ))
 
         local total_xpu=$(( plugin_node_count + dra_slice_count ))
 
@@ -210,30 +222,39 @@ check_gpu_operator() {
             return 1
         fi
 
+        # OR logic: succeed if at least one path is healthy
+        local any_healthy=0
+
         if [[ -n "$intel_dra_pods" ]]; then
             local dra_running dra_total
             dra_running=$(echo "$intel_dra_pods" | grep -c "Running" || echo "0")
             dra_total=$(echo "$intel_dra_pods" | wc -l)
-            if [[ $dra_running -eq 0 ]]; then
-                print_status $RED "❌ Intel GPU DRA driver pods are not running ($dra_total found):"
+            if [[ $dra_running -gt 0 ]]; then
+                print_status $GREEN "✅ Intel GPU DRA driver is running ($dra_running/$dra_total pods, ns: intel-gpu-resource-driver)"
+                any_healthy=1
+            else
+                print_status $YELLOW "⚠️  Intel GPU DRA driver pods found but not running ($dra_total found):"
                 echo "$intel_dra_pods"
-                return 1
             fi
-            print_status $GREEN "✅ Intel GPU DRA driver is running ($dra_running/$dra_total pods, ns: intel-gpu-resource-driver)"
         fi
 
         if [[ -n "$intel_plugin_pods" ]]; then
             local plugin_running plugin_total
             plugin_running=$(echo "$intel_plugin_pods" | grep -c "Running" || echo "0")
             plugin_total=$(echo "$intel_plugin_pods" | wc -l)
-            if [[ $plugin_running -eq 0 ]]; then
-                print_status $RED "❌ Intel Device Plugin pods are not running ($plugin_total found):"
+            if [[ $plugin_running -gt 0 ]]; then
+                print_status $GREEN "✅ Intel Device Plugin is running ($plugin_running/$plugin_total pods)"
+                any_healthy=1
+            else
+                print_status $YELLOW "⚠️  Intel Device Plugin pods found but not running ($plugin_total found):"
                 echo "$intel_plugin_pods"
-                return 1
             fi
-            print_status $GREEN "✅ Intel Device Plugin is running ($plugin_running/$plugin_total pods)"
         fi
 
+        if [[ $any_healthy -eq 0 ]]; then
+            print_status $RED "❌ No healthy Intel XPU driver/plugin found"
+            return 1
+        fi
         return 0
     else
         # Check if NVIDIA GPU operator pods exist and are running

@@ -107,6 +107,7 @@ export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://gi
 
 Before proceeding, run the pre-deployment check script to verify your cluster meets all requirements:
 
+```bash
 # For NVIDIA GPU clusters (default)
 ./deploy/pre-deployment/pre-deployment-check.sh
 
