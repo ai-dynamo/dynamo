@@ -1,0 +1,53 @@
+# First-pass values for this cluster:
+# - k8s v1.35.0
+# - containerd 1.7.30
+# - CentOS Linux 8
+# - three candidate GPU nodes named yj-testaiinfragpu-0{1,2,3}
+
+operator:
+  defaultRuntime: containerd
+
+toolkit:
+  enabled: true
+  env:
+    - name: CONTAINERD_CONFIG
+      value: /etc/containerd/config.toml
+    - name: CONTAINERD_SOCKET
+      value: /run/containerd/containerd.sock
+    - name: CONTAINERD_RUNTIME_CLASS
+      value: nvidia
+    - name: CONTAINERD_SET_AS_DEFAULT
+      value: "true"
+
+driver:
+  enabled: true
+
+devicePlugin:
+  enabled: true
+
+gfd:
+  enabled: true
+
+nfd:
+  enabled: true
+
+dcgmExporter:
+  enabled: true
+
+nodeStatusExporter:
+  enabled: true
+
+validator:
+  plugin:
+    env:
+      - name: WITH_WORKLOAD
+        value: "false"
+
+daemonsets:
+  tolerations:
+    - operator: Exists
+
+node-feature-discovery:
+  worker:
+    tolerations:
+      - operator: Exists
