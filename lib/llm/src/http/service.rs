@@ -32,6 +32,28 @@ pub mod service_v2;
 pub use axum;
 pub use metrics::Metrics;
 
+/// Serialize data as JSON for SSE transport, escaping U+2028 and U+2029.
+///
+/// serde_json does not escape U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR)
+/// because they are above U+001F. However, Python's `str.splitlines()` — used by many
+/// SSE client parsers — treats these as line endings, splitting the `data:` field mid-JSON
+/// and producing truncated JSON that fails to parse. This function escapes them to their
+/// `\uXXXX` form so they are inert in SSE framing.
+pub fn serialize_json_for_sse(data: &impl serde::Serialize) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(data)?;
+    Ok(escape_unicode_line_separators(json))
+}
+
+/// Escape U+2028 and U+2029 in an already-serialized JSON string.
+fn escape_unicode_line_separators(json: String) -> String {
+    // Fast path: skip allocation if no problematic characters present
+    if !json.contains('\u{2028}') && !json.contains('\u{2029}') {
+        return json;
+    }
+    json.replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 /// Documentation for a route
 #[derive(Debug, Clone)]
 pub struct RouteDoc {
