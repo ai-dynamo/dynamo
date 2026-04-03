@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver
 import pytest
 import torch
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 
 pytestmark = [

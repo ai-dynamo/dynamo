@@ -13,7 +13,7 @@ from contextlib import ExitStack
 
 import pynvml
 import requests
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 
 from tests.gpu_memory_service.common.gms import GMSServer
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME

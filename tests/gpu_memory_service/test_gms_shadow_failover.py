@@ -10,7 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from gpu_memory_service.common.types import RequestedLockType, ServerState
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,

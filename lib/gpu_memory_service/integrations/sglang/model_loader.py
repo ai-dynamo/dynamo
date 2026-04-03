@@ -17,7 +17,7 @@ import logging
 
 import torch
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,

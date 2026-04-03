@@ -15,9 +15,11 @@ from contextlib import contextmanager
 from typing import Optional
 
 import torch
-from gpu_memory_service import get_or_create_gms_client_memory_manager
-from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.client.torch.allocator import (
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
 

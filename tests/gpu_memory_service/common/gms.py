@@ -8,22 +8,17 @@ import os
 import socket
 import threading
 import time
+from typing import TYPE_CHECKING
 
-from gpu_memory_service.common.protocol.messages import (
-    ErrorResponse,
-    GetEventHistoryRequest,
-    GetEventHistoryResponse,
-    GetRuntimeStateRequest,
-    GetRuntimeStateResponse,
-    HandshakeRequest,
-    HandshakeResponse,
-    ListAllocationsRequest,
-    ListAllocationsResponse,
-)
-from gpu_memory_service.common.protocol.wire import recv_message_sync, send_message_sync
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.server.rpc import GMSRPCServer
+
+if TYPE_CHECKING:
+    from gpu_memory_service.common.protocol.messages import (
+        GetEventHistoryResponse,
+        GetRuntimeStateResponse,
+        ListAllocationsResponse,
+    )
 
 
 def _request_gms(
@@ -34,6 +29,16 @@ def _request_gms(
     lock_type: RequestedLockType | None = None,
     timeout_ms: int | None = None,
 ):
+    from gpu_memory_service.common.protocol.messages import (
+        ErrorResponse,
+        HandshakeRequest,
+        HandshakeResponse,
+    )
+    from gpu_memory_service.common.protocol.wire import (
+        recv_message_sync,
+        send_message_sync,
+    )
+
     recv_buffer = bytearray()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -73,6 +78,11 @@ def _request_gms(
 
 
 def list_allocations(socket_path: str) -> ListAllocationsResponse:
+    from gpu_memory_service.common.protocol.messages import (
+        ListAllocationsRequest,
+        ListAllocationsResponse,
+    )
+
     return _request_gms(
         socket_path,
         ListAllocationsRequest(),
@@ -83,6 +93,8 @@ def list_allocations(socket_path: str) -> ListAllocationsResponse:
 
 class GMSServer:
     def __init__(self, device: int, tag: str = "weights"):
+        from gpu_memory_service.server.rpc import GMSRPCServer
+
         self.socket_path = get_socket_path(device, tag)
         self.server = GMSRPCServer(self.socket_path, device=device)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -162,6 +174,11 @@ class GMSServer:
             os.unlink(self.socket_path)
 
     def get_runtime_state(self) -> GetRuntimeStateResponse:
+        from gpu_memory_service.common.protocol.messages import (
+            GetRuntimeStateRequest,
+            GetRuntimeStateResponse,
+        )
+
         return _request_gms(
             self.socket_path,
             GetRuntimeStateRequest(),
@@ -169,6 +186,11 @@ class GMSServer:
         )
 
     def get_event_history(self) -> GetEventHistoryResponse:
+        from gpu_memory_service.common.protocol.messages import (
+            GetEventHistoryRequest,
+            GetEventHistoryResponse,
+        )
+
         return _request_gms(
             self.socket_path,
             GetEventHistoryRequest(),

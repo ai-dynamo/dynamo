@@ -7,7 +7,7 @@ import logging
 import time
 
 import requests
-from gpu_memory_service.common.types import ServerState
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.gpu_memory_service.common.runtime import get_gpu_memory_used
 from tests.utils.client import send_request

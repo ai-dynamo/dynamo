@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service.client.torch.module import register_module_tensors
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager

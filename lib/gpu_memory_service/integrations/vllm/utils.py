@@ -6,7 +6,7 @@
 import logging
 import os
 
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.integrations.common.utils import parse_requested_lock_type
 
 logger = logging.getLogger(__name__)
