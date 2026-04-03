@@ -639,8 +639,7 @@ def _run_offload_and_onboard_via_eviction(tester, server):
     print_phase(3, "Re-send first request (expect onboard from CPU)")
     print(f"Sending same request: {prompt[:80]}...")
 
-    response_2 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
-    print(f"Response 2: {response_2}")
+    tester.make_request(prompt, max_tokens=MAX_TOKENS)
 
     metrics = check_kvbm_metrics("Phase 3", server.metrics_port)
     assert (
@@ -648,15 +647,10 @@ def _run_offload_and_onboard_via_eviction(tester, server):
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after eviction."
     print(f"✓ Phase 3: {metrics['kvbm_onboard_blocks_h2d']} blocks onboarded from CPU")
 
-    # Verify determinism
-    print_test_header("DETERMINISM VERIFICATION")
-    assert_deterministic(
-        response_1,
-        response_2,
-        test_name="SWA Offload/Onboard",
-        label1="Initial response",
-        label2="After eviction+onboard",
-    )
+    # Note: determinism (initial vs onboarded) is NOT checked here because
+    # partial onboarding can produce slightly different outputs than full
+    # prefill. The dedicated test_swa_onboarding_determinism_trtllm test
+    # validates onboarded-vs-onboarded determinism instead.
 
     print("\n=== TEST PASSED ===")
 
