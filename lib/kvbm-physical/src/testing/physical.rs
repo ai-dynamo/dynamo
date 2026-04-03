@@ -458,7 +458,7 @@ pub fn create_transfer_manager(
     TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
         .build()
 }
 
@@ -473,7 +473,7 @@ pub fn create_rdma_transfer_manager(agent_name: &str) -> Result<TransferManager>
     let agent = create_test_agent_with_backends(agent_name, &["UCX"])?;
     TransferManager::builder()
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
         .build()
 }
 
