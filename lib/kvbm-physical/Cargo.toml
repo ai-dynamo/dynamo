@@ -20,6 +20,7 @@ anyhow = { workspace = true }
 bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
 cudarc = { workspace = true, features = ["nccl"] }
+level-zero = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 derive-getters = { version = "0.5" }
@@ -32,11 +33,14 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 [features]
-default = []
+default = ["cuda"]
+cuda = []
 collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
+testing-xpu = ["xpu"]
+xpu = ["kvbm-kernels/xpu", "dep:level-zero", "dep:oneapi-rs"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

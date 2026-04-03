@@ -4,12 +4,12 @@
 //! Transfer options for configuring block and layer transfers.
 
 use super::BounceBuffer;
+use crate::device::DeviceStream;
 use crate::layout::KvBlockLayout;
-use cudarc::driver::CudaStream;
+use std::sync::Arc;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use std::ops::Range;
-use std::sync::Arc;
 
 /// Options for configuring transfer operations.
 ///
@@ -50,17 +50,6 @@ pub struct TransferOptions {
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<BounceBuffer>,
 
-    /// Optional caller-provided CUDA stream for the transfer.
-    ///
-    /// When provided, the transfer executor will use this stream instead of
-    /// acquiring one from the pool. The caller is responsible for synchronization -
-    /// no event is recorded by the executor.
-    ///
-    /// This is useful for layer-wise transfers where all layers must execute
-    /// on the same stream to allow proper event sequencing.
-    #[builder(default, setter(strip_option))]
-    pub cuda_stream: Option<Arc<CudaStream>>,
-
     /// Override source block layout interpretation.
     ///
     /// When set, the transfer executor will treat source blocks as having
@@ -78,6 +67,14 @@ pub struct TransferOptions {
     /// layout's native format.
     #[builder(default, setter(strip_option))]
     pub dst_kv_layout: Option<KvBlockLayout>,
+
+    /// Caller-provided device stream.
+    ///
+    /// When set, the transfer executor uses this stream instead of acquiring
+    /// one from the context pool, and skips event recording (caller manages
+    /// synchronization). Returns `completed()` immediately.
+    #[builder(default, setter(strip_option))]
+    pub device_stream: Option<Arc<DeviceStream>>,
 }
 
 impl TransferOptions {

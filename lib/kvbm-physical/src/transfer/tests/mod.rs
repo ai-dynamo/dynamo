@@ -219,7 +219,7 @@ pub fn create_transfer_context(
     crate::manager::TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
         .build()
 }
 

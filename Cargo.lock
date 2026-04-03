@@ -4530,6 +4530,7 @@ dependencies = [
  "cudarc",
  "half 2.7.1",
  "ndarray 0.17.2",
+ "oneapi-rs",
  "rand 0.9.2",
 ]
 
@@ -4578,6 +4579,7 @@ dependencies = [
  "futures",
  "kvbm-common",
  "kvbm-kernels",
+ "level-zero",
  "rstest 0.26.1",
  "serde",
  "serde_json",
@@ -5719,6 +5721,13 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oneapi-rs"
+version = "0.1.0"
+dependencies = [
+ "sycl-bindings",
+]
 
 [[package]]
 name = "oneshot"
@@ -8148,6 +8157,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sycl-bindings"
+version = "2025.3.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8172,17 +8188,6 @@ dependencies = [
 [[package]]
 name = "synapse"
 version = "0.1.0"
-dependencies = [
- "synapse-sys",
-]
-
-[[package]]
-name = "synapse-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen 0.71.1",
- "libloading 0.8.9",
-]
 
 [[package]]
 name = "sync_wrapper"
