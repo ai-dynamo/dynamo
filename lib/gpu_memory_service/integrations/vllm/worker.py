@@ -18,13 +18,13 @@ from contextlib import nullcontext
 from typing import List, Optional
 
 import torch
-from gpu_memory_service import (
+from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
+from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
 )
-from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
-from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode

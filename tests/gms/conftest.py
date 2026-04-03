@@ -3,7 +3,29 @@
 
 """Pytest configuration for GPU Memory Service tests."""
 
+import sys
+from pathlib import Path
+
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_PATHS = [
+    REPO_ROOT,
+    REPO_ROOT / "components" / "src",
+    REPO_ROOT / "lib" / "bindings" / "python" / "src",
+    REPO_ROOT / "lib",
+]
+
+for path in reversed(PROJECT_PATHS):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+for module_name in list(sys.modules):
+    if module_name == "gpu_memory_service" or module_name.startswith(
+        "gpu_memory_service."
+    ):
+        del sys.modules[module_name]
 
 # Skip collection entirely if gpu_memory_service is not installed.
 # This package lives under nested common/ and integration/ subdirectories, so
@@ -11,10 +33,11 @@ import pytest
 # to this conftest.
 try:
     import gpu_memory_service  # noqa: F401
+    import msgspec  # noqa: F401
 except ImportError:
     collect_ignore = ["common", "integration"]
 
-from tests.utils.port_utils import allocate_port, deallocate_ports
+from tests.utils.port_utils import allocate_port, deallocate_ports  # noqa: E402
 
 
 @pytest.fixture

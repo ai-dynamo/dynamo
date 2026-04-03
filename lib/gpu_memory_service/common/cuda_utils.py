@@ -8,9 +8,20 @@ from __future__ import annotations
 import atexit
 import os
 
-from cuda.bindings import driver as cuda
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
+
+try:
+    from cuda.bindings import driver as cuda
+except ImportError:
+
+    class _MissingCuda:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "cuda-python is required for GPU Memory Service CUDA operations"
+            )
+
+    cuda = _MissingCuda()
 
 _primary_contexts: dict[int, object] = {}
 _primary_context_release_registered = False
