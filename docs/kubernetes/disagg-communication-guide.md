@@ -508,7 +508,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 | Aggregated (baseline) | 0 | N/A | No KV transfer needed |
 | Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | 20-50 GB/s | *Expected* based on hardware specs |
 | Disagg + RoCE RDMA with GPUDirect | +300-800ms | 10-25 GB/s | *Expected* based on hardware specs |
-| Disagg + AWS EFA with libfabric + GDRCopy | **+146ms** (p95: +372ms) | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000, c=10) |
+| Disagg + AWS EFA with libfabric + GDRCopy | **+40ms** | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000) |
 | Disagg + Host-staged (no GPUDirect) | +1-3s | 1-3 GB/s | *Expected* - CPU bottleneck |
 | Disagg + AWS EFA with UCX (without GPUDirect) | ~3x slower than aggregated | ~1 GB/s | *Measured* on AWS p5.48xlarge |
 | Disagg + TCP fallback | **+90-100s** | ~100 MB/s | *Measured* ~98s TTFT on AWS p5.48xlarge |
@@ -518,13 +518,13 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 ### When Disaggregated Makes Sense
 
 **Use disaggregated architecture when:**
-- Output sequence length (OSL) > 1000 tokens (overhead amortized)
+- Input sequence length (ISL) ≥ 4000 tokens (5-18% throughput gain)
 - You need independent scaling of prefill vs decode capacity
 - Prefill and decode have different hardware requirements
 
 **Use aggregated architecture when:**
 - Low-latency TTFT is critical
-- Short outputs (OSL under 500 tokens)
+- Input sequences under 2000 tokens (minimal disagg benefit)
 - RDMA is not available
 
 ### Break-Even Analysis
@@ -532,35 +532,32 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 The KV transfer overhead is amortized across output tokens. **Measured data from Llama-3.1-8B-Instruct** on AWS p5.48xlarge with NIXL+libfabric:
 
 ```text
-Total Latency = TTFT + (OSL × ITL)
+KV Transfer Overhead (TTFT min, unqueued):
+- Aggregated:    ~175ms
+- Disaggregated: ~215ms
+- KV transfer cost: ~40ms
 
-Measured (Llama-3.1-8B, ISL=8000, OSL=200, concurrency=10):
-- Aggregated:    417.7ms TTFT + (OSL × 13.5ms ITL)
-- Disaggregated: 563.4ms TTFT + (OSL × 9.3ms ITL)
-
-TTFT overhead:     563.4 - 417.7 = 145.7ms (+35%)
-ITL improvement:   13.5 - 9.3 = 4.2ms/token (-31%)
-
-Break-even OSL:    145.7ms / 4.2ms = ~35 tokens
+Performance at ISL=8000, concurrency=10:
+- ITL improvement: 27% faster per-token generation
+- Throughput gain: 18% higher overall throughput
 ```
 
-**Key Insight**: With properly configured NIXL+libfabric on AWS EFA, the ITL improvement (31% lower) quickly amortizes the TTFT overhead. Disaggregated inference becomes faster than aggregated at just **35 output tokens**.
+**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~40ms**. Combined with 27% faster decode (ITL), disaggregated inference delivers **18% higher throughput** for long-context workloads.
 
 | Metric | Aggregated | Disaggregated | Difference |
 |--------|------------|---------------|------------|
-| TTFT (avg) | 417.7 ms | 563.4 ms | +35% |
-| TTFT (p95) | 641.8 ms | 1013.5 ms | +58% |
-| ITL (avg) | 13.5 ms | 9.3 ms | **-31%** |
-| ITL (p95) | 17.9 ms | 12.7 ms | **-29%** |
+| TTFT (min, unqueued) | 175 ms | 215 ms | +40ms |
+| ITL (avg) | 17.9 ms | 13.1 ms | **-27%** |
+| Throughput (ISL=8000) | 20,131 tok/s | 24,229 tok/s | **+20%** |
 
-**Example latency at different OSL:**
+**Disagg advantage scales with input length (ISL):**
 
-| OSL | Aggregated | Disaggregated | Winner |
-|-----|------------|---------------|--------|
-| 50 | 1.09s | 1.03s | Disagg (5% faster) |
-| 200 | 3.12s | 2.42s | **Disagg (22% faster)** |
-| 500 | 7.17s | 5.21s | **Disagg (27% faster)** |
-| 1000 | 13.9s | 9.86s | **Disagg (29% faster)** |
+| ISL | Throughput Δ | ITL Δ | Recommendation |
+|-----|--------------|-------|----------------|
+| 1000 | ~0% | -4% | Use aggregated |
+| 2000 | +3% | -7% | Either works |
+| 4000 | +5% | -12% | Disagg preferred |
+| 8000 | **+18%** | **-27%** | **Disagg strongly preferred** |
 
 ---
 
