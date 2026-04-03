@@ -288,7 +288,52 @@ async def test_gaie_deployment(
         capture_output=True,
         text=True,
     )
+    logger.info(f"HTTPRoute apply stdout: {result.stdout}")
+    if result.stderr:
+        logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
     assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+
+    # Debug: verify namespace state before creating DGD
+    logger.info(f"Namespace: {namespace}")
+    ns_check = subprocess.run(
+        ["kubectl", "get", "namespace", namespace],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"Namespace check: {ns_check.stdout.strip()}")
+    if ns_check.returncode != 0:
+        logger.error(f"Namespace not found: {ns_check.stderr}")
+
+    # Debug: check if operator CRD is registered
+    crd_check = subprocess.run(
+        ["kubectl", "get", "crd", "dynamographdeployments.nvidia.com"],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"CRD check: {crd_check.stdout.strip()}")
+    if crd_check.returncode != 0:
+        logger.error(f"CRD not found: {crd_check.stderr}")
+
+    # Debug: check operator pod status
+    operator_check = subprocess.run(
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            "app.kubernetes.io/name=dynamo-operator",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"Operator pods: {operator_check.stdout.strip()}")
+
+    # Debug: log the full deployment spec being submitted
+    logger.info(f"DGD name: {deployment_spec.name}")
+    logger.info(f"DGD namespace: {deployment_spec.namespace}")
+    logger.info(f"DGD services: {[s.name for s in deployment_spec.services]}")
 
     async with ManagedDeployment(
         log_dir=request.node.name,
@@ -297,6 +342,20 @@ async def test_gaie_deployment(
         skip_service_restart=skip_service_restart,
         frontend_service_name="Epp",
     ) as deployment:
+        # Debug: check what DGDs exist after creation
+        dgd_check = subprocess.run(
+            ["kubectl", "get", "dynamographdeployments", "-n", namespace],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"DGDs after creation: {dgd_check.stdout.strip()}")
+
+        pod_check = subprocess.run(
+            ["kubectl", "get", "pods", "-n", namespace, "-o", "wide"],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"Pods after creation: {pod_check.stdout.strip()}")
         epp_pods = deployment.get_pods(["Epp"])
         epp_pod_list = epp_pods.get("Epp", [])
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
