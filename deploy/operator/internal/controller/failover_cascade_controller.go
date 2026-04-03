@@ -32,6 +32,8 @@ const (
 
 // cascadeCooldown prevents tight delete-recreate-fail loops by suppressing
 // repeated cascade-deletes for the same engine group within this window.
+// Only applies to same-generation events; pods created after the last
+// cascade (new generation from Grove) bypass it entirely.
 const cascadeCooldown = 60 * time.Second
 
 // FailoverCascadeReconciler watches GMS failover pods (restartPolicy: Never)
@@ -60,13 +62,23 @@ func NewFailoverCascadeReconciler(c client.Client, recorder record.EventRecorder
 	}
 }
 
-func (r *FailoverCascadeReconciler) inCooldown(key string) bool {
+// inCooldown reports whether a cascade for this group should be suppressed.
+//
+// Pods created after the last cascade belong to a new generation (Grove
+// recreated the group) and bypass the cooldown entirely so failover is
+// immediate. Same-generation events get the full cascadeCooldown to
+// prevent tight loops from duplicate watch events.
+func (r *FailoverCascadeReconciler) inCooldown(key string, podCreationTime time.Time) bool {
 	r.cooldownMu.Lock()
 	defer r.cooldownMu.Unlock()
-	if last, ok := r.cooldowns[key]; ok {
-		return r.Now().Sub(last) < cascadeCooldown
+	lastCascade, ok := r.cooldowns[key]
+	if !ok {
+		return false
 	}
-	return false
+	if podCreationTime.After(lastCascade) {
+		return false
+	}
+	return r.Now().Sub(lastCascade) < cascadeCooldown
 }
 
 func (r *FailoverCascadeReconciler) setCooldown(key string) {
@@ -109,8 +121,8 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	groupKey := pcsg + "/" + pcsgReplica + "/" + podIndex
-	if r.inCooldown(groupKey) {
-		logger.V(1).Info("engine group in cascade cooldown, skipping",
+	if r.inCooldown(groupKey, pod.CreationTimestamp.Time) {
+		logger.V(1).Info("engine group in cascade cooldown, skipping same-generation event",
 			"trigger", pod.Name,
 			"pcsg", pcsg,
 			"pcsgReplica", pcsgReplica,
@@ -126,7 +138,7 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPodIndex:         podIndex,
 	}
 
-	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels); err != nil {
+	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
 
