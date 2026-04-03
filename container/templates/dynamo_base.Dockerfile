@@ -14,6 +14,12 @@ ARG TARGETARCH
 USER root
 WORKDIR /opt/dynamo
 
+{% if device == "cpu" %}
+RUN apt clean && apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    curl ca-certificates zip unzip git lsb-release numactl wget vim
+{% endif %}
+
 # Install sccache into the base image so downstream stages can COPY it
 # instead of downloading from GitHub (avoids 502 errors under parallel builds)
 ARG SCCACHE_VERSION=v0.14.0

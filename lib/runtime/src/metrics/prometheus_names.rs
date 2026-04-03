@@ -61,19 +61,42 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Metric name prefixes used across the metrics system
+/// Metric name prefixes used across the metrics system.
 pub mod name_prefix {
-    /// Prefix for all Prometheus metric names.
+    /// Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     pub const COMPONENT: &str = "dynamo_component";
 
-    /// Prefix for frontend service metrics
+    /// Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     pub const FRONTEND: &str = "dynamo_frontend";
 
-    /// Prefix for KV router metrics (used with router_id label)
+    /// Prefix for KV router instance metrics (carries `router_id` label).
     pub const ROUTER: &str = "dynamo_router";
 
-    /// Prefix for tokio runtime metrics
+    // Note: REQUEST_PLANE vs TRANSPORT: REQUEST_PLANE measures *what requests do* (latency,
+    // concurrency) and is transport-agnostic. TRANSPORT measures *how the wire behaves*
+    // (bytes transferred, protocol errors) and is protocol-specific (TCP/NATS).
+
+    /// Prefix for standalone KV indexer metrics
+    pub const KVINDEXER: &str = "dynamo_kvindexer";
+
+    /// Prefix for request-plane metrics at AddressedPushRouter.
+    /// Transport-agnostic: measures request lifecycle latency and concurrency
+    /// (queue → send → roundtrip TTFT, inflight gauge).
+    pub const REQUEST_PLANE: &str = "dynamo_request_plane";
+
+    /// Prefix for transport-layer metrics (TCP / NATS).
+    /// Protocol-specific: measures wire-level health (bytes sent/received, error counts).
+    pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for work-handler transport breakdown metrics (backend side)
+    pub const WORK_HANDLER: &str = "dynamo_work_handler";
+
+    /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
+
+    /// Prefix for per-phase routing overhead latency (hashing, scheduling).
+    /// Raw Prometheus, not component-scoped.
+    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -209,6 +232,9 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Total number of request cancellations
+    pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
@@ -322,6 +348,9 @@ pub mod work_handler {
 
     /// Total number of errors in work handler processing
     pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    pub const CANCELLATION_TOTAL: &str = "cancellation_total";
 
     /// Network transit: frontend send to backend receive (wall-clock, cross-process)
     pub const NETWORK_TRANSIT_SECONDS: &str = "network_transit_seconds";
@@ -495,8 +524,10 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// Per-token detokenization cost (microseconds)
-    pub const DETOKENIZE_PER_TOKEN_US: &str = "detokenize_per_token_us";
+    /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
+    /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    pub const DETOKENIZE_TOKEN_COUNT: &str = "detokenize_token_count";
     /// Event loop delay canary (sleep 10ms, measure drift)
     pub const EVENT_LOOP_DELAY_SECONDS: &str = "event_loop_delay_seconds";
     /// Count of event loop stalls (delay > 5ms)
@@ -517,6 +548,51 @@ pub mod tokio_perf {
     pub const BLOCKING_IDLE_THREADS: &str = "blocking_idle_threads";
     pub const BLOCKING_QUEUE_DEPTH: &str = "blocking_queue_depth";
     pub const ALIVE_TASKS: &str = "alive_tasks";
+}
+
+/// Standalone KV indexer HTTP service metrics
+pub mod kvindexer {
+    /// HTTP request latency
+    pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+
+    /// Total HTTP requests
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// HTTP error responses (4xx/5xx)
+    pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Number of active model+tenant indexers
+    pub const MODELS: &str = "models";
+
+    /// Number of registered worker instances
+    pub const WORKERS: &str = "workers";
+}
+
+/// Request plane metrics at AddressedPushRouter
+pub mod request_plane {
+    /// Time from generate() entry to send_request() (serialization + encoding)
+    pub const QUEUE_SECONDS: &str = "queue_seconds";
+    /// Time for send_request() to complete (frontend view: network + queue + ack)
+    pub const SEND_SECONDS: &str = "send_seconds";
+    /// Time from send_request() to first response item (transport roundtrip TTFT)
+    pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
+    /// Currently in-flight requests (gauge)
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+}
+
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const POOL_ACTIVE: &str = "tcp_pool_active";
+        pub const POOL_IDLE: &str = "tcp_pool_idle";
+        pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
+        pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+        pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
 }
 
 // KvRouter (including KvIndexer) Prometheus metric names

@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.17.1"
+VLLM_VER="0.18.0"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -25,8 +25,8 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.6.4"
-LMCACHE_REF="0.4.1"
+FLASHINF_REF="v0.6.6"
+LMCACHE_REF="0.4.2"
 VLLM_OMNI_REF="v0.16.0"
 
 while [[ $# -gt 0 ]]; do
@@ -128,7 +128,7 @@ if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Configuration Summary ==="
     echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
     echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
-elif [ "$DEVICE" = "xpu" ]; then
+elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then
     echo "\n=== Configuration Summary ==="
     echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | INSTALLATION_DIR=$INSTALLATION_DIR"
 fi
@@ -143,7 +143,6 @@ echo "✓ vLLM repository cloned"
 
 if [ "$DEVICE" = "xpu" ]; then
     echo "\n=== Installing vLLM ==="
-    git apply --ignore-whitespace /tmp/vllm-xpu.patch
     uv pip install -r requirements/xpu.txt --index-strategy unsafe-best-match
     uv pip install --verbose --no-build-isolation .
 fi
@@ -172,24 +171,39 @@ if [ "$DEVICE" = "cuda" ]; then
     #           does not prevent uv from resolving the cu12 variant)
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
     if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-        if uv pip install "vllm[flashinfer,runai]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+        if uv pip install "vllm[flashinfer,runai,otel]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
             echo "✓ vLLM ${VLLM_VER} installed from PyPI"
         else
             echo "⚠ PyPI install failed, installing from GitHub release..."
             uv pip install ${EXTRA_PIP_ARGS} \
-                "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+                "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
                 --torch-backend=${TORCH_BACKEND}
             echo "✓ vLLM ${VLLM_VER} installed from GitHub"
         fi
     else
         echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
         uv pip install ${EXTRA_PIP_ARGS} \
-            "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+            "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
             --torch-backend=${TORCH_BACKEND}
         echo "✓ vLLM ${VLLM_VER} installed from GitHub"
     fi
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+fi
+
+if [ "$DEVICE" = "cpu" ]; then
+    echo "\n=== Installing vLLM for cpu ==="
+    if [ -n "${CACHE_BUSTER:-}" ]; then
+        echo "$CACHE_BUSTER" > /tmp/builder-buster
+    fi
+    # vLLM CPU requirements pin torch with a +cpu local version (e.g. 2.10.0+cpu),
+    # which is published on the PyTorch CPU wheel index instead of PyPI.
+    # Install torchvision, torchaudio from the same index to get the correct versions with +cpu suffix.
+    uv pip install -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+    uv pip install torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+    VLLM_TARGET_DEVICE=cpu \
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+    uv pip install dist/*.whl
 fi
 echo "✓ vLLM installation completed"
 

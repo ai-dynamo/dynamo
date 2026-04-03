@@ -16,6 +16,7 @@ use crate::{
     types::{
         generic::tensor::TensorStreamingEngine,
         openai::{
+            audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
@@ -41,6 +42,7 @@ pub struct WorkerSet {
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
+    pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
 
     /// KV router for this set's workers (if KV mode)
@@ -65,6 +67,7 @@ impl WorkerSet {
             embeddings_engine: None,
             images_engine: None,
             videos_engine: None,
+            audios_engine: None,
             tensor_engine: None,
             kv_router: None,
             worker_monitor: None,
@@ -104,6 +107,10 @@ impl WorkerSet {
         self.videos_engine.is_some()
     }
 
+    pub fn has_audios_engine(&self) -> bool {
+        self.audios_engine.is_some()
+    }
+
     pub fn has_tensor_engine(&self) -> bool {
         self.tensor_engine.is_some()
     }
@@ -119,6 +126,7 @@ impl WorkerSet {
             && !self.has_embeddings_engine()
             && !self.has_images_engine()
             && !self.has_videos_engine()
+            && !self.has_audios_engine()
             && !self.has_tensor_engine()
     }
 

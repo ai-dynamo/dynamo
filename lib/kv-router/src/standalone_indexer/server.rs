@@ -9,14 +9,18 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(feature = "metrics")]
+use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
+use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 
-use super::registry::{IndexerKey, WorkerRegistry};
+use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
 
 pub struct AppState {
-    pub registry: WorkerRegistry,
+    pub registry: Arc<WorkerRegistry>,
+    #[cfg(feature = "metrics")]
+    pub prom_registry: prometheus::Registry,
 }
 
 fn default_tenant() -> String {
@@ -45,12 +49,6 @@ pub struct UnregisterRequest {
     pub tenant_id: Option<String>,
     #[serde(default)]
     pub dp_rank: Option<u32>,
-}
-
-#[derive(Serialize)]
-struct WorkerInfo {
-    instance_id: WorkerId,
-    endpoints: HashMap<u32, String>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +80,15 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
+    if let Err(error) =
+        super::validate_listener_endpoints(&req.endpoint, req.replay_endpoint.as_deref())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        );
+    }
+
     match state
         .registry
         .register(
@@ -142,16 +149,7 @@ async fn unregister(
 }
 
 async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let workers: Vec<WorkerInfo> = state
-        .registry
-        .list()
-        .into_iter()
-        .map(|(instance_id, endpoints)| WorkerInfo {
-            instance_id,
-            endpoints,
-        })
-        .collect();
-    Json(workers)
+    Json(state.registry.list())
 }
 
 fn build_score_response(
@@ -199,8 +197,14 @@ async fn query(
     let indexer = ie.indexer.clone();
     drop(ie);
 
-    let block_hashes =
-        compute_block_hash_for_seq(&req.token_ids, block_size, None, req.lora_name.as_deref());
+    let block_hashes = compute_block_hash_for_seq(
+        &req.token_ids,
+        block_size,
+        BlockHashOptions {
+            lora_name: req.lora_name.as_deref(),
+            ..Default::default()
+        },
+    );
     match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,
@@ -250,7 +254,6 @@ async fn query_by_hash(
     }
 }
 
-#[cfg(feature = "test-endpoints")]
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
@@ -258,7 +261,6 @@ struct ListenerControlRequest {
     dp_rank: Option<u32>,
 }
 
-#[cfg(feature = "test-endpoints")]
 async fn test_pause_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -268,14 +270,10 @@ async fn test_pause_listener(
         .pause_listener(req.instance_id, req.dp_rank.unwrap_or(0))
     {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(error) => listener_control_error_response(error),
     }
 }
 
-#[cfg(feature = "test-endpoints")]
 async fn test_resume_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -286,11 +284,24 @@ async fn test_resume_listener(
         .await
     {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(error) => listener_control_error_response(error),
     }
+}
+
+fn listener_control_error_response(
+    error: ListenerControlError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let status = match &error {
+        ListenerControlError::WorkerNotFound { .. }
+        | ListenerControlError::ListenerNotFound { .. } => StatusCode::NOT_FOUND,
+        ListenerControlError::DiscoveryManaged { .. }
+        | ListenerControlError::InvalidPauseState { .. }
+        | ListenerControlError::InvalidResumeState { .. } => StatusCode::CONFLICT,
+    };
+    (
+        status,
+        Json(serde_json::json!({"error": error.to_string()})),
+    )
 }
 
 #[derive(Deserialize)]
@@ -363,6 +374,28 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!(result)))
 }
 
+async fn handle_health() -> StatusCode {
+    StatusCode::OK
+}
+
+#[cfg(feature = "metrics")]
+async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.registry.refresh_metrics();
+    let encoder = prometheus::TextEncoder::new();
+    let mut buf = Vec::new();
+    encoder
+        .encode(&state.prom_registry.gather(), &mut buf)
+        .unwrap();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            prometheus::TEXT_FORMAT.to_string(),
+        )],
+        buf,
+    )
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/register", post(register))
@@ -373,12 +406,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers));
+        .route("/peers", get(list_peers))
+        .route("/health", get(handle_health));
 
-    #[cfg(feature = "test-endpoints")]
     let router = router
         .route("/test/pause_listener", post(test_pause_listener))
-        .route("/test/resume_listener", post(test_resume_listener));
+        .route("/test/resume_listener", post(test_resume_listener))
+        .with_state(state.clone());
 
-    router.with_state(state)
+    #[cfg(feature = "metrics")]
+    let router = {
+        let metrics_route = Router::new()
+            .route("/metrics", get(handle_metrics))
+            .with_state(state);
+        router
+            .layer(axum::middleware::from_fn(
+                super::metrics::metrics_middleware,
+            ))
+            .merge(metrics_route)
+    };
+
+    router
 }

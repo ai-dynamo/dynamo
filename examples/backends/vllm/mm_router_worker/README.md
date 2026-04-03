@@ -58,9 +58,9 @@ This MM router depends on vLLM PR [`#33304`](https://github.com/vllm-project/vll
 
 As of **2026-02-25**:
 - PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) is merged into `vllm-project/vllm:main` (merged on **2026-02-21**)
-- the latest vLLM release shown on GitHub releases is **v0.16.0 (2026-02-13)**, which predates this PR
+- the latest Dynamo release 1.0.0 includes vLLM v0.16.0 released on **(2026-02-13)**, which predates this PR
 
-If you are using a released vLLM package, you likely need to patch your installed `site-packages` manually.
+If you are using a Dynamo 1.0.0, you likely need to patch vLLM package installed in `site-packages` manually.
 
 Example (patch installed vLLM in-place, `site-packages` layout):
 

@@ -11,6 +11,7 @@ pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     SequenceSubscriber,
 };
+use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -21,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::metrics::WORKER_LOAD_METRICS;
-use super::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -133,6 +133,9 @@ pub async fn create_multi_worker_sequences(
         arc.start_replica_sync(subscriber, cancel_token);
     }
 
+    let expiry_cancel = component.drt().runtime().child_token();
+    arc.start_periodic_force_expiry_across_all_workers(expiry_cancel);
+
     Ok(arc)
 }
 
@@ -214,41 +217,38 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
-                request_id: "request_0".to_string(),
-                token_sequence: Some(vec![0, 1, 2]),
-                isl: 12,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::new(0, 0),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_1.add_request(SequenceRequest {
+            request_id: "request_0".to_string(),
+            token_sequence: Some(vec![0, 1, 2]),
+            isl: 12,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::new(0, 0),
+            lora_name: None,
+        })?;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
-                request_id: "request_1".to_string(),
-                token_sequence: Some(vec![3, 4]),
-                isl: 8,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::new(0, 1),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_1.add_request(SequenceRequest {
+            request_id: "request_1".to_string(),
+            token_sequence: Some(vec![3, 4]),
+            isl: 8,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::new(0, 1),
+            lora_name: None,
+        })?;
 
-        seq_manager_2
-            .add_request(SequenceRequest {
-                request_id: "request_2".to_string(),
-                token_sequence: Some(vec![0, 1, 2, 3]),
-                isl: 16,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::new(1, 0),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_2.add_request(SequenceRequest {
+            request_id: "request_2".to_string(),
+            token_sequence: Some(vec![0, 1, 2, 3]),
+            isl: 16,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::new(1, 0),
+            lora_name: None,
+        })?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -284,10 +284,10 @@ mod tests {
             "Worker 1 dp_rank 0 should have 16 active tokens (from request_2 added by seq_manager_2)"
         );
 
-        seq_manager_1.free(&"request_2".to_string()).await?;
+        seq_manager_1.free(&"request_2".to_string())?;
 
-        seq_manager_2.free(&"request_0".to_string()).await?;
-        seq_manager_2.free(&"request_1".to_string()).await?;
+        seq_manager_2.free(&"request_0".to_string())?;
+        seq_manager_2.free(&"request_1".to_string())?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -364,41 +364,38 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
-                request_id: "request_0".to_string(),
-                token_sequence: None,
-                isl: 12,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::from_worker_id(0),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_1.add_request(SequenceRequest {
+            request_id: "request_0".to_string(),
+            token_sequence: None,
+            isl: 12,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::from_worker_id(0),
+            lora_name: None,
+        })?;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
-                request_id: "request_1".to_string(),
-                token_sequence: None,
-                isl: 8,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::from_worker_id(1),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_1.add_request(SequenceRequest {
+            request_id: "request_1".to_string(),
+            token_sequence: None,
+            isl: 8,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::from_worker_id(1),
+            lora_name: None,
+        })?;
 
-        seq_manager_2
-            .add_request(SequenceRequest {
-                request_id: "request_2".to_string(),
-                token_sequence: None,
-                isl: 16,
-                overlap: 0,
-                expected_output_tokens: None,
-                worker: WorkerWithDpRank::from_worker_id(2),
-                lora_name: None,
-            })
-            .await?;
+        seq_manager_2.add_request(SequenceRequest {
+            request_id: "request_2".to_string(),
+            token_sequence: None,
+            isl: 16,
+            overlap: 0,
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            worker: WorkerWithDpRank::from_worker_id(2),
+            lora_name: None,
+        })?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -421,19 +418,13 @@ mod tests {
             "Worker 2 should have 16 active tokens (from request_2 added by seq_manager_2)"
         );
 
-        seq_manager_1
-            .mark_prefill_completed(&"request_2".to_string())
-            .await?;
-        seq_manager_1.free(&"request_2".to_string()).await?;
+        seq_manager_1.mark_prefill_completed(&"request_2".to_string())?;
+        seq_manager_1.free(&"request_2".to_string())?;
 
-        seq_manager_2
-            .mark_prefill_completed(&"request_0".to_string())
-            .await?;
-        seq_manager_2
-            .mark_prefill_completed(&"request_1".to_string())
-            .await?;
-        seq_manager_2.free(&"request_0".to_string()).await?;
-        seq_manager_2.free(&"request_1".to_string()).await?;
+        seq_manager_2.mark_prefill_completed(&"request_0".to_string())?;
+        seq_manager_2.mark_prefill_completed(&"request_1".to_string())?;
+        seq_manager_2.free(&"request_0".to_string())?;
+        seq_manager_2.free(&"request_1".to_string())?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 

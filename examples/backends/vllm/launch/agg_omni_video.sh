@@ -26,7 +26,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_curl_footer <<CURL
+curl -s http://localhost:${HTTP_PORT}/v1/videos \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "model": "${MODEL}",
+    "prompt": "Dog running on a beach",
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "num_inference_steps": 20,
+      "num_frames": 30
+    }
+  }' | jq
+CURL
 
 
 python -m dynamo.frontend &
@@ -36,9 +50,8 @@ sleep 2
 
 echo "Starting Omni worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm \
+    python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --omni \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
     "${EXTRA_ARGS[@]}" &

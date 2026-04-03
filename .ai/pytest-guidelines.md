@@ -8,6 +8,27 @@ Rules and conventions for Python tests in this repository.
 wastes shared GPU minutes and blocks other PRs. A local run catches most
 failures in seconds.
 
+### Reproducing CI failures locally
+
+Don't guess from log snippets. Pull the same container image CI built and
+reproduce the failure locally:
+
+```bash
+# 1. Find the image:tag in the CI job's "docker build" or "docker push" step.
+
+# 2. Run it with GPU access:
+docker run --rm -it --gpus all <ci-image>:<tag> bash
+
+# 3. Run the failing test:
+python3 -m pytest -xvv tests/path/to/test_that_failed.py::test_name
+```
+
+If the test passes locally in the CI container, the failure is likely a
+resource or timing issue in CI. If it fails, you have an exact reproduction.
+
+Pull the container, reproduce, fix, verify -- in that order. Don't make
+speculative fixes from logs.
+
 Always use the venv-aware invocation -- never bare `pytest`:
 
 ```bash
@@ -281,31 +302,6 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):
     ...
-```
-
-## Async Tests
-
-`asyncio_mode = "auto"` is configured in `pyproject.toml`, so all `async def test_*`
-functions are collected automatically.
-
-**Always flag** `@pytest.mark.asyncio` -- this is a **required change, not a style
-suggestion**. The marker is never needed in this repo. Remove it.
-
-```python
-# BAD -- redundant marker; asyncio_mode = "auto" handles this
-@pytest.mark.asyncio
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-async def test_async_endpoint():
-    await asyncio.sleep(0.01)
-
-# GOOD -- no marker needed, pytest collects it automatically
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-async def test_async_endpoint():
-    await asyncio.sleep(0.01)
 ```
 
 ## Hermetic Testing

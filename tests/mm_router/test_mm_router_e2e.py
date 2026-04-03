@@ -30,11 +30,11 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
-TRTLLM_MM_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
-TRTLLM_MM_MODEL_TYPE = "qwen2_vl"
+TRTLLM_MM_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+TRTLLM_MM_MODEL_TYPE = "qwen3_vl"
 BLOCK_SIZE = 32
 NAMESPACE = "test-mm"
-# Broad guardrails for TRT-LLM + Qwen2-VL-2B under block size 32.
+# Broad guardrails for TRT-LLM + Qwen3-VL-2B under block size 32.
 THREE_IMAGE_TOTAL_BLOCKS_RANGE = (80, 520)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (20, 260)
 

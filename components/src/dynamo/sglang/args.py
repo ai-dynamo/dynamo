@@ -262,8 +262,6 @@ async def parse_args(args: list[str]) -> Config:
             and parsed_args.disaggregation_mode == "prefill"
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
-        elif dynamo_config.multimodal_processor:
-            endpoint = f"dyn://{namespace}.processor.generate"
         elif dynamo_config.multimodal_encode_worker:
             endpoint = f"dyn://{namespace}.encoder.generate"
         elif (
@@ -368,11 +366,20 @@ async def parse_args(args: list[str]) -> Config:
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
 
+    if getattr(server_args, "schedule_low_priority_values_first", False):
+        raise ValueError(
+            "--schedule-low-priority-values-first is not supported in Dynamo's "
+            "SGLang integration. Dynamo normalizes request priority so higher "
+            "values are always higher priority at the API layer."
+        )
+
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. When stream_output=True,
-    # SGLang sends disjoint segments which Dynamo passes through directly.
-    # Force stream_output=True for optimal streaming performance.
-    server_args.stream_output = True
+    # tokens since last output), not cumulative tokens.
+    # sglang renamed stream_output -> incremental_streaming_output in PR #20614.
+    if hasattr(ServerArgs, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
+    else:
+        server_args.stream_output = True
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
