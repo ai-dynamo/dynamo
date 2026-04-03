@@ -155,6 +155,19 @@ pub struct NewSlotInfo {
     pub expected_immediate_ops: u64,
 }
 
+/// Best-effort request-scoped advisory prefetch request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteAdviceRequest {
+    /// The request ID for the slot this advice applies to.
+    pub request_id: String,
+    /// Full request token IDs so workers can derive sequence hashes locally later.
+    pub token_ids: Vec<u32>,
+    /// Initial scheduling grace period before the caller proceeds normally.
+    pub transfer_budget_ms: u64,
+    /// Minimum number of contiguous blocks worth preferring before prefetch work begins.
+    pub min_blocks: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorMetadata {
     /// The iteration at which the metadata was built.
@@ -165,6 +178,9 @@ pub struct ConnectorMetadata {
 
     /// The operations that were initialized in this iteration.
     pub operations: Vec<WorkerTransferRequest>,
+
+    /// Best-effort advisory prefetch requests for this iteration.
+    pub advice_requests: Vec<RemoteAdviceRequest>,
 }
 
 impl ConnectorMetadata {
@@ -173,6 +189,7 @@ impl ConnectorMetadata {
             iteration,
             new_slots: Vec::new(),
             operations: Vec::new(),
+            advice_requests: Vec::new(),
         }
     }
 
@@ -186,5 +203,9 @@ impl ConnectorMetadata {
 
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
         self.operations.extend(xfer_reqs);
+    }
+
+    pub fn add_advice_request(&mut self, request: RemoteAdviceRequest) {
+        self.advice_requests.push(request);
     }
 }

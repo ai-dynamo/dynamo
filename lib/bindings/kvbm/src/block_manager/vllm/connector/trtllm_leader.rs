@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::block_manager::BlockManagerBuilder;
+use crate::block_manager::vllm::connector::RemoteAdviceRequest;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
@@ -50,6 +51,14 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    fn advise_will_need_remote(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        transfer_budget_ms: u64,
+        min_blocks: u64,
+    ) -> anyhow::Result<()>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -61,6 +70,7 @@ pub struct KvConnectorLeader {
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
     inflight_request_to_num_external_tokens: HashMap<String, usize>,
+    pending_remote_advice: HashMap<String, RemoteAdviceRequest>,
     kvbm_metrics: KvbmMetrics,
 }
 
@@ -158,6 +168,7 @@ impl KvConnectorLeader {
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
             inflight_request_to_num_external_tokens: HashMap::new(),
+            pending_remote_advice: HashMap::new(),
             kvbm_metrics,
         }
     }
@@ -452,6 +463,22 @@ impl Leader for KvConnectorLeader {
             }
         }
 
+        for request_id in scheduler_output
+            .new_requests
+            .iter()
+            .map(|req| &req.request_id)
+            .chain(
+                scheduler_output
+                    .cached_requests
+                    .iter()
+                    .map(|req| &req.request_id),
+            )
+        {
+            if let Some(request) = self.pending_remote_advice.remove(request_id) {
+                md.add_advice_request(request);
+            }
+        }
+
         tracing::debug!("metadata: {md:#?}");
         serde_json::to_vec(&md)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connector metadata: {}", e))
@@ -505,6 +532,45 @@ impl Leader for KvConnectorLeader {
             .create_slot(&request.request_id, tokens, request.salt_hash)?;
 
         self.inflight_requests.insert(request.request_id);
+
+        Ok(())
+    }
+
+    fn advise_will_need_remote(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        transfer_budget_ms: u64,
+        min_blocks: u64,
+    ) -> anyhow::Result<()> {
+        // This is a best-effort pre-scheduling hint, not a load promise.
+        //
+        // Intended call timing:
+        // - after TRT-LLM has activated request objects for the upcoming iteration
+        // - before the scheduler runs for that iteration
+        //
+        // Intended caller shape:
+        // - inspect active/context requests that are likely to need remote KV soon
+        // - call advise_will_need_remote(request, tokens, budget, min_blocks)
+        // - allow a bounded grace period for remote-to-local prefetch work
+        // - then run normal scheduling using only local KVBM matches
+        //
+        // This API must not be used to promise remote availability to TRT-LLM.
+        // It only stages advisory intent so all worker ranks can receive the same
+        // request-scoped hint during the next connector metadata bind.
+        if !self.has_slot(request.request_id.clone()) {
+            self.create_slot(request.clone(), tokens.clone())?;
+        }
+
+        self.pending_remote_advice.insert(
+            request.request_id.clone(),
+            RemoteAdviceRequest {
+                request_id: request.request_id,
+                token_ids: tokens,
+                transfer_budget_ms,
+                min_blocks,
+            },
+        );
 
         Ok(())
     }
@@ -580,6 +646,19 @@ impl PyTrtllmKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (request, tokens, transfer_budget_ms=100, min_blocks=10))]
+    fn advise_will_need_remote(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        transfer_budget_ms: u64,
+        min_blocks: u64,
+    ) -> PyResult<()> {
+        self.connector_leader
+            .advise_will_need_remote(request, tokens, transfer_budget_ms, min_blocks)
             .map_err(to_pyerr)
     }
 }

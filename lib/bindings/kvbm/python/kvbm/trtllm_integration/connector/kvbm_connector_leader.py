@@ -220,3 +220,40 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         )
 
         self._connector.create_slot(request, all_token_ids)
+
+    @nvtx_annotate(category="scheduler")
+    def advise_will_need_remote(
+        self, request: LlmRequest, transfer_for_ms: int = 100, min_blocks: int = 10
+    ) -> None:
+        """
+        Submit a best-effort remote-prefetch hint for this request before scheduling.
+
+        This should be called after TRT-LLM has activated the request for the upcoming
+        iteration, but before the scheduler makes its placement decision for that
+        iteration.
+
+        Intended usage:
+        - inspect active/context requests that are likely to need remote KV soon
+        - call this method with the full request tokens
+        - allow a bounded grace period for remote-to-local prefetch work
+        - run normal scheduling afterward using only local KVBM matches
+
+        This API is advisory only. It must not be treated as a promise that remote KV
+        will be available in time for the next iteration.
+
+        The request is routed through connector metadata so every local worker rank
+        receives the same request-scoped advisory hint during the next metadata bind.
+        """
+        self._create_slot(request)
+
+        if bool(request.multimodal_positions):
+            raise ValueError("Unsupported request - requires mm extra keys")
+
+        all_token_ids = request.get_tokens(0)
+        request = KvbmRequest(
+            request_id=str(request.request_id), lora_name=None, salt_hash=None
+        )
+
+        self._connector.advise_will_need_remote(
+            request, all_token_ids, transfer_for_ms, min_blocks
+        )
