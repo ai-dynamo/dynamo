@@ -231,20 +231,16 @@ impl<
             return;
         };
 
-        if let Err(e) = self
-            .slots
-            .add_request(SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
-                track_prefill_tokens: request.track_prefill_tokens,
-                expected_output_tokens: request.expected_output_tokens,
-                worker: selection.worker,
-                lora_name: request.lora_name.clone(),
-            })
-            .await
-        {
+        if let Err(e) = self.slots.add_request(SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: request.token_seq,
+            isl: request.isl_tokens,
+            overlap: selection.overlap_blocks,
+            track_prefill_tokens: request.track_prefill_tokens,
+            expected_output_tokens: request.expected_output_tokens,
+            worker: selection.worker,
+            lora_name: request.lora_name.clone(),
+        }) {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
     }
@@ -413,8 +409,8 @@ mod tests {
                 let resp = resp.expect("scheduling failed");
                 assert!(resp.best_worker.worker_id < num_workers as u64);
 
-                slots.mark_prefill_completed(&req_id).await.unwrap();
-                slots.free(&req_id).await.unwrap();
+                slots.mark_prefill_completed(&req_id).unwrap();
+                slots.free(&req_id).unwrap();
                 queue.update().await;
             }));
         }
@@ -457,8 +453,8 @@ mod tests {
         for _ in 0..num_requests {
             queue.update().await;
             for rid in &req_ids {
-                let _ = slots.mark_prefill_completed(rid).await;
-                let _ = slots.free(rid).await;
+                let _ = slots.mark_prefill_completed(rid);
+                let _ = slots.free(rid);
             }
         }
         queue.update().await;
@@ -499,11 +495,8 @@ mod tests {
         assert_eq!(queue.pending_count(), 2);
 
         // Free the first request and update — should drain one from pending
-        slots
-            .mark_prefill_completed(&"req-1".to_string())
-            .await
-            .unwrap();
-        slots.free(&"req-1".to_string()).await.unwrap();
+        slots.mark_prefill_completed(&"req-1".to_string()).unwrap();
+        slots.free(&"req-1".to_string()).unwrap();
         queue.update().await;
 
         // After update, one pending request should have been scheduled
@@ -514,11 +507,11 @@ mod tests {
         );
 
         // Free req-2 and update to drain remaining
-        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
-        let _ = slots.free(&"req-2".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-2".to_string());
+        let _ = slots.free(&"req-2".to_string());
         queue.update().await;
-        let _ = slots.mark_prefill_completed(&"req-3".to_string()).await;
-        let _ = slots.free(&"req-3".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-3".to_string());
+        let _ = slots.free(&"req-3".to_string());
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
@@ -598,9 +591,8 @@ mod tests {
         // Clean up
         slots
             .mark_prefill_completed(&"after-register".to_string())
-            .await
             .unwrap();
-        slots.free(&"after-register".to_string()).await.unwrap();
+        slots.free(&"after-register".to_string()).unwrap();
     }
 
     /// Register_workers is additive: calling with a new set does NOT remove old workers.
@@ -651,8 +643,8 @@ mod tests {
                 .expect("oneshot dropped")
                 .expect("scheduling failed");
             seen.insert(resp.best_worker.worker_id);
-            slots.mark_prefill_completed(&req_id).await.unwrap();
-            slots.free(&req_id).await.unwrap();
+            slots.mark_prefill_completed(&req_id).unwrap();
+            slots.free(&req_id).unwrap();
         }
 
         assert!(
@@ -721,9 +713,8 @@ mod tests {
         );
         slots
             .mark_prefill_completed(&"filter-0".to_string())
-            .await
             .unwrap();
-        slots.free(&"filter-0".to_string()).await.unwrap();
+        slots.free(&"filter-0".to_string()).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -747,9 +738,9 @@ mod tests {
         let _resp2 = rx2.await.unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0);
 
-        let _ = slots.mark_prefill_completed(&"req-1".to_string()).await;
-        let _ = slots.free(&"req-1".to_string()).await;
-        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
-        let _ = slots.free(&"req-2".to_string()).await;
+        let _ = slots.mark_prefill_completed(&"req-1".to_string());
+        let _ = slots.free(&"req-1".to_string());
+        let _ = slots.mark_prefill_completed(&"req-2".to_string());
+        let _ = slots.free(&"req-2".to_string());
     }
 }

@@ -11,9 +11,7 @@ They should only allocate on their cache when they are the active/leader engine.
 from __future__ import annotations
 
 import logging
-import time
 
-import torch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = logging.getLogger(__name__)
@@ -47,6 +45,10 @@ class GMSShadowModelRunner(GPUModelRunner):
             self._shadow_kernel_block_sizes = kernel_block_sizes
             logger.info(
                 "[Shadow] Init phase: stored config, skipping KV cache allocation"
+            )
+            print(
+                "[Shadow] Init phase: stored config, skipping KV cache allocation",
+                flush=True,
             )
             return {}
         return super().initialize_kv_cache_tensors(kv_cache_config, kernel_block_sizes)
@@ -86,7 +88,9 @@ class GMSShadowModelRunner(GPUModelRunner):
         """Allocate KV cache on wake using config stored during shadow init.
 
         Called by GMSWorker.wake_up() after shadow init phase is exited.
-        Waits up to 60s for GPU memory to be freed.
+        GMS kv_cache RW lock acquisition serves as the memory barrier — the
+        dying engine's abort() releases the lock and frees memory before we
+        can connect.
         """
         assert hasattr(
             self, "_shadow_kv_cache_config"
@@ -95,47 +99,7 @@ class GMSShadowModelRunner(GPUModelRunner):
             self, "_shadow_kernel_block_sizes"
         ), "_shadow_kernel_block_sizes not set — was enter_shadow_init() called?"
 
-        # OOM remediation during failover: wait for the dying engine to release memory.
-        # TODO: This will be replaced with a barrier in GMS when we manage kv cache there instead
         config = self._shadow_kv_cache_config
-        kv_cache_bytes = sum(t.size for t in config.kv_cache_tensors)
-
-        free_bytes, _ = torch.cuda.mem_get_info()
-        if free_bytes < kv_cache_bytes:
-            logger.info(
-                "[Shadow] Waiting for GPU memory (need %.2f GiB, free %.2f GiB)",
-                kv_cache_bytes / (1 << 30),
-                free_bytes / (1 << 30),
-            )
-            deadline = time.monotonic() + 60.0
-            last_log = time.monotonic()
-            while free_bytes < kv_cache_bytes:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(
-                        f"Timed out waiting for GPU memory: "
-                        f"need {kv_cache_bytes / (1 << 30):.2f} GiB, "
-                        f"free {free_bytes / (1 << 30):.2f} GiB"
-                    )
-                now = time.monotonic()
-                if now - last_log >= 5.0:
-                    elapsed = now - (deadline - 60.0)
-                    remaining = deadline - now
-                    logger.info(
-                        "[Shadow] Still waiting for GPU memory: "
-                        "need %.2f GiB, free %.2f GiB "
-                        "(%.0fs elapsed, %.0fs remaining)",
-                        kv_cache_bytes / (1 << 30),
-                        free_bytes / (1 << 30),
-                        elapsed,
-                        remaining,
-                    )
-                    last_log = now
-                time.sleep(0.5)
-                free_bytes = torch.cuda.mem_get_info()[0]
-            logger.info(
-                "[Shadow] GPU memory available (free %.2f GiB), proceeding",
-                free_bytes / (1 << 30),
-            )
 
         logger.info("[Shadow] Allocating KV cache on wake")
 
@@ -163,10 +127,11 @@ class GMSShadowModelRunner(GPUModelRunner):
             logger.debug("[Shadow] KV transfer group not available")
 
         total_bytes = sum(t.numel() * t.element_size() for t in kv_caches.values())
-        logger.info(
-            "[Shadow] Allocated KV cache on wake: %.2f GiB (%d tensors)",
+        msg = "[Shadow] Allocated KV cache on wake: %.2f GiB (%d tensors)" % (
             total_bytes / (1 << 30),
             len(kv_caches),
         )
+        logger.info(msg)
+        print(msg, flush=True)
 
         return kv_caches

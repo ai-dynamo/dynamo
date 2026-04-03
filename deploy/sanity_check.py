@@ -661,7 +661,7 @@ class SystemInfo(NodeInfo):
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
         # The planner module logs a warning about Prometheus endpoint when imported
         # outside of a Kubernetes cluster. Suppress this for cleaner output.
-        planner_logger = logging.getLogger("dynamo.planner.defaults")
+        planner_logger = logging.getLogger("dynamo.planner.config.defaults")
         planner_logger.setLevel(logging.ERROR)
         # Also suppress the defaults._get_default_prometheus_endpoint logger
         defaults_logger = logging.getLogger("defaults._get_default_prometheus_endpoint")
