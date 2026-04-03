@@ -531,7 +531,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Set enable_thinking=true only when the Responses API caller explicitly requests
         // reasoning alongside guided decoding; this signals the Python handler to wrap the
         // guided decoding constraint in a structural_tag that allows free-text reasoning.
-        let chat_template_args = if response_format.is_some() && resp.inner.reasoning.is_some() {
+        let has_guided_decoding = response_format.is_some() || tools.is_some();
+        let chat_template_args = if has_guided_decoding && resp.inner.reasoning.is_some() {
             // Guided decoding WITH explicit reasoning → enable thinking
             // The Python handler generates a structural_tag with sequence format
             let mut args = std::collections::HashMap::new();
