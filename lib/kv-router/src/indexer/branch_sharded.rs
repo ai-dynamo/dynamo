@@ -352,8 +352,13 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(
+            tokens,
+            self.kv_block_size,
+            BlockHashOptions { lora_name, is_eagle, block_mm_infos: None },
+        );
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         match self.lookup_shard(branch_key) {
             Some(idx) => self.shards[idx].find_matches(sequence).await,
