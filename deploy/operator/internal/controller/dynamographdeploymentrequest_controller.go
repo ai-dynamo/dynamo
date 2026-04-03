@@ -218,6 +218,13 @@ metadata:
   labels:
     dgdr.nvidia.com/name: {{.DGDRName}}
     nvidia.com/managed-by: dynamo-operator
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentRequest
+    name: {{.DGDRName}}
+    uid: {{.DGDRuid}}
+    blockOwnerDeletion: true
+    controller: true
 data:
   {{.OutputFile}}: |
 EOF
@@ -768,16 +775,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace] = dgdr.Namespace
 		cm.Labels[nvidiacomv1beta1.LabelManagedBy] = nvidiacomv1beta1.LabelValueDynamoOperator
 
-		// Create the ConfigMap
-		if err := r.Create(ctx, cm); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				logger.Info("ConfigMap already exists, skipping", "name", cm.Name)
-			} else {
-				return fmt.Errorf("failed to create ConfigMap %s: %w", cm.Name, err)
-			}
-		} else {
-			logger.Info("Created ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
+		// Use SyncResource to create/update the ConfigMap with owner reference and change detection
+		_, _, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+			return cm, false, nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to sync ConfigMap %s: %w", cm.Name, err)
 		}
+		logger.Info("Synced ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
 	}
 
 	if resourceCount > 0 {
@@ -1046,6 +1051,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"ConfigMapName": outputConfigMapName,
 			"Namespace":     dgdr.Namespace,
 			"DGDRName":      dgdr.Name,
+			"DGDRuid":       string(dgdr.UID),
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
