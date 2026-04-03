@@ -78,7 +78,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0
         assert result.top_k == 0
@@ -97,7 +99,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
@@ -114,7 +118,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0.7
         assert result.top_p == 0.9
@@ -150,7 +156,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0
         assert result.top_p == original_top_p  # Unchanged
@@ -237,7 +245,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(
             result.guided_decoding, dict
@@ -262,7 +272,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         assert result.guided_decoding.regex == "(yes|no|maybe)"
@@ -279,7 +291,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         expected = (
@@ -301,7 +315,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex == "[0-9]+"
 
@@ -316,7 +332,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex is None
 
@@ -331,7 +349,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         assert result.guided_decoding.regex == "(yes|no)"
@@ -347,7 +367,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = self._make_handler()._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex is None
 
