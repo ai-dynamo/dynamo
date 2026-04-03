@@ -23,7 +23,7 @@ EXCLUDED_JOB_NAMES = [
     "Upload Workflow Metrics",  # Avoid infinite loops
     # Add other job names to exclude here as needed
 ]
-FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
+FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm", "fastvideo"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
 # Using prefixes: s_ for strings, l_ for longs, ts_ for timestamps
@@ -132,6 +132,8 @@ class BuildMetricsReader:
             framework = "sglang"
         elif "trtllm" in job_name_lower:
             framework = "trtllm"
+        elif "fastvideo" in job_name_lower:
+            framework = "fastvideo"
 
         if not framework:
             print(f"⚠️  Could not determine framework from job name: {job_name}")
@@ -836,6 +838,8 @@ class WorkflowMetricsUploader:
             framework = "sglang"
         elif "trtllm" in job_name_lower:
             framework = "trtllm"
+        elif "fastvideo" in job_name_lower:
+            framework = "fastvideo"
 
         if not framework:
             print(f"⚠️  Could not determine framework from job name: {job_name}")

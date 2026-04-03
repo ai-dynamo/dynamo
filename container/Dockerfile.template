@@ -57,6 +57,16 @@
 # --- No TRTLLM stages included
 {% endif %}
 
+# --- FastVideo Stages
+{% if framework == "fastvideo" %}
+    {% include "templates/fastvideo_framework.Dockerfile" %}
+    {% if target != "framework" %}
+        {% include "templates/fastvideo_runtime.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No FastVideo stages included
+{% endif %}
+
 {% if make_efa == true and target == "runtime" %}
     {% include "templates/aws.Dockerfile" %}
 {% endif %}

@@ -30,6 +30,12 @@ class FastVideoConfig(EngineConfig):
 
 
 fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/diffusers/local")
+fastvideo_ci_worker_args = (
+    "--no-dit-layerwise-offload "
+    "--dit-cpu-offload "
+    "--vae-cpu-offload "
+    "--text-encoder-cpu-offload"
+)
 
 fastvideo_configs = {
     "aggregated": FastVideoConfig(
@@ -39,13 +45,13 @@ fastvideo_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.fastvideo,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
         model="FastVideo/LTX2-Distilled-Diffusers",
         timeout=1800,
-        env={},
+        env={"WORKER_EXTRA_ARGS": fastvideo_ci_worker_args},
         request_payloads=[video_generation_payload_default()],
     ),
     "aggregated_flash_attn": FastVideoConfig(
@@ -61,7 +67,11 @@ fastvideo_configs = {
         ],
         model="FastVideo/LTX2-Distilled-Diffusers",
         timeout=1800,
-        env={"WORKER_EXTRA_ARGS": "--attention-backend FLASH_ATTN"},
+        env={
+            "WORKER_EXTRA_ARGS": (
+                f"{fastvideo_ci_worker_args} --attention-backend FLASH_ATTN"
+            )
+        },
         request_payloads=[video_generation_payload_default()],
     ),
 }
@@ -81,6 +91,7 @@ def test_fastvideo_deployment(
     tmp_path,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    set_ucx_tls_no_mm,
     predownload_models,
 ):
     """Smoke test the built-in FastVideo backend behind the shared frontend."""

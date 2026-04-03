@@ -35,11 +35,26 @@ The local example flow in `examples/diffusers/` now shells into this built-in en
 
 ## Docker Image Build
 
-The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
+The canonical FastVideo runtime image is built through the shared container renderer so CI, release, and local image generation all follow the same backend path:
 
-- Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
-- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
-- Builds and installs the local `ai-dynamo-runtime` bindings plus the local Dynamo source tree so the image runs the built-in `dynamo.fastvideo` backend from this repo
+```bash
+python3 container/render.py \
+  --framework fastvideo \
+  --target runtime \
+  --cuda-version 13.1 \
+  --platform linux/amd64
+
+docker build -f container/fastvideo-runtime-cuda13.1-amd64-rendered.Dockerfile .
+```
+
+This rendered runtime image:
+
+- Uses a multi-stage build with `nvcr.io/nvidia/pytorch:25.12-py3` as the build-side base
+- Publishes the final runtime stage from `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04`
+- Installs the local Dynamo runtime wheels produced by the shared wheel builder
+- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) and related Python dependencies in a dedicated framework stage through the shared `container/deps/fastvideo/` installer path, then copies the prepared environment into the final runtime image
+
+The example [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile) remains available as a local compatibility image for Docker Compose. It reuses the same FastVideo dependency installer, but installs the local repository directly from source so the example remains easy to run with:
 
 ```bash
 docker build -f examples/diffusers/Dockerfile .
@@ -77,7 +92,7 @@ cd <dynamo-root>/examples/diffusers/local
 COMPOSE_PROFILES=4 docker compose up --build
 ```
 
-The Compose file builds from the Dockerfile and exposes the API on `http://localhost:8000`. See the [Docker Image Build](#docker-image-build) section for build time expectations.
+The Compose file builds from the compatibility Dockerfile and exposes the API on `http://localhost:8000`. See the [Docker Image Build](#docker-image-build) section for both the canonical rendered image flow and the local compose compatibility path.
 
 ### Option 2: Host-Local Script
 

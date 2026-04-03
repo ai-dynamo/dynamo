@@ -1,14 +1,14 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm/fastvideo)
 #   operator -> operator build and test
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
-#   fastvideo -> FastVideo file coverage (no dedicated CI pipeline yet)
+#   fastvideo -> FastVideo build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -151,6 +151,8 @@ trtllm:
 fastvideo:
   - '!**/*.md'
   - '!**/*.rst'
+  - 'container/deps/fastvideo/**'
+  - 'container/templates/fastvideo_*'
   - 'components/src/dynamo/fastvideo/**'
   - 'examples/diffusers/**'
 

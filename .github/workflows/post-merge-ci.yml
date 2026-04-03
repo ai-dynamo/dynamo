@@ -92,6 +92,30 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # FASTVIDEO PIPELINE
+  # ============================================================================
+  fastvideo-pipeline:
+    name: fastvideo
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-fastvideo' || '' }}
+        ${{ github.ref_name == 'main' && format('main-fastvideo-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
+      cpu_only_test_markers: '(pre_merge or post_merge) and fastvideo and gpu_0'
+      single_gpu_test_markers: '(pre_merge or post_merge) and fastvideo and gpu_1'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
   # DEV PIPELINES
   # ============================================================================
   vllm-dev-pipeline:
@@ -362,6 +386,10 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  # Follow-up: add deploy-test-fastvideo once tests/deploy/test_deploy.py
+  # supports the FastVideo request path (/v1/videos) in addition to chat.
+  # FastVideo deploy profiles already exist under examples/diffusers/deploy.
+  # If this lane becomes stable and required, mirror the same job in pr.yaml.
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
@@ -457,7 +485,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -478,7 +506,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:

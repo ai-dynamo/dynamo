@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git@833a33b66318125ac449f05a87aa7ada1a1b120d
+flash-attn-4[cu13]==4.0.0b7
+uvloop

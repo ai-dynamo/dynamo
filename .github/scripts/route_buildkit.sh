@@ -12,7 +12,7 @@
 # 100% pod utilization across any number of BuildKit pods.
 #
 # CACHE GROUPS (3 distinct groups to maximize layer reuse):
-#   - Group 0 (cuda-dl-base-13):    vLLM & SGLang (CUDA 13.x)
+#   - Group 0 (cuda-dl-base-13):    vLLM, SGLang & FastVideo (CUDA 13.x)
 #   - Group 1 (cuda-dl-base-12):    vLLM & SGLang (CUDA 12.x)
 #   - Group 2 (general-trt-combined): TRT-LLM & General Builds
 #
@@ -51,7 +51,7 @@ set -e
 ARCH_INPUT=""
 FLAVOR_INPUT=""
 CUDA_VERSION=""
-ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "fastvideo" "general")
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <12.9|13.0>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|fastvideo|general|all> [--cuda <12.9|13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -80,13 +80,13 @@ if [ -z "$ARCH_INPUT" ]; then
 fi
 
 if [ -z "$FLAVOR_INPUT" ]; then
-  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|fastvideo|general|all>."
   exit 1
 fi
 
 # CUDA version is required for all flavors except "general"
 if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-  echo "❌ Error: Must specify --cuda <12.9|13.0> for flavor '$FLAVOR_INPUT'."
+  echo "❌ Error: Must specify --cuda <12.9|13.0|13.1> for flavor '$FLAVOR_INPUT'."
   exit 1
 fi
 
@@ -101,9 +101,9 @@ esac
 
 # Validate flavor input
 case $FLAVOR_INPUT in
-  vllm|trtllm|sglang|general|all) ;;
+  vllm|trtllm|sglang|fastvideo|general|all) ;;
   *)
-    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, general, or all."
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, fastvideo, general, or all."
     exit 1
     ;;
 esac
@@ -181,7 +181,7 @@ flavor_to_group() {
   local flavor=$1
   local cuda_major=${2%%.*}
   case "$flavor" in
-    vllm|sglang)
+    vllm|sglang|fastvideo)
       case "$cuda_major" in
         13) echo 0 ;;
         *)  echo 1 ;;
