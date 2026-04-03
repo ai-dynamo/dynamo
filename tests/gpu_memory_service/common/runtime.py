@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
@@ -166,9 +165,6 @@ class GMSEngineProcess(EngineProcess, ABC):
         self._reserved_ports = reserved_ports
         self.weights_lock_mode = _normalize_weights_lock_mode(weights_lock_mode)
 
-        log_dir = f"{request.node.name}_{engine_id}"
-        shutil.rmtree(log_dir, ignore_errors=True)
-
         super().__init__(
             command=self.command(),
             env={
@@ -186,7 +182,7 @@ class GMSEngineProcess(EngineProcess, ABC):
             display_output=True,
             terminate_all_matching_process_names=False,
             stragglers=[],
-            log_dir=log_dir,
+            log_dir=f"{request.node.name}_{engine_id}",
             display_name=engine_id,
         )
 
