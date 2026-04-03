@@ -6,9 +6,6 @@
 import logging
 import os
 
-from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.integrations.common.utils import parse_requested_lock_type
-
 logger = logging.getLogger(__name__)
 
 
@@ -46,42 +43,32 @@ def validate_cudagraph_mode(engine_args) -> None:
 
 
 def configure_gms_lock_mode(engine_args) -> None:
-    """Set gms_lock_mode in model_loader_extra_config based on ENGINE_ID.
+    """Set gms_read_only in model_loader_extra_config based on ENGINE_ID.
 
     In a failover setup with TP>1, only ENGINE_ID="0" loads weights from
     disk (RW_OR_RO). All other engines import from GMS (RO). This avoids
     deadlock: if multiple engines tried to acquire RW locks across TP ranks
     simultaneously, they could block each other indefinitely.
 
-    Raises if user-specified gms_lock_mode conflicts with ENGINE_ID.
+    Raises if user-specified gms_read_only conflicts with ENGINE_ID.
     """
     engine_id = os.environ.get("ENGINE_ID", "0")
-    extra = dict(engine_args.model_loader_extra_config or {})
-    requested_mode = extra.get("gms_lock_mode")
-    if requested_mode is not None:
-        try:
-            requested_mode = parse_requested_lock_type(requested_mode)
-            extra["gms_lock_mode"] = requested_mode.value
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid gms_lock_mode {requested_mode!r}. "
-                "Expected one of: rw, ro, rw_or_ro."
-            ) from exc
+    extra = engine_args.model_loader_extra_config or {}
+    user_read_only = extra.get("gms_read_only", None)
 
     if engine_id == "0":
-        if requested_mode == RequestedLockType.RO:
+        if user_read_only:
             raise ValueError(
                 "ENGINE_ID=0 is the primary writer but "
-                "gms_lock_mode='ro' was explicitly set. "
+                "gms_read_only=True was explicitly set. "
                 "The primary engine must be able to write weights."
             )
     else:
-        if requested_mode is None:
-            extra["gms_lock_mode"] = RequestedLockType.RO.value
-        elif requested_mode != RequestedLockType.RO:
+        if user_read_only is not None and not user_read_only:
             raise ValueError(
-                f"ENGINE_ID={engine_id} requires gms_lock_mode='ro', "
-                f"but gms_lock_mode={requested_mode.value!r} was explicitly set."
+                f"ENGINE_ID={engine_id} requires gms_read_only=True, "
+                f"but gms_read_only=False was explicitly set."
             )
+        extra["gms_read_only"] = True
 
     engine_args.model_loader_extra_config = extra

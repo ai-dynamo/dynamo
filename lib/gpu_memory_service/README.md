@@ -588,12 +588,10 @@ This enables a shadow engine to release its GPU memory, let a primary engine use
 
 ### Configuration via `model_loader_extra_config`
 
-To force a specific lock mode, pass `gms_lock_mode` via the framework's
-`--model-loader-extra-config` flag:
+To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
 
 ```bash
---model-loader-extra-config '{"gms_lock_mode": "ro"}'
+--model-loader-extra-config '{"gms_read_only": true}'
 ```
 
-Accepted values are `rw`, `ro`, and `rw_or_ro`. Omitting the field keeps the
-default `RW_OR_RO` auto-detection.
+This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
