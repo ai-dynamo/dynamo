@@ -21,7 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Checkpoint storage type constants
+// Checkpoint storage type constants retained for compatibility with older
+// operator configuration files.
 const (
 	CheckpointStorageTypePVC = "pvc"
 	CheckpointStorageTypeS3  = "s3"
@@ -245,46 +246,49 @@ type CheckpointConfiguration struct {
 	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
 	// +kubebuilder:default="/tmp/ready-for-checkpoint"
 	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
-	// Storage holds storage backend configuration
+	// Deprecated: Storage is retained for compatibility and ignored by the
+	// current snapshot flow. Snapshot storage is discovered from the
+	// snapshot-agent DaemonSet instead.
 	Storage CheckpointStorageConfiguration `json:"storage"`
 }
 
-// CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
+// Deprecated: CheckpointStorageConfiguration is retained for compatibility and
+// ignored by the current snapshot flow.
 type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type: pvc, s3, or oci
-	// +kubebuilder:default="pvc"
+	// Type is the legacy storage backend type: pvc, s3, or oci.
 	Type string `json:"type"`
-	// PVC configuration (used when Type=pvc)
+	// PVC configuration for legacy pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
-	// S3 configuration (used when Type=s3)
+	// S3 configuration for legacy s3-based settings.
 	S3 CheckpointS3Config `json:"s3"`
-	// OCI configuration (used when Type=oci)
+	// OCI configuration for legacy oci-based settings.
 	OCI CheckpointOCIConfig `json:"oci"`
 }
 
-// CheckpointPVCConfig holds PVC storage configuration.
+// Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
+// the current snapshot flow.
 type CheckpointPVCConfig struct {
-	// PVCName is the name of the PVC
-	// +kubebuilder:default="snapshot-pvc"
+	// PVCName is the legacy PVC name.
 	PVCName string `json:"pvcName"`
-	// BasePath is the base directory within the PVC
-	// +kubebuilder:default="/checkpoints"
+	// BasePath is the legacy base directory within the PVC.
 	BasePath string `json:"basePath"`
 }
 
-// CheckpointS3Config holds S3 storage configuration.
+// Deprecated: CheckpointS3Config is retained for compatibility and ignored by
+// the current snapshot flow.
 type CheckpointS3Config struct {
-	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
+	// URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
 	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the credentials secret
+	// CredentialsSecretRef is the legacy credentials secret name.
 	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 
-// CheckpointOCIConfig holds OCI registry storage configuration.
+// Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
+// the current snapshot flow.
 type CheckpointOCIConfig struct {
-	// URI is the OCI URI (oci://registry/repository)
+	// URI is the legacy OCI URI (oci://registry/repository).
 	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the docker config secret
+	// CredentialsSecretRef is the legacy docker config secret name.
 	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 

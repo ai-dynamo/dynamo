@@ -2161,6 +2161,8 @@ def _test_disagg_direct_mode(
             headers = {
                 "x-worker-instance-id": str(target_decode),
                 "x-prefill-instance-id": str(target_prefill),
+                "x-dp-rank": "0",
+                "x-prefill-dp-rank": "0",
             }
 
             async with aiohttp.ClientSession() as session:

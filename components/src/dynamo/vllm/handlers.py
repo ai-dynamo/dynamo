@@ -33,6 +33,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -389,6 +390,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks_guard = threading.Lock()
 
         self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.video_loader = VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
@@ -1178,8 +1182,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         mm_map = request["multi_modal_data"]
 
-        # [gluo NOTE] If embedding loader is configured, currently we unconditionally
-        # fetch from the embedding loader.
+        vllm_mm_data = {}
+
+        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
+        # Still continue below so mixed image+video requests can attach `video`.
         if self.embedding_loader is not None:
             # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
             # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
@@ -1198,23 +1204,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.debug(
                     f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
                 )
-                return vllm_mm_data if vllm_mm_data else None
 
-        # Fallback that the vLLM engine will perform encoding internally.
-        vllm_mm_data = {}
-        # Process image_url entries
-        images = await self.image_loader.load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []),
-        )
+        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
+        if "image" not in vllm_mm_data and image_mm_items:
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+            )
 
-        if images:
-            # vLLM expects single image or list
-            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
 
-        # Handle video_url entries (future expansion)
-        if VIDEO_URL_KEY in mm_map:
-            logger.warning("Video multimodal data not yet supported in standard worker")
+        video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
+        if video_mm_items:
+            videos = await self.video_loader.load_video_batch(video_mm_items)
+
+            if videos:
+                # vLLM expects single video or list
+                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                logger.debug(
+                    f"Extracted {len(videos)} video(s) for multimodal processing"
+                )
 
         return vllm_mm_data if vllm_mm_data else None
 

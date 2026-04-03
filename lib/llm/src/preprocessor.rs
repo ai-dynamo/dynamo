@@ -321,7 +321,8 @@ impl OpenAIPreprocessor {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
-                dp_rank: None, // dp_rank is set later in the pipeline
+                dp_rank: nvext.dp_rank,
+                prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| {
                     h.priority

@@ -7,6 +7,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -50,6 +51,10 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+LOCAL_VIDEO_TEST_PATH = Path(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+).resolve()
+LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -423,14 +428,6 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -531,20 +528,18 @@ vllm_configs = {
             ),
         ],
     ),
-    # Video multimodal tests for nightly CI pipeline
-    # These tests validate video inference capabilities with LLaVA-NeXT-Video model
-    # Reference: Linear OPS-3015
+    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="video_agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
-            pytest.mark.nightly,
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
-        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
@@ -552,13 +547,11 @@ vllm_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {
-                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                        },
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response=["red", "static", "still"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -566,15 +559,15 @@ vllm_configs = {
     ),
     "multimodal_video_disagg": VLLMConfig(
         name="multimodal_video_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="video_disagg.sh",
+        directory=vllm_dir,
+        script_name="disagg_multimodal_epd.sh",
         marks=[
-            pytest.mark.gpu_2,
-            pytest.mark.nightly,
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
-        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
@@ -582,13 +575,11 @@ vllm_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {
-                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                        },
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response=["red", "static", "still"],
                 temperature=0.0,
                 max_tokens=100,
             )
