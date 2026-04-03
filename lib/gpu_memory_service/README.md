@@ -565,9 +565,9 @@ python -m dynamo.sglang \
 ```
 
 The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
-- Weights (`"weights"` / `"model_weights"` tags) use the `weights` GMS tag
+- Weights (`"weights"`) use the `weights` GMS tag
 - KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
-- Other tags still use the default torch mempool implementation
+- Other tags are not supported in GMS mode
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
 ### Shadow Engine Failover (Sleep / Wake)
@@ -588,10 +588,12 @@ This enables a shadow engine to release its GPU memory, let a primary engine use
 
 ### Configuration via `model_loader_extra_config`
 
-To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
+To force a specific lock mode, pass `gms_lock_mode` via the framework's
+`--model-loader-extra-config` flag:
 
 ```bash
---model-loader-extra-config '{"gms_read_only": true}'
+--model-loader-extra-config '{"gms_lock_mode": "ro"}'
 ```
 
-This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+Accepted values are `rw`, `ro`, and `rw_or_ro`. Omitting the field keeps the
+default `RW_OR_RO` auto-detection.

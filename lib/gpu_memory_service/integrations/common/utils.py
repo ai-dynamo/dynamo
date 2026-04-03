@@ -10,24 +10,43 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.common.types import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+GMS_TAGS = ("weights", "kv_cache")
+
+
+def parse_requested_lock_type(value):
+    """Parse a requested lock type from a string or enum value."""
+    if isinstance(value, RequestedLockType):
+        return value
+    return RequestedLockType(str(value).lower())
 
 
 def get_gms_lock_mode(extra_config: dict):
     """Resolve GMS lock mode from model_loader_extra_config.
 
-    Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
+    `gms_lock_mode` accepts `rw`, `ro`, or `rw_or_ro`.
+    Omitting it keeps the default `RW_OR_RO` auto mode.
     """
-    from gpu_memory_service.common.types import RequestedLockType
+    requested_mode = extra_config.get("gms_lock_mode")
+    if requested_mode is None:
+        return RequestedLockType.RW_OR_RO
 
-    if extra_config.get("gms_read_only", False):
-        logger.info("[GMS] gms_read_only=True, forcing RO mode")
-        return RequestedLockType.RO
-    return RequestedLockType.RW_OR_RO
+    try:
+        mode = parse_requested_lock_type(requested_mode)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid gms_lock_mode {requested_mode!r}. "
+            "Expected one of: rw, ro, rw_or_ro."
+        ) from exc
+
+    logger.info("[GMS] gms_lock_mode=%s, forcing %s mode", mode.value, mode.name)
+    return mode
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):
@@ -68,9 +87,6 @@ def finalize_gms_write(
     Returns:
         Total bytes committed.
     """
-    from gpu_memory_service.client.torch.module import register_module_tensors
-    from gpu_memory_service.common.types import RequestedLockType
-
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 
