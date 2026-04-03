@@ -114,6 +114,3 @@ Today, the implemented surface is:
 - remote `offer`, `query`, `fetch`, `stage_put`, and `commit_put`
 - NIXL-backed staged transfers
 - KVBM-native admission policy via `DYN_KVBM_G3PB_ADMISSION_POLICY`
-
-For historical planning detail, see the longer
-[KVBM G3PB plan](../../design-docs/kvbm-g3pb-plan.md).
