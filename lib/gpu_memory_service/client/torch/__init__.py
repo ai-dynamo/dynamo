@@ -12,7 +12,9 @@ This module provides PyTorch-specific functionality:
 
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
+    get_gms_client_memory_managers,
     get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -23,6 +25,8 @@ __all__ = [
     # GMS client memory manager
     "get_or_create_gms_client_memory_manager",
     "get_gms_client_memory_manager",
+    "get_gms_client_memory_managers",
+    "gms_use_mem_pool",
     # Tensor operations (public API)
     "register_module_tensors",
     "materialize_module_from_gms",

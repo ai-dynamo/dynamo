@@ -47,6 +47,23 @@ make docker-push-placeholder \
 
 This flow is defined in [deploy/snapshot/Makefile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Makefile) and [deploy/snapshot/Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/Dockerfile). The placeholder image preserves the base runtime entrypoint and command contract, and adds the CRIU, `cuda-checkpoint`, and `nsrestore` tooling needed for restore.
 
+To build either snapshot image against a custom CRIU fork or ref, pass
+`CRIU_REPO` and `CRIU_REF` through `make`. If they are unset, the Dockerfile
+defaults are used.
+
+```bash
+make docker-build-agent \
+  IMG=registry.example.com/dynamo/snapshot-agent:1.0.0 \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
+  CRIU_REF="branch-or-sha"
+
+make docker-build-placeholder \
+  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
+  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}" \
+  CRIU_REPO="${YOUR_CRIU_REPO}" \
+  CRIU_REF="branch-or-sha"
+```
+
 ### 2. Enable checkpointing in the platform and verify it
 
 Whether you are installing or upgrading `dynamo-platform`, the operator must have checkpointing enabled and must point at the same storage that the snapshot chart will use:

@@ -595,15 +595,16 @@ impl ConcurrentRadixTreeCompressed {
             None => self.root.clone(),
         };
 
-        let num_blocks = op.blocks.len();
-        self.insert_blocks_from(lookup, worker, &parent, op.parent_hash, &op.blocks);
+        let num_blocks_added =
+            self.insert_blocks_from(lookup, worker, &parent, op.parent_hash, &op.blocks);
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
-                size.fetch_add(num_blocks, Ordering::Relaxed);
+                size.fetch_add(num_blocks_added, Ordering::Relaxed);
             }
             None => {
-                self.tree_sizes.insert(worker, AtomicUsize::new(num_blocks));
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_blocks_added));
             }
         }
 
@@ -617,9 +618,10 @@ impl ConcurrentRadixTreeCompressed {
         parent: &SharedNode,
         seed_hash: Option<ExternalSequenceBlockHash>,
         blocks: &[KvCacheStoredBlockData],
-    ) {
+    ) -> usize {
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
+        let mut num_blocks_added = 0usize;
         // Track the last ExternalSequenceBlockHash we matched to detect if
         // `current_parent` was split by a concurrent thread between iterations.
         // A split shortens `current_parent`'s edge and moves our last-matched
@@ -681,9 +683,11 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in remaining {
-                            wl.insert(b.block_hash, new_node.clone());
+                            if wl.insert(b.block_hash, new_node.clone()).is_none() {
+                                num_blocks_added += 1;
+                            }
                         }
-                        return;
+                        return num_blocks_added;
                     }
                 }
             };
@@ -753,10 +757,14 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in &remaining[..match_len] {
-                            wl.insert(b.block_hash, child.clone());
+                            if wl.insert(b.block_hash, child.clone()).is_none() {
+                                num_blocks_added += 1;
+                            }
                         }
                         for b in tail {
-                            wl.insert(b.block_hash, new_node.clone());
+                            if wl.insert(b.block_hash, new_node.clone()).is_none() {
+                                num_blocks_added += 1;
+                            }
                         }
                     } else {
                         drop(child_guard);
@@ -764,10 +772,12 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in &remaining[..match_len] {
-                            wl.insert(b.block_hash, child.clone());
+                            if wl.insert(b.block_hash, child.clone()).is_none() {
+                                num_blocks_added += 1;
+                            }
                         }
                     }
-                    return;
+                    return num_blocks_added;
                 }
 
                 // Full edge match: upgrade worker to full coverage if necessary.
@@ -779,7 +789,9 @@ impl ConcurrentRadixTreeCompressed {
 
                 let wl = lookup.get_mut(&worker).unwrap();
                 for b in &remaining[..edge_len] {
-                    wl.insert(b.block_hash, child.clone());
+                    if wl.insert(b.block_hash, child.clone()).is_none() {
+                        num_blocks_added += 1;
+                    }
                 }
 
                 last_ext_hash = Some(remaining[edge_len - 1].block_hash);
@@ -787,6 +799,8 @@ impl ConcurrentRadixTreeCompressed {
                 current_parent = child;
             }
         }
+
+        num_blocks_added
     }
 
     // ------------------------------------------------------------------

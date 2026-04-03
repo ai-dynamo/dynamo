@@ -19,6 +19,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     TransferRequest,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 
 EMBEDDING_SENDER_FACTORIES: dict[
     EmbeddingTransferMode, Callable[[], AbstractEmbeddingSender]
@@ -43,6 +44,7 @@ __all__ = [
     "EMBEDDING_RECEIVER_FACTORIES",
     "EMBEDDING_SENDER_FACTORIES",
     "ImageLoader",
+    "VideoLoader",
     "NixlReadEmbeddingReceiver",
     "NixlReadEmbeddingSender",
     "NixlWriteEmbeddingSender",
