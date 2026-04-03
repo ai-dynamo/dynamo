@@ -10,7 +10,12 @@ import json
 
 import pytest
 
-from dynamo.vllm.omni.types import OmniInterStageRequest, StageConnector, StageEngine
+from dynamo.vllm.omni.types import (
+    OmniInterStageRequest,
+    StageConnector,
+    StageEngine,
+    StageOutput,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -62,6 +67,34 @@ def test_missing_cleanup_not_stage_connector():
             pass
 
     assert not isinstance(NoPut(), StageConnector)
+
+
+# ── StageOutput ───────────────────────────────────────────
+
+
+# TODO: Fix shm_meta thing later. This should be removed
+class TestStageOutput:
+    def test_unknown_keys_are_dropped(self):
+        out = StageOutput.model_validate(
+            {"shm_meta": {"name": "x"}, "unknown_key": "noise"}
+        )
+        assert out.shm_meta == {"name": "x"}
+        assert not hasattr(out, "unknown_key")
+
+    def test_to_next_stage_request_excludes_finished_and_error(self):
+        out = StageOutput.model_validate(
+            {"shm_meta": {"name": "x"}, "finished": True, "error": None}
+        )
+        req = out.to_next_stage_request("req-1")
+        assert req == {"shm_meta": {"name": "x"}, "request_id": "req-1"}
+        assert "finished" not in req
+        assert "error" not in req
+
+    def test_to_next_stage_request_excludes_none_fields(self):
+        out = StageOutput.model_validate({"connector_meta": {"ref": "abc"}})
+        req = out.to_next_stage_request("req-2")
+        assert req == {"connector_meta": {"ref": "abc"}, "request_id": "req-2"}
+        assert "shm_meta" not in req
 
 
 # ── OmniInterStageRequest ──────────────────────────────────

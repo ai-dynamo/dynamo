@@ -7,6 +7,8 @@
 import dataclasses
 from typing import Any, AsyncGenerator, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict
+
 
 @runtime_checkable
 class StageEngine(Protocol):
@@ -43,6 +45,38 @@ class StageConnector(Protocol):
     def cleanup(self, request_id: str) -> None:
         """Release transport resources for this request."""
         ...
+
+
+class StageOutput(BaseModel):
+    """Validated output dict from a stage worker.
+
+    Unknown keys are silently dropped (extra="ignore") to prevent arbitrary
+    stage output from accumulating across stages. Only protocol fields pass through.
+    finished/error are consumed by the router and not forwarded to subsequent stages.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    # TODO: Fix shm_meta thing later. This should be removed
+    shm_meta: dict | None = None
+    connector_meta: dict | None = None
+    original_prompt: dict | None = None
+    stage_connector_refs: dict | None = None
+    finished: bool | None = None
+    error: str | None = None
+
+    def to_next_stage_request(self, request_id: str) -> dict:
+        """Build the request dict for the next stage: only inter-stage protocol fields."""
+        fields = self.model_dump(
+            include={
+                "shm_meta",
+                "connector_meta",
+                "original_prompt",
+                "stage_connector_refs",
+            },
+            exclude_none=True,
+        )
+        fields["request_id"] = request_id
+        return fields
 
 
 @dataclasses.dataclass
