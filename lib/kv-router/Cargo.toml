@@ -12,12 +12,17 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[[bin]]
+name = "standalone_indexer_blackhole_publisher"
+path = "src/bin/standalone_indexer_blackhole_publisher.rs"
+required-features = ["standalone-indexer"]
+
 [features]
 default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
-standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+standalone-indexer = ["dep:axum", "dep:bytes", "dep:zmq", "dep:serde_json", "dep:reqwest"]
 indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
 [dependencies]
@@ -55,7 +60,7 @@ rustc-hash = "2.1.1"
 axum = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
-zeromq = { version = "0.4.1", optional = true }
+zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = "0.18.2"
