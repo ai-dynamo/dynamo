@@ -8,7 +8,7 @@ use anyhow::Result;
 use futures::StreamExt;
 
 use dynamo_kv_router::{
-    ConcurrentRadixTree, ThreadPoolIndexer,
+    ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
     approx::PruneConfig,
     config::KvRouterConfig,
     indexer::{
@@ -74,7 +74,7 @@ impl RemoteIndexer {
 #[derive(Clone)]
 pub enum Indexer {
     KvIndexer(KvIndexer),
-    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>),
     Remote(Arc<RemoteIndexer>),
     None,
 }
@@ -124,7 +124,7 @@ impl Indexer {
 
         if kv_router_config.router_event_threads > 1 {
             return Ok(Self::Concurrent(Arc::new(ThreadPoolIndexer::new(
-                ConcurrentRadixTree::new(),
+                ConcurrentRadixTreeCompressed::new(),
                 kv_router_config.router_event_threads as usize,
                 block_size,
             ))));
