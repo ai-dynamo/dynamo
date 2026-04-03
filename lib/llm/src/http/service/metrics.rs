@@ -2290,10 +2290,9 @@ mod tests {
         ];
 
         for error_type in &error_types {
-            let mut guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, endpoint, false, String::new());
+            let mut guard = metrics
+                .clone()
+                .create_inflight_guard(model, endpoint, false, "");
             guard.mark_error(error_type.clone());
             drop(guard);
         }
