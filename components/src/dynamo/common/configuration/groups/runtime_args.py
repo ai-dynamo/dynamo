@@ -14,6 +14,32 @@ from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 
+def _parse_optional_bool(value: str) -> Optional[bool]:
+    """Parse a CLI/env string to Optional[bool]; raises on unrecognized values."""
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "none":
+        return None
+    raise argparse.ArgumentTypeError(
+        f"Invalid value {value!r}: expected one of true, false, none"
+    )
+
+
+def _parse_bool(value: str) -> bool:
+    """Parse a CLI/env string to bool; raises on unrecognized values."""
+    lowered = value.lower()
+    if lowered in {"true", "1", "yes"}:
+        return True
+    if lowered in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Invalid value {value!r}: expected one of true, false, 1, 0, yes, no"
+    )
+
+
 class DynamoRuntimeConfig(ConfigBase):
     """Configuration for Dynamo runtime (common across all backends)."""
 
@@ -173,7 +199,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
                 "thinking phase (thinking-off). If not set, guided decoding is applied without any "
                 "reasoning-aware structural_tag wrapping."
             ),
-            type=lambda x: None if x.lower() == "none" else x.lower() == "true",
+            type=_parse_optional_bool,
         )
         add_argument(
             g,
@@ -186,7 +212,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
                 "causes model degeneration with guided decoding. Applies to any model whose "
                 "template injects the reasoning start tag (e.g., GLM-4.7, Qwen3)."
             ),
-            type=lambda x: x.lower() in ("true", "1", "yes"),
+            type=_parse_bool,
         )
         add_argument(
             g,

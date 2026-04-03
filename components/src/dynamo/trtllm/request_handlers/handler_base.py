@@ -134,9 +134,11 @@ class HandlerBase(BaseGenerativeHandler):
             self.enable_thinking_default = None
         else:
             self.enable_thinking_default = bool(_etd)
-        self.prompt_injects_thinking_tag = bool(
-            getattr(config, "prompt_injects_thinking_tag", False)
-        )
+        _pitt = config.prompt_injects_thinking_tag
+        if isinstance(_pitt, str):
+            self.prompt_injects_thinking_tag = _pitt.lower() in ("true", "1", "yes")
+        else:
+            self.prompt_injects_thinking_tag = bool(_pitt)
 
     def check_error(self, result: dict) -> bool:
         """

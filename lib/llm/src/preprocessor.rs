@@ -1267,11 +1267,17 @@ impl OpenAIPreprocessor {
 
                                 let parsed_content = parser_result.get_some_normal_text();
                                 let parsed_reasoning = parser_result.get_some_reasoning();
+                                let content_preview = parsed_content
+                                    .as_deref()
+                                    .map(|s| s.chars().take(100).collect::<String>());
+                                let reasoning_preview = parsed_reasoning
+                                    .as_deref()
+                                    .map(|s| s.chars().take(100).collect::<String>());
                                 tracing::debug!(
                                     has_content = parsed_content.is_some(),
-                                    content_preview = ?parsed_content.as_deref().map(|s| &s[..s.len().min(100)]),
+                                    content_preview = ?content_preview,
                                     has_reasoning = parsed_reasoning.is_some(),
-                                    reasoning_preview = ?parsed_reasoning.as_deref().map(|s| &s[..s.len().min(100)]),
+                                    reasoning_preview = ?reasoning_preview,
                                     "Reasoning parser output (after parsing)"
                                 );
 
