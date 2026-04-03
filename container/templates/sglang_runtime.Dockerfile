@@ -39,12 +39,11 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
-# Copy wheels first (separate from benchmarks to avoid unnecessary cache invalidation)
+{% if target not in ("dev", "local-dev") %}
+# Runtime target installs the prebuilt Dynamo wheels. Dev/local-dev build from
+# source later in the shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-# Keep the upstream SGLang Python solve intact: install only the Dynamo-owned
-# wheels and suppress transitive dependency resolution unless validation later
-# proves a small explicit add-back is required.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
@@ -59,6 +58,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+{% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
