@@ -59,13 +59,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("dgdr", "DynamoGraphDeploymentRequest e2e options")
     group.addoption(
         "--dgdr-namespace",
-        default="default",
-        help="Kubernetes namespace for DGDR resources (default: default)",
+        required=True,
+        help="Kubernetes namespace for DGDR resources (required)",
     )
     group.addoption(
         "--dgdr-image",
-        default="docker.io/ashnam/dynamo-frontend:latest",
-        help="Container image used for profiling and deployment workers",
+        required=True,
+        help="Container image used for profiling and deployment workers (required)",
     )
     group.addoption(
         "--dgdr-model",
