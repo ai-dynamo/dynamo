@@ -827,7 +827,15 @@ mod tests_startup_helpers {
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
         // ZMQ TCP endpoint using localhost with an ephemeral port
-        let endpoint = format!("tcp://127.0.0.1:{}", find_open_port());
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
         let topic = "".to_string(); // subscribe to all
 
         // Publisher side - set up first
