@@ -130,6 +130,23 @@ class FastVideoArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             group,
+            flag_name="--dit-layerwise-offload",
+            env_var="DYN_FASTVIDEO_DIT_LAYERWISE_OFFLOAD",
+            default=True,
+            help=(
+                "Enable DiT layerwise offload. FastVideo treats this as an "
+                "alternative to DiT CPU offload."
+            ),
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--use-fsdp-inference",
+            env_var="DYN_FASTVIDEO_USE_FSDP_INFERENCE",
+            default=False,
+            help="Enable FSDP inference for additional model sharding.",
+        )
+        add_negatable_bool_argument(
+            group,
             flag_name="--vae-cpu-offload",
             env_var="DYN_FASTVIDEO_VAE_CPU_OFFLOAD",
             default=True,
@@ -137,10 +154,31 @@ class FastVideoArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             group,
+            flag_name="--image-encoder-cpu-offload",
+            env_var="DYN_FASTVIDEO_IMAGE_ENCODER_CPU_OFFLOAD",
+            default=True,
+            help="Enable image encoder CPU offload (used by image-conditioned workloads).",
+        )
+        add_negatable_bool_argument(
+            group,
             flag_name="--text-encoder-cpu-offload",
             env_var="DYN_FASTVIDEO_TEXT_ENCODER_CPU_OFFLOAD",
             default=True,
             help="Enable text encoder CPU offload.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--pin-cpu-memory",
+            env_var="DYN_FASTVIDEO_PIN_CPU_MEMORY",
+            default=True,
+            help="Pin host memory for CPU offload transfers.",
+        )
+        add_negatable_bool_argument(
+            group,
+            flag_name="--disable-autocast",
+            env_var="DYN_FASTVIDEO_DISABLE_AUTOCAST",
+            default=False,
+            help="Disable autocast in FastVideo denoising/decoding paths.",
         )
         add_negatable_bool_argument(
             group,
@@ -205,8 +243,13 @@ class FastVideoConfig(DynamoRuntimeConfig):
     num_gpus: int = 1
     attention_backend: str = DEFAULT_ATTENTION_BACKEND
     dit_cpu_offload: bool = True
+    dit_layerwise_offload: bool = True
+    use_fsdp_inference: bool = False
     vae_cpu_offload: bool = True
+    image_encoder_cpu_offload: bool = True
     text_encoder_cpu_offload: bool = True
+    pin_cpu_memory: bool = True
+    disable_autocast: bool = False
     enable_torch_compile: bool = False
     torch_compile_mode: str = DEFAULT_TORCH_COMPILE_MODE
     torch_compile_fullgraph: bool = True

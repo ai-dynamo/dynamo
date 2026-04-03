@@ -175,8 +175,13 @@ class FastVideoHandler:
         generator_kwargs: dict[str, Any] = {
             "enable_torch_compile": self.config.enable_torch_compile,
             "dit_cpu_offload": self.config.dit_cpu_offload,
+            "dit_layerwise_offload": self.config.dit_layerwise_offload,
+            "use_fsdp_inference": self.config.use_fsdp_inference,
             "vae_cpu_offload": self.config.vae_cpu_offload,
+            "image_encoder_cpu_offload": self.config.image_encoder_cpu_offload,
             "text_encoder_cpu_offload": self.config.text_encoder_cpu_offload,
+            "pin_cpu_memory": self.config.pin_cpu_memory,
+            "disable_autocast": self.config.disable_autocast,
         }
         if self.config.enable_torch_compile:
             generator_kwargs["torch_compile_kwargs"] = {

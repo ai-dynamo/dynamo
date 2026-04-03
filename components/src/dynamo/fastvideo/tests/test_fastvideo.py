@@ -44,8 +44,13 @@ def test_parse_fastvideo_args_uses_builtin_defaults():
     assert config.num_gpus == 1
     assert config.attention_backend == "TORCH_SDPA"
     assert config.dit_cpu_offload is True
+    assert config.dit_layerwise_offload is True
+    assert config.use_fsdp_inference is False
     assert config.vae_cpu_offload is True
+    assert config.image_encoder_cpu_offload is True
     assert config.text_encoder_cpu_offload is True
+    assert config.pin_cpu_memory is True
+    assert config.disable_autocast is False
     assert config.enable_torch_compile is False
     assert config.torch_compile_mode == "max-autotune-no-cudagraphs"
     assert config.torch_compile_fullgraph is True
@@ -68,8 +73,13 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
             "--attention-backend",
             "FLASH_ATTN",
             "--no-dit-cpu-offload",
+            "--no-dit-layerwise-offload",
+            "--use-fsdp-inference",
             "--no-vae-cpu-offload",
+            "--no-image-encoder-cpu-offload",
             "--no-text-encoder-cpu-offload",
+            "--no-pin-cpu-memory",
+            "--disable-autocast",
             "--torch-compile",
             "--torch-compile-mode",
             "max-autotune",
@@ -83,8 +93,13 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
     assert config.num_gpus == 2
     assert config.attention_backend == "FLASH_ATTN"
     assert config.dit_cpu_offload is False
+    assert config.dit_layerwise_offload is False
+    assert config.use_fsdp_inference is True
     assert config.vae_cpu_offload is False
+    assert config.image_encoder_cpu_offload is False
     assert config.text_encoder_cpu_offload is False
+    assert config.pin_cpu_memory is False
+    assert config.disable_autocast is True
     assert config.enable_torch_compile is True
     assert config.torch_compile_mode == "max-autotune"
     assert config.torch_compile_fullgraph is False
@@ -183,6 +198,7 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
             "--model-path",
             "org/model",
             "--no-dit-cpu-offload",
+            "--no-dit-layerwise-offload",
             "--no-vae-cpu-offload",
             "--no-text-encoder-cpu-offload",
             "--torch-compile",
@@ -197,8 +213,13 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
     generator_kwargs = handler._build_generator_kwargs()
 
     assert generator_kwargs["dit_cpu_offload"] is False
+    assert generator_kwargs["dit_layerwise_offload"] is False
+    assert generator_kwargs["use_fsdp_inference"] is False
     assert generator_kwargs["vae_cpu_offload"] is False
+    assert generator_kwargs["image_encoder_cpu_offload"] is True
     assert generator_kwargs["text_encoder_cpu_offload"] is False
+    assert generator_kwargs["pin_cpu_memory"] is True
+    assert generator_kwargs["disable_autocast"] is False
     assert generator_kwargs["enable_torch_compile"] is True
     assert generator_kwargs["custom_option"] == 3
     assert generator_kwargs["ltx2_vae_tiling"] is True
