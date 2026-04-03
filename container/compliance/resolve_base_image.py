@@ -7,7 +7,7 @@
 Prints the resolved image URI to stdout so it can be captured in shell scripts.
 
 Usage:
-    python resolve_base_image.py --framework vllm --cuda-version 12.9 --arch amd64
+    python resolve_base_image.py --framework vllm --cuda-version 12.9
     python resolve_base_image.py --framework dynamo --target frontend
     python resolve_base_image.py --framework sglang --cuda-version 13.0
 """
@@ -38,11 +38,6 @@ def main() -> None:
     parser.add_argument(
         "--cuda-version",
         help="CUDA version (e.g. 12.9, 13.0, 13.1) — required for runtime targets",
-    )
-    parser.add_argument(
-        "--arch",
-        default="amd64",
-        help="Target architecture (amd64, arm64, linux/amd64, linux/arm64)",
     )
     parser.add_argument(
         "--context-yaml",
@@ -101,14 +96,6 @@ def main() -> None:
     # Runtime target
     if not args.cuda_version:
         print("ERROR: --cuda-version is required for runtime targets", file=sys.stderr)
-        sys.exit(1)
-
-    arch = args.arch.split("/")[-1]
-    if arch not in {"amd64", "arm64"}:
-        print(
-            f"ERROR: Unsupported arch '{args.arch}'. Use amd64, arm64, linux/amd64, or linux/arm64",
-            file=sys.stderr,
-        )
         sys.exit(1)
 
     fw_config = ctx.get(args.framework, {})
