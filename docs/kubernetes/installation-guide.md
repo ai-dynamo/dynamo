@@ -114,7 +114,7 @@ Before proceeding, run the pre-deployment check script to verify your cluster me
 ./deploy/pre-deployment/pre-deployment-check.sh --device xpu
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU/XPU node availability. 
+This script validates kubectl connectivity, default StorageClass configuration, and GPU/XPU node availability.
 
 > **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
 
