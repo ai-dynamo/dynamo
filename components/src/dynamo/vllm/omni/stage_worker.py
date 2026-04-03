@@ -3,9 +3,11 @@
 
 """Single-stage omni worker for disaggregated pipelines."""
 
+import importlib
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import yaml
@@ -15,17 +17,32 @@ from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
-from dynamo.vllm.omni.types import StageEngine
+from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 
 logger = logging.getLogger(__name__)
 
 
-class OmniStageWorker:
-    """Single-stage worker — runs engine, yields serializable output.
+@dataclass
+class _Proxy:
+    """Satisfies stage_list[i].engine_outputs for processor functions.
 
-    PIL images can't cross Dynamo's process boundary. For final-output stages,
-    images are encoded to raw bytes so the router can reconstruct and format them.
-    Formatting (NvVideosResponse, video encoding) stays in the router.
+    Processor functions (e.g. ar2diffusion) access stage_list[i].engine_outputs
+    as a list of OmniRequestOutput objects.
+    """
+
+    engine_outputs: Any = None
+
+
+class OmniStageWorker:
+    """Single-stage worker: fetches inputs → runs processor → runs engine → writes output.
+
+    For stage 0: gets engine_inputs directly from request.
+    For stage N > 0: fetches previous stage outputs from connectors via stage_connector_refs,
+    runs the pre-processor (e.g. thinker2talker) to produce this stage's engine inputs,
+    then runs the engine.
+
+    Non-final stages write output to a connector and yield stage_connector_refs for the router.
+    Final stages write to SHM and yield shm_meta for the router to format.
     """
 
     def __init__(
@@ -37,71 +54,73 @@ class OmniStageWorker:
     ) -> None:
         self.engine = engine
         self.stage_id = stage_id
-        self.connectors = connectors
+        self.connectors = connectors  # {(from_stage, to_stage): vllm_omni connector}
         self.final_output: bool = getattr(stage_config, "final_output", False)
-        self.final_output_type: str = getattr(stage_config, "final_output_type", "text")
+
+        # TODO: use per-request sampling_params_list from request when the router
+        # forwards it (see router TODO). Until then, YAML defaults apply for all requests.
         self._default_sp = _build_default_sampling_params(stage_config)
 
+        func_path = getattr(stage_config, "custom_process_input_func", None)
+        self._processor = _load_processor(func_path)
+        self._engine_input_source: list[int] = getattr(
+            stage_config, "engine_input_source", []
+        )
+        self._requires_mm: bool = getattr(
+            stage_config, "requires_multimodal_data", False
+        )
+
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
-        request_id = request.get("request_id") or context.id()
+        from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 
-        # Fall back to YAML defaults if request has no sampling params.
-        raw_sp = request.get("sampling_params_list")
-        if raw_sp and isinstance(raw_sp[0], dict):
-            from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+        req = StageRequest.model_validate(request)
+        request_id = req.request_id or context.id()
+        original_prompt = req.original_prompt
+        # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
+        stage_connector_refs = _int_keyed(req.stage_connector_refs)
 
-            sampling_params_list = [OmniDiffusionSamplingParams(**sp) for sp in raw_sp]
-        else:
-            sampling_params_list = raw_sp or self._default_sp
-
-        if request.get("from_connector"):
-            from vllm_omni.distributed.omni_connectors.adapter import (
-                try_recv_via_connector,
-            )
-
-            prompt, rx_metrics = try_recv_via_connector(
-                request, self.connectors, self.stage_id
-            )
-            logger.debug(
-                "Stage %d: received from connector for %s — prompt type=%s, "
-                "is_none=%s, rx_metrics=%s",
-                self.stage_id,
-                request_id,
-                type(prompt).__name__ if prompt is not None else "None",
-                prompt is None,
-                rx_metrics,
-            )
-            if prompt is None:
-                logger.error(
-                    "Stage %d: connector returned None for %s — "
-                    "connector keys=%s, request=%s",
-                    self.stage_id,
-                    request_id,
-                    list(self.connectors.keys()),
-                    request,
-                )
-                yield {"error": "connector returned None prompt", "finished": True}
+        # --- Resolve engine inputs ---
+        if stage_connector_refs:
+            # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
+            stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
+            if stage_list is None:
+                yield {
+                    "error": "Failed to fetch inputs from connectors",
+                    "finished": True,
+                }
                 return
-        elif "engine_inputs" in request:
-            prompt = request["engine_inputs"]
+
+            if self._processor is not None:
+                prompt = self._processor(
+                    stage_list,
+                    self._engine_input_source,
+                    [original_prompt],
+                    self._requires_mm,
+                )
+                if isinstance(prompt, list) and len(prompt) == 1:
+                    prompt = prompt[0]
+            else:
+                # No processor: use the most recent fetched stage output directly.
+                prompt = stage_list[-1].engine_outputs[0]
+        elif req.engine_inputs is not None:
+            # Stage 0: engine inputs come directly from the router.
+            prompt = req.engine_inputs
         else:
-            # Direct frontend → stage (single-stage, no router)
+            # Direct frontend → stage (single-stage, no router).
             prompt = request
 
         logger.debug(
-            "Stage %d: calling engine.generate for %s — prompt type=%s, sp type=%s",
+            "Stage %d: engine.generate for %s — prompt type=%s",
             self.stage_id,
             request_id,
             type(prompt).__name__,
-            type(sampling_params_list[0]).__name__ if sampling_params_list else "None",
         )
 
-        from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-
+        # --- Run engine ---
         last_result = None
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id, sampling_params_list=sampling_params_list
+                prompt, request_id, sampling_params_list=self._default_sp
             ):
                 last_result = chunk
         except Exception as e:
@@ -115,12 +134,85 @@ class OmniStageWorker:
             yield {"error": str(e), "finished": True}
             return
 
+        # --- Write output ---
+        if not self.final_output:
+            # Inter-stage: write engine output to connector; accumulate ref in stage_connector_refs.
+            connector = self.connectors.get(
+                _connector_key(self.stage_id, self.stage_id + 1)
+            )
+            if connector is not None:
+                from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
+                ok, _, metadata = connector.put(  # type: ignore[arg-type]
+                    from_s, to_s, request_id, {"engine_inputs": last_result}
+                )
+                if not ok:
+                    yield {"error": "connector.put() failed", "finished": True}
+                    return
+                yield {
+                    "original_prompt": original_prompt,
+                    "stage_connector_refs": {
+                        **stage_connector_refs,
+                        self.stage_id: metadata,
+                    },
+                    "finished": True,
+                }
+                return
+
+        # Final stage → router: write to SHM (no YAML edge for this leg).
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
-        yield {
-            "shm_meta": shm_meta,
-            "final_output": self.final_output,
-            "finished": True,
-        }
+        yield {"shm_meta": shm_meta, "finished": True}
+
+    def _fetch_stage_inputs(
+        self, stage_connector_refs: dict[int, Any], request_id: str
+    ) -> list[_Proxy] | None:
+        """Fetch previous stage outputs from connectors for the processor/engine.
+
+        Fetches only the stages listed in engine_input_source (or all refs if empty).
+        Returns _Proxy objects in engine_input_source order, or None on any error.
+        """
+        sources = self._engine_input_source or sorted(stage_connector_refs.keys())
+        stage_list = []
+        for stage_k in sources:
+            if (meta_k := stage_connector_refs.get(stage_k)) is None:
+                logger.error(
+                    "Stage %d: no connector ref for source stage %d",
+                    self.stage_id,
+                    stage_k,
+                )
+                return None
+            if (
+                connector := self.connectors.get(_connector_key(stage_k, self.stage_id))
+            ) is None:
+                logger.error(
+                    "Stage %d: no connector for edge (%s→%s)",
+                    self.stage_id,
+                    stage_k,
+                    self.stage_id,
+                )
+                return None
+            try:
+                payload = connector.get(
+                    str(stage_k), str(self.stage_id), request_id, metadata=meta_k
+                )
+            except Exception as e:
+                logger.error("Stage %d: connector.get() failed: %s", self.stage_id, e)
+                return None
+            payload_data = payload[0] if isinstance(payload, tuple) else payload
+            if not payload_data:
+                logger.error(
+                    "Stage %d: empty payload from connector (%s→%s)",
+                    self.stage_id,
+                    stage_k,
+                    self.stage_id,
+                )
+                return None
+            engine_inputs = (
+                payload_data.get("engine_inputs")
+                if isinstance(payload_data, dict)
+                else payload_data
+            )
+            stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
+        return stage_list
 
 
 async def init_omni_stage(
@@ -138,7 +230,8 @@ async def init_omni_stage(
     from dynamo.common.utils.output_modalities import get_output_modalities
     from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 
-    stage_id: int = config.stage_id  # type: ignore[assignment]
+    assert config.stage_id is not None  # dispatch in main.py guarantees this
+    stage_id: int = config.stage_id
     stage_configs = load_stage_configs_from_yaml(config.stage_configs_path)  # type: ignore[arg-type]
     if stage_id >= len(stage_configs):
         raise ValueError(
@@ -147,10 +240,8 @@ async def init_omni_stage(
     my_config = stage_configs[stage_id]
     stage_type: str = getattr(my_config, "stage_type", "llm")
 
-    # Mirror init_omni: create endpoint FIRST
     # Stage worker registers at {ns}.{model_stage}.generate — NOT {ns}.backend.generate.
-    # The router registers at {ns}.backend.generate and discovers workers by model_stage.
-    # If both used the same endpoint, the frontend would round-robin between them.
+    # Router registers at {ns}.backend.generate and discovers workers by model_stage.
     model_stage = getattr(my_config.engine_args, "model_stage", f"stage{stage_id}")
     generate_endpoint = runtime.endpoint(f"{config.namespace}.{model_stage}.generate")
     shutdown_endpoints[:] = [generate_endpoint]
@@ -158,6 +249,8 @@ async def init_omni_stage(
     engine = _create_engine(config.model, my_config, stage_type)
     logger.info("Stage %d: engine created (type=%s)", stage_id, stage_type)
 
+    # Connectors for inter-stage output transfer — type determined by YAML config
+    # (SharedMemoryConnector, MooncakeConnector, etc.)
     _, connectors = initialize_orchestrator_connectors(config.stage_configs_path)  # type: ignore[arg-type]
 
     worker = OmniStageWorker(
@@ -210,12 +303,21 @@ async def init_omni_stage(
             raise
 
 
-def _build_default_sampling_params(stage_config: Any) -> list | None:
-    """Construct typed sampling params from YAML default_sampling_params.
+def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
+    """Build the connector dict key used by initialize_orchestrator_connectors."""
+    return (str(from_stage), str(to_stage))
 
-    Returns a single-element list (what AsyncOmni expects for num_stages=1),
-    or None if no defaults are configured.
-    """
+
+def _load_processor(func_path: str | None) -> Any:
+    """Load a processor function from a dotted module path, or return None."""
+    if not func_path:
+        return None
+    module_path, func_name = func_path.rsplit(".", 1)
+    return getattr(importlib.import_module(module_path), func_name)
+
+
+def _build_default_sampling_params(stage_config: Any) -> list | None:
+    """Construct typed sampling params from YAML default_sampling_params."""
     defaults = getattr(stage_config, "default_sampling_params", None)
     if not defaults:
         return None
@@ -258,11 +360,7 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
 
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
-    """Convert a parsed stage config to a single-stage YAML dict.
-
-    Preserves all fields that AsyncOmni reads during engine init
-    (default_sampling_params, is_comprehension, runtime, etc.).
-    """
+    """Convert a parsed stage config to a single-stage YAML dict."""
     from omegaconf import OmegaConf
 
     def _to_plain(obj: Any) -> Any:
@@ -285,13 +383,6 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
         if val is not None:
             result[key] = _to_plain(val)
 
-    # Runtime: copy but override devices to "0". The original YAML devices
-    # field (e.g. "1") is for the monolithic orchestrator. In disaggregated
-    # mode, CUDA_VISIBLE_DEVICES already isolates the GPU — the worker
-    # always sees its GPU as device 0.
-    # TODO: Remove hardcoded devices="0" once stage configs support
-    # per-worker device assignment. Currently CUDA_VISIBLE_DEVICES
-    # isolates the GPU, so the worker always sees device 0.
     runtime = getattr(stage_config, "runtime", None)
     if runtime is not None:
         rt = _to_plain(runtime)

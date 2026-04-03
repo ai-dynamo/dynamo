@@ -28,25 +28,6 @@ class StageEngine(Protocol):
         ...
 
 
-@runtime_checkable
-class StageConnector(Protocol):
-    """Inter-stage transport owned by the router (e.g. SharedMemoryConnector)."""
-
-    def put(
-        self,
-        from_stage: str,
-        to_stage: str,
-        put_key: str,
-        data: Any,
-    ) -> tuple[bool, int, Any]:
-        """Write payload to transport. Returns (ok, serialized_size, metadata)."""
-        ...
-
-    def cleanup(self, request_id: str) -> None:
-        """Release transport resources for this request."""
-        ...
-
-
 class StageOutput(BaseModel):
     """Validated output dict from a stage worker.
 
@@ -56,27 +37,49 @@ class StageOutput(BaseModel):
     """
 
     model_config = ConfigDict(extra="ignore")
-    # TODO: Fix shm_meta thing later. This should be removed
+    # TODO: shm_meta should move to a YAML-configured connector edge (issue-005)
     shm_meta: dict | None = None
-    connector_meta: dict | None = None
     original_prompt: dict | None = None
     stage_connector_refs: dict | None = None
     finished: bool | None = None
     error: str | None = None
 
     def to_next_stage_request(self, request_id: str) -> dict:
-        """Build the request dict for the next stage: only inter-stage protocol fields."""
+        """Build the request dict for the next stage: only inter-stage protocol fields.
+
+        shm_meta is intentionally excluded — it is final-stage → router only.
+        """
         fields = self.model_dump(
-            include={
-                "shm_meta",
-                "connector_meta",
-                "original_prompt",
-                "stage_connector_refs",
-            },
+            include={"original_prompt", "stage_connector_refs"},
             exclude_none=True,
         )
         fields["request_id"] = request_id
         return fields
+
+
+class StageRequest(BaseModel):
+    """Validated request dict received by a stage worker from the router.
+
+    extra="ignore" handles all three request shapes:
+      Stage 0:   {request_id, engine_inputs, original_prompt, stage_connector_refs: {}}
+      Stage N>0: {request_id, original_prompt, stage_connector_refs: {0: ref0, ...}}
+      Direct:    raw frontend request (no router, single-stage deployment)
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    request_id: str | None = None
+    engine_inputs: Any = None
+    original_prompt: dict | None = None
+    # String keys from JSON — caller must normalize with _int_keyed().
+    stage_connector_refs: dict | None = None
+
+
+def _int_keyed(d: dict | None) -> dict[int, Any]:
+    """Normalize JSON-deserialized string keys back to int for stage_connector_refs."""
+    if not d:
+        return {}
+    return {int(k): v for k, v in d.items()}
 
 
 @dataclasses.dataclass
@@ -112,8 +115,5 @@ class OmniInterStageRequest:
         return cls(
             request_id=d["request_id"],
             original_prompt=d["original_prompt"],
-            # JSON serializes dict keys as strings — convert back to int
-            stage_connector_refs={
-                int(k): v for k, v in d.get("stage_connector_refs", {}).items()
-            },
+            stage_connector_refs=_int_keyed(d.get("stage_connector_refs")),
         )

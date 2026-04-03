@@ -10,12 +10,7 @@ import json
 
 import pytest
 
-from dynamo.vllm.omni.types import (
-    OmniInterStageRequest,
-    StageConnector,
-    StageEngine,
-    StageOutput,
-)
+from dynamo.vllm.omni.types import OmniInterStageRequest, StageEngine, StageOutput
 
 pytestmark = [
     pytest.mark.unit,
@@ -33,46 +28,17 @@ class _MockEngine:
         return _gen()
 
 
-class _MockConnector:
-    def put(self, from_stage, to_stage, put_key, data):
-        return True, 0, {}
-
-    def cleanup(self, request_id):
-        pass
-
-
 def test_stage_engine_protocol_satisfied():
     assert isinstance(_MockEngine(), StageEngine)
-
-
-def test_stage_connector_protocol_satisfied():
-    assert isinstance(_MockConnector(), StageConnector)
 
 
 def test_missing_generate_not_stage_engine():
     assert not isinstance(object(), StageEngine)
 
 
-def test_missing_put_not_stage_connector():
-    class NoCleanup:
-        def put(self, f, t, r, p):
-            return True, 0, {}
-
-    assert not isinstance(NoCleanup(), StageConnector)
-
-
-def test_missing_cleanup_not_stage_connector():
-    class NoPut:
-        def cleanup(self, rid):
-            pass
-
-    assert not isinstance(NoPut(), StageConnector)
-
-
 # ── StageOutput ───────────────────────────────────────────
 
 
-# TODO: Fix shm_meta thing later. This should be removed
 class TestStageOutput:
     def test_unknown_keys_are_dropped(self):
         out = StageOutput.model_validate(
@@ -83,18 +49,34 @@ class TestStageOutput:
 
     def test_to_next_stage_request_excludes_finished_and_error(self):
         out = StageOutput.model_validate(
-            {"shm_meta": {"name": "x"}, "finished": True, "error": None}
+            {
+                "stage_connector_refs": {"0": {"name": "x"}},
+                "finished": True,
+                "error": None,
+            }
         )
         req = out.to_next_stage_request("req-1")
-        assert req == {"shm_meta": {"name": "x"}, "request_id": "req-1"}
         assert "finished" not in req
         assert "error" not in req
+        assert req["request_id"] == "req-1"
 
-    def test_to_next_stage_request_excludes_none_fields(self):
-        out = StageOutput.model_validate({"connector_meta": {"ref": "abc"}})
+    def test_to_next_stage_request_excludes_shm_meta(self):
+        """shm_meta is final-stage → router only; must not be forwarded to next stage."""
+        out = StageOutput.model_validate({"shm_meta": {"name": "x"}})
         req = out.to_next_stage_request("req-2")
-        assert req == {"connector_meta": {"ref": "abc"}, "request_id": "req-2"}
         assert "shm_meta" not in req
+
+    def test_to_next_stage_request_passes_stage_connector_refs(self):
+        out = StageOutput.model_validate(
+            {
+                "original_prompt": {"prompt": "hi"},
+                "stage_connector_refs": {"0": {"ref": "abc"}},
+            }
+        )
+        req = out.to_next_stage_request("req-3")
+        assert req["original_prompt"] == {"prompt": "hi"}
+        assert req["stage_connector_refs"] == {"0": {"ref": "abc"}}
+        assert req["request_id"] == "req-3"
 
 
 # ── OmniInterStageRequest ──────────────────────────────────
