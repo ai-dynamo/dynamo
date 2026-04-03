@@ -327,9 +327,6 @@ def main() -> None:
     if not otlp_endpoint:
         print("No OTLP endpoint configured, skipping metrics push.")
         sys.exit(0)
-    if not args.test_results and not args.build_metrics:
-        print("No test-results or build-metrics provided, skipping.")
-        sys.exit(0)
 
     # Read GitHub context from environment
     ctx = GitHubActionsContext.from_env()

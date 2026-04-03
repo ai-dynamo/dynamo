@@ -234,6 +234,16 @@ jobs:
           fresh_builder: ${{ inputs.fresh_builder }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
+      - name: Push Build Metrics
+        if: always()
+        uses: ./.github/actions/push-metrics
+        with:
+          otlp-endpoint: ${{ secrets.OTLP_ENDPOINT }}
+          otlp-token: ${{ secrets.OTLP_TOKEN }}
+          framework: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda-version: ${{ inputs.cuda_version }}
+          job-status: ${{ job.status }}
 
 
   # ============================================================================

@@ -293,7 +293,8 @@ runs:
           ERROR_TESTS=0
         fi
 
-        exit ${TEST_EXIT_CODE}
+        # Don't exit here — let Push Metrics and Upload run first
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
 
     - name: Cleanup MinIO Service
       if: always() && inputs.start_minio == 'true'
@@ -316,8 +317,13 @@ runs:
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
-      if: always()  # Always upload test results, even if tests failed
+      if: always()
       with:
         name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+
+    - name: Exit with test result
+      if: always()
+      shell: bash
+      run: exit ${TEST_EXIT_CODE:-0}
