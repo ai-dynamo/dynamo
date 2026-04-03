@@ -157,7 +157,13 @@ impl Trace {
             let hash_ids = raw
                 .hash_ids
                 .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
-            let input_length = raw.input_length.unwrap_or(hash_ids.len() * block_size);
+            // Clamp input_length to the synthesizable capacity: in the mooncake
+            // trace format, input_length is the full prompt token count which may
+            // exceed hash_ids.len() * block_size (cached portion only).
+            let input_length = raw
+                .input_length
+                .unwrap_or(hash_ids.len() * block_size)
+                .min(hash_ids.len() * block_size);
             let output_length = raw
                 .output_length
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;

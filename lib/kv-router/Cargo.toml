@@ -17,6 +17,7 @@ default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
+shard-metrics = []
 standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
 indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
