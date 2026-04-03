@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -224,102 +224,48 @@ func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
 	assert.Equal(t, "ldr-r1-0", remaining.Items[0].Name)
 }
 
-func TestFailoverCascade_CooldownSuppressesSameGeneration(t *testing.T) {
+func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
 	ns := "test-ns"
-	now := time.Now()
+	now := metav1.Now()
 
-	// Pod created BEFORE the cascade — same generation.
 	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	failedPod.CreationTimestamp = metav1.NewTime(now.Add(-5 * time.Second))
+	failedPod.DeletionTimestamp = &now
+	failedPod.DeletionGracePeriodSeconds = ptr.To(int64(0))
+	failedPod.Finalizers = []string{"test-finalizer"}
+	sibling := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
 
-	r, c := newCascadeReconciler(failedPod)
-	r.Now = func() time.Time { return now }
+	r, c := newCascadeReconciler(failedPod, sibling)
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
 	})
 	require.NoError(t, err)
-
-	// Simulate a duplicate watch event for a same-generation pod (created
-	// before the cascade at T=0) that somehow still exists.
-	stale := newFailoverPod("ldr-stale", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	stale.CreationTimestamp = metav1.NewTime(now.Add(-3 * time.Second))
-	require.NoError(t, c.Create(context.Background(), stale))
-
-	r.Now = func() time.Time { return now.Add(10 * time.Second) }
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-stale", Namespace: ns},
-	})
-	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
 
 	var remaining corev1.PodList
 	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
-	assert.Len(t, remaining.Items, 1, "same-gen event should be suppressed by cooldown")
-	assert.Equal(t, ctrl.Result{}, result, "no requeue for stale same-generation events")
+	assert.Len(t, remaining.Items, 2, "already-deleting pod should not trigger a cascade")
 }
 
-func TestFailoverCascade_NewGenerationBypassesCooldown(t *testing.T) {
+func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
 	ns := "test-ns"
-	now := time.Now()
+	pod1 := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	pod2 := newFailoverPod("wkr-1-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
 
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	failedPod.CreationTimestamp = metav1.NewTime(now.Add(-5 * time.Second))
-
-	r, c := newCascadeReconciler(failedPod)
-	r.Now = func() time.Time { return now }
+	r, c := newCascadeReconciler(pod1, pod2)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
 	})
 	require.NoError(t, err)
 
-	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
-	assert.Empty(t, remaining.Items, "first cascade should delete")
-
-	// Grove recreates a new pod (created AFTER the cascade) that also fails.
-	newFailed := newFailoverPod("ldr-new", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	newFailed.CreationTimestamp = metav1.NewTime(now.Add(5 * time.Second))
-	require.NoError(t, c.Create(context.Background(), newFailed))
-
-	r.Now = func() time.Time { return now.Add(10 * time.Second) }
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-new", Namespace: ns},
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
-	assert.Empty(t, remaining.Items, "new-generation pod should bypass cooldown and cascade immediately")
-	assert.Equal(t, ctrl.Result{}, result, "no requeue needed after immediate cascade")
-}
-
-func TestFailoverCascade_CooldownExpiresAllowsReCascade(t *testing.T) {
-	ns := "test-ns"
-	now := time.Now()
-
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	failedPod.CreationTimestamp = metav1.NewTime(now.Add(-5 * time.Second))
-
-	r, c := newCascadeReconciler(failedPod)
-	r.Now = func() time.Time { return now }
-
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
-	})
-	require.NoError(t, err)
-
-	// Same-gen pod but after cooldown expires.
-	stale := newFailoverPod("ldr-stale", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	stale.CreationTimestamp = metav1.NewTime(now.Add(-3 * time.Second))
-	require.NoError(t, c.Create(context.Background(), stale))
-
-	r.Now = func() time.Time { return now.Add(cascadeCooldown + time.Second) }
+	// Second reconcile for the other pod — it's already gone (NotFound).
 	_, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-stale", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "wkr-1-0", Namespace: ns},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
 	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
-	assert.Empty(t, remaining.Items, "cascade should fire again after cooldown expires")
+	assert.Empty(t, remaining.Items)
 }
