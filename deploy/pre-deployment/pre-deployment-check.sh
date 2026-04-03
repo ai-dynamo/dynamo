@@ -203,56 +203,47 @@ check_gpu_operator() {
     print_section "Checking ${DEVICE_TYPE^^} operator"
 
     if [[ "$DEVICE_TYPE" == "xpu" ]]; then
-        # Path 1: Intel Device Plugin pods (app=intel-gpu-plugin or intel-device-plugins-operator)
-        local intel_plugin_pods
-        intel_plugin_pods=$(kubectl get pods -A -lapp=intel-gpu-plugin --no-headers 2>/dev/null || echo "")
-        if [[ -z "$intel_plugin_pods" ]]; then
-            intel_plugin_pods=$(kubectl get pods -A -lcontrol-plane=controller-manager --no-headers 2>/dev/null | grep -i intel || echo "")
-        fi
-
-        # Path 2: Intel GPU DRA driver pods (namespace intel-gpu-resource-driver)
-        local intel_dra_pods
-        intel_dra_pods=$(kubectl get pods -n intel-gpu-resource-driver --no-headers 2>/dev/null || echo "")
-
-        if [[ -z "$intel_plugin_pods" ]] && [[ -z "$intel_dra_pods" ]]; then
-            print_status $RED "❌ No Intel XPU driver/plugin found in the cluster"
-            print_status $YELLOW "Dynamo requires one of:"
-            print_status $YELLOW "  - Intel GPU Device Plugin: https://intel.github.io/intel-device-plugins-for-kubernetes/master/operator/README.html"
-            print_status $YELLOW "  - Intel GPU DRA driver:    https://github.com/intel/intel-resource-drivers-for-kubernetes"
-            return 1
-        fi
-
-        # OR logic: succeed if at least one path is healthy
+        # Use the same discovery signals as check_cluster_resources to avoid hardcoding
+        # labels or namespace names that may vary across custom installations:
+        #   DRA driver health  ← ResourceSlice presence (driver must be running to publish slices)
+        #   Device Plugin health ← node label presence (plugin must be running to label nodes)
         local any_healthy=0
 
-        if [[ -n "$intel_dra_pods" ]]; then
-            local dra_running dra_total
-            dra_running=$(echo "$intel_dra_pods" | grep -c "Running" || echo "0")
-            dra_total=$(echo "$intel_dra_pods" | wc -l)
-            if [[ $dra_running -gt 0 ]]; then
-                print_status $GREEN "✅ Intel GPU DRA driver is running ($dra_running/$dra_total pods, ns: intel-gpu-resource-driver)"
+        # Path 1: Intel GPU DRA driver — healthy if ResourceSlices are published
+        local dra_kubectl_out
+        dra_kubectl_out=$(kubectl get resourceslice -o jsonpath='{range .items[?(@.spec.driver=="gpu.intel.com")]}{.metadata.name}{"\n"}{end}' 2>&1)
+        if [[ $? -ne 0 && "$dra_kubectl_out" != *"No resources found"* ]]; then
+            print_status $YELLOW "⚠️  kubectl error querying ResourceSlice: $dra_kubectl_out"
+        else
+            local dra_slice_count
+            dra_slice_count=$(echo "$dra_kubectl_out" | grep -c '[^[:space:]]' 2>/dev/null || true)
+            dra_slice_count=$(( ${dra_slice_count:-0} + 0 ))
+            if [[ $dra_slice_count -gt 0 ]]; then
+                print_status $GREEN "✅ Intel GPU DRA driver is healthy ($dra_slice_count ResourceSlice(s) with driver gpu.intel.com)"
                 any_healthy=1
-            else
-                print_status $YELLOW "⚠️  Intel GPU DRA driver pods found but not running ($dra_total found):"
-                echo "$intel_dra_pods"
             fi
         fi
 
-        if [[ -n "$intel_plugin_pods" ]]; then
-            local plugin_running plugin_total
-            plugin_running=$(echo "$intel_plugin_pods" | grep -c "Running" || echo "0")
-            plugin_total=$(echo "$intel_plugin_pods" | wc -l)
-            if [[ $plugin_running -gt 0 ]]; then
-                print_status $GREEN "✅ Intel Device Plugin is running ($plugin_running/$plugin_total pods)"
+        # Path 2: Intel Device Plugin — healthy if nodes carry the gpu.intel.com/product label
+        local plugin_kubectl_out
+        plugin_kubectl_out=$(kubectl get nodes -l 'gpu.intel.com/product' -o name 2>&1)
+        if [[ $? -ne 0 && "$plugin_kubectl_out" != *"No resources found"* ]]; then
+            print_status $YELLOW "⚠️  kubectl error querying Intel XPU node labels: $plugin_kubectl_out"
+        else
+            local plugin_node_count
+            plugin_node_count=$(echo "$plugin_kubectl_out" | grep -c '^node/' 2>/dev/null || true)
+            plugin_node_count=$(( ${plugin_node_count:-0} + 0 ))
+            if [[ $plugin_node_count -gt 0 ]]; then
+                print_status $GREEN "✅ Intel Device Plugin is running ($plugin_node_count labeled node(s) with gpu.intel.com/product)"
                 any_healthy=1
-            else
-                print_status $YELLOW "⚠️  Intel Device Plugin pods found but not running ($plugin_total found):"
-                echo "$intel_plugin_pods"
             fi
         fi
 
         if [[ $any_healthy -eq 0 ]]; then
-            print_status $RED "❌ No healthy Intel XPU driver/plugin found"
+            print_status $RED "❌ No Intel XPU driver/plugin found in the cluster"
+            print_status $YELLOW "Dynamo requires one of:"
+            print_status $YELLOW "  - Intel GPU Device Plugin: https://intel.github.io/intel-device-plugins-for-kubernetes/master/operator/README.html"
+            print_status $YELLOW "  - Intel GPU DRA driver:    https://github.com/intel/intel-resource-drivers-for-kubernetes"
             return 1
         fi
         return 0
