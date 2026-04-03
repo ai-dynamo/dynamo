@@ -1045,7 +1045,7 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
-        let elapsed_ms = self.timer.elapsed().as_millis();
+        let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
         match self.status {
             Status::Error => {
