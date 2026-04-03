@@ -250,21 +250,13 @@ flowchart LR
 
 **Launch:**
 
-<!-- TODO: Add an example of Dynamo+vLLM Agg worker + Embedding Cache -->
-
 ```bash
-vllm serve $model \
-    --ec-transfer-config "{
-        \"ec_role\": \"ec_both\",
-        \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
-        \"ec_connector_module_path\": \"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",
-        \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": 10}
-    }"
+bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+    --multimodal-embedding-cache-capacity-gb 10
 ```
 
-This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector`. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled). No patches required — `ec_both` is supported natively in vLLM 0.17+.
-
-See `examples/backends/vllm/launch/vllm_serve_embedding_cache.sh` for a ready-to-run script.
+The `--multimodal-embedding-cache-capacity-gb` flag controls the CPU-side LRU cache size in GB (0 = disabled). `dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0. Requires vLLM 0.17+.
 
 ### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
