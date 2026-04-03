@@ -561,6 +561,16 @@ impl G3pbCacheStorage {
         self.foyer_shards[self.foyer_shard_index(sequence_hash)].remove(&sequence_hash);
     }
 
+    async fn prune_if_missing_from_foyer(&self, sequence_hash: SequenceHash) -> Result<bool> {
+        match self.foyer_get(sequence_hash).await? {
+            Some(_) => Ok(true),
+            None => {
+                let _ = self.metadata.remove(sequence_hash)?;
+                Ok(false)
+            }
+        }
+    }
+
     async fn allocate_in_g2(
         &self,
         size: usize,
@@ -628,13 +638,10 @@ impl G3pbCacheStorage {
                 Some(self.read_from_g2(offset, meta.size_bytes).await)
                     .map(|_| G3pbCacheLocation::G2 { offset })
             }
-            G3pbCacheLocation::Foyer => self
-                .foyer_get(sequence_hash)
-                .await
-                .ok()??
-                .is_empty()
-                .then_some(G3pbCacheLocation::Foyer)
-                .or(Some(G3pbCacheLocation::Foyer)),
+            G3pbCacheLocation::Foyer => match self.prune_if_missing_from_foyer(sequence_hash).await {
+                Ok(true) => Some(G3pbCacheLocation::Foyer),
+                Ok(false) | Err(_) => None,
+            },
         }
     }
 
@@ -661,6 +668,8 @@ impl G3pbCacheStorage {
                     meta.acquired_tick = self.next_tick();
                 })?;
             }
+        } else {
+            let _ = self.metadata.remove(sequence_hash)?;
         }
 
         Ok(())
@@ -949,6 +958,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit> {
         let mut hits = Vec::new();
+        let mut foyer_candidates = Vec::new();
 
         // Group by shard to minimize lock acquisitions
         let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> =
@@ -968,15 +978,39 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 .expect("metadata lock poisoned");
 
             for sequence_hash in shard_hashes {
-                if let Some(meta) = guard.get(sequence_hash) {
-                    if meta.payload_ready {
-                        hits.push(G3pbQueryHit {
+                if let Some(meta) = guard.get(sequence_hash)
+                    && meta.payload_ready
+                {
+                    match meta.location {
+                        G3pbCacheLocation::G2 { .. } => hits.push(G3pbQueryHit {
                             instance_id,
                             sequence_hash: *sequence_hash,
                             size_bytes: meta.size_bytes,
                             checksum: None,
-                        });
+                        }),
+                        G3pbCacheLocation::Foyer => {
+                            foyer_candidates.push((*sequence_hash, meta.size_bytes));
+                        }
                     }
+                }
+            }
+        }
+
+        for (sequence_hash, size_bytes) in foyer_candidates {
+            match self.prune_if_missing_from_foyer(sequence_hash).await {
+                Ok(true) => hits.push(G3pbQueryHit {
+                    instance_id,
+                    sequence_hash,
+                    size_bytes,
+                    checksum: None,
+                }),
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        sequence_hash,
+                        "failed to validate foyer-backed G3PB query candidate"
+                    );
                 }
             }
         }
@@ -1073,6 +1107,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                         })? {
                         Some(p) => p,
                         None => {
+                            let _ = self.metadata.remove(sequence_hash);
                             missing.push(sequence_hash);
                             continue;
                         }
@@ -2385,6 +2420,39 @@ mod tests {
                 sequence_hashes,
             }) if sequence_hashes == vec![1001]
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn g3pb_cache_storage_prunes_stale_foyer_metadata() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let mut config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
+        config.g2_capacity_bytes = 4;
+        config.foyer_memory_capacity_bytes = 4 * 1024;
+        config.foyer_disk_capacity_bytes = 64 * 1024;
+
+        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
+        let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
+        let sequence_hash = 4242;
+
+        agent
+            .offer_and_put_payload_blocks(vec![G3pbTransferBlock {
+                meta: G3pbPutBlock {
+                    sequence_hash,
+                    size_bytes: 8,
+                    checksum: None,
+                },
+                payload: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            }])
+            .await?;
+
+        assert!(storage.metadata.contains_key(sequence_hash)?);
+        storage.foyer_remove(sequence_hash);
+
+        assert!(agent.query_blocks(&[sequence_hash]).await.is_empty());
+        assert!(!storage.metadata.contains_key(sequence_hash)?);
+        assert!(agent.fetch_blocks(&[sequence_hash]).await.unwrap_err().to_string().contains("not found"));
 
         Ok(())
     }
