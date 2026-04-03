@@ -128,10 +128,8 @@ python container/compliance/process_results.py \
 
 | Framework | CUDA | Arch | Base image |
 |-----------|------|------|------------|
-| `vllm` | 12.9 | `amd64` | `vllm/vllm-openai:v0.18.0-x86_64` |
-| `vllm` | 12.9 | `arm64` | `vllm/vllm-openai:v0.18.0-aarch64` |
-| `vllm` | 13.0 | `amd64` | `vllm/vllm-openai:v0.18.0-x86_64-cu130` |
-| `vllm` | 13.0 | `arm64` | `vllm/vllm-openai:v0.18.0-aarch64-cu130` |
+| `vllm` | 12.9 | — | `vllm/vllm-openai:v0.18.0` |
+| `vllm` | 13.0 | — | `vllm/vllm-openai:v0.18.0-cu130` |
 | `sglang` | 12.9 | — | `lmsysorg/sglang:v0.5.9-runtime` |
 | `sglang` | 13.0 | — | `lmsysorg/sglang:v0.5.9-cu130-runtime` |
 | `trtllm` | 13.1 | — | `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04` |

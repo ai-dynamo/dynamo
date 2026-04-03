@@ -33,16 +33,7 @@ ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
-{% if framework == "vllm" and context[framework][device_key].runtime_image_tags is defined -%}
-{% if platform == "multi" -%}
-ARG RUNTIME_IMAGE_TAG_AMD64={{ context[framework][device_key].runtime_image_tags.amd64 }}
-ARG RUNTIME_IMAGE_TAG_ARM64={{ context[framework][device_key].runtime_image_tags.arm64 }}
-{% else -%}
-ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tags[platform] }}
-{% endif -%}
-{% else -%}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
-{% endif -%}
 {%- endif %}
 
 # wheel builder image selection

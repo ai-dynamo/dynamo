@@ -117,15 +117,11 @@ def main() -> None:
 
     runtime_image = cuda_config.get("runtime_image")
     runtime_image_tag = cuda_config.get("runtime_image_tag")
-    runtime_image_tags = cuda_config.get("runtime_image_tags")
-
-    if runtime_image_tags:
-        runtime_image_tag = runtime_image_tags.get(arch)
 
     if not runtime_image or not runtime_image_tag:
         print(
             f"ERROR: Could not resolve base image for framework={args.framework} "
-            f"cuda={args.cuda_version} arch={arch}. Keys runtime_image/runtime_image_tag(s) not found "
+            f"cuda={args.cuda_version}. Keys runtime_image/runtime_image_tag not found "
             f"under {args.framework}.{cuda_key} in context.yaml",
             file=sys.stderr,
         )

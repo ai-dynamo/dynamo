@@ -40,11 +40,11 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
-| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (arch-specific tag for vLLM)** |
+| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
 |  /usr/bin/nats-server | COPY from dynamo_base |
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
-|  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (`x86_64` or `aarch64` tag selected by CUDA + platform) |
+|  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (multi-arch tag selected by CUDA family) |
 |  /workspace/{tests,examples/common,examples/backends/vllm,deploy/sanity_check.py} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
