@@ -7,6 +7,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -44,6 +45,10 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+LOCAL_VIDEO_TEST_PATH = Path(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+).resolve()
+LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -397,6 +402,35 @@ vllm_configs = {
                 expected_response=["green"],  # Validate image understanding
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
+            )
+        ],
+    ),
+    # Video multimodal tests for CI using the vLLM video launch scripts.
+    "multimodal_video_agg": VLLMConfig(
+        name="multimodal_video_agg_xpu",
+        directory=vllm_dir,
+        script_name="xpu/video_agg_xpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+        ],  # TODO: profile to get max_vram and timeout
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        delayed_start=60,  # Video models require longer loading time
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
+        timeout=600,  # 10 minutes for video processing overhead
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["red", "static", "still"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
