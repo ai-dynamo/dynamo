@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
+import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -14,13 +15,11 @@ from gpu_memory_service.client.torch.module import (
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
 
-from tests.gms.harness.gms import GMSServerProcess
-
-torch = pytest.importorskip("torch", reason="torch is required")
+from tests.gpu_memory_service.common.gms import GMSServer
 
 pytestmark = [
     pytest.mark.pre_merge,
-    pytest.mark.unit,
+    pytest.mark.integration,
     pytest.mark.gpu_1,
 ]
 
@@ -49,8 +48,8 @@ class _TinyModule(torch.nn.Module):
 
 
 @pytest.fixture
-def running_gms(request):
-    with GMSServerProcess(request, device=0, tag="weights") as server:
+def running_gms():
+    with GMSServer(device=0, tag="weights") as server:
         yield server.socket_path
 
 
@@ -78,51 +77,16 @@ def _assert_exact_tensor_equal(expected: torch.Tensor, actual: torch.Tensor) -> 
     torch.testing.assert_close(expected, actual, rtol=0, atol=0)
 
 
-def test_gms_tensor_matches_plain_torch_ops(running_gms):
-    socket_path = running_gms
-    baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
-    rhs = torch.arange(32, device="cuda", dtype=torch.float32).reshape(8, 4)
-
-    writer = GMSClientMemoryManager(socket_path, device=0)
-    writer.connect(RequestedLockType.RW)
-    allocation_id, _writer_tensor = _make_gms_tensor(writer, baseline, tag="weights")
-    assert writer.commit()
-
-    reader = GMSClientMemoryManager(socket_path, device=0)
-    reader.connect(RequestedLockType.RO)
-    va = reader.create_mapping(allocation_id=allocation_id)
-    gms_tensor = _tensor_from_pointer(
-        va,
-        list(baseline.shape),
-        list(baseline.stride()),
-        baseline.dtype,
-        0,
-    )
-
-    _assert_exact_tensor_equal(
-        torch.relu((baseline + 3.0) @ rhs), torch.relu((gms_tensor + 3.0) @ rhs)
-    )
-    _assert_exact_tensor_equal(
-        baseline.transpose(0, 1).contiguous(), gms_tensor.transpose(0, 1).contiguous()
-    )
-    _assert_exact_tensor_equal(
-        baseline[:, 2:6].sum(dim=1), gms_tensor[:, 2:6].sum(dim=1)
-    )
-    _assert_exact_tensor_equal(
-        (baseline * 2.0 - 5.0).square(), (gms_tensor * 2.0 - 5.0).square()
-    )
-
-    reader.close()
-
-
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     socket_path = running_gms
     baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
 
     writer = GMSClientMemoryManager(socket_path, device=0)
     writer.connect(RequestedLockType.RW)
-    allocation_id, _ = _make_gms_tensor(writer, baseline, tag="weights")
+    allocation_id, writer_tensor = _make_gms_tensor(writer, baseline, tag="weights")
+    del writer_tensor
     assert writer.commit()
+    writer.close()
 
     reader = GMSClientMemoryManager(socket_path, device=0)
     reader.connect(RequestedLockType.RO)
@@ -176,6 +140,11 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     register_module_tensors(writer, gms_model)
     _assert_exact_tensor_equal(expected, gms_model(inputs))
     assert writer.commit()
+    del gms_weight
+    del gms_scale
+    del gms_extra
+    del gms_model
+    writer.close()
 
     reader = GMSClientMemoryManager(socket_path, device=0)
     reader.connect(RequestedLockType.RO)

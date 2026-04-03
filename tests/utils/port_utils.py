@@ -87,7 +87,7 @@ def _cleanup_stale_allocations(registry: dict, max_age: float = 900.0) -> dict:
     return cleaned
 
 
-def allocate_ports(count: int, start_port: int) -> list[int]:
+def allocate_ports(count: int, start_port: int = _PORT_MIN) -> list[int]:
     """Find and return available ports in i16 range with flock-based locking.
 
     Uses file locking (flock) to prevent race conditions when multiple test processes
@@ -100,7 +100,7 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
 
     Args:
         count: Number of unique ports to allocate
-        start_port: Starting port number for allocation (required)
+        start_port: Starting port number for allocation
 
     Returns:
         list[int]: List of available port numbers
@@ -319,11 +319,11 @@ def allocate_contiguous_ports(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def allocate_port(start_port: int) -> int:
+def allocate_port(start_port: int = _PORT_MIN) -> int:
     """Find and return a single available port in i16 range.
 
     Args:
-        start_port: Starting port number for allocation (required)
+        start_port: Starting port number for allocation
 
     Returns:
         int: An available port number between start_port and 32767 (i16 max)
