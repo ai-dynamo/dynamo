@@ -123,7 +123,8 @@ class VllmProcessor:
 
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
         # The Rust HTTP layer accepts None/missing, so normalize before validation.
-        for msg in request.get("messages", []):
+        messages = request.get("messages") or []
+        for msg in messages:
             if not isinstance(msg, dict):
                 continue
             content = msg.get("content")
@@ -268,7 +269,7 @@ class VllmProcessor:
         }
 
         # Forward multimodal URLs so the backend handler can load the media.
-        mm_data = extract_mm_urls(request.get("messages", []))
+        mm_data = extract_mm_urls(request.get("messages") or [])
         if mm_data:
             dynamo_preproc["multi_modal_data"] = mm_data
 
