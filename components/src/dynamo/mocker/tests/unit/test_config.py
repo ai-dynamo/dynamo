@@ -10,11 +10,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.llm import EngineType, EntrypointArgs
+from dynamo.llm import EngineType, EntrypointArgs, MockEngineArgs
 
-MODULE_PATH = (
-    Path(__file__).resolve().parents[2] / "components/src/dynamo/mocker/config.py"
-)
+MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
 assert SPEC is not None
 assert SPEC.loader is not None
@@ -230,5 +228,26 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
             "clip_max_new_tokens": 1024,
             "schedule_conservativeness": 0.8,
         },
+    }
+
+    assert "has_perf_model" not in payload
+
+
+def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
+    payload = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 2048,
+        "block_size": 128,
+        "max_num_seqs": None,
+        "max_num_batched_tokens": None,
+        "worker_type": "decode",
         "has_perf_model": True,
     }
+
+    engine_args = MockEngineArgs.from_json(json.dumps(payload))
+
+    assert engine_args.num_gpu_blocks == 2048
+    assert engine_args.block_size == 128
+    assert engine_args.max_num_seqs is None
+    assert engine_args.max_num_batched_tokens is None
+    assert engine_args.worker_type == "decode"

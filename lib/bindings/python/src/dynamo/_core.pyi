@@ -1221,6 +1221,21 @@ class KvRouterConfig:
     def from_json(config_json: str) -> "KvRouterConfig":
         ...
 
+    def dump_json(self) -> str: ...
+
+    def copy(self) -> "KvRouterConfig": ...
+
+    @property
+    def overlap_score_weight(self) -> float: ...
+
+    @overlap_score_weight.setter
+    def overlap_score_weight(self, value: float) -> None: ...
+
+    def with_overrides(
+        self,
+        overlap_score_weight: Optional[float] = None,
+    ) -> "KvRouterConfig": ...
+
 class ReasoningConfig:
     def __init__(
         self,
@@ -1280,6 +1295,8 @@ class MockEngineArgs:
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
 
+    def copy(self) -> "MockEngineArgs": ...
+
     def dump_json(self) -> str: ...
 
     @property
@@ -1288,11 +1305,20 @@ class MockEngineArgs:
     @property
     def num_gpu_blocks(self) -> int: ...
 
+    @num_gpu_blocks.setter
+    def num_gpu_blocks(self, value: int) -> None: ...
+
     @property
     def max_num_seqs(self) -> Optional[int]: ...
 
     @property
     def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    @property
+    def enable_prefix_caching(self) -> bool: ...
+
+    @enable_prefix_caching.setter
+    def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...
@@ -1302,6 +1328,42 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def aic_backend(self) -> Optional[str]: ...
+
+    @aic_backend.setter
+    def aic_backend(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_system(self) -> Optional[str]: ...
+
+    @aic_system.setter
+    def aic_system(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_backend_version(self) -> Optional[str]: ...
+
+    @aic_backend_version.setter
+    def aic_backend_version(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_tp_size(self) -> Optional[int]: ...
+
+    @aic_tp_size.setter
+    def aic_tp_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_model_path(self) -> Optional[str]: ...
+
+    @aic_model_path.setter
+    def aic_model_path(self, value: Optional[str]) -> None: ...
+
+    @property
+    def worker_type(self) -> str: ...
+
+    @worker_type.setter
+    def worker_type(self, value: str) -> None: ...
 
     def is_prefill(self) -> bool: ...
 
@@ -1313,6 +1375,14 @@ class MockEngineArgs:
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
+        num_gpu_blocks: Optional[int] = None,
+        aic_backend: Optional[str] = None,
+        aic_system: Optional[str] = None,
+        aic_backend_version: Optional[str] = None,
+        aic_tp_size: Optional[int] = None,
+        aic_model_path: Optional[str] = None,
+        enable_prefix_caching: Optional[bool] = None,
+        worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
 
 async def register_model(
