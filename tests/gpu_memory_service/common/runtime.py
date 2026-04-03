@@ -196,9 +196,7 @@ class GMSEngineProcess(EngineProcess, ABC):
     def model_loader_extra_config(self) -> str | None:
         if self.weights_lock_mode is None:
             return None
-        return json.dumps(
-            {"gms_read_only": self.weights_lock_mode == RequestedLockType.RO}
-        )
+        return json.dumps({"gms_lock_mode": self.weights_lock_mode.value})
 
     @abstractmethod
     def quiesce_payload(self) -> dict:
