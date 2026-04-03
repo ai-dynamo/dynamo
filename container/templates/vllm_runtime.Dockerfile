@@ -60,7 +60,6 @@ RUN set -eu; \
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 
 {% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
@@ -82,12 +81,15 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 USER dynamo
 
-# Copy only the runtime-facing vLLM test and launch surface. Keep framework
-# source trees out of /workspace so optional components like planner are not
-# treated as present in the upstream runtime image.
+# Copy the workspace surface needed by the current vLLM pre-merge test image.
+# Keep optional framework trees like planner out of /workspace so the upstream
+# runtime does not look like a fully-expanded generic image.
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples/backends/vllm /workspace/examples/backends/vllm
 COPY --chmod=775 --chown=dynamo:0 examples/common /workspace/examples/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
+COPY --chown=dynamo:0 lib /workspace/lib
 COPY --chmod=775 --chown=dynamo:0 deploy/sanity_check.py /workspace/deploy/sanity_check.py
 
 # Setup launch banner in common directory accessible to all users

@@ -33,7 +33,16 @@ ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
+{% if framework == "vllm" and context[framework][device_key].runtime_image_tags is defined -%}
+{% if platform == "multi" -%}
+ARG RUNTIME_IMAGE_TAG_AMD64={{ context[framework][device_key].runtime_image_tags.amd64 }}
+ARG RUNTIME_IMAGE_TAG_ARM64={{ context[framework][device_key].runtime_image_tags.arm64 }}
+{% else -%}
+ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tags[platform] }}
+{% endif -%}
+{% else -%}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{% endif -%}
 {%- endif %}
 
 # wheel builder image selection
@@ -89,27 +98,6 @@ ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
 ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
 ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% endif %}
-
-{% if framework == "vllm" -%}
-# Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF={{ context[framework][device_key].vllm_ref }}
-ARG MAX_JOBS={{ context.vllm.max_jobs }}
-# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-{% if device == "cuda" -%}
-ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
-{% endif %}
-ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
-
-{% if device == "cuda" -%}
-# If left blank, then we will fallback to vLLM defaults
-ARG DEEPGEMM_REF=""
-
-# ModelExpress for P2P weight transfer (optional)
-ARG ENABLE_MODELEXPRESS_P2P={{ context.vllm.enable_modelexpress_p2p }}
-ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
-{% endif %}
-{%- endif -%}
 
 {% if framework == "trtllm" %}
 # TensorRT-LLM specific configuration
