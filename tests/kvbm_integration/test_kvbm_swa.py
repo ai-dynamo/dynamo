@@ -481,7 +481,11 @@ def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
 
 
 @pytest.mark.trtllm
-@pytest.mark.parametrize("trtllm_server", [{}], indirect=True)
+@pytest.mark.parametrize(
+    "trtllm_server",
+    [{"cpu_blocks": 200, "gpu_blocks": 10}],
+    indirect=True,
+)
 @pytest.mark.timeout(170)
 def test_swa_offload_and_onboard_trtllm(trtllm_tester, trtllm_server):
     """
@@ -499,7 +503,7 @@ def test_swa_offload_and_onboard_trtllm(trtllm_tester, trtllm_server):
 @pytest.mark.trtllm
 @pytest.mark.parametrize(
     "trtllm_server",
-    [{"cpu_blocks": 200, "gpu_blocks": 20}],
+    [{"cpu_blocks": 200, "gpu_blocks": 10}],
     indirect=True,
 )
 @pytest.mark.timeout(170)
@@ -518,7 +522,7 @@ def test_swa_gpu_cache_eviction_trtllm(trtllm_tester, trtllm_server):
 @pytest.mark.trtllm
 @pytest.mark.parametrize(
     "trtllm_server",
-    [{"cpu_blocks": 200, "gpu_blocks": 20}],
+    [{"cpu_blocks": 200, "gpu_blocks": 10}],
     indirect=True,
 )
 @pytest.mark.timeout(160)
