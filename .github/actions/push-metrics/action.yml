@@ -42,7 +42,7 @@ inputs:
     description: 'CUDA version (e.g., 12.8)'
     required: false
   job-status:
-    description: 'Job status — pass ${{ job.status }} for automatic detection'
+    description: 'Job status (success/failure/cancelled)'
     required: false
 
 runs:
