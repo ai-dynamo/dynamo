@@ -428,14 +428,6 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -577,14 +569,6 @@ vllm_configs = {
         delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=600,  # 10 minutes for video processing overhead
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [

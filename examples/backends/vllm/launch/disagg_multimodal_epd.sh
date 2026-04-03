@@ -77,10 +77,17 @@ python -m dynamo.frontend &
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
 
-# GPU assignments (override via environment variables)
-DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
-DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
+# GPU assignments (override via environment variables).
+# In single-GPU mode all 3 workers default to GPU 0.
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
+else
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
+fi
 
 # GPU memory utilization for workers.
 # NOTE: --kv-cache-memory-bytes (set below for P/D workers) overrides
@@ -93,9 +100,15 @@ if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
     echo "WARNING: _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is set but has no effect here because" >&2
     echo "  --kv-cache-memory-bytes overrides --gpu-memory-utilization in vLLM." >&2
 fi
-DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
-DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.4}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.4}
+else
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
+fi
 
 # 512 MB KV cache per P/D worker. Setting --kv-cache-memory-bytes bypasses vLLM's
 # memory profiling entirely (both language model and multimodal encoder), which avoids
