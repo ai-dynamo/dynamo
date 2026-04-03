@@ -410,6 +410,7 @@ class SglangProcessor:
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
                 )
             else:
                 dynamo_stream = await self.router.generate(
