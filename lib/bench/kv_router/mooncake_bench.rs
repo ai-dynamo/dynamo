@@ -5,7 +5,6 @@
 mod common;
 use common::*;
 
-
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
@@ -900,8 +899,15 @@ async fn main() -> anyhow::Result<()> {
                     IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
                 };
                 let count_events = IndexerArgs::supports_remove(name);
-                let result =
-                    run_benchmark(indexer, artifacts.clone(), &args, dur_ms, count_events, args.find_matches_concurrency).await?;
+                let result = run_benchmark(
+                    indexer,
+                    artifacts.clone(),
+                    &args,
+                    dur_ms,
+                    count_events,
+                    args.find_matches_concurrency,
+                )
+                .await?;
 
                 if multi_threaded {
                     if result.block_throughput >= result.offered_block_throughput * 0.95 {
