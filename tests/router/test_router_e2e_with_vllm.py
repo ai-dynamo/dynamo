@@ -341,10 +341,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
         super().__exit__(exc_type, exc_val, exc_tb)
 
-    async def launch_mockers_with_indexer(self, endpoint):
+    async def launch_workers_with_indexer(self, endpoint):
         if not self._standalone_indexer:
             raise RuntimeError(
-                "launch_mockers_with_indexer requires standalone_indexer=True"
+                "launch_workers_with_indexer requires standalone_indexer=True"
             )
 
         client = await endpoint.client()
