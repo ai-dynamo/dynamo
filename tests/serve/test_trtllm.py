@@ -149,6 +149,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(
                 2592
             ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,

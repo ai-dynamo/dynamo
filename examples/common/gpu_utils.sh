@@ -124,7 +124,11 @@ build_trtllm_override_args_with_mem() {
             # Strip outer braces from existing JSON
             local existing="${merge_json#\{}"
             existing="${existing%\}}"
-            echo "{${gpu_mem_json}, ${existing}}"
+            if [[ -n "${existing//[[:space:]]/}" ]]; then
+                echo "{${gpu_mem_json}, ${existing}}"
+            else
+                echo "{${gpu_mem_json}}"
+            fi
         else
             # Just GPU mem config
             echo "{${gpu_mem_json}}"
@@ -223,6 +227,12 @@ _gpu_utils_self_test() {
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
         build_trtllm_override_args_with_mem --merge-with-json '{"return_perf_metrics": true, "otlp_traces_endpoint": "http://localhost:4317"}')
     _assert "trtllm merged" '{"kv_cache_config": {"max_tokens": 2048}, "return_perf_metrics": true, "otlp_traces_endpoint": "http://localhost:4317"}' "$result"
+
+    echo ""
+    echo "=== trtllm: merge with empty JSON object ==="
+    result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
+        build_trtllm_override_args_with_mem --merge-with-json '{}')
+    _assert "trtllm merge empty obj" '{"kv_cache_config": {"max_tokens": 2048}}' "$result"
 
     echo ""
     echo "=== trtllm: no GPU override, but pass through existing JSON ==="

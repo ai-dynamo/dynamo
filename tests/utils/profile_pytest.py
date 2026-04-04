@@ -1141,7 +1141,7 @@ def _find_min_vram(
         # safe_kv_bytes which allocates more KV cache and thus more VRAM.
         print(f"  [final probe] Measuring VRAM at safe_kv_bytes={safe_kv_mib} MiB")
         sys.stdout.flush()
-        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+        rc_final, wall_final, reports_final, samples_final, _stdout_final = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
@@ -1209,7 +1209,7 @@ def _find_min_vram(
             marker_name = "requested_sglang_kv_tokens"
             backend_label = "SGLang"
 
-        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+        rc_final, wall_final, reports_final, samples_final, _stdout_final = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
