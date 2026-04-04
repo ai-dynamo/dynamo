@@ -327,13 +327,10 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
 # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
 RUN git lfs install
 
-# Install dev/test dependencies. vLLM dev inherits a lean upstream runtime, so it
-# must restore the Python packages that the documented source-build workflow used
-# to inherit from the old runtime image.
+# Install shared dev/test dependencies.
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=bind,source=./container/deps/requirements.vllm.dev.txt,target=/tmp/requirements.vllm.dev.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
@@ -342,9 +339,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/r
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
-    if [ "${FRAMEWORK}" = "vllm" ]; then \
-        uv pip install --no-deps --requirement /tmp/requirements.vllm.dev.txt; \
-    fi && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
