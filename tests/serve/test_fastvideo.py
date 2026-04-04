@@ -67,7 +67,7 @@ fastvideo_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.fastvideo,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
