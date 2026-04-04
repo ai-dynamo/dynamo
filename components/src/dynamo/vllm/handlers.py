@@ -52,7 +52,7 @@ from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import Config
-from .constants import EmbeddingTransferMode
+from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
@@ -1586,17 +1586,37 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
             embedding_params = None
 
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        has_mm_data = (
+            "multi_modal_data" in request and request["multi_modal_data"] is not None
+        )
+
         multi_modal_data = None
-        # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
-        if prefill_result is not None and embedding_params is not None:
-            if is_qwen_vl_model(self.config.model):
-                multi_modal_data = construct_qwen_decode_mm_data(
-                    embedding_params["image_grid_thw"],
-                    embedding_params["embeddings_shape"],
-                    request_id,
+        if is_decode_only:
+            # Decode mode: use synthetic data from prefill, NEVER fetch images
+            if embedding_params is not None:
+                if is_qwen_vl_model(self.config.model):
+                    multi_modal_data = construct_qwen_decode_mm_data(
+                        embedding_params["image_grid_thw"],
+                        embedding_params["embeddings_shape"],
+                        request_id,
+                    )
+            elif has_mm_data:
+                # Multimodal request but no embedding_params — always an error.
+                # Decode workers cannot process multimodal data without
+                # embedding metadata from prefill.
+                msg = (
+                    "Decode worker received multimodal request without "
+                    "prefill result"
+                    if prefill_result is None
+                    else "Prefill did not produce required multimodal "
+                    "embedding metadata for decode"
                 )
+                logger.error("Request %s: %s", request_id, msg)
+                yield {"status": "error", "message": msg}
+                return
         else:
-            # Extract and decode multimodal data if present
+            # Aggregated mode: load images normally
             multi_modal_data = await self._extract_multimodal_data(
                 request, request_id, context
             )
@@ -1800,7 +1820,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         multi_modal_data = await self._extract_multimodal_data(
             request, request_id, context
         )
-        embedding_params = self._build_embedding_params(multi_modal_data or {})
+        try:
+            embedding_params = self._build_embedding_params(multi_modal_data or {})
+        except ValueError as exc:
+            logger.error("Request %s: %s", request_id, exc)
+            yield {
+                "status": "error",
+                "message": str(exc),
+                "disaggregated_params": None,
+            }
+            return
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1921,18 +1950,37 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         tokens in the prompt which requires such a metadata to pass through the processor.
         """
         embedding_params = {}
-        if is_qwen_vl_model(self.config.model) and isinstance(
-            multi_modal_data.get("image"), dict
-        ):
-            image_data = multi_modal_data["image"]
-            image_grid_thw = image_data.get("image_grid_thw")
-            image_embeds = image_data.get("image_embeds")
-            if image_grid_thw is not None:
+        if is_qwen_vl_model(self.config.model):
+            image_data = multi_modal_data.get("image")
+            if isinstance(image_data, dict):
+                image_grid_thw = image_data.get("image_grid_thw")
+                image_embeds = image_data.get("image_embeds")
+                # Validate both fields are present and non-empty to avoid
+                # passing partial metadata that would fail on decode.
+                has_grid_thw = image_grid_thw is not None
+                if isinstance(image_grid_thw, torch.Tensor):
+                    has_grid_thw = image_grid_thw.numel() > 0
+                elif isinstance(image_grid_thw, list):
+                    has_grid_thw = len(image_grid_thw) > 0
+                if not has_grid_thw or image_embeds is None:
+                    raise ValueError(
+                        "Prefill received incomplete Qwen VL embedding metadata "
+                        "(image_grid_thw/image_embeds). Configure "
+                        "--route-to-encoder to use the embedding loader for "
+                        "disaggregated multimodal serving."
+                    )
                 embedding_params["image_grid_thw"] = (
                     image_grid_thw.tolist()
                     if isinstance(image_grid_thw, torch.Tensor)
                     else image_grid_thw
                 )
-            if image_embeds is not None:
                 embedding_params["embeddings_shape"] = list(image_embeds.shape)
+            elif image_data is not None:
+                # PIL images without embedding metadata — cannot produce
+                # the image_grid_thw that Qwen VL decode requires.
+                raise ValueError(
+                    "Qwen VL model received PIL images without embedding "
+                    "metadata. Use --route-to-encoder for disaggregated "
+                    "multimodal serving."
+                )
         return embedding_params if embedding_params else None
