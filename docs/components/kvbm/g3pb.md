@@ -99,7 +99,7 @@ on the NIXL transfer path.
 ## TRT-LLM Async Loading
 
 TRT-LLM can optionally use a small leader-side prefetch hook before scheduling:
-`advise_async_loading(...)`.
+the KV cache connector leader method `advise_async_loading(...)`.
 
 The intent is:
 
