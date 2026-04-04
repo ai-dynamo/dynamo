@@ -821,6 +821,104 @@ vllm_configs = {
             ),
         ],
     ),
+    # Embedding cache integration test for aggregated multimodal.
+    # Validates the ec_both code path (DynamoMultimodalEmbeddingCacheConnector)
+    # by exercising both the CPU cache save and load paths:
+    #   Payload 1: image A → GPU miss → encode → save to CPU store
+    #   Payload 2: image B (synthetic) → GPU evicts A → save B to CPU store
+    #   Payload 3: image A → GPU miss → CPU hit → load from CPU store
+    #
+    # Eviction guarantee:
+    #   --mm-processor-kwargs pins min_pixels=max_pixels=3136 → all images become
+    #   56x56 → 4 encoder tokens each. --max-num-batched-tokens=4 makes
+    #   encoder_cache_size = max(4, max_tokens_per_mm_item=4) = 4, holding exactly
+    #   1 image. Image B's can_allocate() evicts A from the GPU encoder cache.
+    #   --max-num-seqs=1 ensures sequential processing for deterministic state.
+    #   --limit-mm-per-prompt disables video so only image tokens set the budget.
+    #   DYN_LOG=debug enables the connector's debug-level save/load logs.
+    "multimodal_agg_embedding_cache": VLLMConfig(
+        name="multimodal_agg_embedding_cache",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(8.0),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+            pytest.mark.multimodal,
+            pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct"),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        env={"DYN_LOG": "debug"},
+        request_payloads=[
+            # Payload 1: image A — save to CPU store
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe briefly."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[
+                    r"Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector",
+                    r"DynamoMultimodalEmbeddingCacheConnector initialized: capacity_gb=",
+                    r"EC cache save:",
+                ],
+                max_tokens=16,
+                temperature=0.0,
+            ),
+            # Payload 2: image B (synthetic 2x2 red PNG) — evicts image A from GPU cache
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe briefly."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,"
+                            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91Jpz"
+                            "AAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=="
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                temperature=0.0,
+            ),
+            # Payload 3: image A again — GPU miss, CPU cache hit, load from CPU store
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe briefly."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[
+                    r"EC cache load:",
+                ],
+                max_tokens=16,
+                temperature=0.0,
+            ),
+        ],
+        script_args=[
+            "--multimodal-embedding-cache-capacity-gb",
+            "0.5",
+            "--max-num-batched-tokens",
+            "4",
+            "--max-num-seqs",
+            "1",
+            "--mm-processor-kwargs",
+            '{"min_pixels": 3136, "max_pixels": 3136}',
+            "--limit-mm-per-prompt",
+            '{"video": 0}',
+        ],
+    ),
 }
 
 

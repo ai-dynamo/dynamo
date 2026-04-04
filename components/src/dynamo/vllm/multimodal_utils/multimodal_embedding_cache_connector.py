@@ -205,6 +205,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
                     "cuda", non_blocking=True
                 )
+                # E2E tests assert this log to confirm cache load path is exercised
+                logger.debug("EC cache load: %s", mm_hash[:12])
             else:
                 logger.warning(
                     "start_load_caches: hash %s not in cpu_store, skipping", mm_hash
@@ -231,3 +233,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             )
             return
         self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()
+        # E2E tests assert this log to confirm cache save path is exercised
+        logger.debug(
+            "EC cache save: %s (%d bytes)",
+            mm_hash[:12],
+            encoder_cache[mm_hash].numel() * encoder_cache[mm_hash].element_size(),
+        )
