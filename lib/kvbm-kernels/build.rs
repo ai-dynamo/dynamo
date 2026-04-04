@@ -315,6 +315,8 @@ fn get_cuda_arch_flags() -> Vec<String> {
     let explicit_archs = env::var("CUDA_ARCHS").ok();
     let arch_list = explicit_archs.as_deref().unwrap_or("80,86,89,90,100,120");
 
+    let mut compiled_archs = Vec::new();
+
     for arch in arch_list.split(',') {
         let arch = arch.trim();
         if arch.is_empty() {
@@ -336,7 +338,25 @@ fn get_cuda_arch_flags() -> Vec<String> {
             );
             continue;
         }
+        compiled_archs.push(arch_num);
         flags.push(format!("-gencode=arch=compute_{},code=sm_{}", arch, arch));
+    }
+
+    if !compiled_archs.is_empty() {
+        println!(
+            "cargo:warning=Building kernels for GPU architectures: sm_{}",
+            compiled_archs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", sm_")
+        );
+    } else {
+        println!(
+            "cargo:warning=WARNING: No GPU architectures compiled! \
+             All requested architectures exceed the CUDA toolkit's maximum supported compute capability. \
+             This will cause 'no kernel image available' errors at runtime."
+        );
     }
 
     // Generate forward-compatible PTX for each major architecture family that is
