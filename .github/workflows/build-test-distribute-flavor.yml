@@ -134,6 +134,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_coverage:
+        description: 'Enable test coverage collection (true/false)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -315,6 +320,7 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
 
@@ -331,6 +337,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
@@ -389,6 +396,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
