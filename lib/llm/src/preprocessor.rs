@@ -395,12 +395,11 @@ impl OpenAIPreprocessor {
             };
             for part in parts {
                 for key in ["image_url", "video_url", "audio_url"] {
-                    if let Some(media) = part.get_mut(key) {
-                        if let Some(url) = media.get_mut("url") {
-                            if url.as_str().is_some_and(|s| s.starts_with("data:")) {
-                                *url = serde_json::Value::String(String::new());
-                            }
-                        }
+                    if let Some(media) = part.get_mut(key)
+                        && let Some(url) = media.get_mut("url")
+                        && url.as_str().is_some_and(|s| s.starts_with("data:"))
+                    {
+                        *url = serde_json::Value::String(String::new());
                     }
                 }
             }
@@ -1624,7 +1623,10 @@ mod strip_tests {
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
         let parts = messages[0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["video_url"]["url"], "");
-        assert_eq!(parts[1]["audio_url"]["url"], "https://example.com/audio.wav");
+        assert_eq!(
+            parts[1]["audio_url"]["url"],
+            "https://example.com/audio.wav"
+        );
     }
 
     #[test]
