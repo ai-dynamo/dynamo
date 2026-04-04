@@ -360,8 +360,14 @@ pub struct WorkerSelectionResult {
 
 /// Active load metrics for a worker, used for busy detection.
 ///
-/// Published by workers (with only `active_decode_blocks`) and by the scheduler
-/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+/// Two independent publishers write to the same NATS subject (`KV_METRICS_SUBJECT`):
+/// - `WorkerMetricsPublisher` (engine-side): publishes `active_decode_blocks` (authoritative
+///   KV cache occupancy) with `active_prefill_tokens = None`.
+/// - `RuntimeSequencePublisher` (router-side): publishes `active_prefill_tokens` (sequence
+///   tracker's view) with `active_decode_blocks = None`.
+///
+/// `KvWorkerMonitor` merges these by only updating a field when it is `Some(...)`, so each
+/// publisher owns exactly one field and they do not race.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,

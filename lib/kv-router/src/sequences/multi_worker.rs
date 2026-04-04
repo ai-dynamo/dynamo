@@ -628,7 +628,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let active_load = ActiveLoad {
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
-            active_decode_blocks: Some(active_blocks as u64),
+            // Do not publish active_decode_blocks from the router side.
+            // The engine-side WorkerMetricsPublisher is the authoritative source for
+            // KV cache block occupancy. Publishing it here would race with the engine
+            // publisher on KV_METRICS_SUBJECT, causing last-write-wins corruption of
+            // the active_decode_blocks_threshold busy-detection in KvWorkerMonitor.
+            active_decode_blocks: None,
             active_prefill_tokens: Some(active_tokens as u64),
         };
 
