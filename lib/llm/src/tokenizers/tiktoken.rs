@@ -667,7 +667,7 @@ mod tests {
         let engine = base64::engine::general_purpose::STANDARD;
         let mut content = String::new();
         for byte_val in 0u16..256 {
-            let encoded = engine.encode(&[byte_val as u8]);
+            let encoded = engine.encode([byte_val as u8]);
             content.push_str(&format!("{encoded} {byte_val}\n"));
         }
         let file_path = dir.join("tiktoken.model");
@@ -741,7 +741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = create_byte_level_tiktoken_file(dir.path());
 
-        let encoder = parse_tiktoken_file(&file_path).unwrap();
+        let _encoder = parse_tiktoken_file(&file_path).unwrap();
         let num_base_tokens = 256usize;
 
         // Build special tokens with the OLD (buggy) relative-offset naming
