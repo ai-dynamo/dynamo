@@ -56,6 +56,7 @@ KVBM has three primary logical layers:
 ## Next Steps
 
 - **[KVBM Guide](kvbm-guide.md)** — Installation, configuration, and deployment instructions
+- **[KVBM G3PB](g3pb.md)** — Compact overview of the peer-backed remote cache path
 - **[KVBM Design](../../design-docs/kvbm-design.md)** — Architecture deep dive, components, and data flows
 - **[LMCache Integration](../../integrations/lmcache-integration.md)** — Use LMCache with Dynamo vLLM backend
 - **[FlexKV Integration](../../integrations/flexkv-integration.md)** — Use FlexKV for KV cache management

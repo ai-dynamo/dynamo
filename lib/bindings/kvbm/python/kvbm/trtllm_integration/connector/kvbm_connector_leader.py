@@ -97,9 +97,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
             )
 
-        print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
+        print(
+            f"KvConnectorLeader initialized with rank: {mappings.rank}, local_rank: {mappings.local_rank}"
+        )
         self._connector = RustKvConnectorLeader(
             mappings.rank,
+            mappings.local_rank,
             self.drt,
             self.block_size,
             leader,
@@ -220,3 +223,37 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         )
 
         self._connector.create_slot(request, all_token_ids)
+
+    @nvtx_annotate(category="scheduler")
+    def advise_async_loading(
+        self, request: LlmRequest, transfer_for_ms: int = 100, min_blocks: int = 10
+    ) -> None:
+        """
+        Start best-effort async remote loading for this request before scheduling.
+
+        This should be called after TRT-LLM has activated the request for the upcoming
+        iteration, but before the scheduler makes its placement decision for that
+        iteration.
+
+        Intended usage:
+        - inspect active/context requests that are likely to need remote KV soon
+        - call this method with the full request tokens
+        - allow a bounded grace period for remote-to-local prefetch work
+        - run normal scheduling afterward using only local KVBM matches
+
+        This API is best-effort only. It must not be treated as a promise that remote
+        KV will be available in time for the next iteration.
+        """
+        self._create_slot(request)
+
+        if bool(request.multimodal_positions):
+            raise ValueError("Unsupported request - requires mm extra keys")
+
+        all_token_ids = request.get_tokens(0)
+        request = KvbmRequest(
+            request_id=str(request.request_id), lora_name=None, salt_hash=None
+        )
+
+        self._connector.advise_async_loading(
+            request, all_token_ids, transfer_for_ms, min_blocks
+        )

@@ -150,6 +150,39 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         self.state.onboard_blocks(blocks, targets)
     }
+
+    /// Exports the local blockset configuration as a serialized object.
+    pub fn export_local_blockset(&self) -> Result<SerializedNixlBlockSet> {
+        self.state.export_local_blockset()
+    }
+
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.state.nixl_agent()
+    }
+
+    /// Imports a remote blockset configuration from a serialized object.
+    pub fn import_remote_blockset(
+        &self,
+        serialized_blockset: SerializedNixlBlockSet,
+    ) -> Result<()> {
+        self.state.import_remote_blockset(serialized_blockset)
+    }
+
+    /// Get a [`Vec<RemoteBlock<IsImmutable>>`] from a [`BlockDescriptorList`]
+    pub fn get_remote_blocks_immutable(
+        &self,
+        bds: &BlockDescriptorList,
+    ) -> Result<Vec<RemoteBlock<IsImmutable>>> {
+        self.state.get_remote_blocks_immutable(bds)
+    }
+
+    /// Get a [`Vec<RemoteBlock<IsMutable>>`] from a [`BlockDescriptorList`]
+    pub fn get_remote_blocks_mutable(
+        &self,
+        bds: &BlockDescriptorList,
+    ) -> Result<Vec<RemoteBlock<IsMutable>>> {
+        self.state.get_remote_blocks_mutable(bds)
+    }
 }
 
 fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop> {
@@ -182,35 +215,6 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
             _cancellation_token,
             block_size,
         })
-    }
-
-    /// Exports the local blockset configuration as a serialized object.
-    pub fn export_local_blockset(&self) -> Result<SerializedNixlBlockSet> {
-        self.state.export_local_blockset()
-    }
-
-    /// Imports a remote blockset configuration from a serialized object.
-    pub fn import_remote_blockset(
-        &self,
-        serialized_blockset: SerializedNixlBlockSet,
-    ) -> Result<()> {
-        self.state.import_remote_blockset(serialized_blockset)
-    }
-
-    /// Get a [`Vec<RemoteBlock<IsImmutable>>`] from a [`BlockDescriptorList`]
-    pub fn get_remote_blocks_immutable(
-        &self,
-        bds: &BlockDescriptorList,
-    ) -> Result<Vec<RemoteBlock<IsImmutable>>> {
-        self.state.get_remote_blocks_immutable(bds)
-    }
-
-    /// Get a [`Vec<RemoteBlock<IsMutable>>`] from a [`BlockDescriptorList`]
-    pub fn get_remote_blocks_mutable(
-        &self,
-        bds: &BlockDescriptorList,
-    ) -> Result<Vec<RemoteBlock<IsMutable>>> {
-        self.state.get_remote_blocks_mutable(bds)
     }
 }
 

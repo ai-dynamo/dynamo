@@ -26,6 +26,19 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
+fn apply_g3pb_admission_config(config: &mut KvBlockManagerConfig) {
+    let admission = config
+        .g3pb_admission
+        .clone()
+        .or_else(config::G3pbAdmissionConfig::from_legacy_env);
+
+    if let (Some(admission), Some(host_layout)) = (admission, config.host_layout.as_mut())
+        && host_layout.offload_filter.is_none()
+    {
+        host_layout.offload_filter = Some(admission.build_filter());
+    }
+}
+
 pub(crate) struct Resources {
     pub worker_id: WorkerID,
     pub cancellation_token: CancellationToken,
@@ -93,12 +106,145 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         self.offload_manager.onboard(blocks, targets)
     }
+
+    /// Exports the local blockset configuration as a serialized object.
+    pub fn export_local_blockset(&self) -> Result<SerializedNixlBlockSet> {
+        SerializedNixlBlockSet::try_from(&self.local_block_set)
+            .context("Failed to serialize local blockset")
+    }
+
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.resources.nixl_agent.clone()
+    }
+
+    /// Imports a remote blockset configuration from a serialized object.
+    pub fn import_remote_blockset(
+        &self,
+        serialized_blockset: SerializedNixlBlockSet,
+    ) -> Result<()> {
+        let remote = NixlBlockSet::try_from(serialized_blockset)
+            .context("Failed to deserialize remote blockset")?;
+
+        let (block_sets, metadata, worker_id) = remote.dissolve();
+        tracing::debug!("Importing remote blockset from worker {}", worker_id);
+
+        assert_ne!(
+            worker_id, self.resources.worker_id,
+            "Cannot import blockset from self"
+        );
+
+        let agent = self
+            .resources
+            .nixl_agent
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("NIXL agent not initialized"))?;
+
+        let mut remote_block_sets = self.remote_block_sets.write().unwrap();
+
+        if remote_block_sets.contains_key(&worker_id) {
+            anyhow::bail!(
+                "Worker ID {} already exists; cannot update remote blockset",
+                worker_id
+            );
+        }
+
+        let mut inner_map = HashMap::new();
+
+        for (block_set_idx, block_set_layout) in block_sets {
+            let remote_blocks =
+                RemoteBlocks::from_serialized(block_set_layout.clone(), block_set_idx, worker_id)?;
+
+            let layout = remote_blocks.layout();
+            let storage_list = layout.storage();
+            let storage = storage_list
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No storage found in remote blockset"))?;
+
+            match storage.mem_type() {
+                MemType::Dram => {
+                    tracing::trace!(block_set_idx, "Detected Host/DRAM remote descriptor");
+                }
+                MemType::Vram => {
+                    tracing::trace!(block_set_idx, "Detected GPU/Device/VRAM remote descriptor");
+                }
+                _ => {
+                    tracing::warn!(
+                        block_set_idx,
+                        "Detected unknown remote descriptor; skipping blockset..."
+                    );
+                    continue;
+                }
+            }
+
+            inner_map.insert(block_set_idx, remote_blocks);
+        }
+
+        let agent_id = agent
+            .load_remote_md(&metadata)
+            .context("Loading remote metadata")?;
+
+        let agent_id: WorkerID = agent_id
+            .parse()
+            .context("Failed to parse agent ID string into WorkerID (u64)")?;
+
+        assert_eq!(agent_id, worker_id, "Mismatch with remote worker ID");
+
+        remote_block_sets.insert(worker_id, inner_map);
+
+        Ok(())
+    }
+
+    /// Get a [`Vec<RemoteBlock<IsImmutable>>`] from a [`BlockDescriptorList`]
+    pub fn get_remote_blocks_immutable(
+        &self,
+        bds: &BlockDescriptorList,
+    ) -> Result<Vec<RemoteBlock<IsImmutable>>> {
+        self.get_remote_blocks::<IsImmutable>(bds)
+    }
+
+    /// Get a [`Vec<RemoteBlock<IsMutable>>`] from a [`BlockDescriptorList`]
+    pub fn get_remote_blocks_mutable(
+        &self,
+        bds: &BlockDescriptorList,
+    ) -> Result<Vec<RemoteBlock<IsMutable>>> {
+        if bds.mutability() == BlockMutability::Mutable {
+            self.get_remote_blocks::<IsMutable>(bds)
+        } else {
+            anyhow::bail!("Cannot get mutable remote blocks for immutable block descriptor set");
+        }
+    }
+
+    fn get_remote_blocks<M: MutabilityKind>(
+        &self,
+        bds: &BlockDescriptorList,
+    ) -> Result<Vec<RemoteBlock<M>>> {
+        let remote_block_sets = self.remote_block_sets.read().unwrap();
+
+        let remote_blocks = remote_block_sets
+            .get(&bds.worker_id())
+            .and_then(|map| map.get(&bds.block_set_idx()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No remote blockset found for worker {} and block_set_idx {}",
+                    bds.worker_id(),
+                    bds.block_set_idx()
+                )
+            })?;
+
+        bds.block_indices()
+            .iter()
+            .map(|index| remote_blocks.block::<M>(*index))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 impl<R: LogicalResources, Metadata: BlockMetadata>
     KvBlockManagerState<locality::Logical<R>, Metadata>
 {
-    pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
+    pub async fn new(mut config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
+        apply_g3pb_admission_config(&mut config);
         let model_config = config.model.clone();
         let mut resources = Resources::new(config).await?;
         let block_data_factories =
@@ -159,7 +305,6 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
         };
-
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
@@ -218,7 +363,8 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 // create a method on locality to construct a block data factory from a layout builder and resources
 // - this will allow us to use the locality abstraction to build our factories and block pools
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
-    pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
+    pub async fn new(mut config: KvBlockManagerConfig) -> Result<Arc<Self>> {
+        apply_g3pb_admission_config(&mut config);
         let model_config = config.model.clone();
         let mut resources = Resources::new(config).await?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
@@ -285,7 +431,6 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
         };
-
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
@@ -337,158 +482,72 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 
         Ok(state)
     }
+}
 
-    /// Exports the local blockset configuration as a serialized object.
-    pub fn export_local_blockset(&self) -> Result<SerializedNixlBlockSet> {
-        SerializedNixlBlockSet::try_from(&self.local_block_set)
-            .context("Failed to serialize local blockset")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_manager::config::{
+        G3pbAdmissionConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
+    };
+    use crate::block_manager::storage::{DeviceStorage, PinnedStorage};
+
+    fn base_config() -> KvBlockManagerConfig {
+        KvBlockManagerConfig::builder()
+            .runtime(
+                KvManagerRuntimeConfig::builder()
+                    .worker_id(7)
+                    .disable_nixl()
+                    .build()
+                    .unwrap(),
+            )
+            .model(
+                KvManagerModelConfig::builder()
+                    .num_layers(1)
+                    .outer_dim(1)
+                    .page_size(32)
+                    .inner_dim(128)
+                    .build()
+                    .unwrap(),
+            )
+            .device_layout(
+                KvManagerLayoutConfig::<DeviceStorage>::builder()
+                    .num_blocks(1)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()
+                    .unwrap(),
+            )
+            .host_layout(
+                KvManagerLayoutConfig::<PinnedStorage>::builder()
+                    .num_blocks(1)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()
     }
 
-    /// Imports a remote blockset configuration from a serialized object.
-    // TODO: NIXL will validate the every descriptor list against the memory registration list for
-    // a given agent; this is can be an expensive operation. To avoid this, NIXL offers the ability
-    // to generate "partial pre-validated (PPV)" descriptor lists. However, to support per-block and per-layer
-    // PPV lists we will need as many as `num_layers + 1` PPV lists per block:
-    // - one for representing the entire block
-    // - one for representing each layer individually
-    //
-    // A deeper dive into the performance impact of PPV lists is required to determine if this is
-    // the best approach.
-    //
-    // If PPV are valuable, it might be beneficial to lazily instantiate PPV lists when they are
-    // needed; alternatively, we could generate the entire PPV list for each block at import time.
-    pub fn import_remote_blockset(
-        &self,
-        serialized_blockset: SerializedNixlBlockSet,
-    ) -> Result<()> {
-        let remote = NixlBlockSet::try_from(serialized_blockset)
-            .context("Failed to deserialize remote blockset")?;
+    #[test]
+    fn apply_g3pb_admission_config_installs_host_filter() {
+        let mut config = base_config();
+        config.g3pb_admission = Some(G3pbAdmissionConfig::eager());
 
-        let (block_sets, metadata, worker_id) = remote.dissolve();
-        tracing::debug!("Importing remote blockset from worker {}", worker_id);
+        apply_g3pb_admission_config(&mut config);
 
-        assert_ne!(
-            worker_id, self.resources.worker_id,
-            "Cannot import blockset from self"
-        );
-
-        let agent = self
-            .resources
-            .nixl_agent
-            .as_ref()
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("NIXL agent not initialized"))?;
-
-        let mut remote_block_sets = self.remote_block_sets.write().unwrap();
-
-        if remote_block_sets.contains_key(&worker_id) {
-            anyhow::bail!(
-                "Worker ID {} already exists; cannot update remote blockset",
-                worker_id
-            );
-        }
-
-        let mut inner_map = HashMap::new();
-
-        for (block_set_idx, block_set_layout) in block_sets {
-            // Deserialize the individual layout and create RemoteBlocks
-            let remote_blocks =
-                RemoteBlocks::from_serialized(block_set_layout.clone(), block_set_idx, worker_id)?;
-
-            // check the storage type of the remote blocks
-            let layout = remote_blocks.layout();
-            let storage = layout.storage();
-
-            let storage = storage
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("No storage found in remote blockset"))?;
-
-            match storage.mem_type() {
-                MemType::Dram => {
-                    tracing::trace!(block_set_idx, "Detected Host/DRAM remote descriptor");
-                }
-                MemType::Vram => {
-                    tracing::trace!(block_set_idx, "Detected GPU/Device/VRAM remote descriptor");
-                }
-                _ => {
-                    tracing::warn!(
-                        block_set_idx,
-                        "Detected unknown remote descriptor; skipping blockset..."
-                    );
-                    continue;
-                }
-            }
-
-            inner_map.insert(block_set_idx, remote_blocks);
-        }
-
-        let agent_id = agent
-            .load_remote_md(&metadata)
-            .context("Loading remote metadata")?;
-
-        // try to convert the agent_id (String) to a WorkerID (u64)
-        let agent_id: WorkerID =
-            agent_id // Assuming agent_id is String here
-                .parse() // Parse the String into u64 (WorkerID)
-                .context("Failed to parse agent ID string into WorkerID (u64)")?;
-
-        assert_eq!(agent_id, worker_id, "Mismatch with remote worker ID");
-
-        remote_block_sets.insert(worker_id, inner_map);
-
-        Ok(())
+        assert!(config.host_layout.unwrap().offload_filter.is_some());
     }
 
-    /// Get a [`Vec<RemoteBlock<IsImmutable>>`] from a [`BlockDescriptorList`]
-    pub fn get_remote_blocks_immutable(
-        &self,
-        bds: &BlockDescriptorList,
-    ) -> Result<Vec<RemoteBlock<IsImmutable>>> {
-        // no checks - we can always create an immutable remote block even if the bds is mutable
-        self.get_remote_blocks::<IsImmutable>(bds)
-    }
+    #[test]
+    fn apply_g3pb_admission_config_preserves_explicit_host_filter() {
+        let mut config = base_config();
+        let explicit = crate::block_manager::offload::g3pb_filter::G3pbAdmissionFilter::default();
+        config.host_layout.as_mut().unwrap().offload_filter = Some(Arc::new(explicit));
+        config.g3pb_admission = Some(G3pbAdmissionConfig::eager());
 
-    /// Get a [`Vec<RemoteBlock<IsMutable>>`] from a [`BlockDescriptorList`]
-    pub fn get_remote_blocks_mutable(
-        &self,
-        bds: &BlockDescriptorList,
-    ) -> Result<Vec<RemoteBlock<IsMutable>>> {
-        if bds.mutability() == BlockMutability::Mutable {
-            self.get_remote_blocks::<IsMutable>(bds)
-        } else {
-            anyhow::bail!("Cannot get mutable remote blocks for immutable block descriptor set");
-        }
-    }
+        apply_g3pb_admission_config(&mut config);
 
-    /// Generate a [`Vec<RemoteBlock>`] from a [`BlockDescriptorList`]
-    fn get_remote_blocks<M: MutabilityKind>(
-        &self,
-        bds: &BlockDescriptorList,
-    ) -> Result<Vec<RemoteBlock<M>>> {
-        // Get a read lock on the remote block sets
-        let remote_block_sets = self.remote_block_sets.read().unwrap();
-
-        // validate we have loaded a remote blockset for the worker and the specific block_set_idx
-        let remote_blocks = remote_block_sets
-            .get(&bds.worker_id())
-            .and_then(|map| map.get(&bds.block_set_idx()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No remote blockset found for worker {} and block_set_idx {}",
-                    bds.worker_id(),
-                    bds.block_set_idx()
-                )
-            })?;
-
-        // Iterate through indices, call .block() for each, and collect results.
-        // The collect::<Result<...>>() handles potential errors from .block()
-        let blocks: Vec<block::nixl::RemoteBlock<M>> = bds
-            .block_indices()
-            .iter()
-            .map(|block_idx| remote_blocks.block(*block_idx))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(blocks)
+        assert!(config.host_layout.unwrap().offload_filter.is_some());
     }
 }
 

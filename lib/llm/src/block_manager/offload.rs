@@ -59,6 +59,7 @@ use std::env;
 use std::collections::BTreeSet;
 
 pub mod filter;
+pub mod g3pb_filter;
 mod pending;
 pub mod request;
 

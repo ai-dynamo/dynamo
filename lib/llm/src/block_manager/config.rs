@@ -3,9 +3,12 @@
 
 use super::events::EventManager;
 use super::*;
+use crate::block_manager::offload::filter::OffloadFilter;
+use crate::block_manager::offload::g3pb_filter::G3pbAdmissionFilter;
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum NixlOptions {
@@ -82,6 +85,50 @@ pub struct KvManagerModelConfig {
 impl KvManagerModelConfig {
     pub fn builder() -> KvManagerModelConfigBuilder {
         KvManagerModelConfigBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum G3pbAdmissionPolicy {
+    #[default]
+    AfterFirstReuse,
+    Eager,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct G3pbAdmissionConfig {
+    pub policy: G3pbAdmissionPolicy,
+}
+
+impl G3pbAdmissionConfig {
+    pub fn after_first_reuse() -> Self {
+        Self {
+            policy: G3pbAdmissionPolicy::AfterFirstReuse,
+        }
+    }
+
+    pub fn eager() -> Self {
+        Self {
+            policy: G3pbAdmissionPolicy::Eager,
+        }
+    }
+
+    pub fn from_legacy_env() -> Option<Self> {
+        match std::env::var("G3PB_OFFLOAD_ALL") {
+            Ok(value) => {
+                let eager = value == "1" || value.eq_ignore_ascii_case("true");
+                Some(if eager {
+                    Self::eager()
+                } else {
+                    Self::after_first_reuse()
+                })
+            }
+            Err(_) => None,
+        }
+    }
+
+    pub fn build_filter(&self) -> Arc<dyn OffloadFilter> {
+        Arc::new(G3pbAdmissionFilter::from_config(self.clone()))
     }
 }
 
@@ -214,6 +261,13 @@ pub struct KvBlockManagerConfig {
     #[builder(default, setter(custom))]
     pub consolidator_config:
         Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
+
+    /// Optional G3PB admission policy.
+    ///
+    /// When set, KVBM installs the G3PB admission filter on the host layout
+    /// unless an explicit host offload filter has already been provided.
+    #[builder(default, setter(strip_option))]
+    pub g3pb_admission: Option<G3pbAdmissionConfig>,
 }
 
 impl KvBlockManagerConfig {

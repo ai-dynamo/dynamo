@@ -165,6 +165,7 @@ pub struct ConnectorMetadata {
 
     /// The operations that were initialized in this iteration.
     pub operations: Vec<WorkerTransferRequest>,
+
 }
 
 impl ConnectorMetadata {

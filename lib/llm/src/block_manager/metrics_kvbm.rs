@@ -58,6 +58,12 @@ pub struct KvbmMetrics {
     // number of failed object storage write operations (blocks)
     pub object_write_failures: IntCounter,
 
+    // number of advisory remote lookups that observed hits after the first miss gap
+    pub g3pb_post_gap_requests: IntCounter,
+
+    // number of advisory remote hit blocks observed after the first miss gap
+    pub g3pb_post_gap_blocks: IntCounter,
+
     shutdown_notify: Option<Arc<Notify>>,
 }
 
@@ -154,6 +160,20 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+        let g3pb_post_gap_requests = mr
+            .create_intcounter(
+                "g3pb_post_gap_requests",
+                "The number of advisory remote lookups that observed hits after the first miss gap",
+                &[],
+            )
+            .unwrap();
+        let g3pb_post_gap_blocks = mr
+            .create_intcounter(
+                "g3pb_post_gap_blocks",
+                "The number of advisory remote hit blocks observed after the first miss gap",
+                &[],
+            )
+            .unwrap();
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
@@ -170,6 +190,8 @@ impl KvbmMetrics {
                 object_cache_hit_rate,
                 object_read_failures,
                 object_write_failures,
+                g3pb_post_gap_requests,
+                g3pb_post_gap_blocks,
                 shutdown_notify: None,
             };
         }
@@ -232,6 +254,8 @@ impl KvbmMetrics {
             object_cache_hit_rate,
             object_read_failures,
             object_write_failures,
+            g3pb_post_gap_requests,
+            g3pb_post_gap_blocks,
             shutdown_notify: Some(notify),
         }
     }
