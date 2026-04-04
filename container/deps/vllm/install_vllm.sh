@@ -222,8 +222,12 @@ if [ "$DEVICE" = "cpu" ]; then
     # when resolving torchvision/torchaudio dependencies (e.g. torch 2.11 breaks at::cpu::L2_cache_size).
     uv pip install -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
     uv pip install torchvision torchaudio --constraint requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
-    VLLM_TARGET_DEVICE=cpu \
-    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+
+    # Workaround GCC 13 ICE in oneDNN ref_rnn.cpp:
+    # The stdarg GIMPLE pass + remove_unused_locals() crashes at -O3 on complex
+    # std::function lambda instantiations. -O2 avoids the code path that segfaults.
+    CXXFLAGS="-O2" VLLM_TARGET_DEVICE=cpu \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
     uv pip install dist/*.whl
 fi
 echo "✓ vLLM installation completed"
