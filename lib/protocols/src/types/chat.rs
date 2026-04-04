@@ -1157,6 +1157,10 @@ pub struct ChatChoice {
     /// Log probability information for the choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatChoiceLogprobs>,
+    /// Flag indicating whether this choice includes reasoning content.
+    /// Set to `true` when `message.reasoning_content` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_reasoning: Option<bool>,
 }
 
 /// Represents a chat completion response returned by model, based on the provided input.
@@ -1252,6 +1256,10 @@ pub struct ChatChoiceStream {
     /// Log probability information for the choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatChoiceLogprobs>,
+    /// Flag indicating whether this choice includes reasoning content.
+    /// Set to `true` when `delta.reasoning_content` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_reasoning: Option<bool>,
 }
 
 #[derive(ToSchema, Debug, Deserialize, Clone, PartialEq, Serialize)]

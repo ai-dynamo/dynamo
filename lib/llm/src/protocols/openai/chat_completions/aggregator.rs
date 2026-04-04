@@ -313,6 +313,11 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
             None
         };
 
+        let has_reasoning = delta
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|r| !r.is_empty());
+
         dynamo_protocols::types::ChatChoice {
             message: dynamo_protocols::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
@@ -327,6 +332,7 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
             finish_reason,
             stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
+            has_reasoning: if has_reasoning { Some(true) } else { None },
         }
     }
 }
@@ -442,6 +448,7 @@ mod tests {
             finish_reason,
             stop_reason: None,
             logprobs,
+            has_reasoning: None,
         };
 
         let data = NvCreateChatCompletionStreamResponse {
@@ -678,6 +685,7 @@ mod tests {
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                         stop_reason: None,
                         logprobs: None,
+                        has_reasoning: None,
                     },
                     dynamo_protocols::types::ChatChoiceStream {
                         index: 1,
@@ -694,6 +702,7 @@ mod tests {
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                         stop_reason: None,
                         logprobs: None,
+                        has_reasoning: None,
                     },
                 ],
                 object: "chat.completion".to_string(),
