@@ -96,6 +96,29 @@ The current flow is intentionally simple:
 Control traffic goes through the Dynamo request plane. Bulk block movement stays
 on the NIXL transfer path.
 
+## TRT-LLM Async Loading
+
+TRT-LLM can optionally use a small leader-side prefetch hook before scheduling:
+`advise_async_loading(...)`.
+
+The intent is:
+
+1. inspect a new request before scheduling
+2. allow a short bounded grace period, for example `100ms`
+3. prefetch a useful contiguous remote prefix into local KVBM host cache
+4. run normal scheduling using only local KVBM matches
+
+Important properties:
+
+- this is best-effort only and is not a promise that remote KV will be ready
+- it stops at the first remote miss in the ordered block sequence
+- it may continue in the background after the initial budget expires
+- it prefetches into local host cache first, then relies on the existing
+  host-to-device onboarding path later
+
+This keeps G3PB as a cache-assist mechanism rather than making remote peer hits
+part of the correctness contract for scheduling.
+
 ## Operational Notes
 
 - G3PB is best treated as a cache extension, not a durability layer.
