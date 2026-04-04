@@ -380,6 +380,33 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Replace inline `data:` URLs with empty strings in message content parts.
+    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    fn strip_inline_data_urls(messages: &mut serde_json::Value) {
+        let Some(arr) = messages.as_array_mut() else {
+            return;
+        };
+        for msg in arr {
+            let Some(content) = msg.get_mut("content") else {
+                continue;
+            };
+            let Some(parts) = content.as_array_mut() else {
+                continue;
+            };
+            for part in parts {
+                for key in ["image_url", "video_url", "audio_url"] {
+                    if let Some(media) = part.get_mut(key) {
+                        if let Some(url) = media.get_mut("url") {
+                            if url.as_str().is_some_and(|s| s.starts_with("data:")) {
+                                *url = serde_json::Value::String(String::new());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
@@ -449,6 +476,15 @@ impl OpenAIPreprocessor {
         }
 
         if !media_map.is_empty() {
+            // Check if all media items were decoded via frontend (RDMA descriptors).
+            // When true, strip inline data: URLs from extra_args.messages to avoid
+            // sending ~40MB of redundant base64 over TCP — workers use
+            // multi_modal_data.Decoded (RDMA descriptors) instead.
+            let all_decoded = media_map
+                .values()
+                .flat_map(|v| v.iter())
+                .all(|item| matches!(item, MultimodalData::Decoded(_)));
+
             builder.multi_modal_data(Some(media_map));
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
@@ -458,6 +494,12 @@ impl OpenAIPreprocessor {
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+
+            if all_decoded {
+                Self::strip_inline_data_urls(&mut extra_args["messages"]);
+                builder.inline_media_stripped(true);
+            }
+
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
@@ -1548,6 +1590,61 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod strip_tests {
+    use super::OpenAIPreprocessor;
+
+    #[test]
+    fn test_strip_inline_data_urls_replaces_data_urls() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR...longdata..."}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "What is this?");
+        assert_eq!(parts[1]["image_url"]["url"], "");
+        assert_eq!(parts[2]["image_url"]["url"], "https://example.com/img.png");
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_handles_video_audio() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["video_url"]["url"], "");
+        assert_eq!(parts[1]["audio_url"]["url"], "https://example.com/audio.wav");
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_preserves_text_only() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": "plain text message"
+        }]);
+        let original = messages.clone();
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_empty_messages() {
+        let mut messages = serde_json::json!([]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, serde_json::json!([]));
+    }
+}
 
 #[cfg(test)]
 mod tests {
