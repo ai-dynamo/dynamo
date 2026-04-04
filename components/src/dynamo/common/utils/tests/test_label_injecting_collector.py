@@ -11,6 +11,12 @@ modifying the source metrics.
 import pytest
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 class TestLabelInjectingCollector:
     """Test suite for LabelInjectingCollector"""

@@ -7,6 +7,13 @@ import pytest
 
 from dynamo.trtllm.dynamic_flags import infer_type, parse_dynamic_flags, set_nested
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 class TestInferType:
     def test_int(self):

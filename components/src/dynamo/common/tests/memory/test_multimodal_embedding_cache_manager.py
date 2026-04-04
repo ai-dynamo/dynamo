@@ -11,6 +11,12 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 class TestMultimodalEmbeddingCacheManagerBasicOperations:
     """Tests for basic get/set operations."""
