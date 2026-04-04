@@ -78,7 +78,7 @@ RUN mkdir -p /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/pre-commit
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
 {% else %}

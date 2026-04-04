@@ -211,6 +211,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
+{% elif device == "cpu" %}
+# CPU NIXL is installed under lib/x86_64-linux-gnu (native meson convention, no CUDA).
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
 {% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
 # All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
@@ -383,7 +388,7 @@ RUN printf '%s\n' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 {% else %}
