@@ -519,6 +519,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             -Ducx_path="/usr/local/ucx"; \
     elif [ "$DEVICE" = "cpu" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+            -Doptimization=2 \
             -Ducx_path="/usr/local/ucx"; \
     fi && \
     cd build && \
