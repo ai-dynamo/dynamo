@@ -412,7 +412,7 @@ pub fn default_mock_engine_args(
     Ok(MockEngineArgs::builder()
         .num_gpu_blocks(num_gpu_blocks)
         .block_size(block_size)
-        .speedup_ratio(0.0)
+        .speedup_ratio(1000.0)
         .enable_prefix_caching(true)
         .max_num_batched_tokens(None)
         .max_num_seqs(None)
@@ -461,7 +461,14 @@ async fn replay_worker_trace(
                 output_length: ready_turn.request.max_output_tokens,
                 replay_hashes,
             });
-            scheduler.receive(ready_turn.request);
+            // Use max_output_tokens=1 so the mock engine completes each turn after
+            // a single decode step.  Event generation only needs the prefill KV
+            // store events; simulating thousands of decode steps per turn would
+            // make event generation prohibitively slow for long-output traces.
+            scheduler.receive(DirectRequest {
+                max_output_tokens: 1,
+                ..ready_turn.request
+            });
             progress.inc(1);
         }
 

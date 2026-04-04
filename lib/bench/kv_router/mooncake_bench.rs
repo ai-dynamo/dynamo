@@ -12,8 +12,8 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
-    ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed,
+    NodeDepthShardedIndexer, PositionalIndexer, ThreadPoolIndexer,
 };
 use dynamo_mocker::loadgen::Trace;
 use serde::Serialize;
@@ -86,6 +86,28 @@ enum IndexerArgs {
         #[clap(long, default_value = "0")]
         num_read_threads_per_shard: usize,
     },
+
+    /// Node-depth-sharded CRTC: routes by the first `routing_node_depth` compressed
+    /// radix-tree nodes rather than a fixed block-depth prefix hash, allowing correct
+    /// routing even when a long shared system prompt collapses block-depth routing.
+    NodeDepthShardedCrtc {
+        /// Number of independent CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads per shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Shadow-trie routing depth (number of CRTC-node edges to traverse).
+        #[clap(long, default_value = "2")]
+        routing_node_depth: usize,
+
+        /// Number of OS threads per shard dedicated to find_matches (read isolation).
+        /// 0 (default): reads run inline on the calling tokio thread.
+        #[clap(long, default_value = "0")]
+        num_read_threads_per_shard: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -142,6 +164,28 @@ impl IndexerArgs {
                     block_size,
                 ))
             }
+            IndexerArgs::NodeDepthShardedCrtc {
+                num_shards,
+                num_event_workers_per_shard,
+                routing_node_depth,
+                num_read_threads_per_shard,
+            } => {
+                let shards = (0..num_shards)
+                    .map(|_| {
+                        ThreadPoolIndexer::new(
+                            ConcurrentRadixTreeCompressed::new(),
+                            num_event_workers_per_shard,
+                            block_size,
+                        )
+                    })
+                    .collect();
+                Arc::new(NodeDepthShardedIndexer::new(
+                    shards,
+                    routing_node_depth,
+                    block_size,
+                    num_read_threads_per_shard,
+                ))
+            }
         }
     }
 
@@ -156,6 +200,7 @@ impl IndexerArgs {
                 | "concurrent-radix-tree"
                 | "concurrent-radix-tree-compressed"
                 | "branch-sharded-crtc"
+                | "node-depth-sharded-crtc"
         )
     }
 
@@ -185,10 +230,16 @@ impl IndexerArgs {
                 prefix_depth: 2,
                 num_read_threads_per_shard: 0,
             },
+            "node-depth-sharded-crtc" => IndexerArgs::NodeDepthShardedCrtc {
+                num_shards: 2,
+                num_event_workers_per_shard: nw,
+                routing_node_depth: 2,
+                num_read_threads_per_shard: 0,
+            },
             _ => anyhow::bail!(
                 "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
                  nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, \
-                 branch-sharded-crtc",
+                 branch-sharded-crtc, node-depth-sharded-crtc",
                 name
             ),
         };
@@ -874,6 +925,7 @@ async fn main() -> anyhow::Result<()> {
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
             IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",
             IndexerArgs::BranchShardedCrtc { .. } => "branch-sharded-crtc",
+            IndexerArgs::NodeDepthShardedCrtc { .. } => "node-depth-sharded-crtc",
         };
         vec![name.to_string()]
     } else {
