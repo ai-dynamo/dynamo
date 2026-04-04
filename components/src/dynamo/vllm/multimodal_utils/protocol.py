@@ -15,7 +15,7 @@
 
 
 import json
-from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
 import torch
@@ -24,16 +24,11 @@ from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs import MultiModalUUIDDict, TokensPrompt  # noqa: F401
 from vllm.logprobs import PromptLogprobs
+from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.stats import RequestStateStats
 
 from dynamo.common.multimodal.embedding_transfer import TransferRequest
-
-if TYPE_CHECKING:
-    from vllm.outputs import CompletionOutput
-    from vllm.v1.metrics.stats import RequestStateStats
-else:
-    CompletionOutput = Any
-    RequestStateStats = Any
 
 
 class Request(BaseModel):
