@@ -93,6 +93,7 @@ trtllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -153,6 +154,7 @@ trtllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
             chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
@@ -391,6 +393,7 @@ trtllm_configs = {
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=300,
+        delayed_start=5,
         request_payloads=[
             VideoGenerationPayload(
                 body={
