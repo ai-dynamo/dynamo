@@ -42,6 +42,7 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      fastvideo: ${{ steps.changes.outputs.fastvideo }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -60,7 +61,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -278,6 +279,31 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # FASTVIDEO PIPELINE
+  # ============================================================================
+  fastvideo-pipeline:
+    name: fastvideo
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and fastvideo and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_single_gpu_tests: true
+      single_gpu_test_markers: 'pre_merge and fastvideo and gpu_1'
+      single_gpu_test_timeout_minutes: 45
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
   # DEV PIPELINES
   # ============================================================================
   vllm-dev-pipeline:
@@ -431,7 +457,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

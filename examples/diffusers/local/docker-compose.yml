@@ -8,7 +8,7 @@ x-backend-base: &backend-base
   build:
     context: ../../..
     dockerfile: examples/diffusers/Dockerfile
-  image: dynamo-fastvideo-diffusers:latest
+  image: dynamo-fastvideo-runtime:local
   restart: on-failure
   command: python -m dynamo.fastvideo
   environment:
@@ -33,7 +33,7 @@ services:
     build:
       context: ../../..
       dockerfile: examples/diffusers/Dockerfile
-    image: dynamo-fastvideo-diffusers:latest
+    image: dynamo-fastvideo-runtime:local
     restart: on-failure
     command: >
       python -m dynamo.frontend

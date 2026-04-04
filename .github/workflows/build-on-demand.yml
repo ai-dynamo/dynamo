@@ -18,6 +18,10 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_fastvideo:
+        description: 'Build and push fastvideo image, tagged with branch name'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
@@ -97,6 +101,22 @@ jobs:
       copy_to_acr: true
     secrets: inherit
 
+  fastvideo-pipeline:
+    needs: [init]
+    if: inputs.build_fastvideo
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: false
+      copy_to_acr: true
+    secrets: inherit
+
   # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
@@ -166,7 +186,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

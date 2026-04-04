@@ -10,6 +10,7 @@ Usage:
     python resolve_base_image.py --framework vllm --cuda-version 12.9
     python resolve_base_image.py --framework dynamo --target frontend
     python resolve_base_image.py --framework sglang --cuda-version 13.0
+    python resolve_base_image.py --framework fastvideo --cuda-version 13.1
 """
 
 import argparse
@@ -26,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--framework",
         required=True,
-        choices=["vllm", "sglang", "trtllm", "dynamo"],
+        choices=["vllm", "sglang", "trtllm", "fastvideo", "dynamo"],
         help="Framework name",
     )
     parser.add_argument(

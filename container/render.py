@@ -43,7 +43,7 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        choices=["dynamo", "vllm", "sglang", "trtllm"],
+        choices=["dynamo", "vllm", "sglang", "trtllm", "fastvideo"],
         help="Dockerfile framework to use",
     )
 
@@ -79,7 +79,7 @@ def parse_args():
         type=str,
         default="12.9",
         choices=["12.9", "13.0", "13.1"],
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]",
+        help="CUDA version to use. [12.9 or 13.0 for dynamo, vllm, and sglang; 13.1 for trtllm and fastvideo]",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -145,6 +145,14 @@ def validate_args(args):
                 "base",
             ],
             "cuda_version": ["12.9", "13.0"],
+        },
+        "fastvideo": {
+            "device": ["cuda"],
+            # Follow-up: consider exposing base/wheel_builder once we want
+            # parity with the other non-dynamo frameworks, and dev/local-dev
+            # once a FastVideo development workflow is explicitly supported.
+            "target": ["runtime", "framework"],
+            "cuda_version": ["13.1"],
         },
     }
 

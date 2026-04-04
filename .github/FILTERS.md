@@ -8,10 +8,10 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 
 | Filter | Triggers |
 |--------|----------|
-| `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
+| `core` | Main test suite (vLLM, SGLang, TRT-LLM, FastVideo containers) |
 | `operator` | Kubernetes operator tests |
 | `deploy` | Deploy-specific tests |
-| `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `vllm` / `sglang` / `trtllm` / `fastvideo` | Backend-specific tests |
 | `docs` | Nothing (classification only) |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |
@@ -66,4 +66,3 @@ COVERED_FILES=$(echo "... ${{ steps.filter.outputs.YOURFILTER_all_modified_files
 ```
 
 If you skip this step, CI will fail with "uncovered files" even though your filter exists.
-

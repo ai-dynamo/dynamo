@@ -30,6 +30,15 @@ class FastVideoConfig(EngineConfig):
 
 
 fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/diffusers/local")
+# CI single-GPU lanes run on smaller VRAM runners, so keep smoke tests on a
+# lighter FastVideo model for both pre-merge and nightly.
+fastvideo_smoke_model = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+fastvideo_ci_worker_args = (
+    "--dit-layerwise-offload "
+    "--vae-cpu-offload "
+    "--text-encoder-cpu-offload "
+    "--image-encoder-cpu-offload"
+)
 
 fastvideo_configs = {
     "aggregated": FastVideoConfig(
@@ -39,13 +48,16 @@ fastvideo_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.fastvideo,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
-        model="FastVideo/LTX2-Distilled-Diffusers",
+        model=fastvideo_smoke_model,
         timeout=1800,
-        env={},
+        env={
+            "WORKER_EXTRA_ARGS": fastvideo_ci_worker_args,
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        },
         request_payloads=[video_generation_payload_default()],
     ),
     "aggregated_flash_attn": FastVideoConfig(
@@ -55,13 +67,18 @@ fastvideo_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.fastvideo,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
             pytest.mark.slow,
             pytest.mark.timeout(1800),
         ],
-        model="FastVideo/LTX2-Distilled-Diffusers",
+        model=fastvideo_smoke_model,
         timeout=1800,
-        env={"WORKER_EXTRA_ARGS": "--attention-backend FLASH_ATTN"},
+        env={
+            "WORKER_EXTRA_ARGS": (
+                f"{fastvideo_ci_worker_args} --attention-backend FLASH_ATTN"
+            ),
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        },
         request_payloads=[video_generation_payload_default()],
     ),
 }
@@ -81,6 +98,7 @@ def test_fastvideo_deployment(
     tmp_path,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    set_ucx_tls_no_mm,
     predownload_models,
 ):
     """Smoke test the built-in FastVideo backend behind the shared frontend."""

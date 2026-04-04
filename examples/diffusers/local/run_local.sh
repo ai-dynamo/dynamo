@@ -16,6 +16,7 @@ REPO_DIR="$(cd "${EXAMPLE_DIR}/../.." && pwd)"
 : "${LOG_DIR:=${SCRIPT_DIR}/.runtime/logs}"
 : "${WORKER_EXTRA_ARGS:=}"
 : "${FRONTEND_EXTRA_ARGS:=}"
+: "${FAIL_LOG_TAIL_LINES:=200}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "error: ${PYTHON_BIN} not found"
@@ -45,12 +46,38 @@ if [[ -n "${FRONTEND_EXTRA_ARGS}" ]]; then
 fi
 
 cleanup() {
+  status=$?
+  if [[ ${status} -ne 0 && ${shutdown_requested:-0} -eq 0 ]]; then
+    echo
+    echo "FastVideo local startup failed (exit code: ${status})."
+    echo "===== Worker log tail (${FAIL_LOG_TAIL_LINES} lines) ====="
+    if [[ -f "${LOG_DIR}/worker.log" ]]; then
+      tail -n "${FAIL_LOG_TAIL_LINES}" "${LOG_DIR}/worker.log" | sed 's/^/[WORKER] /' || true
+    else
+      echo "[WORKER] log file not found: ${LOG_DIR}/worker.log"
+    fi
+    echo "===== Frontend log tail (${FAIL_LOG_TAIL_LINES} lines) ====="
+    if [[ -f "${LOG_DIR}/frontend.log" ]]; then
+      tail -n "${FAIL_LOG_TAIL_LINES}" "${LOG_DIR}/frontend.log" | sed 's/^/[FRONTEND] /' || true
+    else
+      echo "[FRONTEND] log file not found: ${LOG_DIR}/frontend.log"
+    fi
+    echo "===== End FastVideo log tail ====="
+  fi
   echo
   echo "Stopping local processes..."
   kill "${frontend_pid:-}" "${worker_pid:-}" 2>/dev/null || true
   wait "${frontend_pid:-}" "${worker_pid:-}" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+shutdown_requested=0
+on_signal() {
+  shutdown_requested=1
+  exit 0
+}
+
+trap cleanup EXIT
+trap on_signal INT TERM
 
 echo "Starting worker: ${worker_cmd[*]}"
 "${worker_cmd[@]}" >"${LOG_DIR}/worker.log" 2>&1 &

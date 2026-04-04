@@ -632,6 +632,69 @@ class ManagedProcess:
                         for line in log_lines[-lines:]:
                             self._logger.error(line.rstrip())
                         self._logger.error("=== End of log tail ===")
+
+                        # Best-effort fallback: include worker/frontend logs when
+                        # launch scripts print their locations (or provide LOG_DIR).
+                        # This makes CI startup failures much easier to debug.
+                        import re
+
+                        referenced_logs: list[tuple[str, str]] = []
+                        for line in log_lines:
+                            match = re.search(
+                                r"\b(Worker|Frontend) log:\s*(\S+)",
+                                line,
+                            )
+                            if match:
+                                referenced_logs.append(
+                                    (match.group(1).lower(), match.group(2))
+                                )
+
+                        if isinstance(getattr(self, "env", None), dict):
+                            log_dir = self.env.get("LOG_DIR")
+                            if log_dir:
+                                referenced_logs.extend(
+                                    [
+                                        ("worker", os.path.join(log_dir, "worker.log")),
+                                        (
+                                            "frontend",
+                                            os.path.join(log_dir, "frontend.log"),
+                                        ),
+                                    ]
+                                )
+
+                        seen_paths: set[str] = set()
+                        tail_lines = max(lines, 200)
+                        for label, path in referenced_logs:
+                            if path in seen_paths:
+                                continue
+                            seen_paths.add(path)
+
+                            if not os.path.exists(path):
+                                self._logger.error(
+                                    "=== %s log not found: %s ===",
+                                    label.capitalize(),
+                                    path,
+                                )
+                                continue
+
+                            try:
+                                with open(path, "r", errors="replace") as extra_log:
+                                    extra_lines = extra_log.readlines()
+                                self._logger.error(
+                                    "=== Last %d lines from %s ===",
+                                    min(tail_lines, len(extra_lines)),
+                                    path,
+                                )
+                                for line in extra_lines[-tail_lines:]:
+                                    self._logger.error(line.rstrip())
+                                self._logger.error("=== End of %s log tail ===", label)
+                            except Exception as e:
+                                self._logger.warning(
+                                    "Could not read %s log file %s: %s",
+                                    label,
+                                    path,
+                                    e,
+                                )
             except Exception as e:
                 self._logger.warning("Could not read log file: %s", e)
 

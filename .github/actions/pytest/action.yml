@@ -238,7 +238,16 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        SECURITY_FLAGS=""
+        if [[ "${{ inputs.framework }}" == "fastvideo" ]]; then
+          # FastVideo's mp executor returns GPU tensors across process pipes
+          # (worker pipe.send of CUDA outputs). PyTorch's CUDA IPC path hits
+          # pidfd_getfd, which requires ptrace capability on CI runners.
+          SECURITY_FLAGS="--cap-add SYS_PTRACE"
+          echo "🔐 Enabling --cap-add SYS_PTRACE for FastVideo CUDA IPC (pidfd_getfd)"
+        fi
+
+        docker run ${GPU_FLAGS} ${SECURITY_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
