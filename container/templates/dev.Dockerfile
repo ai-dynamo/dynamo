@@ -126,19 +126,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
      rm -rf /var/lib/apt/lists/*) && \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
-# Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
+# Add external repos and install developer tools.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
+{% if device != "cpu" %}
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH} /" \
         | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+{% endif %}
     curl --retry 3 --retry-delay 5 -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
+{% if device != "cpu" %}
     apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
+{% else %}
+    apt-get install -y --no-install-recommends gh && \
+{% endif %}
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================
@@ -211,6 +218,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
+{% elif device == "cpu" %}
+# CPU: NIXL libraries are under lib/x86_64-linux-gnu (meson default on Ubuntu)
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
 {% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
 # All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
@@ -270,7 +282,9 @@ COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
 COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
 COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
 COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
+{% if device != "cpu" %}
 COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
+{% endif %}
 
 # Restore the pre-tools python3 (keeps SGLang system python intact and avoids venv symlink loops).
 RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi
@@ -327,7 +341,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/r
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
+{% if device == "cpu" %}
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+{% else %}
         --extra-index-url https://download.pytorch.org/whl/cu130 \
+{% endif %}
         --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
@@ -383,8 +401,7 @@ RUN printf '%s\n' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
 
-{% if device == "xpu" %}
-SHELL ["bash", "-c"]
+{% if device == "xpu" or device == "cpu" %}
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

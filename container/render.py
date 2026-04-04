@@ -123,7 +123,7 @@ def validate_args(args):
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "device": ["cuda"],
+            "device": ["cuda", "cpu"],
             "target": [
                 "runtime",
                 "dev",
