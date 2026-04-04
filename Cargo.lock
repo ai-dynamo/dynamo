@@ -2035,6 +2035,7 @@ dependencies = [
  "anyhow",
  "cudarc",
  "dynamo-config",
+ "level-zero",
  "libc",
  "nix 0.30.1",
  "nixl-sys",

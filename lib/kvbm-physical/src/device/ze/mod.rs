@@ -146,7 +146,7 @@ impl DeviceContextOps for ZeContext {
             .alloc_device(&self.cache.device, size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero device allocation failed: {:?}", e))?;
         let ptr = buffer.as_mut_ptr() as u64;
-        store_device_buffer(ptr, buffer, Arc::clone(&self.cache.context));
+        store_device_buffer(ptr, buffer);
         Ok(ptr)
     }
 
@@ -162,7 +162,7 @@ impl DeviceContextOps for ZeContext {
             .alloc_host(size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero host allocation failed: {:?}", e))?;
         let ptr = buffer.as_mut_ptr() as u64;
-        store_host_buffer(ptr, buffer, Arc::clone(&self.cache.context));
+        store_host_buffer(ptr, buffer);
         Ok(ptr)
     }
 
@@ -173,12 +173,22 @@ impl DeviceContextOps for ZeContext {
 
     fn create_memory_pool(
         &self,
-        _reserve_size: usize,
-        _release_threshold: Option<u64>,
+        reserve_size: usize,
+        release_threshold: Option<u64>,
     ) -> Result<Box<dyn DeviceMemPoolOps>> {
-        // Level-Zero uses USM allocations directly; no async pool needed yet.
-        // Return a no-op pool that uses synchronous alloc/free.
-        Ok(Box::new(ZeMemPoolStub { device_id: self.device_id }))
+        let mut builder = dynamo_memory::ZeMemPool::builder(
+            Arc::clone(&self.cache.context),
+            self.cache.device.clone(),
+            reserve_size,
+        );
+        if let Some(threshold) = release_threshold {
+            builder = builder.release_threshold(threshold);
+        }
+        let pool = builder.build()?;
+        Ok(Box::new(ZeMemPoolWrapper {
+            pool,
+            buffers: Mutex::new(HashMap::new()),
+        }))
     }
 
     fn raw_handle(&self) -> Option<u64> {
@@ -186,48 +196,63 @@ impl DeviceContextOps for ZeContext {
     }
 }
 
-/// Stub memory pool for Level-Zero (synchronous alloc/free).
+/// Memory pool wrapper for Level-Zero using `dynamo_memory::ZeMemPool`.
 ///
-/// Level-Zero does not have a stream-ordered async pool API like CUDA.
-/// This stub provides the DeviceMemPoolOps interface using synchronous
-/// USM allocation. A proper pool can be added in the future.
-#[derive(Debug)]
-struct ZeMemPoolStub {
-    device_id: u32,
+/// Bridges the `DeviceMemPoolOps` trait (which uses raw `u64` pointers) with
+/// the `ZeMemPool` API (which uses RAII `DeviceBuffer` for ownership).
+/// An internal `HashMap` tracks `DeviceBuffer` ownership by pointer so that
+/// buffers stay alive until explicitly freed back to the pool.
+struct ZeMemPoolWrapper {
+    pool: dynamo_memory::ZeMemPool,
+    /// Maps device pointer -> (DeviceBuffer, size) for ownership tracking.
+    /// Entries are inserted on alloc and removed on free (returning the
+    /// buffer to the pool's free-list).
+    buffers: Mutex<HashMap<u64, (ze::DeviceBuffer, usize)>>,
 }
 
-impl DeviceMemPoolOps for ZeMemPoolStub {
+impl std::fmt::Debug for ZeMemPoolWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZeMemPoolWrapper")
+            .field("pool", &self.pool)
+            .finish()
+    }
+}
+
+impl DeviceMemPoolOps for ZeMemPoolWrapper {
     fn alloc_async(&self, size: usize, _stream: &dyn DeviceStreamOps) -> Result<u64> {
-        // Synchronous device allocation via Ze context (no async pool available)
-        let cache = get_or_create_ze_context(self.device_id)?;
-        let buffer = cache.context
-            .alloc_device(&cache.device, size, 1)
-            .map_err(|e| anyhow::anyhow!("Ze device alloc failed: {:?}", e))?;
-        let ptr = buffer.as_mut_ptr() as u64;
-        store_device_buffer(ptr, buffer, Arc::clone(&cache.context));
+        let (buffer, ptr) = self.pool.alloc(size)?;
+        self.buffers
+            .lock()
+            .map_err(|e| anyhow::anyhow!("buffer map poisoned: {}", e))?
+            .insert(ptr, (buffer, size));
         Ok(ptr)
     }
 
     fn free_async(&self, ptr: u64, _stream: &dyn DeviceStreamOps) -> Result<()> {
-        remove_device_buffer(ptr);
+        let (buffer, size) = self
+            .buffers
+            .lock()
+            .map_err(|e| anyhow::anyhow!("buffer map poisoned: {}", e))?
+            .remove(&ptr)
+            .ok_or_else(|| anyhow::anyhow!("ZeMemPoolWrapper: ptr {:#x} not found in buffer map", ptr))?;
+        self.pool.free(buffer, ptr, size)?;
         Ok(())
     }
 }
 
-// Buffer storage to prevent premature drop
-struct SendSyncBuffer(Vec<u8>, Arc<ze::Context>);
-unsafe impl Send for SendSyncBuffer {}
-unsafe impl Sync for SendSyncBuffer {}
+// Buffer storage to prevent premature drop.
+// level-zero-rc uses RAII: DeviceBuffer/HostBuffer call zeMemFree on Drop.
+// We store them in global maps keyed by pointer, removing = drop = zeMemFree.
 
-static DEVICE_BUFFERS: OnceLock<Mutex<HashMap<u64, SendSyncBuffer>>> = OnceLock::new();
-static HOST_BUFFERS: OnceLock<Mutex<HashMap<u64, SendSyncBuffer>>> = OnceLock::new();
+static DEVICE_BUFFERS: OnceLock<Mutex<HashMap<u64, ze::DeviceBuffer>>> = OnceLock::new();
+static HOST_BUFFERS: OnceLock<Mutex<HashMap<u64, ze::HostBuffer>>> = OnceLock::new();
 
-fn store_device_buffer(ptr: u64, buffer: Vec<u8>, ctx: Arc<ze::Context>) {
+fn store_device_buffer(ptr: u64, buffer: ze::DeviceBuffer) {
     DEVICE_BUFFERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
-        .insert(ptr, SendSyncBuffer(buffer, ctx));
+        .insert(ptr, buffer);
 }
 
 fn remove_device_buffer(ptr: u64) {
@@ -236,12 +261,12 @@ fn remove_device_buffer(ptr: u64) {
     }
 }
 
-fn store_host_buffer(ptr: u64, buffer: Vec<u8>, ctx: Arc<ze::Context>) {
+fn store_host_buffer(ptr: u64, buffer: ze::HostBuffer) {
     HOST_BUFFERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
-        .insert(ptr, SendSyncBuffer(buffer, ctx));
+        .insert(ptr, buffer);
 }
 
 fn remove_host_buffer(ptr: u64) {
