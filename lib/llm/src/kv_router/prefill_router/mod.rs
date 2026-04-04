@@ -202,6 +202,8 @@ impl
 
                 let mut decode_req = req;
 
+                let is_original_prefill_path = matches!(outcome, PrefillOutcome::Completed(_));
+
                 match outcome {
                     PrefillOutcome::Bootstrap(info) => {
                         decode_req.bootstrap_info = Some(info);
@@ -222,6 +224,13 @@ impl
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override =
                     Some(build_decode_router_override(existing_override));
+
+                // Record decode dispatch time (for KV transfer latency metric, original path only).
+                // In the bootstrap path, decode is dispatched before prefill completes,
+                // so the metric is not meaningful there.
+                if is_original_prefill_path && let Some(ref tracker) = decode_req.tracker {
+                    tracker.record_decode_dispatch();
+                }
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
