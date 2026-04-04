@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use crate::block_manager::v2::kernels::OperationalCopyBackend;
+use crate::block_manager::v2::device::{DeviceBackend, DeviceContext, DeviceStream, DeviceEvent};
 use anyhow::Result;
-use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
 use derive_builder::Builder;
 use nixl_sys::XferRequest;
 use tokio::sync::{mpsc, oneshot};
@@ -37,8 +37,12 @@ pub(crate) struct TransferConfig {
     #[builder(default = "NixlBackendConfig::new()")]
     nixl_backend_config: NixlBackendConfig,
 
+    /// Device backend (CUDA, HPU, XPU) - auto-detected if not specified
+    #[builder(default = "DeviceBackend::auto_detect().unwrap_or(DeviceBackend::Cuda)")]
+    device_backend: DeviceBackend,
+
     #[builder(default = "0")]
-    cuda_device_id: usize,
+    device_id: u32,
 
     #[builder(default = "get_tokio_runtime()")]
     tokio_runtime: TokioRuntime,
@@ -114,11 +118,11 @@ impl TransferConfigBuilder {
             NixlAgent::new_with_backends(&agent_name, &backend_names)?
         };
 
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+        let device_context = Arc::new(DeviceContext::new(config.device_backend, config.device_id)?);
         let context = TransferContext::new(
             config.worker_id,
             nixl_agent,
-            cuda_context,
+            device_context,
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
@@ -140,11 +144,11 @@ impl TransferConfigBuilderWithAgent {
     /// Build the TransportManager using the pre-configured agent.
     pub fn build(self) -> Result<TransportManager> {
         let config = self.builder.build_internal()?;
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+        let device_context = Arc::new(DeviceContext::new(config.device_backend, config.device_id)?);
         let context = TransferContext::new(
             config.worker_id,
             self.agent,
-            cuda_context,
+            device_context,
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
@@ -158,8 +162,13 @@ impl TransferConfigBuilderWithAgent {
         self
     }
 
-    pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
-        self.builder = self.builder.cuda_device_id(cuda_device_id);
+    pub fn device_backend(mut self, device_backend: DeviceBackend) -> Self {
+        self.builder = self.builder.device_backend(device_backend);
+        self
+    }
+
+    pub fn device_id(mut self, device_id: u32) -> Self {
+        self.builder = self.builder.device_id(device_id);
         self
     }
 }
@@ -200,9 +209,9 @@ pub struct TransferContext {
     worker_id: u64,
     nixl_agent: NixlAgent,
     #[allow(dead_code)]
-    cuda_context: Arc<CudaContext>,
-    d2h_stream: Arc<CudaStream>,
-    h2d_stream: Arc<CudaStream>,
+    device_context: Arc<DeviceContext>,
+    d2h_stream: Arc<DeviceStream>,
+    h2d_stream: Arc<DeviceStream>,
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
@@ -210,8 +219,8 @@ pub struct TransferContext {
     // Channels for background notification handlers
     tx_nixl_status:
         mpsc::Sender<notifications::RegisterPollingNotification<notifications::NixlStatusChecker>>,
-    tx_cuda_event:
-        mpsc::Sender<notifications::RegisterPollingNotification<notifications::CudaEventChecker>>,
+    tx_device_event:
+        mpsc::Sender<notifications::RegisterPollingNotification<notifications::DeviceEventChecker>>,
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
 }
@@ -224,16 +233,17 @@ impl TransferContext {
     pub(crate) fn new(
         worker_id: u64,
         nixl_agent: NixlAgent,
-        cuda_context: Arc<CudaContext>,
+        device_context: Arc<DeviceContext>,
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
         operational_backend: OperationalCopyBackend,
     ) -> Result<Self> {
-        unsafe { cuda_context.disable_event_tracking() };
+        // Disable automatic event tracking (CUDA-specific, no-op for HPU/XPU)
+        unsafe { device_context.ops.disable_event_tracking()? };
 
         // Create channels for background notification handlers
         let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
+        let (tx_device_event, rx_device_event) = mpsc::channel(64);
         let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
 
         // Spawn background handlers
@@ -242,8 +252,8 @@ impl TransferContext {
         // Spawn NIXL status polling handler
         handle.spawn(notifications::process_polling_notifications(rx_nixl_status));
 
-        // Spawn CUDA event polling handler
-        handle.spawn(notifications::process_polling_notifications(rx_cuda_event));
+        // Spawn device event polling handler (supports CUDA/HPU/XPU)
+        handle.spawn(notifications::process_polling_notifications(rx_device_event));
 
         // Spawn NIXL notification events handler
         handle.spawn(notifications::process_nixl_notification_events(
@@ -254,14 +264,14 @@ impl TransferContext {
         Ok(Self {
             worker_id,
             nixl_agent,
-            cuda_context: cuda_context.clone(),
-            d2h_stream: cuda_context.new_stream()?,
-            h2d_stream: cuda_context.new_stream()?,
+            device_context: device_context.clone(),
+            d2h_stream: Arc::new(device_context.create_stream()?),
+            h2d_stream: Arc::new(device_context.create_stream()?),
             tokio_runtime,
             capabilities,
             operational_backend,
             tx_nixl_status,
-            tx_cuda_event,
+            tx_device_event,
             tx_nixl_events,
         })
     }
@@ -271,15 +281,15 @@ impl TransferContext {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
+    pub(crate) fn device_context(&self) -> &Arc<DeviceContext> {
+        &self.device_context
     }
 
-    pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
+    pub(crate) fn d2h_stream(&self) -> &Arc<DeviceStream> {
         &self.d2h_stream
     }
 
-    pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
+    pub(crate) fn h2d_stream(&self) -> &Arc<DeviceStream> {
         &self.h2d_stream
     }
 
@@ -322,21 +332,21 @@ impl TransferContext {
         TransferCompleteNotification { status: done_rx }
     }
 
-    /// Register a CUDA event for polling completion.
+    /// Register a device event for polling completion (supports CUDA, HPU, XPU).
     ///
-    /// This method enqueues the CUDA event to be polled for completion.
+    /// This method enqueues the device event to be polled for completion.
     /// Returns a notification object that can be awaited for completion.
-    pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
+    pub(crate) fn register_device_event(&self, event: DeviceEvent) -> TransferCompleteNotification {
         let (done_tx, done_rx) = oneshot::channel();
 
         let notification = notifications::RegisterPollingNotification {
             uuid: Uuid::new_v4(),
-            checker: notifications::CudaEventChecker::new(event),
+            checker: notifications::DeviceEventChecker::new(event),
             done: done_tx,
         };
 
         // Send to background handler (ignore error if receiver dropped)
-        let _ = self.tx_cuda_event.try_send(notification);
+        let _ = self.tx_device_event.try_send(notification);
 
         TransferCompleteNotification { status: done_rx }
     }

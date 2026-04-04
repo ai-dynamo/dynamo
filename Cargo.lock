@@ -1976,6 +1976,7 @@ dependencies = [
  "insta",
  "json-five",
  "lazy_static",
+ "level-zero",
  "memfile",
  "minijinja",
  "minijinja-contrib",
@@ -2002,6 +2003,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "strum",
+ "synapse",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -3978,6 +3980,7 @@ dependencies = [
  "cudarc",
  "half 2.7.1",
  "ndarray 0.17.2",
+ "oneapi-rs",
  "rand 0.9.2",
 ]
 
@@ -4026,6 +4029,8 @@ dependencies = [
  "futures",
  "kvbm-common",
  "kvbm-kernels",
+ "level-zero",
+ "oneapi-rs",
  "parking_lot",
  "rstest 0.26.1",
  "serde",
@@ -4061,6 +4066,22 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"
@@ -5167,6 +5188,13 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oneapi-rs"
+version = "0.1.0"
+dependencies = [
+ "sycl-bindings",
+]
 
 [[package]]
 name = "oneshot"
@@ -7503,6 +7531,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sycl-bindings"
+version = "2025.3.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7523,6 +7558,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "synapse"
+version = "0.1.0"
 
 [[package]]
 name = "sync_wrapper"

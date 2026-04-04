@@ -3,7 +3,7 @@
 
 //! Transfer executors for different copy strategies.
 
-pub(super) mod cuda;
+pub(super) mod device;
 mod memcpy;
 mod nixl;
 
@@ -91,11 +91,11 @@ fn execute_direct_transfer(
         TransferStrategy::Memcpy => {
             memcpy::execute_memcpy_transfer(src, dst, src_block_ids, dst_block_ids, layer_range)
         }
-        TransferStrategy::CudaAsyncH2D
-        | TransferStrategy::CudaAsyncD2H
-        | TransferStrategy::CudaAsyncD2D
-        | TransferStrategy::CudaBlockingH2D
-        | TransferStrategy::CudaBlockingD2H => Ok(cuda::execute_cuda_transfer(
+        TransferStrategy::AsyncH2D
+        | TransferStrategy::AsyncD2H
+        | TransferStrategy::AsyncD2D
+        | TransferStrategy::BlockingH2D
+        | TransferStrategy::BlockingD2H => Ok(device::execute_device_transfer(
             src,
             dst,
             src_block_ids,

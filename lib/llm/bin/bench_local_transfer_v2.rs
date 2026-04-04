@@ -20,6 +20,7 @@ use core::time::Duration;
 use indicatif::ProgressIterator;
 use std::time::Instant;
 
+use dynamo_llm::block_manager::v2::device::DeviceBackend;
 use dynamo_llm::block_manager::v2::physical::{
     layout::LayoutConfig,
     transfer::{
@@ -59,6 +60,18 @@ struct Args {
     /// Amount of iterations
     #[clap(long, default_value_t = 100)]
     iterations: usize,
+
+    /// Device backend to use (cuda, hpu, or ze)
+    #[clap(long, default_value = "cuda")]
+    backend: String,
+
+    /// Device ID
+    #[clap(long, default_value_t = 0)]
+    device_id: u32,
+
+    /// NIXL backends (comma-separated, e.g., "POSIX,GDS_MT" or "POSIX")
+    #[clap(long, default_value = "POSIX")]
+    nixl_backends: String,
 }
 
 struct DummyBounceBufferSpec {
@@ -90,8 +103,10 @@ fn build_layout(
     agent: NixlAgent,
     config: LayoutConfig,
     storage_kind: StorageKind,
+    device_backend: DeviceBackend,
+    device_id: u32,
 ) -> PhysicalLayout {
-    let builder = PhysicalLayout::builder(agent)
+    let builder = PhysicalLayout::builder(agent, device_backend, device_id)
         .with_config(config)
         .fully_contiguous();
 
@@ -112,7 +127,54 @@ fn get_bandwidth_gbs(latencies: Vec<Duration>, args: &Args) -> f64 {
 }
 
 async fn benchmark(args: &Args) -> Result<()> {
-    let agent = NixlAgent::require_backends("test_agent", &["POSIX", "GDS_MT"])?;
+    // Parse device backend with runtime availability checks
+    let device_backend = match args.backend.to_lowercase().as_str() {
+        "cuda" => {
+            if DeviceBackend::Cuda.is_available() {
+                DeviceBackend::Cuda
+            } else {
+                anyhow::bail!("CUDA backend not available on this system")
+            }
+        }
+        "hpu" => {
+            if DeviceBackend::Hpu.is_available() {
+                DeviceBackend::Hpu
+            } else {
+                anyhow::bail!("HPU (Synapse) backend not available on this system")
+            }
+        }
+        "ze" | "xpu" => {
+            if DeviceBackend::Ze.is_available() {
+                DeviceBackend::Ze
+            } else {
+                anyhow::bail!("XPU (Level-Zero) backend not available on this system")
+            }
+        }
+        _ => {
+            let available_backends = DeviceBackend::list_available();
+            let available_names: Vec<_> = available_backends
+                .iter()
+                .map(|b| b.name())
+                .collect();
+            if available_names.is_empty() {
+                anyhow::bail!(
+                    "Invalid backend: '{}'. No device backends are available on this system.",
+                    args.backend
+                )
+            } else {
+                anyhow::bail!(
+                    "Invalid backend: '{}'. Available backends on this system: {}",
+                    args.backend,
+                    available_names.join(", ")
+                )
+            }
+        }
+    };
+
+    // Parse NIXL backends
+    let nixl_backends: Vec<&str> = args.nixl_backends.split(',').map(|s| s.trim()).collect();
+    let agent = NixlAgent::require_backends("test_agent", &nixl_backends)?;
+
     let src_dst_config = LayoutConfig::builder()
         .num_blocks(args.num_blocks)
         .num_layers(args.num_layers)
@@ -122,11 +184,19 @@ async fn benchmark(args: &Args) -> Result<()> {
         .dtype_width_bytes(2)
         .build()?;
 
-    let disk_layout = build_layout(agent.clone(), src_dst_config.clone(), StorageKind::Disk(0));
+    let disk_layout = build_layout(
+        agent.clone(),
+        src_dst_config.clone(),
+        StorageKind::Disk(0),
+        device_backend,
+        args.device_id,
+    );
     let device_layout = build_layout(
         agent.clone(),
         src_dst_config.clone(),
-        StorageKind::Device(0),
+        StorageKind::Device(args.device_id),
+        device_backend,
+        args.device_id,
     );
 
     let bounce_config = LayoutConfig::builder()
@@ -138,12 +208,19 @@ async fn benchmark(args: &Args) -> Result<()> {
         .dtype_width_bytes(2)
         .build()?;
 
-    let bounce_layout = build_layout(agent.clone(), bounce_config.clone(), StorageKind::Pinned);
+    let bounce_layout = build_layout(
+        agent.clone(),
+        bounce_config.clone(),
+        StorageKind::Pinned,
+        device_backend,
+        args.device_id,
+    );
 
     let ctx = TransportManager::builder()
         .worker_id(0)
+        .device_backend(device_backend)
+        .device_id(args.device_id)
         .nixl_agent(agent)
-        .cuda_device_id(0)
         .build()?;
 
     let bounce_buffer_spec: Arc<dyn BounceBufferSpec> = Arc::new(DummyBounceBufferSpec {

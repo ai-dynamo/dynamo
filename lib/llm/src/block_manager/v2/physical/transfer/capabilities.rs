@@ -21,6 +21,7 @@ use crate::block_manager::v2::physical::{
         nixl_agent::NixlAgent,
     },
 };
+use crate::block_manager::v2::device::DeviceBackend;
 
 /// Transfer capability flags controlling which direct paths are enabled.
 ///
@@ -97,6 +98,9 @@ impl TransferCapabilities {
 
     fn test_gds_transfer(&self) -> anyhow::Result<()> {
         let agent = NixlAgent::require_backends("agent", &["GDS_MT"])?;
+        let device_backend = DeviceBackend::auto_detect()
+            .expect("No device backend available for test");
+        let device_id = 0;
 
         // Try a little test transfer and see if it works.
         let config = LayoutConfig::builder()
@@ -107,12 +111,12 @@ impl TransferCapabilities {
             .inner_dim(4096)
             .build()?;
 
-        let src = PhysicalLayout::builder(agent.clone())
+        let src = PhysicalLayout::builder(agent.clone(), device_backend, device_id)
             .with_config(config.clone())
             .fully_contiguous()
             .allocate_device(0)
             .build()?;
-        let dst = PhysicalLayout::builder(agent.clone())
+        let dst = PhysicalLayout::builder(agent.clone(), device_backend, device_id)
             .with_config(config)
             .fully_contiguous()
             .allocate_disk(None)
@@ -124,7 +128,8 @@ impl TransferCapabilities {
         let ctx = TransportManager::builder()
             .worker_id(0)
             .nixl_agent(agent)
-            .cuda_device_id(0)
+            .device_backend(device_backend)
+            .device_id(device_id)
             .build()?;
 
         execute_transfer(
