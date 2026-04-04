@@ -309,7 +309,14 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/loc
 COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
 
 {% if framework == "sglang" %}
-# SGLang: Create venv with --system-site-packages to inherit runtime packages
+{% if device == "cpu" %}
+# SGLang CPU: venv already exists from the framework stage; just add uv and maturin
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+RUN cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
+    chmod +x /opt/dynamo/venv/bin/uv && \
+    /opt/dynamo/venv/bin/uv pip install maturin[patchelf]
+{% else %}
+# SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
@@ -318,6 +325,7 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
+{% endif %}
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
