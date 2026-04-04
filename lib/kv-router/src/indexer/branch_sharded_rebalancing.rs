@@ -103,42 +103,8 @@ use std::sync::{
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use rustc_hash::FxBuildHasher;
-use tokio::sync::oneshot;
-
 use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
-
-// ---------------------------------------------------------------------------
-// Per-shard read thread pool (same as branch_sharded.rs)
-// ---------------------------------------------------------------------------
-
-type ReadRequest = (Vec<LocalBlockHash>, oneshot::Sender<OverlapScores>);
-
-struct ShardReadPool {
-    sender: flume::Sender<ReadRequest>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded::<ReadRequest>();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Migration state
@@ -185,8 +151,6 @@ pub struct RebalancingBranchShardedIndexer<T: SyncIndexer> {
 
     kv_block_size: u32,
 
-    read_pools: Option<Vec<ShardReadPool>>,
-
     // --- query-rate tracking ---
 
     /// Cumulative `find_matches` dispatched hits per shard.
@@ -221,33 +185,20 @@ impl<T: SyncIndexer> RebalancingBranchShardedIndexer<T> {
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
     ) -> Self {
-        Self::new_with_options(shards, prefix_depth, kv_block_size, num_read_threads_per_shard)
+        Self::new_with_options(shards, prefix_depth, kv_block_size)
     }
 
     pub fn new_with_options(
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
     ) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
         let num_shards = shards.len();
 
         let shards: Vec<Arc<ThreadPoolIndexer<T>>> =
             shards.into_iter().map(Arc::new).collect();
-
-        let read_pools = if num_read_threads_per_shard > 0 {
-            Some(
-                shards
-                    .iter()
-                    .map(|s| ShardReadPool::new(s.backend_arc(), num_read_threads_per_shard))
-                    .collect(),
-            )
-        } else {
-            None
-        };
 
         let shard_query_counts = (0..num_shards).map(|_| AtomicU64::new(0)).collect();
 
@@ -259,7 +210,6 @@ impl<T: SyncIndexer> RebalancingBranchShardedIndexer<T> {
             branch_counts: Mutex::new(vec![0usize; num_shards]),
             block_to_shard: DashMap::with_hasher(FxBuildHasher),
             kv_block_size,
-            read_pools,
             shard_query_counts,
             branch_query_counts: DashMap::with_hasher(FxBuildHasher),
             replaying_branches: DashSet::with_hasher(FxBuildHasher),
@@ -333,16 +283,7 @@ impl<T: SyncIndexer> RebalancingBranchShardedIndexer<T> {
         shard_idx: usize,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-        if let Some(pools) = &self.read_pools {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            pools[shard_idx]
-                .sender
-                .send((sequence, resp_tx))
-                .map_err(|_| KvRouterError::IndexerOffline)?;
-            resp_rx.await.map_err(|_| KvRouterError::IndexerOffline)
-        } else {
-            self.shards[shard_idx].find_matches(sequence).await
-        }
+        self.shards[shard_idx].find_matches(sequence).await
     }
 
     /// Merge two `OverlapScores` from different shards.
@@ -871,11 +812,7 @@ impl<T: SyncIndexer> KvIndexerInterface for RebalancingBranchShardedIndexer<T> {
         } else {
             0
         };
-        let mode = if self.read_pools.is_some() {
-            "dedicated per-shard OS thread pool"
-        } else {
-            "inline on caller thread"
-        };
+        let mode = "inline on caller thread";
         let total_branches: usize = self.branch_counts.lock().unwrap().iter().sum();
         let branch_dist: Vec<String> = self
             .branch_counts

@@ -58,42 +58,10 @@ use std::sync::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::RwLock;
 
 use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
-
-// ---------------------------------------------------------------------------
-// Per-shard read thread pool (same pattern as branch_sharded.rs)
-// ---------------------------------------------------------------------------
-
-type ReadRequest = (Vec<LocalBlockHash>, oneshot::Sender<OverlapScores>);
-
-struct ShardReadPool {
-    sender: flume::Sender<ReadRequest>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded::<ReadRequest>();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Shadow routing trie
@@ -589,7 +557,6 @@ pub struct NodeDepthShardedIndexer<T: SyncIndexer> {
     /// Shared routing state: shadow trie, block→shard map, path-tracking map.
     routing: NodeDepthRoutingState,
     kv_block_size: u32,
-    read_pools: Option<Vec<ShardReadPool>>,
 
     // Timing / observability
     timing_calls: AtomicU64,
@@ -604,7 +571,6 @@ impl<T: SyncIndexer> NodeDepthShardedIndexer<T> {
         shards: Vec<ThreadPoolIndexer<T>>,
         routing_node_depth: usize,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
     ) -> Self {
         assert!(
             !shards.is_empty(),
@@ -613,22 +579,10 @@ impl<T: SyncIndexer> NodeDepthShardedIndexer<T> {
         let num_shards = shards.len();
         let shards: Vec<Arc<ThreadPoolIndexer<T>>> = shards.into_iter().map(Arc::new).collect();
 
-        let read_pools = if num_read_threads_per_shard > 0 {
-            Some(
-                shards
-                    .iter()
-                    .map(|s| ShardReadPool::new(s.backend_arc(), num_read_threads_per_shard))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
         Self {
             shards,
             routing: NodeDepthRoutingState::new(num_shards, routing_node_depth),
             kv_block_size,
-            read_pools,
             timing_calls: AtomicU64::new(0),
             timing_sum_routing_ns: AtomicU64::new(0),
             timing_sum_shard_ns: AtomicU64::new(0),
@@ -655,16 +609,7 @@ impl<T: SyncIndexer> KvIndexerInterface for NodeDepthShardedIndexer<T> {
         let routing_ns = t_routing.elapsed().as_nanos() as u64;
 
         let t_shard = std::time::Instant::now();
-        let result = if let Some(pools) = &self.read_pools {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            pools[shard_idx]
-                .sender
-                .send((sequence, resp_tx))
-                .map_err(|_| KvRouterError::IndexerOffline)?;
-            resp_rx.await.map_err(|_| KvRouterError::IndexerOffline)
-        } else {
-            self.shards[shard_idx].find_matches(sequence).await
-        };
+        let result = self.shards[shard_idx].find_matches(sequence).await;
         let shard_ns = t_shard.elapsed().as_nanos() as u64;
 
         self.timing_calls.fetch_add(1, Ordering::Relaxed);
@@ -837,11 +782,7 @@ impl<T: SyncIndexer> KvIndexerInterface for NodeDepthShardedIndexer<T> {
         } else {
             0
         };
-        let mode = if self.read_pools.is_some() {
-            "dedicated per-shard OS thread pool"
-        } else {
-            "inline on caller thread"
-        };
+        let mode = "inline on caller thread";
         let (total_leaves, leaf_dist, total_trie_nodes) = self.routing.trie_stats();
         let leaf_dist_str: Vec<String> = leaf_dist
             .iter()

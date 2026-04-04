@@ -80,11 +80,6 @@ enum IndexerArgs {
         /// keys, while depth=2 gives a much larger set of distinguishable branches.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
-
-        /// Number of OS threads per shard dedicated to find_matches (read isolation).
-        /// 0 (default): reads run inline on the calling tokio thread.
-        #[clap(long, default_value = "0")]
-        num_read_threads_per_shard: usize,
     },
 
     /// Node-depth-sharded CRTC: routes by the first `routing_node_depth` compressed
@@ -102,11 +97,6 @@ enum IndexerArgs {
         /// Shadow-trie routing depth (number of CRTC-node edges to traverse).
         #[clap(long, default_value = "2")]
         routing_node_depth: usize,
-
-        /// Number of OS threads per shard dedicated to find_matches (read isolation).
-        /// 0 (default): reads run inline on the calling tokio thread.
-        #[clap(long, default_value = "0")]
-        num_read_threads_per_shard: usize,
     },
 }
 
@@ -147,7 +137,6 @@ impl IndexerArgs {
                 num_shards,
                 num_event_workers_per_shard,
                 prefix_depth,
-                num_read_threads_per_shard: _,
             } => {
                 let shards = (0..num_shards)
                     .map(|_| {
@@ -168,7 +157,6 @@ impl IndexerArgs {
                 num_shards,
                 num_event_workers_per_shard,
                 routing_node_depth,
-                num_read_threads_per_shard,
             } => {
                 let shards = (0..num_shards)
                     .map(|_| {
@@ -183,7 +171,6 @@ impl IndexerArgs {
                     shards,
                     routing_node_depth,
                     block_size,
-                    num_read_threads_per_shard,
                 ))
             }
         }
@@ -228,13 +215,11 @@ impl IndexerArgs {
                 num_shards: 2,
                 num_event_workers_per_shard: nw,
                 prefix_depth: 2,
-                num_read_threads_per_shard: 0,
             },
             "node-depth-sharded-crtc" => IndexerArgs::NodeDepthShardedCrtc {
                 num_shards: 2,
                 num_event_workers_per_shard: nw,
                 routing_node_depth: 2,
-                num_read_threads_per_shard: 0,
             },
             _ => anyhow::bail!(
                 "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \

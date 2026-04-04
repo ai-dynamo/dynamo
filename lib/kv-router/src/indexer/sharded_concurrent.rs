@@ -25,25 +25,6 @@
 //! net benefit should dominate.  See the sharding design doc for the benchmark
 //! matrix.
 //!
-//! ## Read isolation (per-shard read pools) — experimental
-//!
-//! By default `find_matches` uses `tokio::task::spawn_blocking` to scatter read
-//! requests to all shards concurrently.  The dominant overhead (78-90% of outer
-//! wall-clock time) is not the spawn mechanism itself — it is the **scatter-gather
-//! architecture**: every shard must be queried for every `find_matches` call, so
-//! total query volume = N × offered_rate.  No dispatch mechanism eliminates this;
-//! see [`PrefixShardedIndexer`] for a single-shard-per-query design.
-//!
-//! When `num_read_threads_per_shard > 0` is passed to [`ShardedConcurrentIndexer::new`],
-//! each shard gets a **dedicated bounded OS thread pool** of that size.
-//! `find_matches` sends all N shard requests over channels simultaneously and
-//! awaits N `oneshot` replies.  In benchmarks this mode performed **worse** than
-//! `spawn_blocking` at all tested concurrency levels: sleeping OS threads blocked
-//! on `flume::recv()` incur ~200-400 µs futex wake-up latency per shard, while
-//! tokio's `spawn_blocking` reuses warm threads with lower wake latency.  This
-//! option is retained for experimentation but `0` (spawn_blocking) remains the
-//! recommended default.
-
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -52,50 +33,8 @@ use std::sync::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
-use tokio::sync::oneshot;
-
 use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
-
-// ---------------------------------------------------------------------------
-// Per-shard read thread pool
-// ---------------------------------------------------------------------------
-
-/// `(sequence, response_sender)` — response carries the scores *and* the
-/// wall-clock time the CRTC traversal took (nanoseconds), so the caller can
-/// compute `max(shard_ns)` for the timing report.
-type ReadRequest = (Vec<LocalBlockHash>, oneshot::Sender<(OverlapScores, u64)>);
-
-/// A bounded pool of OS threads dedicated to `find_matches` requests for one
-/// shard.  Mirrors the equivalent struct in `prefix_sharded.rs` and
-/// `branch_sharded.rs`, but returns timing alongside the scores so that
-/// `ShardedConcurrentIndexer` can track the critical-path shard cost.
-struct ShardReadPool {
-    sender: flume::Sender<ReadRequest>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded::<ReadRequest>();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let t = std::time::Instant::now();
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send((result, t.elapsed().as_nanos() as u64));
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
 
 /// Merge `src` scores into `dst` in-place.
 ///
@@ -124,13 +63,6 @@ pub struct ShardedConcurrentIndexer<T: SyncIndexer> {
     worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
     worker_counts: Arc<Mutex<Vec<usize>>>,
     kv_block_size: u32,
-    /// Per-shard dedicated read thread pools.
-    ///
-    /// `None`  → reads scatter via `spawn_blocking` (original behavior).
-    /// `Some`  → reads dispatch to isolated per-shard OS thread pools, sending
-    ///           all N requests before awaiting any reply so shards run in
-    ///           parallel without touching the async executor.
-    read_pools: Option<Vec<ShardReadPool>>,
     /// When `true`, `find_matches` iterates shards sequentially on the caller's
     /// async thread instead of scattering via `spawn_blocking`.  Eliminates all
     /// task-scheduling overhead at the cost of shard parallelism: total traversal
@@ -157,13 +89,8 @@ impl<T: SyncIndexer> ShardedConcurrentIndexer<T> {
     ///
     /// * `shards` - One `ThreadPoolIndexer` per shard.
     /// * `kv_block_size` - Block size for KV cache.
-    /// * `num_read_threads_per_shard` - Number of OS threads in each shard's
-    ///   dedicated read pool.  Pass `0` to use the original `spawn_blocking`
-    ///   scatter mode.  Pass `> 0` to pre-spin dedicated threads per shard,
-    ///   eliminating `spawn_blocking` overhead at the cost of some idle threads.
     /// * `inline_sequential` - When `true`, shards are queried one after another
-    ///   on the caller's async thread with no task spawning.  Takes priority over
-    ///   `num_read_threads_per_shard`.
+    ///   on the caller's async thread with no task spawning.
     ///
     /// # Panics
     ///
@@ -171,7 +98,6 @@ impl<T: SyncIndexer> ShardedConcurrentIndexer<T> {
     pub fn new(
         shards: Vec<ThreadPoolIndexer<T>>,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
         inline_sequential: bool,
     ) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
@@ -179,23 +105,11 @@ impl<T: SyncIndexer> ShardedConcurrentIndexer<T> {
         let shards: Vec<Arc<ThreadPoolIndexer<T>>> =
             shards.into_iter().map(Arc::new).collect();
 
-        let read_pools = if !inline_sequential && num_read_threads_per_shard > 0 {
-            Some(
-                shards
-                    .iter()
-                    .map(|shard| ShardReadPool::new(shard.backend_arc(), num_read_threads_per_shard))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
         Self {
             shards,
             worker_assignments: DashMap::with_hasher(FxBuildHasher),
             worker_counts: Arc::new(Mutex::new(vec![0usize; num_shards])),
             kv_block_size,
-            read_pools,
             inline_sequential,
             timing_calls: AtomicU64::new(0),
             timing_sum_outer_ns: AtomicU64::new(0),
@@ -228,26 +142,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ShardedConcurrentIndexer<T> {
         // Record wall-clock start for the full call (scatter + shard work + gather).
         let outer_start = std::time::Instant::now();
 
-        // Two scatter modes depending on whether per-shard read pools are active.
-        //
-        // ── Pool mode (num_read_threads_per_shard > 0) ──────────────────────
-        //
-        // All N shard requests are sent to pre-spun OS threads before any
-        // response is awaited, so every shard starts its CRTC traversal in
-        // parallel without touching the tokio executor.  The call then awaits
-        // the N `oneshot` receivers in sequence — by the time the first await
-        // completes, the slower shards are typically already done or very close,
-        // so the sequential await adds near-zero extra latency.
-        //
-        // This eliminates the `spawn_blocking` overhead that dominated (77% of
-        // outer time) when the blocking thread pool was saturated under load.
-        //
-        // ── spawn_blocking mode (num_read_threads_per_shard == 0) ──────────
-        //
-        // Original behavior.  Each shard's CRTC traversal is submitted as a
-        // `spawn_blocking` task.  Under high caller concurrency the blocking
-        // thread pool saturates and queuing overhead dominates; use pool mode
-        // to fix this.
         let (scores, max_shard_ns) = if self.inline_sequential {
             // --- Sequential inline path ---
             //
@@ -264,29 +158,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ShardedConcurrentIndexer<T> {
                 let shard_start = std::time::Instant::now();
                 let shard_scores = backend.find_matches(&sequence, false);
                 let shard_ns = shard_start.elapsed().as_nanos() as u64;
-                if shard_ns > max_shard_ns {
-                    max_shard_ns = shard_ns;
-                }
-                merge_scores(&mut scores, shard_scores);
-            }
-            (scores, max_shard_ns)
-        } else if let Some(pools) = &self.read_pools {
-            // --- Pool path ---
-            // Send all requests before awaiting any, so shards start in parallel.
-            let mut receivers = Vec::with_capacity(pools.len());
-            for pool in pools {
-                let (resp_tx, resp_rx) = oneshot::channel();
-                pool.sender
-                    .send((sequence.clone(), resp_tx))
-                    .map_err(|_| KvRouterError::IndexerOffline)?;
-                receivers.push(resp_rx);
-            }
-
-            let mut scores = OverlapScores::new();
-            let mut max_shard_ns: u64 = 0;
-            for resp_rx in receivers {
-                let (shard_scores, shard_ns) =
-                    resp_rx.await.map_err(|_| KvRouterError::IndexerOffline)?;
                 if shard_ns > max_shard_ns {
                     max_shard_ns = shard_ns;
                 }
@@ -446,8 +317,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ShardedConcurrentIndexer<T> {
         };
         let mode = if self.inline_sequential {
             "sequential inline"
-        } else if self.read_pools.is_some() {
-            "dedicated per-shard OS thread pool"
         } else {
             "spawn_blocking scatter"
         };

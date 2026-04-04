@@ -249,7 +249,7 @@ advance.
 
 ## Phase 4 — Rebalancing (`RebalancingBranchShardedIndexer`)
 
-**File:** `branch_sharded_rebalancing.rs`
+**File:** `branch_sharded_rebalancing.rs` — see [`REBALANCING.md`](REBALANCING.md) for the full design and protocol details.
 
 Extends `BranchShardedIndexer` with a background task that detects hot shards and
 migrates the hottest branch to the coolest shard.
@@ -285,7 +285,7 @@ at this load level but the migration correctness guarantee is preserved.
 
 ## Phase 5 — Node-Depth Shadow-Trie (`NodeDepthShardedIndexer`)
 
-**File:** `node_depth_sharded.rs`
+**File:** `node_depth_sharded.rs` — see [`NODE_DEPTH_SHARDING.md`](NODE_DEPTH_SHARDING.md) for the full design, the imbalance/incoherence trade-off, and multi-shard scaling results.
 
 Solves the depth-tuning problem of `BranchShardedIndexer` by routing on the first
 `routing_node_depth` **CRTC nodes** traversed, not on raw block count.
@@ -512,6 +512,10 @@ The Phase 6/7 coordinator and shard server files in `lib/bench/kv_router/`
 `shard_server.rs`) are not compiled — they were included for reference but left
 unwired to keep ai-dynamo/dynamo#7859 focused.  See the Phase 2 roadmap entry
 above for the steps needed to wire them up.
+
+Note: the UDS transport is already fully implemented in `multi_process_node_depth_uds.rs`
+and benchmarked (see Phase 7 results above) — it is not future work, just not yet wired
+into the build.
 
 ---
 

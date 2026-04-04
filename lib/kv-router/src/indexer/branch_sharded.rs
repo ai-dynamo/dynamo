@@ -49,50 +49,6 @@ use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, T
 use crate::protocols::*;
 
 // ---------------------------------------------------------------------------
-// Per-shard read thread pool (kept for potential future use)
-// ---------------------------------------------------------------------------
-
-/// A bounded pool of OS threads dedicated to `find_matches` requests for one
-/// shard.  Mirrors the equivalent struct in `prefix_sharded.rs`.
-///
-/// Not currently used by [`BranchShardedIndexer`] — reads run inline on the
-/// caller's thread.  Retained here as a building block if dedicated read
-/// isolation is needed in the future.
-#[allow(dead_code)]
-struct ShardReadPool {
-    sender: flume::Sender<(
-        Vec<LocalBlockHash>,
-        tokio::sync::oneshot::Sender<OverlapScores>,
-    )>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-#[allow(dead_code)]
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx: flume::Receiver<(
-                Vec<LocalBlockHash>,
-                tokio::sync::oneshot::Sender<OverlapScores>,
-            )> = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // FNV-1a constants
 // ---------------------------------------------------------------------------
 

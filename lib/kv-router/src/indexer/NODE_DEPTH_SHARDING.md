@@ -2,7 +2,7 @@
 
 This document covers the design of `NodeDepthShardedIndexer`, the root cause of
 the parent-inheritance imbalance problem, the hybrid depth-aware routing fix,
-and benchmark results on the `.jcs` workload.
+and benchmark results on the `.prefix` workload.
 
 ---
 
@@ -10,7 +10,7 @@ and benchmark results on the `.jcs` workload.
 
 ### The shared-prefix problem
 
-On workloads with a long universal system prompt (e.g. the `.jcs` trace, where
+On workloads with a long universal system prompt (e.g. the `.prefix` trace, where
 every conversation starts with the same 15-block / 960-token system prompt),
 block-depth routing (`BranchShardedIndexer`, `PrefixShardedIndexer`) collapses:
 every request shares the same first `N` blocks, so all traffic hashes to the
@@ -52,7 +52,7 @@ When a Stored event arrives, the indexer looks up `parent_hash` in
 `block_to_shard` and routes all continuation events to the parent's shard.  The
 trie is only consulted for root events.
 
-On the `.jcs` workload:
+On the `.prefix` workload:
 
 1. The first root event carries the system-prompt blocks → the shadow trie
    creates a depth-1 leaf, assigned to shard 0.
@@ -68,7 +68,7 @@ On the `.jcs` workload:
 Without inheritance, every Stored event routes its own incremental blocks
 through the shadow trie starting from the root.
 
-On the `.jcs` workload, a continuation event carries only `[t2b0, t2b1]` (the
+On the `.prefix` workload, a continuation event carries only `[t2b0, t2b1]` (the
 new user-turn blocks), not the full prefix.  `insert_and_get_shard` sees
 `[t2b0, t2b1]` with `seq_pos=0` — it looks for `t2b0` among the root's
 children, finds none (the root only has the system-prompt branch keyed on
@@ -204,7 +204,7 @@ Root event (no parent_hash):
 ### Memory behaviour
 
 `Some(path)` entries are only live while a conversation is in the routing
-region (depth < routing_node_depth).  On the `.jcs` workload
+region (depth < routing_node_depth).  On the `.prefix` workload
 (`routing_node_depth=2`):
 
 - Root event (system prompt, 15 blocks): `reached=false` → stores
@@ -228,7 +228,7 @@ routing-depth boundary.
 
 ## 5. Benchmark Results
 
-**Workload**: `.jcs` synthetic trace —
+**Workload**: `.prefix` synthetic trace —
 `conversation_trace_synth_15x1+10.0_speedup1_maxisl163840.jsonl`
 (15-block universal system prompt, ~11M events, ~374k ops/s offered load)
 
@@ -277,7 +277,7 @@ that with more shards each shard's CRTC is deeper and less path-compressed
 ### Miss rate
 
 83.3% of `find_matches` calls are trie misses (sequences not yet seen by any
-worker).  This is expected for the `.jcs` trace structure and is unchanged
+worker).  This is expected for the `.prefix` trace structure and is unchanged
 across shard counts — the miss path is a fast early return.
 
 ---

@@ -25,19 +25,6 @@
 //!   any shard after reusing different prefixes over its lifetime).
 //! - **remove_worker**: broadcast to all shards for the same reason.
 //!
-//! ## Read isolation (per-shard read pools)
-//!
-//! By default `find_matches` runs **inline** on whichever tokio thread invokes
-//! it — all shards compete for the same shared async thread pool, which does
-//! not reflect a multi-node deployment where each shard owns dedicated CPUs.
-//!
-//! When `num_read_threads_per_shard > 0` is passed to [`PrefixShardedIndexer::new`],
-//! each shard gets a **dedicated bounded OS thread pool** of that size.
-//! `find_matches` sends the request over a channel and awaits a oneshot reply,
-//! so reads on shard 0 never execute on the same OS threads as reads on shard 1.
-//! This faithfully simulates each shard running on its own node with a fixed
-//! CPU budget.
-//!
 //! ## Consistency guarantee
 //!
 //! A root `Stored` event for worker W that has fewer than `prefix_depth` blocks
@@ -61,51 +48,8 @@ use std::sync::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
-use tokio::sync::oneshot;
-
 use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
-
-// ---------------------------------------------------------------------------
-// Per-shard read thread pool
-// ---------------------------------------------------------------------------
-
-type ReadRequest = (Vec<LocalBlockHash>, oneshot::Sender<OverlapScores>);
-
-/// A bounded pool of OS threads dedicated to `find_matches` requests for one shard.
-///
-/// Each thread blocks on a `flume` channel, calls `SyncIndexer::find_matches`
-/// synchronously, and returns the result via a `tokio::sync::oneshot` channel.
-///
-/// Dropping this struct drops the sender, closing the channel and causing all
-/// pool threads to exit their `recv` loop after finishing their current request.
-struct ShardReadPool {
-    sender: flume::Sender<ReadRequest>,
-    /// Held so that thread handles outlive the pool — threads are not joined on
-    /// drop; they exit naturally when the channel closes.
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded::<ReadRequest>();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PrefixShardedIndexer
@@ -133,12 +77,6 @@ pub struct PrefixShardedIndexer<T: SyncIndexer> {
     /// Written on Stored, read+deleted on Removed.
     block_to_shard: DashMap<u64, usize, FxBuildHasher>,
     kv_block_size: u32,
-    /// Per-shard dedicated read thread pools.
-    ///
-    /// `None`  → reads run inline on the calling tokio thread (shared pool).
-    /// `Some`  → reads dispatch to isolated per-shard OS thread pools,
-    ///           simulating each shard running on a dedicated node.
-    read_pools: Option<Vec<ShardReadPool>>,
     /// Number of completed `find_matches` calls (for timing averages).
     timing_calls: AtomicU64,
     /// Sum of FNV routing hash time (ns): `shard_for_local_hashes()` only.
@@ -163,11 +101,6 @@ impl<T: SyncIndexer> PrefixShardedIndexer<T> {
     ///   to ≥ 1.  Larger values give better balance when prefixes are diverse;
     ///   value of 1 (hash only the first block) is always safe and consistent.
     /// * `kv_block_size` - Block size for KV cache.
-    /// * `num_read_threads_per_shard` - Number of OS threads in each shard's
-    ///   dedicated read pool.  Pass `0` to use the default inline mode (reads
-    ///   run on the calling tokio thread, sharing the async pool across shards).
-    ///   Pass `> 0` to isolate shard reads onto dedicated OS threads, mimicking
-    ///   each shard running on its own node with a fixed CPU budget.
     ///
     /// # Panics
     ///
@@ -176,16 +109,14 @@ impl<T: SyncIndexer> PrefixShardedIndexer<T> {
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
     ) -> Self {
-        Self::new_with_options(shards, prefix_depth, kv_block_size, num_read_threads_per_shard, true)
+        Self::new_with_options(shards, prefix_depth, kv_block_size, true)
     }
 
     pub fn new_with_options(
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
         kv_block_size: u32,
-        num_read_threads_per_shard: usize,
         inherit_parent_shard: bool,
     ) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
@@ -194,17 +125,6 @@ impl<T: SyncIndexer> PrefixShardedIndexer<T> {
         let shards: Vec<Arc<ThreadPoolIndexer<T>>> =
             shards.into_iter().map(Arc::new).collect();
 
-        let read_pools = if num_read_threads_per_shard > 0 {
-            Some(
-                shards
-                    .iter()
-                    .map(|shard| ShardReadPool::new(shard.backend_arc(), num_read_threads_per_shard))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
         Self {
             shards,
             num_shards,
@@ -212,7 +132,6 @@ impl<T: SyncIndexer> PrefixShardedIndexer<T> {
             inherit_parent_shard,
             block_to_shard: DashMap::with_hasher(FxBuildHasher),
             kv_block_size,
-            read_pools,
             timing_calls: AtomicU64::new(0),
             timing_sum_routing_ns: AtomicU64::new(0),
             timing_sum_shard_ns: AtomicU64::new(0),
@@ -267,16 +186,11 @@ impl<T: SyncIndexer> KvIndexerInterface for PrefixShardedIndexer<T> {
     /// This is the primary performance advantage over worker-based sharding:
     /// no scatter-gather, so throughput scales linearly with shard count.
     ///
-    /// When `num_read_threads_per_shard > 0` was passed at construction time,
-    /// the request is dispatched to the shard's **dedicated OS thread pool** via
-    /// a channel + oneshot, isolating this shard's reads from all other shards.
-    /// Otherwise the CRTC traversal runs inline on the calling tokio thread.
-    ///
     /// Timing breakdown recorded per call:
     /// - **routing** — `shard_for_local_hashes()`: FNV-1a over `prefix_depth`
     ///   blocks, typically < 100 ns regardless of tree size.
-    /// - **shard** — the delegated `find_matches()` call (either inline CRTC
-    ///   traversal or round-trip through the per-shard read pool).
+    /// - **shard** — the delegated `find_matches()` call (inline CRTC traversal
+    ///   on the calling tokio thread).
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -286,20 +200,7 @@ impl<T: SyncIndexer> KvIndexerInterface for PrefixShardedIndexer<T> {
         let routing_ns = t_routing.elapsed().as_nanos() as u64;
 
         let t_shard = std::time::Instant::now();
-        let result: Result<OverlapScores, KvRouterError> = if let Some(pools) = &self.read_pools {
-            // Dispatch to the shard's dedicated read thread pool.
-            // This ensures shard 0's reads never run on the same OS threads as
-            // shard 1's reads — accurately simulating per-node CPU isolation.
-            let (resp_tx, resp_rx) = oneshot::channel();
-            pools[shard_idx]
-                .sender
-                .send((sequence, resp_tx))
-                .map_err(|_| KvRouterError::IndexerOffline)?;
-            resp_rx.await.map_err(|_| KvRouterError::IndexerOffline)
-        } else {
-            // Inline: CRTC traversal runs on the calling tokio thread.
-            self.shards[shard_idx].find_matches(sequence).await
-        };
+        let result = self.shards[shard_idx].find_matches(sequence).await;
         let shard_ns = t_shard.elapsed().as_nanos() as u64;
 
         self.timing_calls.fetch_add(1, Ordering::Relaxed);
@@ -507,11 +408,7 @@ impl<T: SyncIndexer> KvIndexerInterface for PrefixShardedIndexer<T> {
         } else {
             0.0
         };
-        let mode = if self.read_pools.is_some() {
-            "dedicated per-shard OS thread pool"
-        } else {
-            "inline on caller thread"
-        };
+        let mode = "inline on caller thread";
 
         let apply_events = self.timing_apply_events.load(Ordering::Relaxed);
         let shadow_tree_size = self.block_to_shard.len();
