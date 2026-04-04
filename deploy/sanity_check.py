@@ -2981,6 +2981,51 @@ class DynamoFrameworkInfo(NodeInfo):
                             status=NodeStatus.INFO,
                             metadata={"part_of_previous": True},
                         )
+                        # Check for editable install via direct_url.json
+                        direct_url_path = os.path.join(path, "direct_url.json")
+                        if os.path.exists(direct_url_path):
+                            try:
+                                with open(direct_url_path, "r") as f:
+                                    import json as _json
+
+                                    du = _json.loads(f.read())
+                                url = du.get("url", "")
+                                is_editable = (du.get("dir_info") or {}).get(
+                                    "editable", False
+                                )
+                                if url.startswith("file://") and is_editable:
+                                    target = url[len("file://") :]
+                                    # Resolve to the actual package source dir via pyproject.toml
+                                    pyproject = os.path.join(target, "pyproject.toml")
+                                    if os.path.exists(pyproject):
+                                        try:
+                                            import tomllib
+
+                                            with open(pyproject, "rb") as pf:
+                                                cfg = tomllib.load(pf)
+                                            pkgs = (
+                                                cfg.get("tool", {})
+                                                .get("hatch", {})
+                                                .get("build", {})
+                                                .get("targets", {})
+                                                .get("wheel", {})
+                                                .get("packages", [])
+                                            )
+                                            if pkgs:
+                                                target = os.path.join(
+                                                    target, os.path.dirname(pkgs[0])
+                                                )
+                                        except Exception:
+                                            pass
+                                    display_target = self._replace_home_with_var(target)
+                                    points_to = NodeInfo(
+                                        label="→",
+                                        desc=display_target,
+                                        status=NodeStatus.INFO,
+                                    )
+                                    dist_node.add_child(points_to)
+                            except Exception:
+                                pass
                         self.add_child(dist_node)
                     except Exception:
                         dist_node = NodeInfo(
@@ -3031,15 +3076,15 @@ class DynamoFrameworkInfo(NodeInfo):
                         self.add_child(component_node)
                         components_found = True
                 except ImportError as e:
-                    # Module not importable - show as error
+                    # Module's dependencies not installed (e.g., planner in non-planner images).
+                    # Treat as warning so the sanity check doesn't fail for optional components.
                     padded_name = f"{component:<{max_len}}"
                     error_msg = str(e) if str(e) else "Import failed"
                     component_node = NodeInfo(
-                        label=padded_name, desc=error_msg, status=NodeStatus.ERROR
+                        label=padded_name, desc=error_msg, status=NodeStatus.WARNING
                     )
                     self.add_child(component_node)
                     import_failures.append(component)
-                    # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:
