@@ -419,6 +419,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Without encode worker, the embedding will be generated internally by vLLM.
         if encode_worker_client is None:
             return None
+        logger.warning(
+            "Separate multimodal encode-worker routing only applies to image_url "
+            "inputs. video_url inputs are not sent to the encode worker and will "
+            "be processed on the prefill/PD worker instead."
+        )
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
         #    which can request remote encode and handle the transfer of embeddings
