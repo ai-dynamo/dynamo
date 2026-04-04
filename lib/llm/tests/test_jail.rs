@@ -2493,7 +2493,7 @@ mod parallel_jail_tests {
 
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::FunctionType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
