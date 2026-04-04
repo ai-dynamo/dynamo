@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../common/launch_utils.sh"
 source "$SCRIPT_DIR/../../common/gpu_utils.sh"
 
 # Default values
@@ -87,7 +88,8 @@ else
 fi
 
 # run ingress
-python -m dynamo.frontend --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # run processor
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
@@ -95,8 +97,13 @@ python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_T
 # run E/P/D workers
 GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
 
-CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill $GPU_MEM_ARGS &
+CUDA_VISIBLE_DEVICES=0 \
+    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+    python3 components/audio_encode_worker.py --model $MODEL_NAME &
+CUDA_VISIBLE_DEVICES=1 \
+    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+    python3 components/worker.py --model $MODEL_NAME --worker-type prefill $GPU_MEM_ARGS &
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
