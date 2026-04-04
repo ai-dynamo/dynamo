@@ -11,7 +11,6 @@ use std::sync::{Arc, OnceLock};
 
 use super::*;
 use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
-use crate::block_manager::vllm::connector::RemoteAdviceRequest;
 use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
 use dynamo_runtime::DistributedRuntime;
@@ -70,7 +69,6 @@ pub struct KvConnectorWorker {
 
     onboarding_operations: Vec<WorkerTransferRequest>,
     offloading_operations: Vec<WorkerTransferRequest>,
-    remote_advice_requests: Vec<RemoteAdviceRequest>,
 
     bound: bool,
     iteration: u64,
@@ -112,7 +110,6 @@ impl KvConnectorWorker {
             maybe_finished_offloading: HashSet::new(),
             onboarding_operations: Vec::new(),
             offloading_operations: Vec::new(),
-            remote_advice_requests: Vec::new(),
             bound: false,
             iteration: 0,
             layers_complete: 0,
@@ -229,7 +226,6 @@ impl Worker for KvConnectorWorker {
             "offloading operations should be empty"
         );
         self.offloading_operations = offloading_operations;
-        self.remote_advice_requests = metadata.advice_requests;
 
         Ok(())
     }
@@ -258,15 +254,6 @@ impl Worker for KvConnectorWorker {
     }
 
     fn start_load_kv(&mut self) -> anyhow::Result<()> {
-        if !self.remote_advice_requests.is_empty() {
-            tracing::debug!(
-                iteration = self.iteration,
-                num_requests = self.remote_advice_requests.len(),
-                "received remote advice requests; worker-side execution is not implemented yet"
-            );
-            self.remote_advice_requests.clear();
-        }
-
         let onboarding_operations = self.onboarding_operations.clone();
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();

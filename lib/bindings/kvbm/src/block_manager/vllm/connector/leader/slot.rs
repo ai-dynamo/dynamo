@@ -261,6 +261,11 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             offload_min_priority,
         }
     }
+
+    #[inline]
+    pub fn block_manager(&self) -> &VllmBlockManager {
+        &self.block_manager
+    }
 }
 
 impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {

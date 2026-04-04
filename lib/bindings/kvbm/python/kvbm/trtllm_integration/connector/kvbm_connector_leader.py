@@ -97,9 +97,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
             )
 
-        print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
+        print(
+            f"KvConnectorLeader initialized with rank: {mappings.rank}, local_rank: {mappings.local_rank}"
+        )
         self._connector = RustKvConnectorLeader(
             mappings.rank,
+            mappings.local_rank,
             self.drt,
             self.block_size,
             leader,
@@ -222,11 +225,11 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         self._connector.create_slot(request, all_token_ids)
 
     @nvtx_annotate(category="scheduler")
-    def advise_will_need_remote(
+    def advise_async_loading(
         self, request: LlmRequest, transfer_for_ms: int = 100, min_blocks: int = 10
     ) -> None:
         """
-        Submit a best-effort remote-prefetch hint for this request before scheduling.
+        Start best-effort async remote loading for this request before scheduling.
 
         This should be called after TRT-LLM has activated the request for the upcoming
         iteration, but before the scheduler makes its placement decision for that
@@ -238,11 +241,8 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         - allow a bounded grace period for remote-to-local prefetch work
         - run normal scheduling afterward using only local KVBM matches
 
-        This API is advisory only. It must not be treated as a promise that remote KV
-        will be available in time for the next iteration.
-
-        The request is routed through connector metadata so every local worker rank
-        receives the same request-scoped advisory hint during the next metadata bind.
+        This API is best-effort only. It must not be treated as a promise that remote
+        KV will be available in time for the next iteration.
         """
         self._create_slot(request)
 
@@ -254,6 +254,6 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             request_id=str(request.request_id), lora_name=None, salt_hash=None
         )
 
-        self._connector.advise_will_need_remote(
+        self._connector.advise_async_loading(
             request, all_token_ids, transfer_for_ms, min_blocks
         )

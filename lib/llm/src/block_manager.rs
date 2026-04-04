@@ -150,39 +150,6 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         self.state.onboard_blocks(blocks, targets)
     }
-}
-
-fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop> {
-    // The frontend of the KvBlockManager will take ownership of the cancellation token
-    // and will be responsible for cancelling the task when the KvBlockManager is dropped
-    let cancellation_token = config.runtime.cancellation_token.clone();
-
-    // The internal state will use a child token of the original token
-    config.runtime.cancellation_token = cancellation_token.child_token();
-
-    Arc::new(CancelOnLastDrop { cancellation_token })
-}
-
-impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
-    /// Create a new [KvBlockManager]
-    ///
-    /// The returned object is a frontend to the [KvBlockManager] which owns the cancellation
-    /// tokens. When this object gets drop, the cancellation token will be cancelled and begin
-    /// the gracefully shutdown of the block managers internal state.
-    pub async fn new(mut config: KvBlockManagerConfig) -> Result<Self> {
-        let _cancellation_token = build_cancel_token(&mut config);
-
-        let block_size = config.model.page_size;
-
-        // Create the internal state
-        let state = state::KvBlockManagerState::<locality::Local, Metadata>::new(config).await?;
-
-        Ok(Self {
-            state,
-            _cancellation_token,
-            block_size,
-        })
-    }
 
     /// Exports the local blockset configuration as a serialized object.
     pub fn export_local_blockset(&self) -> Result<SerializedNixlBlockSet> {
@@ -215,6 +182,39 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
         bds: &BlockDescriptorList,
     ) -> Result<Vec<RemoteBlock<IsMutable>>> {
         self.state.get_remote_blocks_mutable(bds)
+    }
+}
+
+fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop> {
+    // The frontend of the KvBlockManager will take ownership of the cancellation token
+    // and will be responsible for cancelling the task when the KvBlockManager is dropped
+    let cancellation_token = config.runtime.cancellation_token.clone();
+
+    // The internal state will use a child token of the original token
+    config.runtime.cancellation_token = cancellation_token.child_token();
+
+    Arc::new(CancelOnLastDrop { cancellation_token })
+}
+
+impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
+    /// Create a new [KvBlockManager]
+    ///
+    /// The returned object is a frontend to the [KvBlockManager] which owns the cancellation
+    /// tokens. When this object gets drop, the cancellation token will be cancelled and begin
+    /// the gracefully shutdown of the block managers internal state.
+    pub async fn new(mut config: KvBlockManagerConfig) -> Result<Self> {
+        let _cancellation_token = build_cancel_token(&mut config);
+
+        let block_size = config.model.page_size;
+
+        // Create the internal state
+        let state = state::KvBlockManagerState::<locality::Local, Metadata>::new(config).await?;
+
+        Ok(Self {
+            state,
+            _cancellation_token,
+            block_size,
+        })
     }
 }
 
