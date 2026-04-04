@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs cache_on vs cache_off interleaved per dataset/concurrency for realtime comparison.
+# For each (dataset, concurrency): run cache_on, then cache_off, back-to-back.
+#
+# Uses DynamoGraphDeployment CRD patching for cache toggling.
+# Requires: ServiceAccount with permissions to patch the CRD and delete worker pods.
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmark-agg-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-agg-role
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["dynamographdeployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-agg-binding
+subjects:
+  - kind: ServiceAccount
+    name: benchmark-agg-sa
+roleRef:
+  kind: Role
+  name: benchmark-agg-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen3-vl-agg-benchmark
+  labels:
+    app: benchmark
+spec:
+  serviceAccountName: benchmark-agg-sa
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
+  nodeSelector:
+    workload: qiwa-agg-benchmark
+  tolerations:
+    - key: "dedicated"
+      value: "user-workload"
+      effect: "NoSchedule"
+    - key: "dedicated"
+      value: "user-workload"
+      effect: "NoExecute"
+  containers:
+    - name: benchmark
+      image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+
+          apt update && apt install -y curl jq
+          pip install aiperf
+          curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl" \
+            && chmod +x kubectl && mv kubectl /opt/dynamo/venv/bin/
+
+          wait_for_model() {
+            echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+            until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+              echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+              sleep 5
+            done
+            echo "Model '${MODEL_NAME}' is ready."
+          }
+
+          wait_for_pod_ready() {
+            local label=$1
+            echo "Waiting for pod with label ${label} to be ready..."
+            until kubectl get pod -l "${label}" -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null | grep -q true; do
+              sleep 5
+            done
+            echo "Pod ${label} is ready."
+          }
+
+          restart_workers() {
+            echo "Restarting worker pods..."
+            kubectl delete pod \
+              -l nvidia.com/dynamo-component=${WORKER_COMPONENT} \
+              -l nvidia.com/dynamo-graph-deployment-name=${GRAPH_DEPLOYMENT} \
+              --wait=true
+            wait_for_pod_ready "nvidia.com/dynamo-component=${WORKER_COMPONENT}"
+            wait_for_model
+          }
+
+          set_cache_gb() {
+            local gb=$1
+            echo "Patching DynamoGraphDeployment: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb}"
+            kubectl patch dynamographdeployment/${GRAPH_DEPLOYMENT} --type=json \
+              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
+            sleep 10
+            wait_for_pod_ready "nvidia.com/dynamo-component=${WORKER_COMPONENT}"
+            wait_for_model
+          }
+
+          run_one() {
+            local mode=$1 ds=$2 conc=$3
+            RUN_DIR="${ARTIFACT_BASE_DIR}/${mode}/${ds}/c${conc}"
+            mkdir -p "${RUN_DIR}"
+
+            echo "=== Running: ${mode} ${ds} concurrency=${conc} ==="
+            aiperf profile \
+              --model "${MODEL_NAME}" \
+              --input-file "${DATASET_DIR}/${ds}.jsonl" \
+              --custom-dataset-type single_turn \
+              --url "http://${FRONTEND}:8000" \
+              --streaming \
+              --ui-type none \
+              --request-count "${REQUEST_COUNT}" \
+              --concurrency "${conc}" \
+              --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+              --artifact-dir "${RUN_DIR}" \
+              --extra-inputs "max_tokens:${MAX_TOKENS}" \
+              --extra-inputs "min_tokens:${MAX_TOKENS}" \
+              --extra-inputs "ignore_eos:true"
+
+            echo "Done: ${RUN_DIR}"
+          }
+
+          DATASETS=(
+            "1000req_3img_200pool_400word_base64"
+            "1000req_3img_200pool_400word_http"
+            # "1000req_1img_500pool_400word_base64"
+            # "1000req_1img_800pool_400word_base64"
+          )
+          CONCURRENCIES=(4 8 16 32 64 128)
+
+          # Wait for datasets
+          for ds in "${DATASETS[@]}"; do
+            until [ -f "${DATASET_DIR}/${ds}.jsonl" ]; do
+              echo "Waiting for ${ds}.jsonl ..."
+              sleep 15
+            done
+          done
+
+          wait_for_model
+
+          for ds in "${DATASETS[@]}"; do
+            for conc in "${CONCURRENCIES[@]}"; do
+              # cache_on: set cache, restart, run
+              set_cache_gb "${CACHE_GB}"
+              restart_workers
+              run_one cache_on "${ds}" "${conc}"
+
+              # cache_off: set cache=0, restart, run
+              set_cache_gb 0
+              restart_workers
+              run_one cache_off "${ds}" "${conc}"
+            done
+          done
+
+          # Restore cache setting
+          set_cache_gb "${CACHE_GB}"
+
+          echo "All runs complete. Artifacts in ${ARTIFACT_BASE_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+        - name: FRONTEND
+          value: qwen3-vl-agg-gb200-frontend
+        - name: GRAPH_DEPLOYMENT
+          value: qwen3-vl-agg-gb200
+        - name: WORKER_COMPONENT
+          value: VllmWorker
+        - name: CACHE_ENV_INDEX
+          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml worker env array
+        - name: CACHE_GB
+          value: "10"
+        - name: MAX_TOKENS
+          value: "150"
+        - name: REQUEST_COUNT
+          value: "1000"
+        - name: WARMUP_REQUEST_COUNT
+          value: "3"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/fp8/gb200-4gpu/agg
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: perf-cache
+          mountPath: /perf-cache
+  volumes:
+    - name: perf-cache
+      persistentVolumeClaim:
+        claimName: perf-cache
+  restartPolicy: Never
