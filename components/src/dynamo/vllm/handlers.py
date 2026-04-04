@@ -52,7 +52,7 @@ from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import Config
-from .constants import EmbeddingTransferMode
+from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
@@ -1586,17 +1586,46 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
             embedding_params = None
 
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        has_mm_data = (
+            "multi_modal_data" in request and request["multi_modal_data"] is not None
+        )
+
         multi_modal_data = None
-        # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
-        if prefill_result is not None and embedding_params is not None:
+        if is_decode_only:
+            # Decode mode: branch on model, not data.
             if is_qwen_vl_model(self.config.model):
-                multi_modal_data = construct_qwen_decode_mm_data(
-                    embedding_params["image_grid_thw"],
-                    embedding_params["embeddings_shape"],
-                    request_id,
-                )
+                # Qwen VL needs embedding_params for mRoPE initialization.
+                if embedding_params is not None:
+                    multi_modal_data = construct_qwen_decode_mm_data(
+                        embedding_params["image_grid_thw"],
+                        embedding_params["embeddings_shape"],
+                        request_id,
+                    )
+                elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
+                    msg = (
+                        "Decode worker received multimodal request without "
+                        "prefill result"
+                        if prefill_result is None
+                        else "Prefill did not produce required multimodal "
+                        "embedding metadata (image_grid_thw) for Qwen VL "
+                        "decode. Use --route-to-encoder or the P/D launcher "
+                        "with grid_thw computation support"
+                    )
+                    logger.error("Request %s: %s", request_id, msg)
+                    yield {"status": "error", "message": msg}
+                    return
+            # TODO(DIS-1661): video/audio re-downloaded on decode.
+            # TODO(DIS-1664): mixed image+video in disagg decode is not
+            # supported — synthetic image data would be overwritten.
+            if multi_modal_data is None and has_mm_data:
+                mm = request["multi_modal_data"]
+                if mm.get(VIDEO_URL_KEY) or mm.get("audio_url"):
+                    multi_modal_data = await self._extract_multimodal_data(
+                        request, request_id, context
+                    )
         else:
-            # Extract and decode multimodal data if present
+            # Aggregated mode: load images normally
             multi_modal_data = await self._extract_multimodal_data(
                 request, request_id, context
             )
