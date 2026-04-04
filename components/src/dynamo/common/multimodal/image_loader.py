@@ -243,7 +243,14 @@ class ImageLoader:
                     raise ValueError("Could not load decoded media from frontend")
 
         # Process images in parallel
+        import time as _time
+
+        _t_gather_start = _time.perf_counter()
         results = await asyncio.gather(*image_futures, return_exceptions=True)
+        _t_gather_end = _time.perf_counter()
+        logger.info(
+            f"[PERF] image load_image_batch gather: {(_t_gather_end-_t_gather_start)*1000:.0f}ms for {len(image_futures)} images"
+        )
         loaded_images = []
         collective_exceptions = ""
         for media_item, result in zip(image_mm_items, results):

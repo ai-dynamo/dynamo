@@ -1093,6 +1093,7 @@ async fn chat_completions(
     mut request: Context<NvCreateChatCompletionRequest>,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    let handler_start = std::time::Instant::now();
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -1175,11 +1176,21 @@ async fn chat_completions(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    tracing::info!(
+        handler_to_generate_ms = handler_start.elapsed().as_millis() as u64,
+        "[PERF] chat_completions: handler_start to engine.generate"
+    );
+    let generate_start = std::time::Instant::now();
     let stream = engine.generate(request).await.map_err(|e| {
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    tracing::info!(
+        generate_ms = generate_start.elapsed().as_millis() as u64,
+        total_handler_ms = handler_start.elapsed().as_millis() as u64,
+        "[PERF] chat_completions: engine.generate returned stream"
+    );
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();

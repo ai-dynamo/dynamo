@@ -7,6 +7,16 @@ import subprocess
 from pathlib import Path
 from typing import List
 
+_RESULT_MARKERS = ("profile_export_aiperf.json", "profile_export.jsonl")
+
+
+def result_exists(artifact_dir: Path) -> bool:
+    """Check if completed results already exist in the artifact directory."""
+    return all(
+        (artifact_dir / m).is_file() and (artifact_dir / m).stat().st_size > 0
+        for m in _RESULT_MARKERS
+    )
+
 
 def _build_aiperf_cmd(
     model: str,
@@ -105,6 +115,10 @@ def run_concurrency_sweep(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for c in sorted(concurrencies):
+        artifact_dir = output_dir / f"c{c}"
+        if result_exists(artifact_dir):
+            print(f"  SKIP concurrency={c} (result exists: {artifact_dir})", flush=True)
+            continue
         run_aiperf_single(
             model=model,
             port=port,
@@ -113,7 +127,7 @@ def run_concurrency_sweep(
             warmup_count=warmup_count,
             input_file=input_file,
             osl=osl,
-            artifact_dir=output_dir / f"c{c}",
+            artifact_dir=artifact_dir,
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)

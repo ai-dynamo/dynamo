@@ -262,9 +262,18 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
+        let mm_start = Instant::now();
         self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
+        let mm_elapsed = mm_start.elapsed();
+        tracing::info!(
+            mm_ms = mm_elapsed.as_millis() as u64,
+            template_ms = (tokenize_start - template_start).as_millis() as u64,
+            tokenize_ms = (mm_start - tokenize_start).as_millis() as u64,
+            total_ms = preprocess_start.elapsed().as_millis() as u64,
+            "[PERF] preprocess_request"
+        );
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["preprocess"])
@@ -380,6 +389,33 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Replace inline `data:` URLs with empty strings in message content parts.
+    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    fn strip_inline_data_urls(messages: &mut serde_json::Value) {
+        let Some(arr) = messages.as_array_mut() else {
+            return;
+        };
+        for msg in arr {
+            let Some(content) = msg.get_mut("content") else {
+                continue;
+            };
+            let Some(parts) = content.as_array_mut() else {
+                continue;
+            };
+            for part in parts {
+                for key in ["image_url", "video_url", "audio_url"] {
+                    if let Some(media) = part.get_mut(key) {
+                        if let Some(url) = media.get_mut("url") {
+                            if url.as_str().is_some_and(|s| s.starts_with("data:")) {
+                                *url = serde_json::Value::String(String::new());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
@@ -431,12 +467,18 @@ impl OpenAIPreprocessor {
 
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
+            let fetch_start = Instant::now();
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
             let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
                 loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
             }))
             .await;
+            tracing::info!(
+                fetch_decode_ms = fetch_start.elapsed().as_millis() as u64,
+                num_items = fetch_tasks.len(),
+                "[PERF] gather_multi_modal_data fetch+decode+nixl_register"
+            );
 
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
@@ -449,6 +491,14 @@ impl OpenAIPreprocessor {
         }
 
         if !media_map.is_empty() {
+            // Check if all media items were decoded via frontend (RDMA descriptors).
+            // When true, we can strip inline data: URLs from extra_args.messages to
+            // avoid sending ~40MB of redundant base64 over TCP.
+            let all_decoded = media_map
+                .values()
+                .flat_map(|v| v.iter())
+                .all(|item| matches!(item, MultimodalData::Decoded(_)));
+
             builder.multi_modal_data(Some(media_map));
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
@@ -458,6 +508,24 @@ impl OpenAIPreprocessor {
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+
+            if all_decoded {
+                let before_len = serde_json::to_string(&extra_args)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                Self::strip_inline_data_urls(&mut extra_args["messages"]);
+                let after_len = serde_json::to_string(&extra_args)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                tracing::info!(
+                    before_bytes = before_len,
+                    after_bytes = after_len,
+                    saved_bytes = before_len.saturating_sub(after_len),
+                    "[PERF] strip_inline_data_urls"
+                );
+                builder.inline_media_stripped(true);
+            }
+
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
@@ -1348,7 +1416,12 @@ impl
         let annotations_stream = stream::iter(annotations);
 
         // forward the common completion request to the next operator
+        let next_start = Instant::now();
         let response_stream = next.generate(common_request).await?;
+        tracing::info!(
+            next_generate_ms = next_start.elapsed().as_millis() as u64,
+            "[PERF] preprocessor: next.generate (route+transport+worker)"
+        );
         // Extract context once
         let context = response_stream.context();
 
@@ -1548,6 +1621,61 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod strip_tests {
+    use super::OpenAIPreprocessor;
+
+    #[test]
+    fn test_strip_inline_data_urls_replaces_data_urls() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR...longdata..."}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "What is this?");
+        assert_eq!(parts[1]["image_url"]["url"], "");
+        assert_eq!(parts[2]["image_url"]["url"], "https://example.com/img.png");
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_handles_video_audio() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["video_url"]["url"], "");
+        assert_eq!(parts[1]["audio_url"]["url"], "https://example.com/audio.wav");
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_preserves_text_only() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": "plain text message"
+        }]);
+        let original = messages.clone();
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_empty_messages() {
+        let mut messages = serde_json::json!([]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, serde_json::json!([]));
+    }
+}
 
 #[cfg(test)]
 mod tests {

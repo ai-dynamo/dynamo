@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# 4-way aggregated comparison: vllm baseline vs dynamo (ec, fd, ec+fd).
+# Aggregated comparison: vllm baseline vs vllm+ec vs dynamo (ec, fd, ec+fd).
 #
-# Synthetic 1080x2400 images, 4/request, 20% reuse (640 pool), base64.
+# Synthetic 1080x2400 images, 4/request, 20% reuse (96 pool), base64.
 #
 # Usage:
 #   python -m benchmarks.multimodal.sweep --config benchmarks/multimodal/sweep/experiments/qwen35_agg_comparison/sweep.yaml
@@ -11,7 +11,7 @@
 model: Qwen/Qwen3.5-35B-A3B-FP8
 concurrencies: [1, 2]
 osl: 1024
-request_count: 100
+request_count: 30
 warmup_count: 3
 port: 8000
 timeout: 600
@@ -20,9 +20,10 @@ output_dir: logs/qwen35_agg_comparison/sweep_results
 env:
   CUDA_VISIBLE_DEVICES: "2"
   HF_HOME: /data/huggingface
+  DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
 
 input_files:
-  - logs/qwen35_agg_comparison/dataset/100req_4img_320pool_400word_base64.jsonl
+  - logs/qwen35_agg_comparison/dataset/30req_4img_96pool_400word_base64.jsonl
 
 configs:
   - label: vllm-baseline
@@ -38,9 +39,10 @@ configs:
       - --gpu-memory-utilization
       - ".9"
 
-  - label: dynamo-ec
-    workflow: examples/backends/vllm/launch/agg_multimodal.sh
+  - label: vllm-ec
+    workflow: examples/backends/vllm/launch/vllm_serve_embedding_cache.sh
     extra_args:
+      - --no-enable-prefix-caching
       - --multimodal-embedding-cache-capacity-gb
       - "10"
       - --max-model-len
@@ -50,26 +52,41 @@ configs:
       - --gpu-memory-utilization
       - ".9"
 
-  - label: dynamo-fd
-    workflow: examples/backends/vllm/launch/agg_multimodal.sh
-    extra_args:
-      - --frontend-decoding
-      - --max-model-len
-      - "16384"
-      - --max-num-seqs
-      - "8"
-      - --gpu-memory-utilization
-      - ".9"
+  # - label: dynamo-ec
+  #   workflow: examples/backends/vllm/launch/agg_multimodal.sh
+  #   extra_args:
+  #     - --no-enable-prefix-caching
+  #     - --multimodal-embedding-cache-capacity-gb
+  #     - "10"
+  #     - --max-model-len
+  #     - "16384"
+  #     - --max-num-seqs
+  #     - "8"
+  #     - --gpu-memory-utilization
+  #     - ".9"
 
-  - label: dynamo-ec-fd
-    workflow: examples/backends/vllm/launch/agg_multimodal.sh
-    extra_args:
-      - --frontend-decoding
-      - --multimodal-embedding-cache-capacity-gb
-      - "10"
-      - --max-model-len
-      - "16384"
-      - --max-num-seqs
-      - "8"
-      - --gpu-memory-utilization
-      - ".9"
+  # - label: dynamo-fd
+  #   workflow: examples/backends/vllm/launch/agg_multimodal.sh
+  #   extra_args:
+  #     - --no-enable-prefix-caching
+  #     - --frontend-decoding
+  #     - --max-model-len
+  #     - "16384"
+  #     - --max-num-seqs
+  #     - "8"
+  #     - --gpu-memory-utilization
+  #     - ".9"
+
+  # - label: dynamo-ec-fd
+  #   workflow: examples/backends/vllm/launch/agg_multimodal.sh
+  #   extra_args:
+  #     - --no-enable-prefix-caching
+  #     - --frontend-decoding
+  #     - --multimodal-embedding-cache-capacity-gb
+  #     - "10"
+  #     - --max-model-len
+  #     - "16384"
+  #     - --max-num-seqs
+  #     - "8"
+  #     - --gpu-memory-utilization
+  #     - ".9"

@@ -101,6 +101,7 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
     ) -> Result<RdmaMediaDataDescriptor> {
+        use std::time::Instant;
         // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
@@ -112,12 +113,22 @@ impl MediaLoader {
 
                 let url = &image_part.image_url.url;
                 self.media_fetcher.check_if_url_allowed(url)?;
+                let t0 = Instant::now();
                 let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                let fetch_ms = t0.elapsed().as_millis();
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
                     mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                decoder.decode_async(data).await?
+                let t1 = Instant::now();
+                let result = decoder.decode_async(data).await?;
+                let decode_ms = t1.elapsed().as_millis();
+                tracing::info!(
+                    fetch_ms = fetch_ms as u64,
+                    decode_ms = decode_ms as u64,
+                    "[PERF] image fetch+decode"
+                );
+                result
             }
             #[allow(unused_variables)]
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
@@ -147,7 +158,12 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
+        let t_nixl = Instant::now();
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        tracing::info!(
+            nixl_register_ms = t_nixl.elapsed().as_millis() as u64,
+            "[PERF] nixl_register"
+        );
         Ok(rdma_descriptor)
     }
 }

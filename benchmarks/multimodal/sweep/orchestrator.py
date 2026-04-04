@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import SweepConfig, input_file_tag, resolve_repo_root
-from .runner import run_aiperf_single, run_concurrency_sweep
+from .runner import result_exists, run_aiperf_single, run_concurrency_sweep
 from .server import ServerManager
 
 
@@ -66,6 +66,19 @@ def run_sweep(
                 workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
                 sweep_dir = file_output_dir / bench_cfg.label
 
+                pending = [
+                    c
+                    for c in config.concurrencies
+                    if not result_exists(sweep_dir / f"c{c}")
+                ]
+                if not pending:
+                    print(
+                        f"  All concurrencies complete for"
+                        f" [{file_tag}] {bench_cfg.label}, skipping.",
+                        flush=True,
+                    )
+                    continue
+
                 if restart:
                     _sweep_with_restart(
                         server=server,
@@ -122,6 +135,10 @@ def _sweep_with_restart(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for c in sorted(config.concurrencies):
+        artifact_dir = output_dir / f"c{c}"
+        if result_exists(artifact_dir):
+            print(f"  SKIP concurrency={c} (result exists: {artifact_dir})", flush=True)
+            continue
         server.start(
             workflow_script=workflow_script,
             model=config.model,
@@ -137,7 +154,7 @@ def _sweep_with_restart(
                 warmup_count=config.warmup_count,
                 input_file=input_file,
                 osl=config.osl,
-                artifact_dir=output_dir / f"c{c}",
+                artifact_dir=artifact_dir,
             )
         finally:
             server.stop()

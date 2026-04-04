@@ -1166,6 +1166,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         Extract and decode multimodal data from PreprocessedRequest.
         """
+        import time as _time
+
+        _t0 = _time.perf_counter()
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
 
@@ -1216,6 +1219,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if VIDEO_URL_KEY in mm_map:
             logger.warning("Video multimodal data not yet supported in standard worker")
 
+        _t1 = _time.perf_counter()
+        logger.info(
+            f"[PERF] _extract_multimodal_data total: {(_t1-_t0)*1000:.0f}ms for request {request_id}"
+        )
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1538,9 +1545,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
     async def generate(self, request, context):
+        import time as _time
+
+        _t_worker_entry = _time.perf_counter()
         # Use context ID for request tracking and correlation
         request_id = context.id()
-        logger.debug(f"Decode Request ID: {request_id}")
+        logger.info(f"[PERF] worker generate entry for {request_id}")
         first_token = True
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
@@ -1560,6 +1570,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
+        import time as _time
+
+        _t_gen_start = _time.perf_counter()
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
@@ -1596,6 +1609,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        # NOTE: Multimodal preprocessing (_process_multimodal / HF image processor)
+        # runs synchronously inside AsyncLLM.generate() when given a TokensPrompt
+        # with multi_modal_data. This is ~700ms per request and causes head-of-line
+        # blocking under concurrency. Thread pool offload doesn't help due to GIL.
+        # The proper fix requires either:
+        # 1. Moving HF preprocessing to the Rust frontend (send processed tensors)
+        # 2. Using a ProcessPoolExecutor (separate process, avoids GIL)
+        # 3. Upstream vLLM change to make _process_multimodal async/non-blocking
+
         # Build sampling params from request
         sampling_params = build_sampling_params(
             request, self.default_sampling_params, self.model_max_len
@@ -1629,8 +1651,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = build_trace_headers(context)
 
+        _t_before_engine = _time.perf_counter()
+        logger.info(
+            f"[PERF] _generate_token_mode pre-engine setup: {(_t_before_engine-_t_gen_start)*1000:.0f}ms for request {request_id}"
+        )
         async with self._abort_monitor(context, request_id):
             try:
+                _first_tok = True
                 async for tok in self.generate_tokens(
                     prompt,
                     sampling_params,

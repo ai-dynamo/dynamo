@@ -120,14 +120,14 @@ BACKEND_NSYS_FLAGS=(
     --cuda-memory-usage=true
     --backtrace=dwarf
     --sample=process-tree
-    --duration=600
+    --force-overwrite=true
 )
 
 FRONTEND_NSYS_FLAGS=(
     --trace=osrt,nvtx
     --sample=cpu
     --cuda-memory-usage=false
-    --duration=600
+    --force-overwrite=true
 )
 
 # ---------------------------------------------------------------------------
