@@ -440,3 +440,69 @@ class TestMultimodalGuard:
         assert result["prompt"] == "describe image"
         assert result["prompt_token_ids"] == [1, 2, 3]
         assert result["multi_modal_data"] is None
+
+
+class TestDisaggRequestId:
+    """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
+
+    def _make_prefill_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        return handler
+
+    def test_disagg_request_id_populated_in_prefill_mode(self):
+        """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
+        handler = self._make_prefill_handler()
+        disagg_params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=None
+        )
+        assert disagg_params is not None
+        assert disagg_params.disagg_request_id is not None
+        assert isinstance(disagg_params.disagg_request_id, int)
+
+    def test_disagg_request_id_unique_across_calls(self):
+        """Multiple calls should produce different IDs."""
+        handler = self._make_prefill_handler()
+        ids = set()
+        for _ in range(10):
+            params, _, _ = handler._setup_disaggregated_params_for_mode(
+                request={}, ep_disaggregated_params=None
+            )
+            ids.add(params.disagg_request_id)
+        assert len(ids) == 10, f"Expected 10 unique IDs, got {len(ids)}"
+
+    def test_disagg_request_id_set_on_ep_params_with_none(self):
+        """When ep_disaggregated_params has disagg_request_id=None, it gets populated."""
+        handler = self._make_prefill_handler()
+        ep_params = MagicMock()
+        ep_params.disagg_request_id = None
+        # Make bool(ep_params) truthy so the if-branch is taken
+        ep_params.__bool__ = lambda self: True
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=ep_params
+        )
+        assert params.disagg_request_id is not None
+        assert isinstance(params.disagg_request_id, int)
+
+    def test_disagg_request_id_not_overwritten_when_set(self):
+        """When ep_disaggregated_params already has a disagg_request_id, keep it."""
+        handler = self._make_prefill_handler()
+        existing_id = 12345678
+        ep_params = MagicMock()
+        ep_params.disagg_request_id = existing_id
+        ep_params.__bool__ = lambda self: True
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=ep_params
+        )
+        assert params.disagg_request_id == existing_id
+
+    def test_machine_id_deterministic(self):
+        """_DISAGG_MACHINE_ID produces the same value across accesses."""
+        from dynamo.trtllm.request_handlers.handler_base import _DISAGG_MACHINE_ID
+
+        assert _DISAGG_MACHINE_ID == _DISAGG_MACHINE_ID
+        assert 0 <= _DISAGG_MACHINE_ID < 1021

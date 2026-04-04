@@ -18,6 +18,7 @@ import dataclasses
 import logging
 import os
 import re
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -27,6 +28,7 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
@@ -54,6 +56,11 @@ if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
     # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
     from tensorrt_llm.metrics import MetricsCollector
+
+# machine_id for snowflake disagg_request_id generation (10-bit, 0-1023).
+# Uses MAC address mod 1021 (largest prime < 1024), matching TRT-LLM's own
+# DisaggServerConfig.node_id derivation for consistent ID space usage.
+_DISAGG_MACHINE_ID = uuid.getnode() % 1021
 
 configure_dynamo_logging()
 
@@ -465,7 +472,16 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = ep_disaggregated_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(_DISAGG_MACHINE_ID),
+                )
+
+            # Ensure disagg_request_id is set even when using
+            # ep_disaggregated_params, so the PYTHON transceiver can track
+            # requests across prefill/decode workers.
+            if disaggregated_params.disagg_request_id is None:
+                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                    _DISAGG_MACHINE_ID
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
