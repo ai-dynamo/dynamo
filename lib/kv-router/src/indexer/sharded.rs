@@ -371,9 +371,13 @@ impl KvIndexerInterface for KvIndexerSharded {
         'match_loop: loop {
             let (match_tx, mut match_rx) = mpsc::channel(self.event_tx.len());
             let sharded_req = ShardedMatchRequest::new(sequence.clone(), false, match_tx);
-            self.request_broadcast_tx
-                .send(sharded_req)
-                .map_err(|_| KvRouterError::IndexerOffline)?;
+            if let Err(e) = self.request_broadcast_tx.send(sharded_req) {
+                tracing::error!(
+                    "Failed to broadcast sharded match request: {:?}; returning empty overlaps",
+                    e
+                );
+                return Ok(OverlapScores::new());
+            }
 
             let mut scores = OverlapScores::new();
 
