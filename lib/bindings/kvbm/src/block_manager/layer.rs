@@ -76,15 +76,25 @@ impl Layer {
             let mut mutable_block = self.inner.lock().unwrap();
             ptr = match &mut *mutable_block {
                 block::BlockType::Pinned(block) => {
-                    use dynamo_llm::block_manager::block::private::PrivateToken;
-                    let block_data = block.block_data_mut(PrivateToken);
+                    let block_data = block.block_data_mut();
+                    let mut layer_view_mut =
+                        block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
+                    (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                block::BlockType::PinnedOwned(block) => {
+                    let block_data = block.block_data_mut();
                     let mut layer_view_mut =
                         block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 block::BlockType::Device(block) => {
-                    use dynamo_llm::block_manager::block::private::PrivateToken;
-                    let block_data = block.block_data_mut(PrivateToken);
+                    let block_data = block.block_data_mut();
+                    let mut layer_view_mut =
+                        block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
+                    (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                block::BlockType::DeviceOwned(block) => {
+                    let block_data = block.block_data_mut();
                     let mut layer_view_mut =
                         block_data.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
@@ -96,7 +106,17 @@ impl Layer {
                     block.page_size() as i64,
                     block.inner_dim() as i64,
                 ),
+                block::BlockType::PinnedOwned(block) => (
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
                 block::BlockType::Device(block) => (
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
+                block::BlockType::DeviceOwned(block) => (
                     block.num_outer_dims() as i64,
                     block.page_size() as i64,
                     block.inner_dim() as i64,

@@ -88,3 +88,4 @@ dynamo-llm = { path = "../../llm", default-features = false }
 inherits = "release"
 debug = true
 strip = false
+

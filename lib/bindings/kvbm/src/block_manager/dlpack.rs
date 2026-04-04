@@ -10,11 +10,24 @@ use dlpark::prelude::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
 use pyo3::{ffi::c_str, prelude::IntoPy, types::PyTuple, PyObject, PyResult, Python};
 use std::sync::{Arc, Mutex};
 
+enum DlPackOwner {
+    Single(Arc<Mutex<block::BlockType>>),
+    Many(Vec<Arc<Mutex<block::BlockType>>>),
+}
+
+impl DlPackOwner {
+    fn first_block(&self) -> &Arc<Mutex<block::BlockType>> {
+        match self {
+            Self::Single(block) => block,
+            Self::Many(blocks) => &blocks[0],
+        }
+    }
+}
+
 struct DlPackTensor {
-    block: Arc<Mutex<block::BlockType>>,
+    owner: DlPackOwner,
     ptr: *mut std::ffi::c_void,
-    shape: Vec<i64>,
-    // TODO: Metadata should be stored in the block?
+    shape_and_strides: ShapeAndStrides,
     dtype: dynamo_llm::common::dtype::DType,
     device_id: usize,
 }
@@ -29,9 +42,9 @@ impl ToTensor for DlPackTensor {
     }
 
     fn device(&self) -> Device {
-        let mutable_block = self.block.lock().unwrap();
+        let mutable_block = self.owner.first_block().lock().unwrap();
         match &*mutable_block {
-            block::BlockType::Pinned(_) => {
+            block::BlockType::Pinned(_) | block::BlockType::PinnedOwned(_) => {
                 // TODO: Why torch does not support CPU_PINNED here?
                 /*Device {
                     device_type: DeviceType::CudaHost,
@@ -39,7 +52,9 @@ impl ToTensor for DlPackTensor {
                 }*/
                 Device::CPU
             }
-            block::BlockType::Device(_) => Device::cuda(self.device_id),
+            block::BlockType::Device(_) | block::BlockType::DeviceOwned(_) => {
+                Device::cuda(self.device_id)
+            }
         }
     }
 
@@ -65,7 +80,19 @@ impl ToTensor for DlPackTensor {
     }
 
     fn shape_and_strides(&self) -> ShapeAndStrides {
-        ShapeAndStrides::new_contiguous(&self.shape)
+        match &self.shape_and_strides {
+            ShapeAndStrides::Contiguous(shape) => ShapeAndStrides::new_contiguous(shape.iter()),
+            ShapeAndStrides::WithStrides(values) => {
+                let ndim = values.len() / 2;
+                ShapeAndStrides::new_with_strides(values[..ndim].iter(), values[ndim..].iter())
+            }
+            ShapeAndStrides::Borrowed { .. } => {
+                ShapeAndStrides::new_borrowed(
+                    self.shape_and_strides.shape(),
+                    self.shape_and_strides.strides(),
+                )
+            }
+        }
     }
 }
 
@@ -84,9 +111,33 @@ pub fn dlpack<'py>(
     device_id: usize,
 ) -> PyResult<PyObject> {
     let manager_ctx = ManagerCtx::new(DlPackTensor {
-        block,
+        owner: DlPackOwner::Single(block),
         ptr,
-        shape,
+        shape_and_strides: ShapeAndStrides::new_contiguous(&shape),
+        dtype,
+        device_id,
+    });
+    let py_capsule = manager_ctx.into_py(py);
+    Ok(py_capsule)
+}
+
+pub fn dlpack_many<'py>(
+    py: Python<'py>,
+    blocks: Vec<Arc<Mutex<block::BlockType>>>,
+    ptr: *mut std::ffi::c_void,
+    shape: Vec<i64>,
+    strides: Option<Vec<i64>>,
+    dtype: dynamo_llm::common::dtype::DType,
+    device_id: usize,
+) -> PyResult<PyObject> {
+    let shape_and_strides = match strides {
+        Some(strides) => ShapeAndStrides::new_with_strides(&shape, &strides),
+        None => ShapeAndStrides::new_contiguous(&shape),
+    };
+    let manager_ctx = ManagerCtx::new(DlPackTensor {
+        owner: DlPackOwner::Many(blocks),
+        ptr,
+        shape_and_strides,
         dtype,
         device_id,
     });
@@ -108,10 +159,38 @@ pub fn dlpack_device<'py>(
         .call1(("DLDeviceType", dev_type_list))
         .unwrap();
     let dev_type = match &*block.lock().unwrap() {
-        block::BlockType::Pinned(_) => dev_type_enum.getattr("CPU_PINNED").unwrap(),
-        block::BlockType::Device(_) => dev_type_enum.getattr("CUDA").unwrap(),
+        block::BlockType::Pinned(_) | block::BlockType::PinnedOwned(_) => {
+            dev_type_enum.getattr("CPU_PINNED").unwrap()
+        }
+        block::BlockType::Device(_) | block::BlockType::DeviceOwned(_) => {
+            dev_type_enum.getattr("CUDA").unwrap()
+        }
     };
     let dev_id = device_id.into_py(py).into_bound(py);
     let dev = vec![dev_type, dev_id];
     PyTuple::new(py, dev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_and_strides_support_non_contiguous_views() {
+        let shape = vec![4, 2, 8];
+        let strides = vec![64, 32, 1];
+
+        let tensor = DlPackTensor {
+            owner: DlPackOwner::Many(Vec::new()),
+            ptr: std::ptr::null_mut(),
+            shape_and_strides: ShapeAndStrides::new_with_strides(&shape, &strides),
+            dtype: dynamo_llm::common::dtype::DType::FP16,
+            device_id: 0,
+        };
+
+        let exported = tensor.shape_and_strides();
+        assert_eq!(exported.shape(), shape.as_slice());
+        assert_eq!(exported.strides(), Some(strides.as_slice()));
+        assert!(!exported.is_contiguous());
+    }
 }
