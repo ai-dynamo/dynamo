@@ -100,6 +100,8 @@ def pytest_configure(config: pytest.Config) -> None:
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
         return
+    if config.option.collectonly:
+        return
     # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
     # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
     from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
@@ -482,8 +484,9 @@ def pytest_collection_modifyitems(config, items):
     #   - Tests whose profiled VRAM exceeds the limit are removed
     #   - Tests WITHOUT a VRAM marker are also removed (unknown VRAM = unsafe)
     # Using deselect (not skip) so they never reach the xdist scheduler.
+    # Skip all VRAM logic during --collect-only (just listing tests).
     vram_limit = config.getoption("--max-vram-gib", default=None)
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         keep = []
         deselected = []
         for item in items:
@@ -497,7 +500,7 @@ def pytest_collection_modifyitems(config, items):
             items[:] = keep
 
     # Write test metadata for the GPU orchestrator to read.
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         # Delayed: see vram_utils pynvml note in pytest_configure
         from tests.utils.vram_utils import print_gpu_plan, write_test_meta
 
