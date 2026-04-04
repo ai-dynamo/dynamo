@@ -2489,6 +2489,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "level-zero",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
