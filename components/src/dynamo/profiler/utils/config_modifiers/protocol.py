@@ -24,11 +24,11 @@ from dynamo.profiler.utils.config import (
     Config,
     Container,
     PodSpec,
-    ServiceResources,
     break_arguments,
     get_service_name_by_type,
     sanitize_cli_args,
     set_argument_value,
+    setup_worker_service_resources,
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
@@ -121,6 +121,29 @@ class ConfigModifierProtocol(Protocol):
         pvc_name: str,
         pvc_mount_path: str,
         pvc_path: str,
+    ) -> dict:
+        ...
+
+    @classmethod
+    def build_dgd_config(
+        cls,
+        mode: str,
+        model_name: str,
+        image: str,
+        prefill_cli_args: list[str] | None = None,
+        prefill_replicas: int = 1,
+        prefill_gpus: int = 1,
+        decode_cli_args: list[str] | None = None,
+        decode_replicas: int = 1,
+        decode_gpus: int = 1,
+        agg_cli_args: list[str] | None = None,
+        agg_replicas: int = 1,
+        agg_gpus: int = 1,
+        namespace: str | None = None,
+        model_path: str | None = None,
+        pvc_name: str | None = None,
+        pvc_mount_path: str | None = None,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
 
@@ -439,6 +462,7 @@ class BaseConfigModifier:
         model_path: str | None = None,
         pvc_name: str | None = None,
         pvc_mount_path: str | None = None,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         """
         Build a complete DynamoGraphDeployment config by loading a base YAML
@@ -465,6 +489,9 @@ class BaseConfigModifier:
             model_path: Model path if different from model_name (e.g. PVC path)
             pvc_name: PVC claim name for model cache (optional)
             pvc_mount_path: PVC mount path (optional)
+            num_gpus_per_node: GPUs per physical node. When provided, worker
+                GPU limits are capped per node and multinode.nodeCount is set
+                for workers that span multiple nodes.
 
         Returns:
             Complete DGD config dict ready for YAML serialization
@@ -496,6 +523,7 @@ class BaseConfigModifier:
                 decode_cli_args=decode_cli_args or [],
                 decode_replicas=decode_replicas,
                 decode_gpus=decode_gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
         else:
             cls._apply_agg_worker(
@@ -503,6 +531,7 @@ class BaseConfigModifier:
                 agg_cli_args=agg_cli_args or [],
                 agg_replicas=agg_replicas,
                 agg_gpus=agg_gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
 
         # Update model (handles worker args + frontend patching)
@@ -552,15 +581,11 @@ class BaseConfigModifier:
         cli_args: list[str],
         replicas: int,
         gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-
-        if service.resources is None:
-            service.resources = ServiceResources()
-        if service.resources.limits is None:
-            service.resources.limits = {}
-        service.resources.limits["gpu"] = str(gpus)
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
@@ -575,6 +600,7 @@ class BaseConfigModifier:
         decode_cli_args: list[str],
         decode_replicas: int,
         decode_gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to disagg worker services."""
         for sct, cli_args, replicas, gpus in [
@@ -595,7 +621,11 @@ class BaseConfigModifier:
                 )
                 continue
             cls._apply_worker_config(
-                cfg.spec.services[svc_name], cli_args, replicas, gpus
+                cfg.spec.services[svc_name],
+                cli_args,
+                replicas,
+                gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
 
     @classmethod
@@ -605,6 +635,7 @@ class BaseConfigModifier:
         agg_cli_args: list[str],
         agg_replicas: int,
         agg_gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to the agg worker service.
 
@@ -624,7 +655,11 @@ class BaseConfigModifier:
             logger.warning("Could not find worker service for agg mode")
             return
         cls._apply_worker_config(
-            cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus
+            cfg.spec.services[svc_name],
+            agg_cli_args,
+            agg_replicas,
+            agg_gpus,
+            num_gpus_per_node=num_gpus_per_node,
         )
 
 
