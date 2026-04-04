@@ -118,6 +118,17 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% if device == "cpu" %}
+# Pin nixl-cu12 to the same version as the installed nixl wheel to prevent PyPI from
+# resolving a newer version via the meta wheel's loose >=VERSION dependency.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    NIXL_VER=$(pip show nixl 2>/dev/null | grep '^Version:' | awk '{print $2}') && \
+    if [ -n "$NIXL_VER" ]; then \
+        echo "Pinning nixl-cu12==${NIXL_VER} to match installed nixl" && \
+        uv pip install "nixl-cu12==${NIXL_VER}"; \
+    fi
+{% endif %}
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)
