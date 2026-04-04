@@ -28,7 +28,6 @@ use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::protocols::annotated::Annotated;
-use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 use dynamo_runtime::{
     component::Component,
     engine::AsyncEngineContextProvider,
@@ -43,7 +42,9 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::utils::zmq::{bind_pub_socket, bind_router_socket, send_multipart};
+use crate::utils::zmq::{
+    bind_pub_socket, bind_router_socket, multipart_message, send_multipart, send_multipart_direct,
+};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -111,10 +112,6 @@ impl ZmqKvEventSink {
         } else {
             None
         };
-        let mut replay_rx = router_socket
-            .as_ref()
-            .map(|socket| spawn_multipart_recv_pump(socket.clone()));
-
         tokio::spawn(async move {
             let mut seq_num: u64 = 0;
             // Store Bytes (ref-counted) to avoid memcpy on both PUB and buffer paths.
@@ -127,22 +124,20 @@ impl ZmqKvEventSink {
                     // Replay requests are rare but latency-sensitive — poll first
                     // to prevent starvation under sustained KV event load.
                     replay_result = async {
-                        match replay_rx.as_mut() {
-                            Some(rx) => rx.recv().await,
+                        match router_socket.as_mut() {
+                            Some(socket) => socket.next().await,
                             None => std::future::pending().await,
                         }
                     } => {
                         let req_msg = match replay_result {
-                            Some(Ok(req_msg)) => req_msg,
+                            Some(Ok(req_msg)) => multipart_message(req_msg),
                             Some(Err(error)) => {
                                 tracing::warn!("Replay ROUTER recv error: {error}");
-                                replay_rx = None;
                                 router_socket = None;
                                 continue;
                             }
                             None => {
-                                tracing::warn!("Replay ROUTER receive pump exited");
-                                replay_rx = None;
+                                tracing::warn!("Replay ROUTER stream ended");
                                 router_socket = None;
                                 continue;
                             }
@@ -176,7 +171,7 @@ impl ZmqKvEventSink {
                                 seq.to_be_bytes().to_vec(),
                                 payload.to_vec(),
                             ];
-                            if let Err(e) = send_multipart(sock, frames).await {
+                            if let Err(e) = send_multipart_direct(sock, frames).await {
                                 tracing::warn!("Replay send error: {e}");
                                 break;
                             }
@@ -188,7 +183,7 @@ impl ZmqKvEventSink {
                             (-1i64).to_be_bytes().to_vec(),
                             Vec::new(),
                         ];
-                        let _ = send_multipart(sock, sentinel_frames).await;
+                        let _ = send_multipart_direct(sock, sentinel_frames).await;
                     }
 
                     msg_opt = rx.recv() => {

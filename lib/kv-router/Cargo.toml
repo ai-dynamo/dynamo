@@ -17,7 +17,7 @@ default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
-standalone-indexer = ["dep:axum", "dep:zmq", "dep:serde_json", "dep:reqwest"]
+standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq"]
 indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
 [dependencies]
@@ -40,6 +40,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+zmq = { version = "0.10", optional = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
@@ -54,7 +55,6 @@ rustc-hash = "2.1.1"
 # standalone-indexer (optional)
 axum = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
-zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = "0.18.2"

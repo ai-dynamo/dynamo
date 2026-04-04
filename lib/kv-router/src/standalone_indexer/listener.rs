@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rmp_serde as rmps;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
@@ -16,7 +16,7 @@ use super::indexer::Indexer;
 use super::registry::ListenerRecord;
 use super::zmq::{
     MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
-    send_multipart, spawn_recv_pump,
+    send_multipart,
 };
 
 const WATERMARK_UNSET: u64 = u64::MAX;
@@ -35,7 +35,7 @@ struct ListenerLoop {
     block_size: u32,
     indexer: Indexer,
     cancel: CancellationToken,
-    message_rx: mpsc::UnboundedReceiver<Result<MultipartMessage, String>>,
+    live_socket: SharedSocket,
     replay_socket: Option<SharedSocket>,
     watermark: Arc<AtomicU64>,
     warning_count: Arc<AtomicU32>,
@@ -50,7 +50,7 @@ impl ListenerLoop {
         block_size: u32,
         indexer: Indexer,
         cancel: CancellationToken,
-        message_rx: mpsc::UnboundedReceiver<Result<MultipartMessage, String>>,
+        live_socket: SharedSocket,
         replay_socket: Option<SharedSocket>,
         watermark: Arc<AtomicU64>,
     ) -> Self {
@@ -60,7 +60,7 @@ impl ListenerLoop {
             block_size,
             indexer,
             cancel,
-            message_rx,
+            live_socket,
             replay_socket,
             watermark,
             warning_count: Arc::new(AtomicU32::new(0)),
@@ -81,7 +81,7 @@ impl ListenerLoop {
             "Requesting replay from engine"
         );
 
-        let Some(replay_socket) = self.replay_socket.as_mut() else {
+        let Some(replay_socket) = self.replay_socket.as_ref() else {
             tracing::warn!(
                 self.worker_id,
                 self.dp_rank,
@@ -106,15 +106,16 @@ impl ListenerLoop {
 
         let mut replayed = 0u64;
         loop {
-            if self.cancel.is_cancelled() {
-                break;
-            }
-            let msg = match recv_multipart(replay_socket).await {
-                Ok(Some(msg)) => msg,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::error!(worker_id, dp_rank, error = %error, "Replay recv error");
-                    break;
+            let msg = tokio::select! {
+                _ = self.cancel.cancelled() => break,
+                result = recv_multipart(replay_socket) => {
+                    match result {
+                        Ok(msg) => msg,
+                        Err(error) => {
+                            tracing::error!(worker_id, dp_rank, error = %error, "Replay recv error");
+                            break;
+                        }
+                    }
                 }
             };
             if msg.len() < 3 {
@@ -289,19 +290,12 @@ impl ListenerLoop {
                     return Ok(());
                 }
 
-                msg_result = self.message_rx.recv() => {
-                    match msg_result {
-                        Some(Ok(msg)) => msg,
-                        Some(Err(error)) => {
+                result = recv_multipart(&self.live_socket) => {
+                    match result {
+                        Ok(msg) => msg,
+                        Err(error) => {
                             return Err(format!(
                                 "ZMQ recv failed for worker {} dp_rank {}: {error}",
-                                self.worker_id,
-                                self.dp_rank,
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "ZMQ receive pump ended for worker {} dp_rank {}",
                                 self.worker_id,
                                 self.dp_rank,
                             ));
@@ -361,9 +355,7 @@ async fn run_listener(
     }
 
     let socket = connect_sub_socket(&endpoint)
-        .await
         .map_err(|e| format!("failed to connect ZMQ SUB socket to {endpoint}: {e}"))?;
-    let message_rx = spawn_recv_pump(socket);
 
     tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
@@ -395,7 +387,7 @@ async fn run_listener(
         block_size,
         indexer,
         cancel,
-        message_rx,
+        socket,
         replay_socket,
         watermark,
     )
@@ -415,7 +407,7 @@ async fn connect_replay_socket(
         return None;
     }
 
-    match connect_dealer_socket(endpoint).await {
+    match connect_dealer_socket(endpoint) {
         Ok(socket) => {
             tracing::info!(
                 worker_id,
@@ -473,12 +465,12 @@ mod tests {
                 .port()
         );
         drop(reserved_listener);
-        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
-        let mut sub_socket = connect_sub_socket(&endpoint).await.unwrap();
+        let pub_socket = bind_pub_socket(&endpoint).unwrap();
+        let mut sub_socket = connect_sub_socket(&endpoint).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SharedSocket>(1);
         tokio::spawn(async move {
-            while recv_multipart(&sub_socket).await.unwrap().is_none() {}
+            let _ = recv_multipart(&sub_socket).await.unwrap();
             let _ = tx.send(sub_socket).await;
         });
         loop {
@@ -503,15 +495,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         for i in 0u64..num_messages {
-            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                loop {
-                    if let Some(msg) = recv_multipart(&sub_socket).await.unwrap() {
-                        return msg;
-                    }
-                }
-            })
+            let msg = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                recv_multipart(&sub_socket),
+            )
             .await
-            .expect("timed out waiting for ZMQ message");
+            .expect("timed out waiting for ZMQ message")
+            .unwrap();
 
             let payload = msg.first().unwrap();
             let received = u64::from_le_bytes(payload[..8].try_into().unwrap());
@@ -530,11 +520,11 @@ mod tests {
                 .port()
         );
         drop(reserved_listener);
-        let sub_socket = connect_sub_socket(&endpoint).await.unwrap();
+        let sub_socket = connect_sub_socket(&endpoint).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let pub_socket = bind_pub_socket(&endpoint).unwrap();
         for _ in 0..5 {
             send_multipart(&pub_socket, vec![b"probe".to_vec()])
                 .await
@@ -542,15 +532,13 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if let Some(msg) = recv_multipart(&sub_socket).await.unwrap() {
-                    return msg;
-                }
-            }
-        })
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            recv_multipart(&sub_socket),
+        )
         .await
-        .expect("timed out waiting for ZMQ message");
+        .expect("timed out waiting for ZMQ message")
+        .unwrap();
 
         assert_eq!(msg, vec![b"probe".to_vec()]);
     }

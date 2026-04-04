@@ -242,8 +242,10 @@ def run_indexers_sync_test(
     block_size: int,
     model_name: str,
     num_workers: int,
+    extra_process_kwargs: dict[str, Any] | None = None,
 ):
     nats_process, _etcd_process = runtime_services_dynamic_ports
+    process_kwargs = extra_process_kwargs or {}
 
     with engine_process_cls(
         request,
@@ -253,6 +255,7 @@ def run_indexers_sync_test(
         store_backend=store_backend,
         durable_kv_events=durable_kv_events,
         **{engine_args_name: engine_args},
+        **process_kwargs,
     ) as engine_workers:
         _test_router_indexers_sync(
             engine_workers=engine_workers,
@@ -264,4 +267,13 @@ def run_indexers_sync_test(
             test_nats_interruption=not durable_kv_events,
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
+            standalone_indexer_url=getattr(
+                engine_workers, "standalone_indexer_url", None
+            ),
+            standalone_indexer_b_url=getattr(
+                engine_workers, "standalone_indexer_b_url", None
+            ),
+            test_zmq_replay=bool(
+                getattr(engine_workers, "standalone_indexer_url", None)
+            ),
         )

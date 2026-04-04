@@ -5,8 +5,8 @@
 //!
 //! This module provides a ZMQ transport for the [crate::DistributedRuntime].
 //!
-//! Currently, the [Server] consists of a [async_zmq::Router] and the [Client] leverages
-//! a [async_zmq::Dealer].
+//! Currently, the [Server] consists of a [tmq::router::Router] and the [Client] leverages
+//! a [tmq::dealer::Dealer].
 //!
 //! The distributed service pattern we will use is based on the Harmony pattern described in
 //! [Chapter 8: A Framework for Distributed Computing](https://zguide.zeromq.org/docs/chapter8/#True-Peer-Connectivity-Harmony-Pattern).
@@ -17,77 +17,19 @@
 //! routing step per service endpoint.
 
 use anyhow::{Context, Result, anyhow};
-use async_zmq::{Context as AsyncZmqContext, Dealer, Router, Sink, SinkExt, StreamExt};
 use bytes::Bytes;
 use derive_getters::Dissolve;
-use futures::TryStreamExt;
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, os::fd::FromRawFd, sync::Arc, time::Duration, vec::IntoIter};
+use std::{collections::HashMap, sync::Arc};
+use tmq::{AsZmqSocket, Context as TmqContext, dealer, router};
 use tokio::{
     sync::{Mutex, mpsc},
-    task::{JoinError, JoinHandle},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 pub type MultipartMessage = Vec<Vec<u8>>;
-pub type SharedRawZmqSocket = Arc<std::sync::Mutex<::zmq::Socket>>;
-pub type MultipartPumpReceiver =
-    mpsc::UnboundedReceiver<std::result::Result<MultipartMessage, String>>;
-
-pub async fn spawn_configured_raw_socket<F>(
-    socket_type: ::zmq::SocketType,
-    configure: F,
-) -> Result<SharedRawZmqSocket>
-where
-    F: FnOnce(&::zmq::Socket) -> Result<()> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || -> Result<SharedRawZmqSocket> {
-        let ctx = ::zmq::Context::new();
-        let socket = ctx.socket(socket_type)?;
-        configure(&socket)?;
-        Ok(Arc::new(std::sync::Mutex::new(socket)))
-    })
-    .await
-    .context("failed to join ZMQ socket task")?
-}
-
-pub fn spawn_multipart_recv_pump(socket: SharedRawZmqSocket) -> MultipartPumpReceiver {
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        loop {
-            let socket = Arc::clone(&socket);
-            let result =
-                tokio::task::spawn_blocking(move || -> Result<Option<MultipartMessage>> {
-                    let socket = socket.lock().expect("ZMQ socket mutex poisoned");
-                    match socket.recv_multipart(0) {
-                        Ok(frames) => Ok(Some(frames)),
-                        Err(::zmq::Error::EAGAIN) => Ok(None),
-                        Err(error) => Err(error.into()),
-                    }
-                })
-                .await
-                .context("failed to join ZMQ recv task");
-
-            match result {
-                Ok(Ok(Some(frames))) => {
-                    if tx.send(Ok(frames)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Ok(None)) => continue,
-                Ok(Err(error)) => {
-                    let _ = tx.send(Err(error.to_string()));
-                    break;
-                }
-                Err(error) => {
-                    let _ = tx.send(Err(error.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-    rx
-}
 
 // Core message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,8 +91,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new [Server] which is a [async_zmq::Router] with the given [async_zmq::Context] and address to bind
-    /// the ZMQ [async_zmq::Router] socket.
+    /// Create a new [Server] which is a [tmq::router::Router] with the given [tmq::Context]
+    /// and address to bind the ZMQ router socket.
     ///
     /// If the event loop processing the router fails with an error, the signal is propagated through the [CancellationToken]
     /// by issuing a [CancellationToken::cancel].
@@ -159,12 +101,12 @@ impl Server {
     ///
     /// The [ServerExecutionHandle] is the handle for background task executing the [Server].
     pub async fn new(
-        context: &AsyncZmqContext,
+        context: &TmqContext,
         address: &str,
         cancel_token: CancellationToken,
     ) -> Result<(Self, ServerExecutionHandle)> {
-        let router = async_zmq::router(address)?.with_context(context).bind()?;
-        let fd = router.as_raw_socket().get_fd()?;
+        let router = router(context).bind(address)?;
+        let fd = router.get_socket().get_fd()?;
         let state = Arc::new(Mutex::new(RouterState::new()));
 
         // can cancel the router's event loop
@@ -202,7 +144,7 @@ impl Server {
     // pub async fn register_stream(&)
 
     async fn run(
-        router: Router<IntoIter<Vec<u8>>, Vec<u8>>,
+        router: tmq::router::Router,
         state: Arc<Mutex<RouterState>>,
         token: CancellationToken,
     ) -> Result<()> {
@@ -358,19 +300,17 @@ impl ServerExecutionHandle {
 
 // Client implementation
 pub struct Client {
-    dealer: Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
+    dealer: tmq::dealer::Dealer,
 }
 
 impl Client {
-    fn new(context: &AsyncZmqContext, address: &str) -> Result<Self> {
-        let dealer = async_zmq::dealer(address)?
-            .with_context(context)
-            .connect()?;
+    fn new(context: &TmqContext, address: &str) -> Result<Self> {
+        let dealer = dealer(context).connect(address)?;
 
         Ok(Self { dealer })
     }
 
-    fn dealer(&mut self) -> &mut Dealer<IntoIter<Vec<u8>>, Vec<u8>> {
+    fn dealer(&mut self) -> &mut tmq::dealer::Dealer {
         &mut self.dealer
     }
 
@@ -416,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_communication() -> Result<()> {
-        let context = AsyncZmqContext::new();
+        let context = TmqContext::new();
         let address = "tcp://127.0.0.1:1337";
         let token = CancellationToken::new();
 
@@ -433,7 +373,10 @@ mod tests {
 
         client
             .dealer()
-            .send(vec![id.as_bytes().to_vec(), id.as_bytes().to_vec()].into())
+            .send(tmq::Multipart::from(vec![
+                id.as_bytes().to_vec(),
+                id.as_bytes().to_vec(),
+            ]))
             .await?;
 
         let receive_result = rx.recv().await;
@@ -444,7 +387,7 @@ mod tests {
         let received_str = String::from_utf8_lossy(&received).to_string();
         assert_eq!(received_str, "test-request");
 
-        client.dealer().close().await?;
+        drop(client);
 
         handle.cancel();
         handle.join().await?;

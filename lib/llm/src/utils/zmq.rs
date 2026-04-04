@@ -3,95 +3,98 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use dynamo_runtime::transports::zmq::{
-    MultipartMessage, SharedRawZmqSocket, spawn_configured_raw_socket,
+use anyhow::Result;
+use futures::SinkExt;
+use tmq::{
+    Context, Multipart, SocketBuilder,
+    publish::{Publish, publish},
+    router::{Router, router},
+    subscribe::{Subscribe, subscribe},
 };
+use tokio::sync::Mutex;
+
+pub(crate) type MultipartMessage = Vec<Vec<u8>>;
+pub(crate) type SharedPubSocket = Arc<Mutex<Publish>>;
+pub(crate) type SubSocket = Subscribe;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
 const ZMQ_RECONNECT_IVL_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MAX_MS: i32 = 5000;
 const ZMQ_TCP_KEEPALIVE: i32 = 1;
-const ZMQ_HEARTBEAT_IVL_MS: i32 = 5000;
-const ZMQ_HEARTBEAT_TIMEOUT_MS: i32 = 15000;
-const ZMQ_HEARTBEAT_TTL_MS: i32 = 15000;
 const ZMQ_LINGER_MS: i32 = 0;
 
-fn configure_common_socket(socket: &zmq::Socket) -> Result<()> {
-    socket.set_linger(ZMQ_LINGER_MS)?;
-    socket.set_reconnect_ivl(ZMQ_RECONNECT_IVL_MS)?;
-    socket.set_reconnect_ivl_max(ZMQ_RECONNECT_IVL_MAX_MS)?;
-    socket.set_tcp_keepalive(ZMQ_TCP_KEEPALIVE)?;
-    socket.set_heartbeat_ivl(ZMQ_HEARTBEAT_IVL_MS)?;
-    socket.set_heartbeat_timeout(ZMQ_HEARTBEAT_TIMEOUT_MS)?;
-    socket.set_heartbeat_ttl(ZMQ_HEARTBEAT_TTL_MS)?;
-    Ok(())
+fn configure_common_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_linger(ZMQ_LINGER_MS)
+        .set_reconnect_ivl(ZMQ_RECONNECT_IVL_MS)
+        .set_reconnect_ivl_max(ZMQ_RECONNECT_IVL_MAX_MS)
+        .set_tcp_keepalive(ZMQ_TCP_KEEPALIVE)
 }
 
-fn configure_receive_socket(socket: &zmq::Socket) -> Result<()> {
-    configure_common_socket(socket)?;
-    socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
-    Ok(())
+fn configure_receive_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    configure_common_builder(builder).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
-fn configure_bidirectional_socket(socket: &zmq::Socket) -> Result<()> {
-    configure_receive_socket(socket)?;
-    socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
-    Ok(())
+fn configure_bidirectional_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    configure_receive_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
-    configure_common_socket(socket)?;
-    socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
-    Ok(())
+fn configure_send_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    configure_common_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-pub(crate) async fn connect_sub_socket(
-    endpoint: &str,
-    topic: Option<&str>,
-) -> Result<SharedRawZmqSocket> {
-    let endpoint = endpoint.to_string();
-    let topic = topic.unwrap_or("").to_string();
-    spawn_configured_raw_socket(zmq::SUB, move |socket| {
-        configure_receive_socket(socket)?;
-        socket.set_subscribe(topic.as_bytes())?;
-        socket.connect(&endpoint)?;
-        Ok(())
-    })
-    .await
+pub(crate) async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> Result<SubSocket> {
+    let ctx = Context::new();
+    let socket = configure_receive_builder(subscribe(&ctx))
+        .connect(endpoint)?
+        .subscribe(topic.unwrap_or("").as_bytes())?;
+    Ok(socket)
 }
 
-pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedRawZmqSocket> {
-    let endpoint = endpoint.to_string();
-    spawn_configured_raw_socket(zmq::PUB, move |socket| {
-        configure_send_socket(socket)?;
-        socket.bind(&endpoint)?;
-        Ok(())
-    })
-    .await
+pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
+    let ctx = Context::new();
+    let socket = configure_send_builder(publish(&ctx)).bind(endpoint)?;
+    Ok(Arc::new(Mutex::new(socket)))
 }
 
-pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<SharedRawZmqSocket> {
-    let endpoint = endpoint.to_string();
-    spawn_configured_raw_socket(zmq::ROUTER, move |socket| {
-        configure_bidirectional_socket(socket)?;
-        socket.bind(&endpoint)?;
-        Ok(())
-    })
-    .await
+pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<Router> {
+    let ctx = Context::new();
+    let socket = configure_bidirectional_builder(router(&ctx)).bind(endpoint)?;
+    Ok(socket)
 }
 
-pub(crate) async fn send_multipart(
-    socket: &SharedRawZmqSocket,
+pub(crate) fn multipart_message(multipart: Multipart) -> MultipartMessage {
+    multipart.into_iter().map(|frame| frame.to_vec()).collect()
+}
+
+pub(crate) async fn send_multipart<S>(
+    socket: &Arc<Mutex<S>>,
     frames: MultipartMessage,
-) -> Result<()> {
-    let socket = Arc::clone(socket);
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let socket = socket.lock().expect("ZMQ socket mutex poisoned");
-        socket.send_multipart(frames, 0)?;
-        Ok(())
-    })
-    .await
-    .context("failed to join ZMQ send task")?
+) -> Result<()>
+where
+    S: futures::Sink<Multipart, Error = tmq::TmqError> + Unpin,
+{
+    socket.lock().await.send(Multipart::from(frames)).await?;
+    Ok(())
+}
+
+pub(crate) async fn send_multipart_direct<S>(socket: &mut S, frames: MultipartMessage) -> Result<()>
+where
+    S: futures::Sink<Multipart, Error = tmq::TmqError> + Unpin,
+{
+    socket.send(Multipart::from(frames)).await?;
+    Ok(())
 }

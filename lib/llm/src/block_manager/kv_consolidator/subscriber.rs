@@ -6,6 +6,7 @@
 //! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -14,10 +15,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::zmq_wire::RawKvEvent;
-use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 
 use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
-use crate::utils::zmq::connect_sub_socket;
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 /// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
@@ -77,7 +77,7 @@ async fn run_listener_loop(
     let socket = connect_sub_socket(&endpoint, None)
         .await
         .with_context(|| format!("Failed to connect to ZMQ endpoint {endpoint}"))?;
-    let mut message_rx = spawn_multipart_recv_pump(socket);
+    let mut socket = socket;
 
     tracing::info!(
         "KV event consolidator ZMQ listener successfully connected to {}",
@@ -93,9 +93,9 @@ async fn run_listener_loop(
                 break;
             }
 
-            msg_result = message_rx.recv() => {
+            msg_result = socket.next() => {
                 let frames = match msg_result {
-                    Some(Ok(frames)) => frames,
+                    Some(Ok(frames)) => multipart_message(frames),
                     Some(Err(error)) => {
                         tracing::error!("Error receiving ZMQ message: {error}");
                         break;

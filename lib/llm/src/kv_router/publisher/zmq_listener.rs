@@ -4,15 +4,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use futures::StreamExt;
 use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
-use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 
-use crate::utils::zmq::connect_sub_socket;
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
@@ -37,7 +37,7 @@ pub(super) async fn start_zmq_listener(
             return;
         }
     };
-    let mut message_rx = spawn_multipart_recv_pump(socket);
+    let mut socket = socket;
 
     if cancellation_token.is_cancelled() {
         return;
@@ -54,14 +54,14 @@ pub(super) async fn start_zmq_listener(
                 break 'main String::from("cancellation token cancelled");
             }
 
-            msg_result = message_rx.recv() => {
+            msg_result = socket.next() => {
                 let frames = match msg_result {
-                    Some(Ok(frames)) => frames,
+                    Some(Ok(frames)) => multipart_message(frames),
                     Some(Err(error)) => {
                         tracing::error!(endpoint = %zmq_endpoint, error = %error, "ZMQ listener recv failed");
                         break 'main format!("ZMQ recv failed: {error}");
                     }
-                    None => break 'main String::from("ZMQ receive pump ended"),
+                    None => break 'main String::from("ZMQ stream ended"),
                 };
                 let mut frames = frames;
 

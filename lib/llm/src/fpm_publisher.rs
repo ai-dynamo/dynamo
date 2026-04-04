@@ -12,14 +12,14 @@
 //! no event transformation, no batching, no local indexer — just raw byte relay.
 
 use anyhow::Result;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
-use dynamo_runtime::transports::zmq::spawn_multipart_recv_pump;
 
-use crate::utils::zmq::connect_sub_socket;
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 
@@ -67,7 +67,7 @@ impl FpmEventRelay {
                 return;
             }
         };
-        let mut message_rx = spawn_multipart_recv_pump(socket);
+        let mut socket = socket;
         tracing::info!("FPM relay: connected to {zmq_endpoint}");
 
         loop {
@@ -77,9 +77,10 @@ impl FpmEventRelay {
                     tracing::info!("FPM relay: shutting down");
                     break;
                 }
-                result = message_rx.recv() => {
+                result = socket.next() => {
                     match result {
-                        Some(Ok(mut frames)) => {
+                        Some(Ok(frames)) => {
+                            let mut frames = multipart_message(frames);
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = frames.swap_remove(2);
@@ -98,7 +99,7 @@ impl FpmEventRelay {
                             break;
                         }
                         None => {
-                            tracing::error!("FPM relay: ZMQ receive pump ended");
+                            tracing::error!("FPM relay: ZMQ stream ended");
                             break;
                         }
                     }
