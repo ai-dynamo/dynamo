@@ -11,12 +11,16 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+pub const HEADER_DP_RANK: &str = "x-dp-rank";
+pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
+/// - `x-prefill-dp-rank` -> `prefill_dp_rank`
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -31,7 +35,18 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    if worker_id.is_none() && prefill_id.is_none() {
+    let dp_rank = headers
+        .get(HEADER_DP_RANK)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    let prefill_dp_rank = headers
+        .get(HEADER_PREFILL_DP_RANK)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    {
         return nvext;
     }
 
@@ -42,6 +57,12 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
+    }
+    if let Some(rank) = dp_rank {
+        ext.dp_rank = Some(rank);
+    }
+    if let Some(rank) = prefill_dp_rank {
+        ext.prefill_dp_rank = Some(rank);
     }
     Some(ext)
 }
@@ -156,6 +177,19 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
+
+    /// Data parallel rank for the decode worker, set by the EPP via the
+    /// `x-dp-rank` header. When a worker hosts multiple DP engines,
+    /// this steers the request to the correct engine instance.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving,
+    /// set by the EPP via the `x-prefill-dp-rank` header.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
 
     /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
@@ -288,29 +322,22 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test apply_header_routing_overrides - worker header present, prefill header absent
     #[test]
     fn test_apply_header_routing_overrides() {
         use axum::http::HeaderMap;
 
-        // Only HEADER_WORKER_INSTANCE_ID is in the header
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID, "123".parse().unwrap());
-        // Note: HEADER_PREFILL_INSTANCE_ID is NOT in the header
+        headers.insert(HEADER_PREFILL_INSTANCE_ID, "456".parse().unwrap());
+        headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
 
-        let nvext = NvExt::builder()
-            .backend_instance_id(999)
-            .decode_worker_id(888)
-            .prefill_worker_id(777)
-            .build()
-            .unwrap();
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
 
-        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
-
-        // Header should override backend_instance_id and decode_worker_id
         assert_eq!(result.backend_instance_id, Some(123));
         assert_eq!(result.decode_worker_id, Some(123));
-        // prefill_worker_id should remain from original nvext (not overwritten by header)
-        assert_eq!(result.prefill_worker_id, Some(777));
+        assert_eq!(result.prefill_worker_id, Some(456));
+        assert_eq!(result.dp_rank, Some(3));
+        assert_eq!(result.prefill_dp_rank, Some(5));
     }
 }

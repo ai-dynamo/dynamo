@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod artifacts;
 mod collector;
 mod entrypoints;
 pub(crate) mod offline;
@@ -12,6 +13,9 @@ use std::collections::VecDeque;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 
+pub use artifacts::{
+    ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
+};
 pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
@@ -51,12 +55,12 @@ impl OfflineDisaggReplayConfig {
 }
 
 pub use entrypoints::{
-    simulate_concurrency_file, simulate_concurrency_file_disagg_with_router_mode,
-    simulate_concurrency_file_with_router_mode, simulate_concurrency_live_file,
-    simulate_concurrency_live_file_with_router_mode, simulate_concurrency_live_requests,
-    simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
-    simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
-    simulate_concurrency_requests_disagg_with_router_mode,
+    generate_trace_worker_artifacts_offline, simulate_concurrency_file,
+    simulate_concurrency_file_disagg_with_router_mode, simulate_concurrency_file_with_router_mode,
+    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
+    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
+    simulate_concurrency_requests, simulate_concurrency_requests_disagg_with_router_mode,
     simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
     simulate_concurrency_workload_disagg_with_router_mode,
     simulate_concurrency_workload_with_router_mode, simulate_trace_file,

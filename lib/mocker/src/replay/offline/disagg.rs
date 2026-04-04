@@ -19,10 +19,8 @@ use super::runtime_utils::{
     push_decode_handoff, push_worker_completion,
 };
 #[cfg(test)]
-use super::state::DisaggPhase;
-#[cfg(test)]
 use super::state::DisaggRequestSnapshot;
-use super::state::DisaggRequestState;
+use super::state::{DisaggPhase, DisaggRequestState};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, TraceCollector};
@@ -260,7 +258,7 @@ impl DisaggRuntime {
 
     /// Dispatch a request's decode stage onto a specific decode worker.
     fn dispatch_decode(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
-        let request = self.state(uuid)?.build_decode_request()?;
+        let request = self.state(uuid)?.original_request()?.clone();
         self.decode_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_decode(worker_idx);
         #[cfg(test)]
@@ -273,7 +271,7 @@ impl DisaggRuntime {
     /// Turn prefill router admissions into concrete worker dispatches.
     fn dispatch_prefill_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
         for WorkerAdmission { uuid, worker_idx } in admissions {
-            if !self.state(uuid)?.is_queued_prefill() {
+            if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }
             self.dispatch_prefill(uuid, worker_idx)?;
@@ -284,7 +282,7 @@ impl DisaggRuntime {
     /// Turn decode router admissions into concrete worker dispatches.
     fn dispatch_decode_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
         for WorkerAdmission { uuid, worker_idx } in admissions {
-            if !self.state(uuid)?.is_queued_decode() {
+            if self.state(uuid)?.phase != DisaggPhase::QueuedDecode {
                 bail!("offline disagg replay expected queued decode request for {uuid}");
             }
             self.dispatch_decode(uuid, worker_idx)?;

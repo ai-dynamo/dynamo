@@ -70,14 +70,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "With -n auto: calculates max concurrent slots from GPU VRAM / max_vram_gib.",
     )
     parser.addoption(
-        "--gpus",
-        "--gpu",
-        type=str,
-        default="all",
-        help="Comma-separated GPU indices or 'all' (default: all). "
-        "Controls which GPUs the parallel test runner distributes tests across.",
-    )
-    parser.addoption(
         "--dry-run",
         action="store_true",
         default=False,
@@ -110,17 +102,18 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
     # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
-    from tests.utils.pytest_parallel_gpu import _parse_gpu_indices
+    from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
     from tests.utils.vram_utils import auto_worker_count, detect_gpus
 
     gpus = detect_gpus()
     if gpus:
         config.stash[_gpu_parallel_gpus_key] = gpus
 
-    # Parse --gpus into a list of indices (or None for all)
-    gpus_raw = config.getoption("gpus", default="all")
-    if gpus_raw and gpus_raw.strip().lower() != "all":
-        config.stash[_gpu_indices_key] = _parse_gpu_indices(gpus_raw, gpus)
+    # Honour CUDA_VISIBLE_DEVICES to restrict which GPUs the scheduler uses.
+    # NVML always sees all physical GPUs, so we filter here.
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None:
+        config.stash[_gpu_indices_key] = _parse_cuda_visible(cvd, gpus)
         selected_gpus = [
             g for g in gpus if g["index"] in config.stash[_gpu_indices_key]
         ]
@@ -548,8 +541,14 @@ def pytest_collection_modifyitems(config, items):
                 print(f"  {name}{vram_str}  -- {'; '.join(reasons)}")
 
         gpus = config.stash.get(_gpu_parallel_gpus_key, None)
+        gpu_indices = config.stash.get(_gpu_indices_key, None)
         if gpus and vram_limit is not None:
-            print_gpu_plan(gpus, vram_limit, would_run)
+            visible = (
+                [g for g in gpus if g["index"] in gpu_indices]
+                if gpu_indices is not None
+                else gpus
+            )
+            print_gpu_plan(visible, vram_limit, would_run)
         print()
         items.clear()
         return

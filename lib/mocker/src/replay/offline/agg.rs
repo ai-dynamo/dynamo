@@ -9,6 +9,8 @@ use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_worker_completion, push_worker_completion,
 };
 #[cfg(test)]
+use super::state::AggRequestPhase;
+#[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
@@ -345,7 +347,7 @@ impl AggRuntime {
             .ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?
-            .prefill_completed();
+            .prefill_completed;
         if already_marked {
             return Ok(());
         }
@@ -355,7 +357,7 @@ impl AggRuntime {
             .ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?
-            .mark_prefill_completed();
+            .prefill_completed = true;
         if let Some(router) = self.router.as_mut() {
             admissions = router.on_prefill_completed(signal.uuid)?.admissions;
             #[cfg(test)]
@@ -527,14 +529,14 @@ impl AggRuntime {
         let mut router_pending_request_ids = self
             .requests
             .iter()
-            .filter(|(_, state)| state.is_queued_at_router())
+            .filter(|(_, state)| state.phase == AggRequestPhase::QueuedAtRouter)
             .map(|(uuid, _)| *uuid)
             .collect::<Vec<_>>();
         router_pending_request_ids.sort_unstable();
         let mut prefill_completed = self
             .requests
             .iter()
-            .filter(|(_, state)| state.prefill_completed())
+            .filter(|(_, state)| state.prefill_completed)
             .map(|(uuid, _)| *uuid)
             .collect::<Vec<_>>();
         prefill_completed.sort_unstable();
