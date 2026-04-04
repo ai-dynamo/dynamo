@@ -55,7 +55,12 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.model import (
+    compute_qwen_grid_thw,
+    construct_qwen_decode_mm_data,
+    is_qwen_vl_model,
+    load_qwen_grid_params,
+)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
@@ -1804,6 +1809,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             encode_worker_client,
         )
 
+        # Cache Qwen VL grid parameters for computing image_grid_thw from
+        # PIL images in the P/D path (no separate encode worker).
+        if is_qwen_vl_model(config.model):
+            self._qwen_grid_params = load_qwen_grid_params(config.model)
+            if (
+                self._qwen_grid_params is None
+                and self.embedding_loader is None
+                and config.disaggregation_mode == DisaggregationMode.PREFILL
+            ):
+                logger.error(
+                    "Qwen VL grid params failed to load and no encode worker "
+                    "is configured. P/D multimodal requests will fail because "
+                    "prefill cannot produce embedding_params for decode. "
+                    "Use --route-to-encoder or ensure the model is cached."
+                )
+        else:
+            self._qwen_grid_params = None
+
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
@@ -1975,9 +1998,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     else image_grid_thw
                 )
                 embedding_params["embeddings_shape"] = list(image_embeds.shape)
+            elif image_data is not None and self._qwen_grid_params is not None:
+                # PIL images — compute grid_thw from image dimensions
+                grid_thw, embeddings_shape = compute_qwen_grid_thw(
+                    image_data, self._qwen_grid_params
+                )
+                if grid_thw is not None:
+                    embedding_params["image_grid_thw"] = grid_thw
+                    embedding_params["embeddings_shape"] = embeddings_shape
             elif image_data is not None:
-                # PIL images without embedding metadata — cannot produce
-                # the image_grid_thw that Qwen VL decode requires.
                 raise ValueError(
                     "Qwen VL model received PIL images without embedding "
                     "metadata. Use --route-to-encoder for disaggregated "

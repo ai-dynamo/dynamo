@@ -428,6 +428,52 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_PREFILL_WORKER_GPU": "0",
+            "DYN_DECODE_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_PREFILL_GPU_MEM": "0.4",
+            "DYN_DECODE_GPU_MEM": "0.4",
+        },
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    # P/D multimodal (no encoder): prefill loads images via PIL,
+    # computes grid_thw for decode using smart_resize.
+    "multimodal_p_d_qwen": VLLMConfig(
+        name="multimodal_p_d_qwen",
+        directory=vllm_dir,
+        script_name="disagg_multimodal_p_d.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=300,
+        env={
+            "DYN_PREFILL_WORKER_GPU": "0",
+            "DYN_DECODE_WORKER_GPU": "0",
+            "DYN_PREFILL_GPU_MEM": "0.45",
+            "DYN_DECODE_GPU_MEM": "0.45",
+        },
         request_payloads=[
             chat_payload(
                 [
