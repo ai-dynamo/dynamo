@@ -19,8 +19,21 @@ use cudarc::driver::sys::{
     CUmemoryPool, CUresult, CUstream,
 };
 use cudarc::driver::{CudaContext, CudaStream};
+use std::ffi::c_int;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+
+#[repr(C)]
+struct CUmemLocationCompat {
+    type_: CUmemLocationType,
+    id: c_int,
+}
+
+fn set_mem_location_id(location: &mut sys::CUmemLocation, device: c_int) {
+    // CUDA 13.2 wraps `id` in a union, while older bindings expose it directly.
+    let location = unsafe { &mut *(location as *mut _ as *mut CUmemLocationCompat) };
+    location.id = device;
+}
 
 /// Builder for creating a CUDA memory pool with configurable parameters.
 ///
@@ -73,7 +86,7 @@ impl CudaMemPoolBuilder {
         let mut props: CUmemPoolProps = unsafe { std::mem::zeroed() };
         props.allocType = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = self.context.cu_device();
+        set_mem_location_id(&mut props.location, self.context.cu_device());
 
         let mut pool: CUmemoryPool = ptr::null_mut();
 
