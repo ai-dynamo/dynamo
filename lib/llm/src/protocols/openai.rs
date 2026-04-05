@@ -91,6 +91,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
     fn get_formatted_prompt(&self) -> Option<bool>;
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -204,12 +208,14 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let prompt_logprobs = self.get_prompt_logprobs();
         let skip_special_tokens = self.get_skip_special_tokens();
         let formatted_prompt = self.get_formatted_prompt();
+        let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
             formatted_prompt,
+            return_tokens_as_token_ids,
         })
     }
 }
