@@ -15,6 +15,7 @@ enforces shared scaling policy across multiple DGDs.
 | `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
 | `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
+| `global-planner-vllm-test-xpu-dra.yaml` | Single-endpoint, multi-pool | vLLM (Intel XPU) | Same as `global-planner-vllm-test.yaml` but for Intel XPU using DRA (Dynamic Resource Allocation) |
 
 ## Deployment Patterns
 
@@ -97,6 +98,33 @@ export DYNAMO_IMAGE=<dynamo-image>
 
 envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
+
+### Intel XPU with DRA Example
+
+For Intel XPU clusters using [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/):
+
+```bash
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+export DYNAMO_VLLM_IMAGE=<vllm-xpu-image>  # Must be built for XPU
+export MODEL_NAME=Qwen/Qwen3-0.6B
+export STORAGE_CLASS_NAME=<rwx-storage-class>
+
+# Create HF token secret first
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
+
+envsubst < global-planner-vllm-test-xpu-dra.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+**Prerequisites for XPU deployment:**
+- Intel XPU GPU driver and [Intel Resource Drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed
+- DRA enabled on the cluster
+- Container images built for Intel XPU (with `VLLM_TARGET_DEVICE=xpu`)
+
+**Key differences from GPU deployment:**
+- Uses DRA `ResourceClaimTemplate` instead of `resources.limits.gpu`
+- Sets `VLLM_TARGET_DEVICE=xpu` environment variable
 
 ## Verifying
 
