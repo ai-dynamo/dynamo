@@ -38,7 +38,7 @@ metadata:
 rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamocomponentdeployments", "dynamographdeployments"]
-  verbs: ["get", "list", "create", "update", "patch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   verbs: ["patch"]
@@ -76,7 +76,7 @@ metadata:
 rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamocomponentdeployments", "dynamographdeployments"]
-  verbs: ["get", "list", "create", "update", "patch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   verbs: ["patch"]
