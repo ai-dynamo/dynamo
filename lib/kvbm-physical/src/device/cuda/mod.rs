@@ -202,84 +202,46 @@ impl DeviceStreamOps for CudaStreamWrapper {
         Ok(())
     }
 
-    fn vectorized_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], chunk_size: usize) -> Result<()> {
-        assert_eq!(src_ptrs.len(), dst_ptrs.len(), "vectorized_copy: src/dst length mismatch");
-        let total_chunks = src_ptrs.len();
-        if total_chunks == 0 {
+    fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()> {
+        unsafe {
+            cuda_result::memcpy_htod_async(
+                dst_device,
+                src_host,
+                self.stream.cu_stream(),
+            )
+            .map_err(|e| anyhow::anyhow!("CUDA memcpy_htod_async failed: {:?}", e))?;
+        }
+        Ok(())
+    }
+
+    fn vectorized_copy(
+        &self,
+        src_ptrs_device: u64,
+        dst_ptrs_device: u64,
+        chunk_size: usize,
+        count: usize,
+    ) -> Result<()> {
+        if count == 0 {
             return Ok(());
         }
 
-        // Bind CUDA context to current thread before any CUDA operations.
-        self.stream.context().bind_to_thread()?;
-
         let cuda_stream = self.stream.cu_stream() as cudarc::runtime::sys::cudaStream_t;
-        let cu_stream = self.stream.cu_stream();
 
-        let ptr_array_bytes = total_chunks * std::mem::size_of::<u64>();
-
-        // Allocate device memory for pointer arrays
-        let src_ptrs_device = unsafe {
-            cuda_result::malloc_sync(ptr_array_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to allocate device memory for src pointers: {:?}", e))?
-        };
-        let dst_ptrs_device = unsafe {
-            cuda_result::malloc_sync(ptr_array_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to allocate device memory for dst pointers: {:?}", e))?
-        };
-
-        // Upload pointer arrays to device
-        unsafe {
-            cuda_result::memcpy_htod_async(
-                src_ptrs_device,
-                std::slice::from_raw_parts(src_ptrs.as_ptr() as *const u8, ptr_array_bytes),
-                cu_stream,
-            ).map_err(|e| anyhow::anyhow!("Failed to upload src pointer array: {:?}", e))?;
-
-            cuda_result::memcpy_htod_async(
-                dst_ptrs_device,
-                std::slice::from_raw_parts(dst_ptrs.as_ptr() as *const u8, ptr_array_bytes),
-                cu_stream,
-            ).map_err(|e| anyhow::anyhow!("Failed to upload dst pointer array: {:?}", e))?;
-        }
-
-        // Record event after pointer upload: ensures host-side src_ptrs/dst_ptrs
-        // Vecs remain valid until the async uploads complete.
-        let pointers_uploaded_event = self.stream.record_event(None)
-            .map_err(|e| anyhow::anyhow!("Failed to record pointer upload event: {:?}", e))?;
-
-        // Launch vectorized_copy kernel
         let status = unsafe {
             kvbm_kernels::vectorized_copy(
                 src_ptrs_device as *mut *mut std::ffi::c_void,
                 dst_ptrs_device as *mut *mut std::ffi::c_void,
                 chunk_size,
-                total_chunks as i32,
+                count as i32,
                 cuda_stream,
             )
         };
 
-        // Synchronize to ensure kernel completes before freeing temp allocations.
-        // Note: with sync alloc/free we must wait for the kernel, not just uploads.
-        // TODO: Switch to pool.alloc_async/free_async to only sync on upload event.
-        unsafe {
-            cuda_result::stream::synchronize(cu_stream)
-                .map_err(|e| anyhow::anyhow!("Stream sync failed after vectorized_copy: {:?}", e))?;
-        }
-
-        // Free temporary device allocations
-        unsafe {
-            let _ = cuda_result::free_sync(src_ptrs_device);
-            let _ = cuda_result::free_sync(dst_ptrs_device);
-        }
-
-        // Ensure pointer uploads completed (host Vecs safe to drop on return).
-        pointers_uploaded_event.synchronize()?;
-
         if status != cudarc::runtime::sys::cudaError::cudaSuccess {
-            return Err(anyhow::anyhow!("CUDA vectorized_copy failed: {:?}", status));
+            return Err(anyhow::anyhow!("CUDA vectorized_copy kernel failed: {:?}", status));
         }
 
-        tracing::debug!(total_chunks, chunk_size, "CUDA vectorized_copy completed");
+        tracing::debug!(count, chunk_size, "CUDA vectorized_copy kernel launched");
         Ok(())
     }
 
