@@ -106,6 +106,16 @@ def encode_image_embeddings(
         NotImplementedError: If model is not supported
     """
     with torch.no_grad():
+        # Log encoder device during inference
+        logger = logging.getLogger(__name__)
+        try:
+            encoder_device = next(vision_encoder.parameters()).device
+            logger.info(
+                f"[ENCODE] Vision encoder device during inference: {encoder_device}"
+            )
+        except (StopIteration, AttributeError):
+            logger.info("[ENCODE] Unable to determine vision encoder device")
+
         # Route through the correct encoder based on model
         if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
             pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)

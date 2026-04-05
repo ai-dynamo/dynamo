@@ -155,11 +155,22 @@ def is_qwen_vl_model(model_name: str) -> bool:
     )
 
 
-def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
+def load_vision_model(
+    model_id: str, enforce_eager: bool = False, device: str = "auto"
+) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
+
+    Args:
+        model_id: The model identifier
+        enforce_eager: Whether to enforce eager execution
+        device: Device to load the model on. Options: "auto", "cpu", "cuda", "xpu", or specific device like "cuda:0"
     """
-    if VLLM_ENCODER and is_qwen_vl_model(model_id):
+    # When device="cpu" is explicitly requested, skip vLLM encoder and use HuggingFace path
+    # because vLLM doesn't support CPU-only mode for encoder workers
+    use_vllm_encoder = VLLM_ENCODER and is_qwen_vl_model(model_id) and device != "cpu"
+
+    if use_vllm_encoder:
         # Disable to get ViT from the same process
         update_environment_variables(
             {
@@ -184,7 +195,7 @@ def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Mo
             vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
         )
     return AutoModel.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
+        model_id, device_map=device, torch_dtype=torch.float16, trust_remote_code=True
     )
 
 
