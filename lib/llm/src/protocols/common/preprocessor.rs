@@ -190,6 +190,12 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
+    /// True when inline data: URLs in extra_args.messages were stripped because
+    /// all media items are available via multi_modal_data.Decoded RDMA descriptors.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inline_media_stripped: bool,
+
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
