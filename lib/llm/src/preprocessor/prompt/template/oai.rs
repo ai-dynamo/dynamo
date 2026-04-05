@@ -279,6 +279,67 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
     }
 }
 
+fn filter_tools(
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
+    exclude_tools_when_tool_choice_none: bool,
+) -> Option<Value> {
+    // Strip or filter tools based on tool_choice:
+    // 1. If tool_choice is "none" -> strip all tools
+    // 2. If tool_choice is "auto" or "required" -> keep all tools
+    // 3. If tool_choice is named -> filter tools to keep only matching one
+    if let Some(ref tc) = tool_choice {
+        match tc.as_str() {
+            Some("none") => {
+                if exclude_tools_when_tool_choice_none {
+                    None
+                } else {
+                    tools
+                }
+            }
+            Some("auto") | Some("required") => tools,
+            _ => {
+                let tc = serde_json::to_value(tc).unwrap();
+
+                if let Some(func_obj) = tc.get("function")
+                    && let Some(name) = func_obj.get("name")
+                    && let Some(name_str) = name.as_str()
+                    && let Some(origin_tools) = tools
+                {
+                    filter_tools_by_name(origin_tools, name_str)
+                } else {
+                    tools
+                }
+            }
+        }
+    } else {
+        tools
+    }
+}
+
+fn filter_tools_by_name(origin_tools: Value, name: &str) -> Option<Value> {
+    let mut filtered_tools = Vec::new();
+    let tools = serde_json::to_value(origin_tools).unwrap();
+
+    if let Some(arr) = tools.as_array() {
+        for tool in arr {
+            if let Some(function) = tool.get("function")
+                && let Some(func_name) = function.get("name")
+                && let Some(func_name_str) = func_name.as_str()
+                && func_name_str == name
+            {
+                filtered_tools.push(tool.clone());
+            }
+        }
+    }
+
+    if filtered_tools.is_empty() {
+        None
+    } else {
+        Some(Value::from_serialize(&filtered_tools))
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
@@ -418,18 +479,11 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
         let mixins = Value::from_dyn_object(self.mixins.clone());
-
-        let tools = req.tools();
-        // Strip tools when tool_choice is "none" and the flag is enabled, so the model
-        // doesn't see tool definitions and generate raw XML tool calls in its response.
-        let tools = if self.exclude_tools_when_tool_choice_none {
-            match req.tool_choice() {
-                Some(ref tc) if tc.as_str() == Some("none") => None,
-                _ => tools,
-            }
-        } else {
-            tools
-        };
+        let tools = filter_tools(
+            req.tools(),
+            req.tool_choice(),
+            self.exclude_tools_when_tool_choice_none,
+        );
         // has_tools should be true if tools is a non-empty array
         let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
@@ -743,6 +797,67 @@ mod tests {
             serde_json::Value::Object(Default::default())
         );
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn test_filter_tools_by_name() {
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather", "description": "Get the current weather in a given location",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"}},
+                            "required": ["location"],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_delivery_date",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "order_id": {
+                                    "type": "string",
+                                    "description": "The customer is order ID."
+                                },
+                                "user_name": {
+                                    "type": "string",
+                                    "description": "The customer is name."
+                                },
+                                "price": {
+                                    "type": "string",
+                                    "description": "the price of the product."
+                                }
+                            },
+                            "required": [
+                                "order_id",
+                                "user_name"
+                            ]
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let name = "get_weather";
+        let tools = request.tools().unwrap();
+        let result = serde_json::to_value(filter_tools_by_name(tools, name)).unwrap();
+
+        assert_eq!(result.as_array().map(|arr| arr.len()).unwrap_or(0), 1);
+        assert_eq!(
+            result[0]["function"]["name"],
+            serde_json::Value::String("get_weather".to_string())
+        );
     }
 
     /// Tests that content arrays (containing only text parts) are correctly concatenated.
