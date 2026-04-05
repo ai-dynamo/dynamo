@@ -32,6 +32,10 @@ use cudarc::runtime::sys as cuda_runtime;
 
 use kvbm_kernels::{MemcpyBatchMode, memcpy_batch, vectorized_copy};
 
+use kvbm_kernels::kvtc_kernels::{
+    self, CublasHandle, KvtcConfig, KvtcQuantType, KvtcTypeRange, TensorDataType,
+};
+
 // ---------------------------------------------------------------------------
 // Llama 3.1 70B, bf16 KV cache dimensions
 // ---------------------------------------------------------------------------
@@ -84,6 +88,14 @@ struct Cli {
     /// Number of timed iterations.
     #[arg(long, default_value = "100")]
     iters: usize,
+
+    /// Run KVTC compression benchmarks instead of transfer benchmarks.
+    #[arg(long, default_value = "false")]
+    kvtc: bool,
+
+    /// Comma-separated KVTC quantization types: fp8, int4, int2.
+    #[arg(long, default_value = "fp8,int4,int2", value_delimiter = ',')]
+    kvtc_bits: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -620,11 +632,370 @@ fn parse_backends(raw: &[String]) -> Vec<Backend> {
 }
 
 // ---------------------------------------------------------------------------
+// KVTC benchmark
+// ---------------------------------------------------------------------------
+
+struct KvtcBitConfig {
+    label: &'static str,
+    quant_type: KvtcQuantType,
+    int_bits: u32,
+}
+
+fn parse_kvtc_bits(raw: &[String]) -> Vec<KvtcBitConfig> {
+    raw.iter()
+        .map(|s| match s.as_str() {
+            "fp8" => KvtcBitConfig {
+                label: "fp8",
+                quant_type: KvtcQuantType::Fp8,
+                int_bits: 8,
+            },
+            "int4" => KvtcBitConfig {
+                label: "int4",
+                quant_type: KvtcQuantType::IntX,
+                int_bits: 4,
+            },
+            "int2" => KvtcBitConfig {
+                label: "int2",
+                quant_type: KvtcQuantType::IntX,
+                int_bits: 2,
+            },
+            other => panic!("unknown kvtc-bits '{other}', expected: fp8, int4, int2"),
+        })
+        .collect()
+}
+
+fn run_kvtc_benchmarks(cli: &Cli, stream_raw: cuda_runtime::cudaStream_t) {
+    let bit_configs = parse_kvtc_bits(&cli.kvtc_bits);
+    let warmup_iters = cli.warmup;
+    let timed_iters = cli.iters;
+
+    // Create cuBLAS handle
+    let cublas_handle: CublasHandle = unsafe {
+        kvtc_kernels::kvtc_create_cublas_handle().expect("Failed to create cuBLAS handle")
+    };
+
+    let total_tests = cli.tokens_per_block.len() * cli.num_blocks.len() * bit_configs.len() * 2;
+
+    eprintln!("KVTC Compression Benchmark");
+    eprintln!("  Model: Llama 3.1 70B (bf16 input)");
+    eprintln!("  KV heads: {NUM_KV_HEADS}, Head dim: {HEAD_DIM}");
+    eprintln!("  Warmup: {warmup_iters}, Timed: {timed_iters}");
+    eprintln!("  tokens_per_block: {:?}", &cli.tokens_per_block);
+    eprintln!("  num_blocks: {:?}", &cli.num_blocks);
+    eprintln!(
+        "  quant types: [{}]",
+        bit_configs
+            .iter()
+            .map(|b| b.label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!("  Total tests: {total_tests}");
+    eprintln!();
+
+    // CSV header
+    println!(
+        "tokens_per_block,num_blocks,features,pca_components,quant_type,operation,uncompressed_bytes,compressed_bytes,median_ms,bandwidth_gbps,compression_ratio"
+    );
+
+    let mut test_num = 0;
+
+    for &tpb in &cli.tokens_per_block {
+        let features = tpb * NUM_KV_HEADS * HEAD_DIM;
+        let pca_components = features; // Identity projection
+        let uncompressed_block_bytes = features * ELEM_SIZE; // bf16 input
+
+        eprintln!("--- tokens_per_block={tpb}, features={features} ---");
+
+        for &num_blocks in &cli.num_blocks {
+            let uncompressed_bytes = uncompressed_block_bytes * num_blocks;
+
+            // Allocate scattered device blocks (bf16)
+            let block_bufs: Vec<DeviceBuffer> = (0..num_blocks)
+                .map(|_| DeviceBuffer::new(uncompressed_block_bytes))
+                .collect();
+
+            // Fill blocks with pattern via pinned staging buffer
+            {
+                let staging = PinnedBuffer::new(uncompressed_block_bytes);
+                for buf in &block_bufs {
+                    unsafe {
+                        cudaMemcpyAsync(
+                            buf.as_ptr(),
+                            staging.as_ptr() as *const c_void,
+                            uncompressed_block_bytes,
+                            CUDA_MEMCPY_HOST_TO_DEVICE,
+                            stream_raw,
+                        );
+                    }
+                }
+                unsafe { cudaStreamSynchronize(stream_raw) };
+            }
+
+            // Block pointer arrays on device
+            let block_ptrs_host: Vec<*const c_void> = block_bufs
+                .iter()
+                .map(|b| b.as_ptr() as *const c_void)
+                .collect();
+            let block_ptrs_mut_host: Vec<*mut c_void> =
+                block_bufs.iter().map(|b| b.as_ptr()).collect();
+
+            let ptr_array_bytes = num_blocks * std::mem::size_of::<usize>();
+            let block_ptrs_dev = DeviceBuffer::new(ptr_array_bytes);
+            let block_ptrs_mut_dev = DeviceBuffer::new(ptr_array_bytes);
+            unsafe {
+                cudaMemcpyAsync(
+                    block_ptrs_dev.as_ptr(),
+                    block_ptrs_host.as_ptr() as *const c_void,
+                    ptr_array_bytes,
+                    CUDA_MEMCPY_HOST_TO_DEVICE,
+                    stream_raw,
+                );
+                cudaMemcpyAsync(
+                    block_ptrs_mut_dev.as_ptr(),
+                    block_ptrs_mut_host.as_ptr() as *const c_void,
+                    ptr_array_bytes,
+                    CUDA_MEMCPY_HOST_TO_DEVICE,
+                    stream_raw,
+                );
+                cudaStreamSynchronize(stream_raw);
+            }
+
+            // Identity projection matrix [features, pca_components] on device
+            // For identity: diagonal of 1.0f
+            let proj_elems = features * pca_components;
+            let proj_bytes = proj_elems * std::mem::size_of::<f32>();
+            let proj_dev = DeviceBuffer::new(proj_bytes);
+            {
+                let proj_host = PinnedBuffer::new(proj_bytes);
+                let proj_slice = unsafe {
+                    std::slice::from_raw_parts_mut(proj_host.as_ptr() as *mut f32, proj_elems)
+                };
+                // Zero-fill then set diagonal
+                for v in proj_slice.iter_mut() {
+                    *v = 0.0;
+                }
+                for i in 0..features.min(pca_components) {
+                    proj_slice[i * pca_components + i] = 1.0;
+                }
+                unsafe {
+                    cudaMemcpyAsync(
+                        proj_dev.as_ptr(),
+                        proj_host.as_ptr() as *const c_void,
+                        proj_bytes,
+                        CUDA_MEMCPY_HOST_TO_DEVICE,
+                        stream_raw,
+                    );
+                    cudaStreamSynchronize(stream_raw);
+                }
+            }
+
+            // Zero mean vector [features] on device
+            let mean_bytes = features * std::mem::size_of::<f32>();
+            let mean_dev = DeviceBuffer::new(mean_bytes);
+            {
+                let mean_host = PinnedBuffer::new(mean_bytes);
+                let mean_slice = unsafe {
+                    std::slice::from_raw_parts_mut(mean_host.as_ptr() as *mut f32, features)
+                };
+                for v in mean_slice.iter_mut() {
+                    *v = 0.0;
+                }
+                unsafe {
+                    cudaMemcpyAsync(
+                        mean_dev.as_ptr(),
+                        mean_host.as_ptr() as *const c_void,
+                        mean_bytes,
+                        CUDA_MEMCPY_HOST_TO_DEVICE,
+                        stream_raw,
+                    );
+                    cudaStreamSynchronize(stream_raw);
+                }
+            }
+
+            for bit_cfg in &bit_configs {
+                let ranges = vec![KvtcTypeRange {
+                    start_idx: 0,
+                    end_idx: pca_components,
+                    quant_type: bit_cfg.quant_type,
+                    int_bits: bit_cfg.int_bits,
+                }];
+
+                let config = KvtcConfig::new(
+                    mean_dev.as_ptr() as *const f32,
+                    proj_dev.as_ptr() as *const f32,
+                    features,
+                    pca_components,
+                    ranges,
+                );
+
+                let compressed_bytes = config.compressed_size(num_blocks);
+                let workspace_bytes = config.workspace_size(num_blocks);
+                let minmax_bytes = num_blocks * 2 * std::mem::size_of::<f32>();
+
+                let compressed_buf = PinnedBuffer::new(compressed_bytes);
+                let workspace_dev = DeviceBuffer::new(workspace_bytes);
+                let minmax_dev = DeviceBuffer::new(minmax_bytes);
+
+                let compression_ratio = uncompressed_bytes as f64 / compressed_bytes as f64;
+
+                let start_event = CudaEvent::new();
+                let end_event = CudaEvent::new();
+
+                // -- Compress benchmark --
+                {
+                    test_num += 1;
+                    eprint!(
+                        "  [{test_num}/{total_tests}] tpb={tpb} N={num_blocks:>3} {:<6} compress ... ",
+                        bit_cfg.label,
+                    );
+
+                    let mut elapsed_samples = Vec::with_capacity(timed_iters);
+
+                    for iter in 0..(warmup_iters + timed_iters) {
+                        let is_timed = iter >= warmup_iters;
+                        if is_timed {
+                            start_event.record(stream_raw);
+                        }
+
+                        let result = unsafe {
+                            kvtc_kernels::kvtc_compress(
+                                block_ptrs_dev.as_ptr() as *const *const c_void,
+                                &config,
+                                compressed_buf.as_ptr() as *mut u8,
+                                workspace_dev.as_ptr() as *mut f32,
+                                minmax_dev.as_ptr() as *mut f32,
+                                num_blocks,
+                                features, // block_stride = features (contiguous per block)
+                                TensorDataType::BF16,
+                                cublas_handle,
+                                stream_raw,
+                            )
+                        };
+                        assert!(result.is_ok(), "kvtc_compress failed: {:?}", result.err());
+
+                        if is_timed {
+                            end_event.record(stream_raw);
+                            end_event.synchronize();
+                            elapsed_samples.push(end_event.elapsed_ms(&start_event));
+                        }
+                    }
+
+                    unsafe { cudaStreamSynchronize(stream_raw) };
+
+                    elapsed_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let median_ms = elapsed_samples[elapsed_samples.len() / 2] as f64;
+                    let bandwidth_gbps = (uncompressed_bytes as f64) / (median_ms / 1000.0) / 1e9;
+
+                    println!(
+                        "{tpb},{num_blocks},{features},{pca_components},{},compress,{uncompressed_bytes},{compressed_bytes},{median_ms:.4},{bandwidth_gbps:.2},{compression_ratio:.2}",
+                        bit_cfg.label,
+                    );
+                    eprintln!("{bandwidth_gbps:.2} GB/s ({median_ms:.4} ms)");
+                }
+
+                // -- Decompress benchmark --
+                {
+                    test_num += 1;
+                    eprint!(
+                        "  [{test_num}/{total_tests}] tpb={tpb} N={num_blocks:>3} {:<6} decompress ... ",
+                        bit_cfg.label,
+                    );
+
+                    // First, produce valid compressed data for decompression
+                    unsafe {
+                        let result = kvtc_kernels::kvtc_compress(
+                            block_ptrs_dev.as_ptr() as *const *const c_void,
+                            &config,
+                            compressed_buf.as_ptr() as *mut u8,
+                            workspace_dev.as_ptr() as *mut f32,
+                            minmax_dev.as_ptr() as *mut f32,
+                            num_blocks,
+                            features,
+                            TensorDataType::BF16,
+                            cublas_handle,
+                            stream_raw,
+                        );
+                        assert!(
+                            result.is_ok(),
+                            "kvtc_compress (setup) failed: {:?}",
+                            result.err()
+                        );
+                        cudaStreamSynchronize(stream_raw);
+                    }
+
+                    let mut elapsed_samples = Vec::with_capacity(timed_iters);
+
+                    for iter in 0..(warmup_iters + timed_iters) {
+                        let is_timed = iter >= warmup_iters;
+                        if is_timed {
+                            start_event.record(stream_raw);
+                        }
+
+                        let result = unsafe {
+                            kvtc_kernels::kvtc_decompress(
+                                compressed_buf.as_ptr() as *const u8,
+                                &config,
+                                block_ptrs_mut_dev.as_ptr() as *const *mut c_void,
+                                workspace_dev.as_ptr() as *mut f32,
+                                minmax_dev.as_ptr() as *mut f32,
+                                num_blocks,
+                                features,
+                                TensorDataType::BF16,
+                                cublas_handle,
+                                stream_raw,
+                            )
+                        };
+                        assert!(result.is_ok(), "kvtc_decompress failed: {:?}", result.err());
+
+                        if is_timed {
+                            end_event.record(stream_raw);
+                            end_event.synchronize();
+                            elapsed_samples.push(end_event.elapsed_ms(&start_event));
+                        }
+                    }
+
+                    unsafe { cudaStreamSynchronize(stream_raw) };
+
+                    elapsed_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let median_ms = elapsed_samples[elapsed_samples.len() / 2] as f64;
+                    let bandwidth_gbps = (uncompressed_bytes as f64) / (median_ms / 1000.0) / 1e9;
+
+                    println!(
+                        "{tpb},{num_blocks},{features},{pca_components},{},decompress,{uncompressed_bytes},{compressed_bytes},{median_ms:.4},{bandwidth_gbps:.2},{compression_ratio:.2}",
+                        bit_cfg.label,
+                    );
+                    eprintln!("{bandwidth_gbps:.2} GB/s ({median_ms:.4} ms)");
+                }
+            }
+        }
+    }
+
+    // Cleanup cuBLAS handle
+    unsafe { kvtc_kernels::kvtc_destroy_cublas_handle(cublas_handle) };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 fn main() {
     let cli = Cli::parse();
+
+    // Initialize CUDA context
+    let count = CudaContext::device_count().expect("Failed to query CUDA devices");
+    assert!(count > 0, "No CUDA devices found");
+    let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
+    let stream = ctx.new_stream().expect("Failed to create CUDA stream");
+    let stream_raw = stream.cu_stream() as cuda_runtime::cudaStream_t;
+
+    // Dispatch to KVTC benchmarks if --kvtc is set
+
+    if cli.kvtc {
+        run_kvtc_benchmarks(&cli, stream_raw);
+        eprintln!("\nDone.");
+        return;
+    }
 
     let directions = parse_directions(&cli.direction);
     let patterns = parse_patterns(&cli.pattern);
@@ -639,13 +1010,6 @@ fn main() {
         * directions.len()
         * patterns.len()
         * backends.len();
-
-    // Initialize CUDA context
-    let count = CudaContext::device_count().expect("Failed to query CUDA devices");
-    assert!(count > 0, "No CUDA devices found");
-    let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
-    let stream = ctx.new_stream().expect("Failed to create CUDA stream");
-    let stream_raw = stream.cu_stream() as cuda_runtime::cudaStream_t;
 
     // Print config to stderr
     eprintln!("KV Cache Transfer Benchmark");
