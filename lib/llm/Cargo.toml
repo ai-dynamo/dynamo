@@ -68,7 +68,6 @@ either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 hf-hub = { workspace = true }
-humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
