@@ -92,6 +92,9 @@ fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
                     added_backends.push("POSIX");
                 }
             }
+            StorageKind::XpuDevice(_) => {
+                // XPU uses Level Zero, no NIXL backend needed for local transfers
+            }
         }
     }
 
@@ -1078,4 +1081,235 @@ async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
     verify_checksums_by_position(&checksums, &src_blocks, &host, &dst_blocks)?;
 
     Ok(())
+}
+
+
+// ============================================================================
+// XPU (Level Zero) Transfer Tests
+// ============================================================================
+
+/// XPU H2D → D2H round-trip test.
+///
+/// Fills pinned host memory with a pattern, transfers to XPU device,
+/// then transfers back to a different pinned host region and verifies checksums.
+#[cfg(feature = "level-zero")]
+#[tokio::test]
+async fn test_xpu_roundtrip_pinned_h2d_d2h_fc() -> Result<()> {
+    let agent = create_test_agent("xpu_roundtrip_fc");
+
+    let host_src = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+    let device = create_fc_layout(agent.clone(), StorageKind::XpuDevice(0), 4);
+    let host_dst = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+
+    let src_blocks = vec![0, 1];
+    let device_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    // Fill host source and compute checksums
+    let checksums = fill_and_checksum(&host_src, &src_blocks, FillPattern::Sequential)?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // H2D: host_src[0,1] → device[0,1]
+    let notification = execute_transfer(
+        &host_src,
+        &device,
+        &src_blocks,
+        &device_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // D2H: device[0,1] → host_dst[2,3]
+    let notification = execute_transfer(
+        &device,
+        &host_dst,
+        &device_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // Verify roundtrip: host_src[0,1] == host_dst[2,3]
+    verify_checksums_by_position(&checksums, &src_blocks, &host_dst, &dst_blocks)?;
+
+    Ok(())
+}
+
+/// XPU H2D → D2H round-trip test with layer-wise layouts.
+#[cfg(feature = "level-zero")]
+#[tokio::test]
+async fn test_xpu_roundtrip_pinned_h2d_d2h_lw() -> Result<()> {
+    let agent = create_test_agent("xpu_roundtrip_lw");
+
+    let host_src = create_lw_layout(agent.clone(), StorageKind::Pinned, 4);
+    let device = create_lw_layout(agent.clone(), StorageKind::XpuDevice(0), 4);
+    let host_dst = create_lw_layout(agent.clone(), StorageKind::Pinned, 4);
+
+    let src_blocks = vec![0, 1];
+    let device_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    let checksums = fill_and_checksum(&host_src, &src_blocks, FillPattern::Sequential)?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // H2D
+    let notification = execute_transfer(
+        &host_src,
+        &device,
+        &src_blocks,
+        &device_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // D2H
+    let notification = execute_transfer(
+        &device,
+        &host_dst,
+        &device_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_blocks, &host_dst, &dst_blocks)?;
+
+    Ok(())
+}
+
+/// XPU H2D → D2H round-trip with mixed layouts (FC src → LW device → FC dst).
+#[cfg(feature = "level-zero")]
+#[tokio::test]
+async fn test_xpu_roundtrip_mixed_fc_lw_fc() -> Result<()> {
+    let agent = create_test_agent("xpu_mixed_fc_lw");
+
+    let host_src = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+    let device = create_lw_layout(agent.clone(), StorageKind::XpuDevice(0), 4);
+    let host_dst = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+
+    let src_blocks = vec![0, 1];
+    let device_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    let checksums = fill_and_checksum(&host_src, &src_blocks, FillPattern::Sequential)?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // H2D: FC host → LW device
+    let notification = execute_transfer(
+        &host_src,
+        &device,
+        &src_blocks,
+        &device_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // D2H: LW device → FC host
+    let notification = execute_transfer(
+        &device,
+        &host_dst,
+        &device_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_blocks, &host_dst, &dst_blocks)?;
+
+    Ok(())
+}
+
+/// XPU layer-only transfer test (transfer only layer 0).
+#[cfg(feature = "level-zero")]
+#[tokio::test]
+async fn test_xpu_layer_transfer_h2d_d2h() -> Result<()> {
+    let agent = create_test_agent("xpu_layer_transfer");
+
+    let host_src = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+    let device = create_fc_layout(agent.clone(), StorageKind::XpuDevice(0), 4);
+    let host_dst = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+
+    let src_blocks = vec![0, 1];
+    let device_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    // Fill only layer 0
+    let mode = TransferMode::FirstLayerOnly;
+    let checksums = fill_and_checksum_with_mode(
+        &host_src,
+        &src_blocks,
+        FillPattern::Sequential,
+        mode,
+    )?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // H2D: layer 0 only
+    let options = TransferOptionsInternal::builder()
+        .layer_range(0..1)
+        .build()?;
+    let notification = execute_transfer(
+        &host_src,
+        &device,
+        &src_blocks,
+        &device_blocks,
+        options,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // D2H: layer 0 only
+    let options = TransferOptionsInternal::builder()
+        .layer_range(0..1)
+        .build()?;
+    let notification = execute_transfer(
+        &device,
+        &host_dst,
+        &device_blocks,
+        &dst_blocks,
+        options,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position_with_mode(
+        &checksums,
+        &src_blocks,
+        &host_dst,
+        &dst_blocks,
+        mode,
+    )?;
+
+    Ok(())
+}
+
+/// XPU fill_blocks + checksum verification (tests that fill.rs and checksum.rs work for XPU).
+#[cfg(feature = "level-zero")]
+#[test]
+fn test_xpu_fill_and_checksum() {
+    let agent = create_test_agent("xpu_fill_checksum");
+    let device = create_fc_layout(agent, StorageKind::XpuDevice(0), 4);
+    let block_ids = vec![0, 1];
+
+    // Fill XPU device memory with sequential pattern
+    fill_blocks(&device, &block_ids, FillPattern::Sequential).unwrap();
+
+    // Compute checksums from XPU device memory
+    let checksums = compute_block_checksums(&device, &block_ids).unwrap();
+
+    // Both blocks should produce non-empty checksums
+    assert!(checksums.contains_key(&0));
+    assert!(checksums.contains_key(&1));
+
+    // Checksums should be different (different block IDs in sequential pattern)
+    assert_ne!(checksums[&0], checksums[&1]);
 }

@@ -100,6 +100,7 @@ fn build_layout(
         StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        other => panic!("Unsupported storage kind for CUDA bench: {:?}", other),
     }
 }
 

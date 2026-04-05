@@ -5,6 +5,8 @@
 
 use super::BounceBufferSpec;
 use derive_builder::Builder;
+#[cfg(feature = "level-zero")]
+use syclrc::level_zero::ze::safe::ZeImmediateCmdList;
 use std::{ops::Range, sync::Arc};
 
 /// Options for configuring transfer operations.
@@ -45,6 +47,15 @@ pub struct TransferOptions {
     /// source → bounce buffer → destination.
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<Arc<dyn BounceBufferSpec>>,
+
+    /// Optional caller-provided Level Zero immediate command list.
+    ///
+    /// When provided, the Ze transfer executor will use this command list instead
+    /// of acquiring one from the per-device cache. The caller is responsible for
+    /// synchronization.
+    #[cfg(feature = "level-zero")]
+    #[builder(default, setter(strip_option))]
+    pub ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
 }
 
 impl TransferOptions {

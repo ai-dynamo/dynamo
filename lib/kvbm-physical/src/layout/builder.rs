@@ -53,6 +53,13 @@ enum AllocationKind {
     Device {
         device_id: u32,
     },
+    XpuDevice {
+        device_id: u32,
+    },
+    /// Level Zero host-pinned memory (zeMemAllocHost). XPU equivalent of Pinned.
+    ZeHost {
+        device_id: u32,
+    },
     Disk {
         path: Option<PathBuf>,
     },
@@ -245,7 +252,25 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device { device_id }))
     }
 
+    /// Allocate XPU (Intel Level Zero) device memory on the specified device.
+    pub fn allocate_xpu_device(
+        self,
+        device_id: u32,
+    ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::XpuDevice { device_id }))
+    }
+
     /// Allocate disk-backed storage. When `path` is `None`, a temporary file is used.
+
+    /// Allocate Level Zero host-pinned memory on the specified device.
+    /// This is the XPU equivalent of `allocate_pinned` — uses `zeMemAllocHost`
+    /// instead of `cuMemHostAlloc`, so it works without CUDA.
+    pub fn allocate_ze_host(
+        self,
+        device_id: u32,
+    ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::ZeHost { device_id }))
+    }
     pub fn allocate_disk(
         self,
         path: Option<PathBuf>,
@@ -465,6 +490,12 @@ fn allocate_regions(
         AllocationKind::Device { device_id } => {
             allocate_device_entry(reserve_size, agent, device_id)?
         }
+        AllocationKind::XpuDevice { device_id } => {
+            allocate_xpu_device_entry(reserve_size, agent, device_id)?
+        }
+        AllocationKind::ZeHost { device_id } => {
+            allocate_ze_host_entry(reserve_size, agent, device_id)?
+        }
         AllocationKind::Disk { path } => allocate_disk_entry(reserve_size, agent, path)?,
     };
 
@@ -492,6 +523,32 @@ fn allocate_device_entry(size: usize, agent: &NixlAgent, device_id: u32) -> Resu
         anyhow!("failed to allocate device memory ({size} bytes) on device {device_id}: {e}")
     })?;
     register_storage(storage, agent)
+}
+
+#[cfg(feature = "level-zero")]
+fn allocate_xpu_device_entry(size: usize, agent: &NixlAgent, device_id: u32) -> Result<MemoryEntry> {
+    let storage = dynamo_memory::XpuDeviceStorage::new(size, device_id).map_err(|e| {
+        anyhow!("failed to allocate XPU device memory ({size} bytes) on device {device_id}: {e}")
+    })?;
+    register_storage(storage, agent)
+}
+
+#[cfg(not(feature = "level-zero"))]
+fn allocate_xpu_device_entry(_size: usize, _agent: &NixlAgent, _device_id: u32) -> Result<MemoryEntry> {
+    Err(anyhow!("XPU device allocation requires the level-zero feature"))
+}
+
+#[cfg(feature = "level-zero")]
+fn allocate_ze_host_entry(size: usize, agent: &NixlAgent, device_id: u32) -> Result<MemoryEntry> {
+    let storage = dynamo_memory::ZeHostStorage::new(size, device_id).map_err(|e| {
+        anyhow!("failed to allocate Ze host memory ({size} bytes) on device {device_id}: {e}")
+    })?;
+    register_storage(storage, agent)
+}
+
+#[cfg(not(feature = "level-zero"))]
+fn allocate_ze_host_entry(_size: usize, _agent: &NixlAgent, _device_id: u32) -> Result<MemoryEntry> {
+    Err(anyhow!("Ze host allocation requires the level-zero feature"))
 }
 
 fn allocate_disk_entry(
@@ -523,7 +580,7 @@ where
             // System/Pinned memory needs UCX for remote transfers
             agent.has_backend("UCX") || agent.has_backend("POSIX")
         }
-        StorageKind::Device(_) => {
+        StorageKind::Device(_) | StorageKind::XpuDevice(_) => {
             // Device memory needs UCX for remote transfers OR GDS for direct disk transfers
             agent.has_backend("UCX") || agent.has_backend("GDS_MT")
         }
@@ -765,6 +822,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
                 StorageKind::System => (MemType::Dram, 0),
                 StorageKind::Pinned => (MemType::Dram, 0),
                 StorageKind::Device(id) => (MemType::Vram, id as u64),
+                StorageKind::XpuDevice(id) => (MemType::Vram, id as u64),
                 StorageKind::Disk(id) => (MemType::File, id),
             };
             Ok(NixlMetadata::new(
