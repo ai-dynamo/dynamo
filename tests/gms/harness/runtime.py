@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -18,10 +19,32 @@ DYNAMO_BIN = REPO_ROOT / "dynamo" / "bin"
 MIN_EXPECTED_MEMORY_RETURN_FRACTION = 0.6
 
 
-def get_gpu_memory_used(device: int = 0) -> int:
+def _resolve_nvml_handle():
+    """Resolve the NVML device handle for CUDA device 0 at call-time.
+
+    Reads CUDA_VISIBLE_DEVICES each time so runtime changes and UUID/MIG
+    entries are honoured.  Raises ValueError if the entry cannot be resolved
+    rather than silently falling back to index 0.
+    """
+    cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    first = cuda_vis.split(",")[0].strip() if cuda_vis else ""
+    if first.startswith("GPU-") or first.startswith("MIG-"):
+        return pynvml.nvmlDeviceGetHandleByUUID(first)
+    if first:
+        try:
+            index = int(first)
+        except ValueError:
+            raise ValueError(
+                f"Cannot parse CUDA_VISIBLE_DEVICES entry {first!r} as an integer or UUID"
+            )
+        return pynvml.nvmlDeviceGetHandleByIndex(index)
+    return pynvml.nvmlDeviceGetHandleByIndex(0)
+
+
+def get_gpu_memory_used() -> int:
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        handle = _resolve_nvml_handle()
         return pynvml.nvmlDeviceGetMemoryInfo(handle).used
     finally:
         pynvml.nvmlShutdown()
@@ -30,6 +53,8 @@ def get_gpu_memory_used(device: int = 0) -> int:
 def send_completion(
     port: int,
     prompt: str = "Hello",
+    *,
+    model: str = FAULT_TOLERANCE_MODEL_NAME,
     max_retries: int = 3,
     retry_delay: float = 1.0,
 ) -> dict:
@@ -39,7 +64,7 @@ def send_completion(
             response = requests.post(
                 f"http://localhost:{port}/v1/completions",
                 json={
-                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "model": model,
                     "prompt": prompt,
                     "max_tokens": 20,
                 },
@@ -62,3 +87,23 @@ def send_completion(
                 )
                 time.sleep(retry_delay)
     raise last_error  # type: ignore[misc]
+
+
+def wait_for_memory_drop(
+    baseline_bytes: int,
+    *,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.5,
+) -> int:
+    """Poll until GPU memory drops below *baseline_bytes*, then return current usage.
+
+    Returns the last observed usage (which may still be >= baseline if timeout fired).
+    """
+    deadline = time.monotonic() + timeout_s
+    current = get_gpu_memory_used()
+    while time.monotonic() < deadline:
+        if current < baseline_bytes:
+            return current
+        time.sleep(poll_interval_s)
+        current = get_gpu_memory_used()
+    return current

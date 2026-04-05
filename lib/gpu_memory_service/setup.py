@@ -77,6 +77,7 @@ setup(
         "gpu_memory_service.integrations",
         "gpu_memory_service.integrations.common",
         "gpu_memory_service.integrations.sglang",
+        "gpu_memory_service.integrations.trtllm",
         "gpu_memory_service.integrations.vllm",
     ],
     package_dir={
@@ -93,6 +94,7 @@ setup(
         "gpu_memory_service.integrations": "integrations",
         "gpu_memory_service.integrations.common": "integrations/common",
         "gpu_memory_service.integrations.sglang": "integrations/sglang",
+        "gpu_memory_service.integrations.trtllm": "integrations/trtllm",
         "gpu_memory_service.integrations.vllm": "integrations/vllm",
     },
     package_data={
