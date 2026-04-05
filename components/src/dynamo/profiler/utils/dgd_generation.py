@@ -17,15 +17,21 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.config.backend_components import MockerComponentName
-from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
+from dynamo.planner.defaults import MockerComponentName, SubComponentType
+from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.profiler.utils.config import (
+    Config,
+    DgdPlannerServiceConfig,
+    get_service_name_by_type,
+    set_argument_value,
+)
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
@@ -400,3 +406,249 @@ def _load_profiling_data(output_dir: str) -> dict:
         pass
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# WebUI config preview helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_dgdr_spec_from_config_path(config_path: str | None) -> Any:
+    """Parse a DGDR spec from a file path or inline JSON string.
+
+    Returns the parsed DynamoGraphDeploymentRequestSpec, or None on failure.
+    """
+    if not config_path:
+        return None
+    try:
+        from dynamo.profiler.utils.dgdr_v1beta1_types import (
+            DynamoGraphDeploymentRequestSpec,
+        )
+
+        path = Path(config_path)
+        if path.is_file():
+            text = path.read_text()
+            suffix = path.suffix.lower()
+            data = yaml.safe_load(text) if suffix in (".yaml", ".yml") else json.loads(text)
+        else:
+            data = json.loads(config_path)
+        return DynamoGraphDeploymentRequestSpec.model_validate(data)
+    except Exception as e:
+        logger.warning("Could not parse DGDR spec for preview: %s", e)
+        return None
+
+
+def _load_dgd_config_for_preview(
+    config_path: str | None, args: Any, mode: str = "disagg"
+) -> dict:
+    """Load the default backend DGD config and apply model/image from the DGDR spec.
+
+    Used exclusively for generating WebUI config previews.
+    """
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+
+    dgdr = _parse_dgdr_spec_from_config_path(config_path)
+    backend = getattr(args, "backend", None)
+    if not backend and dgdr is not None:
+        backend = str(dgdr.backend).lower()
+    if not backend:
+        backend = "vllm"
+
+    modifier = CONFIG_MODIFIERS.get(backend)
+    if modifier is None:
+        logger.warning("Unknown backend '%s', falling back to vllm for preview.", backend)
+        modifier = CONFIG_MODIFIERS["vllm"]
+
+    config_dict: dict = modifier.load_default_config(mode=mode)
+
+    if dgdr is not None:
+        model = dgdr.model
+        if model:
+            try:
+                config_dict = modifier.update_model(config_dict, model_name=model, model_path=model)
+            except Exception as e:
+                logger.warning("Could not apply model to preview config: %s", e)
+        if dgdr.image:
+            try:
+                config_dict = modifier.update_image(config_dict, dgdr.image)
+            except Exception:
+                pass
+
+    # Inject device-specific env vars (e.g. VLLM_TARGET_DEVICE=xpu for Intel XPU)
+    device_type = getattr(args, "device_type", None)
+    if not device_type and dgdr is not None and dgdr.hardware:
+        device_type = dgdr.hardware.deviceType
+    if device_type and hasattr(modifier, "set_device_type"):
+        try:
+            config_dict = modifier.set_device_type(config_dict, device_type)
+        except Exception as e:
+            logger.warning("Could not apply device_type to preview config: %s", e)
+
+    return config_dict
+
+
+def _apply_parallelization_to_service(
+    modifier: Any,
+    config_dict: dict,
+    mapping: Any,
+    component_type: Any,
+    num_gpus_per_node: int,
+) -> dict:
+    """Apply a ParallelizationMapping to the given service component type."""
+    try:
+        if mapping.tp is not None:
+            config_dict = modifier.set_config_tp_size(
+                config_dict, mapping.tp, component_type=component_type
+            )
+        elif mapping.tep is not None:
+            config_dict = modifier.set_config_tep_size(
+                config_dict, mapping.tep, num_gpus_per_node, component_type=component_type
+            )
+        elif mapping.dep is not None:
+            config_dict = modifier.set_config_dep_size(
+                config_dict, mapping.dep, num_gpus_per_node, component_type=component_type
+            )
+    except Exception as e:
+        logger.warning("Could not apply parallelization mapping for preview: %s", e)
+    return config_dict
+
+
+def _extract_service_dict(config_dict: dict, backend: str, component_type: Any) -> tuple[str, dict]:
+    """Extract a single service dict from a DGD config by component type.
+
+    Returns (service_name, service_config_dict).
+    """
+    try:
+        cfg = Config.model_validate(config_dict)
+        service_name = get_service_name_by_type(cfg, backend, component_type)
+        service = cfg.spec.services[service_name]
+        service_dict = service.model_dump(exclude_none=True, exclude_unset=True)
+        return service_name, service_dict
+    except Exception as e:
+        logger.warning("Could not extract service for preview (%s): %s", component_type, e)
+        # Fallback: return raw services dict under a generic name
+        services = config_dict.get("spec", {}).get("services", {})
+        if services:
+            name = next(iter(services))
+            return name, services[name]
+        return "Worker", {}
+
+
+def generate_prefill_service_config_preview(
+    config_path: str | None,
+    args: Any,
+    best_prefill_mapping: Any,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a preview dict for the prefill service with the given parallelization.
+
+    Args:
+        config_path: Path to the DGDR spec file, or an inline JSON string.
+        args: Profiler args namespace (used for backend/model fallback).
+        best_prefill_mapping: ParallelizationMapping for the prefill worker.
+        num_gpus_per_node: Number of GPUs per node (for multinode configs).
+
+    Returns:
+        dict: ``{service_name: service_config_dict}``
+    """
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+
+    config_dict = _load_dgd_config_for_preview(config_path, args, mode="disagg")
+
+    backend = getattr(args, "backend", None)
+    dgdr = _parse_dgdr_spec_from_config_path(config_path)
+    if not backend and dgdr is not None:
+        backend = str(dgdr.backend).lower()
+    if not backend:
+        backend = "vllm"
+    modifier = CONFIG_MODIFIERS.get(backend, CONFIG_MODIFIERS["vllm"])
+
+    config_dict = _apply_parallelization_to_service(
+        modifier, config_dict, best_prefill_mapping, SubComponentType.PREFILL, num_gpus_per_node
+    )
+
+    service_name, service_dict = _extract_service_dict(config_dict, backend, SubComponentType.PREFILL)
+    return {service_name: service_dict}
+
+
+def generate_decode_service_config_preview(
+    config_path: str | None,
+    args: Any,
+    best_decode_mapping: Any,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a preview dict for the decode service with the given parallelization.
+
+    Args:
+        config_path: Path to the DGDR spec file, or an inline JSON string.
+        args: Profiler args namespace (used for backend/model fallback).
+        best_decode_mapping: ParallelizationMapping for the decode worker.
+        num_gpus_per_node: Number of GPUs per node (for multinode configs).
+
+    Returns:
+        dict: ``{service_name: service_config_dict}``
+    """
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+
+    config_dict = _load_dgd_config_for_preview(config_path, args, mode="disagg")
+
+    backend = getattr(args, "backend", None)
+    dgdr = _parse_dgdr_spec_from_config_path(config_path)
+    if not backend and dgdr is not None:
+        backend = str(dgdr.backend).lower()
+    if not backend:
+        backend = "vllm"
+    modifier = CONFIG_MODIFIERS.get(backend, CONFIG_MODIFIERS["vllm"])
+
+    config_dict = _apply_parallelization_to_service(
+        modifier, config_dict, best_decode_mapping, SubComponentType.DECODE, num_gpus_per_node
+    )
+
+    service_name, service_dict = _extract_service_dict(config_dict, backend, SubComponentType.DECODE)
+    return {service_name: service_dict}
+
+
+def generate_prefill_decode_services_config_preview(
+    config_path: str | None,
+    args: Any,
+    best_prefill_mapping: Any,
+    best_decode_mapping: Any,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a preview dict containing both prefill and decode services.
+
+    Args:
+        config_path: Path to the DGDR spec file, or an inline JSON string.
+        args: Profiler args namespace (used for backend/model fallback).
+        best_prefill_mapping: ParallelizationMapping for the prefill worker.
+        best_decode_mapping: ParallelizationMapping for the decode worker.
+        num_gpus_per_node: Number of GPUs per node (for multinode configs).
+
+    Returns:
+        dict: ``{prefill_service_name: prefill_config, decode_service_name: decode_config}``
+    """
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+
+    backend = getattr(args, "backend", None)
+    dgdr = _parse_dgdr_spec_from_config_path(config_path)
+    if not backend and dgdr is not None:
+        backend = str(dgdr.backend).lower()
+    if not backend:
+        backend = "vllm"
+    modifier = CONFIG_MODIFIERS.get(backend, CONFIG_MODIFIERS["vllm"])
+
+    # Apply prefill mapping
+    prefill_config = _load_dgd_config_for_preview(config_path, args, mode="disagg")
+    prefill_config = _apply_parallelization_to_service(
+        modifier, prefill_config, best_prefill_mapping, SubComponentType.PREFILL, num_gpus_per_node
+    )
+    prefill_name, prefill_dict = _extract_service_dict(prefill_config, backend, SubComponentType.PREFILL)
+
+    # Apply decode mapping (load fresh copy to avoid cross-contamination)
+    decode_config = _load_dgd_config_for_preview(config_path, args, mode="disagg")
+    decode_config = _apply_parallelization_to_service(
+        modifier, decode_config, best_decode_mapping, SubComponentType.DECODE, num_gpus_per_node
+    )
+    decode_name, decode_dict = _extract_service_dict(decode_config, backend, SubComponentType.DECODE)
+
+    return {prefill_name: prefill_dict, decode_name: decode_dict}

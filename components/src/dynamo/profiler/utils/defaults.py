@@ -43,7 +43,14 @@ AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO = 4
 
 # Cost calculation defaults
 # TODO: allow user to configure this in GUI
-DEFAULT_GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
+DEFAULT_GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars (NVIDIA default)
+
+# Device-specific cost per accelerator per hour (USD).
+# Used by the WebUI cost analysis chart.  Keys match hardware.deviceType values.
+DEVICE_COST_PER_HOUR: dict[str, float] = {
+    "cuda": 3.0,          # NVIDIA H200 / H100 estimate
+    "xpu": 2.0,           # Intel Gaudi / Arc XPU estimate (placeholder)
+}
 
 
 class EngineType(str, Enum):

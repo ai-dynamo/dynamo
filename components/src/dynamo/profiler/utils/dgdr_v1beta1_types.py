@@ -58,12 +58,18 @@ class SearchStrategy(str, Enum):
 
 
 class GPUSKUType(str, Enum):
+    # NVIDIA GPUs
     GB200SXM = "gb200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
     B200SXM = "b200_sxm"
     A100SXM = "a100_sxm"
     L40S = "l40s"
+    # Intel XPU / Gaudi
+    IntelGaudi3 = "intel_gaudi3"
+    IntelGaudi2 = "intel_gaudi2"
+    IntelArcB580 = "intel_arc_b580"
+    IntelArcA770 = "intel_arc_a770"
 
 
 class BackendType(str, Enum):
@@ -196,6 +202,10 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
+    deviceType: Optional[str] = Field(
+        default="cuda",
+        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel GPU/Gaudi). Defaults to 'cuda'.",
+    )
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
         description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",

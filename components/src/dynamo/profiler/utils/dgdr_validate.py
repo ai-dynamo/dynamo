@@ -134,6 +134,21 @@ def _validate_parallelization_sweeping_mode(
             "Please specify a concrete backend (trtllm, vllm, sglang)."
         )
 
+    # Warn when RAPID mode is requested for XPU: AI Configurator's performance
+    # database only covers NVIDIA systems.  RAPID estimates will be unavailable
+    # and the profiler will fall back to real measurement (THOROUGH behaviour).
+    device_type = (
+        dgdr.hardware.deviceType
+        if dgdr.hardware and dgdr.hardware.deviceType
+        else "cuda"
+    )
+    if dgdr.searchStrategy == SearchStrategy.RAPID and str(device_type).lower() == "xpu":
+        logger.warning(
+            "RAPID search strategy uses AI Configurator, which does not support "
+            "Intel XPU hardware.  Performance estimation will be unavailable for XPU. "
+            "Consider using searchStrategy: thorough for real on-hardware measurement."
+        )
+
 
 def validate_dgdr_dynamo_features(
     dgdr: DynamoGraphDeploymentRequestSpec, aic_supported: bool
