@@ -24,6 +24,10 @@ upgradeCRD: true
 # Environment variables to pass to operator Deployment.
 env: []
 
+# Extra environment variables to add to the operator Deployment.
+# Useful for injecting additional configuration like proxy settings without modifying templates directly.
+extraEnv: []
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
