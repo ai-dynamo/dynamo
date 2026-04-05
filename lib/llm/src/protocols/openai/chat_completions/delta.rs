@@ -82,6 +82,7 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             enable_tracking,
+            return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -100,6 +101,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Determines whether request tracking (timing, KV hit rate) should be enabled.
     pub enable_tracking: bool,
+    /// When true, logprob token fields use "token_id:<id>" format instead of decoded text.
+    pub return_tokens_as_token_ids: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -210,16 +213,22 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
+        let return_as_ids = self.options.return_tokens_as_token_ids;
         let content = top_logprobs.map(|top_logprobs| {
             toks.iter()
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
+                    let token_str = if return_as_ids {
+                        format!("token_id:{}", tid)
+                    } else {
+                        t.clone()
+                    };
                     let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: t.clone(),
+                        token: token_str.clone(),
                         logprob: lp,
-                        bytes: token_to_utf8_bytes(t),
+                        bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
                 })
@@ -525,6 +534,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
