@@ -22,8 +22,8 @@ use crate::MessageType;
 /// Current schema version
 const SCHEMA_VERSION_V1: u16 = 1;
 
-/// Maximum frame size (16 MB)
-const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
+/// Default maximum frame size (16 MB)
+const DEFAULT_MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Minimum frame header size (version + type + 2 lengths)
 const MIN_HEADER_SIZE: usize = 2 + 1 + 4 + 4; // 11 bytes
@@ -36,6 +36,7 @@ const MIN_HEADER_SIZE: usize = 2 + 1 + 4 + 4; // 11 bytes
 #[derive(Debug, Clone)]
 pub struct TcpFrameCodec {
     state: DecodeState,
+    max_frame_size: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,10 +52,19 @@ enum DecodeState {
 }
 
 impl TcpFrameCodec {
-    /// Create a new frame codec
+    /// Create a new frame codec with the default max frame size (16 MB)
     pub fn new() -> Self {
         Self {
             state: DecodeState::AwaitingHeader,
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+        }
+    }
+
+    /// Create a new frame codec with a custom max frame size
+    pub fn with_max_frame_size(max_frame_size: u32) -> Self {
+        Self {
+            state: DecodeState::AwaitingHeader,
+            max_frame_size,
         }
     }
 
@@ -155,18 +165,29 @@ impl TcpFrameCodec {
         Ok(())
     }
 
-    /// Validate that lengths are reasonable
+    /// Validate that lengths are reasonable (uses default max frame size).
+    ///
+    /// Used by static encode methods for backward compatibility.
     fn validate_lengths(header_len: u32, payload_len: u32) -> io::Result<()> {
+        Self::validate_lengths_limit(header_len, payload_len, DEFAULT_MAX_FRAME_SIZE)
+    }
+
+    /// Validate that lengths are reasonable with a configurable max frame size.
+    fn validate_lengths_limit(
+        header_len: u32,
+        payload_len: u32,
+        max_frame_size: u32,
+    ) -> io::Result<()> {
         let total_len = header_len
             .checked_add(payload_len)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Frame size overflow"))?;
 
-        if total_len > MAX_FRAME_SIZE {
+        if total_len > max_frame_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Frame size {} exceeds maximum {}",
-                    total_len, MAX_FRAME_SIZE
+                    total_len, max_frame_size
                 ),
             ));
         }
@@ -220,7 +241,7 @@ impl Decoder for TcpFrameCodec {
                     })?;
 
                     // Validate lengths before allocating/waiting
-                    Self::validate_lengths(header_len, payload_len)?;
+                    Self::validate_lengths_limit(header_len, payload_len, self.max_frame_size)?;
 
                     // Advance buffer past header
                     src.advance(MIN_HEADER_SIZE);
@@ -442,11 +463,11 @@ mod tests {
         let mut codec = TcpFrameCodec::new();
         let mut buf = BytesMut::new();
 
-        // Create frame that exceeds MAX_FRAME_SIZE
+        // Create frame that exceeds DEFAULT_MAX_FRAME_SIZE
         buf.extend_from_slice(&SCHEMA_VERSION_V1.to_be_bytes());
         buf.extend_from_slice(&[MessageType::Message.as_u8()]);
-        buf.extend_from_slice(&(MAX_FRAME_SIZE / 2 + 1).to_be_bytes());
-        buf.extend_from_slice(&(MAX_FRAME_SIZE / 2 + 1).to_be_bytes());
+        buf.extend_from_slice(&(DEFAULT_MAX_FRAME_SIZE / 2 + 1).to_be_bytes());
+        buf.extend_from_slice(&(DEFAULT_MAX_FRAME_SIZE / 2 + 1).to_be_bytes());
 
         let result = codec.decode(&mut buf);
         assert!(result.is_err());
@@ -575,8 +596,8 @@ mod tests {
 
     #[test]
     fn test_encode_frame_too_large() {
-        let header = vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize];
-        let payload = vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize];
+        let header = vec![0u8; (DEFAULT_MAX_FRAME_SIZE / 2 + 1) as usize];
+        let payload = vec![0u8; (DEFAULT_MAX_FRAME_SIZE / 2 + 1) as usize];
 
         let result = encode_frame_to_bytes_sync(MessageType::Message, &header, &payload);
         assert!(result.is_err());

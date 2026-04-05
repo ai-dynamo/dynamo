@@ -219,9 +219,13 @@ impl TcpListener {
             warn!("Failed to set TCP keepalive on {}: {}", peer_addr, e);
         }
 
-        // Set large receive buffer for high throughput
-        if let Err(e) = sock_ref.set_recv_buffer_size(1_048_576) {
+        // Set large buffers for high throughput (2MB each)
+        if let Err(e) = sock_ref.set_recv_buffer_size(2_097_152) {
             warn!("Failed to set receive buffer size on {}: {}", peer_addr, e);
+        }
+
+        if let Err(e) = sock_ref.set_send_buffer_size(2_097_152) {
+            warn!("Failed to set send buffer size on {}: {}", peer_addr, e);
         }
 
         // Create framed stream with zero-copy codec

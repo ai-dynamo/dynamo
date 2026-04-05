@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -17,6 +17,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::transport::{HealthCheckError, ShutdownState, TransportError, TransportErrorHandler};
+use crate::utils::interfaces::{
+    InterfaceEndpoint, InterfaceFilter, parse_endpoints, resolve_advertise_endpoints,
+    select_best_endpoint,
+};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
 use super::framing::TcpFrameCodec;
@@ -47,8 +51,17 @@ pub struct TcpTransport {
     // Send channel capacity for backpressure
     channel_capacity: usize,
 
+    // Connect timeout for outbound connections
+    connect_timeout: Duration,
+
     // Optional pre-bound listener (used for tests to avoid port races)
     listener: Mutex<Option<std::net::TcpListener>>,
+
+    // Cached local interfaces for endpoint selection
+    local_interfaces: OnceLock<Vec<InterfaceEndpoint>>,
+
+    // NUMA hint for topology-aware NIC selection
+    numa_hint: Option<u32>,
 }
 
 /// Handle to a connection's writer task
@@ -83,7 +96,9 @@ impl TcpTransport {
         key: TransportKey,
         local_address: WorkerAddress,
         channel_capacity: usize,
+        connect_timeout: Duration,
         listener: Option<std::net::TcpListener>,
+        numa_hint: Option<u32>,
     ) -> Self {
         Self {
             key,
@@ -95,7 +110,10 @@ impl TcpTransport {
             cancel_token: CancellationToken::new(),
             shutdown_state: OnceLock::new(),
             channel_capacity,
+            connect_timeout,
             listener: Mutex::new(listener),
+            local_interfaces: OnceLock::new(),
+            numa_hint,
         }
     }
 
@@ -162,7 +180,15 @@ impl TcpTransport {
 
         let cancel = self.cancel_token.clone();
         let conns = Arc::clone(&self.connections);
-        rt.spawn(connection_writer_task(addr, instance_id, rx, conns, cancel));
+        let connect_timeout = self.connect_timeout;
+        rt.spawn(connection_writer_task(
+            addr,
+            instance_id,
+            rx,
+            conns,
+            cancel,
+            connect_timeout,
+        ));
 
         debug!("Created new connection to {} ({})", instance_id, addr);
         Ok(handle)
@@ -186,11 +212,20 @@ impl Transport for TcpTransport {
             .map_err(|_| TransportError::NoEndpoint)?
             .ok_or(TransportError::NoEndpoint)?;
 
-        // Parse TCP endpoint (expected format: "tcp://host:port" or "host:port")
-        let addr = parse_tcp_endpoint(&endpoint).map_err(|e| {
+        // Parse endpoints (supports both new multi-endpoint and legacy formats)
+        let remote_endpoints = parse_endpoints(&endpoint).map_err(|e| {
             error!("Failed to parse TCP endpoint: {}", e);
             TransportError::InvalidEndpoint
         })?;
+
+        // Lazy-init local interfaces for endpoint selection
+        let local = self.local_interfaces.get_or_init(|| {
+            resolve_advertise_endpoints(self.bind_addr, &InterfaceFilter::All).unwrap_or_default()
+        });
+
+        // Select best endpoint based on NUMA + subnet affinity
+        let addr = select_best_endpoint(&remote_endpoints, local, self.numa_hint)
+            .ok_or(TransportError::InvalidEndpoint)?;
 
         // Store peer address
         self.peers.insert(peer_info.instance_id(), addr);
@@ -393,8 +428,10 @@ async fn connection_writer_task(
     rx: flume::Receiver<SendTask>,
     connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
     cancel_token: CancellationToken,
+    connect_timeout: Duration,
 ) -> Result<()> {
-    let result = connection_writer_inner(addr, instance_id, &rx, &cancel_token).await;
+    let result =
+        connection_writer_inner(addr, instance_id, &rx, &cancel_token, connect_timeout).await;
 
     // Always drain queued messages and notify their error handlers.
     //
@@ -427,12 +464,15 @@ async fn connection_writer_inner(
     instance_id: crate::InstanceId,
     rx: &flume::Receiver<SendTask>,
     cancel_token: &CancellationToken,
+    connect_timeout: Duration,
 ) -> Result<()> {
     debug!("Connecting to {}", addr);
 
     let mut stream = tokio::select! {
         _ = cancel_token.cancelled() => return Ok(()),
-        res = TcpStream::connect(addr) => res.context("connect failed")?,
+        res = tokio::time::timeout(connect_timeout, TcpStream::connect(addr)) => {
+            res.context("connect timeout")?.context("connect failed")?
+        },
     };
 
     if let Err(e) = stream.set_nodelay(true) {
@@ -448,8 +488,12 @@ async fn connection_writer_inner(
         warn!("Failed to set keepalive: {}", e);
     }
 
-    if let Err(e) = sock.set_send_buffer_size(1_048_576) {
+    if let Err(e) = sock.set_send_buffer_size(2_097_152) {
         warn!("Failed to set send buffer size: {}", e);
+    }
+
+    if let Err(e) = sock.set_recv_buffer_size(2_097_152) {
+        warn!("Failed to set recv buffer size: {}", e);
     }
 
     debug!("Connected to {}", addr);
@@ -474,12 +518,11 @@ async fn connection_writer_inner(
     Ok(())
 }
 
-/// Parse a TCP endpoint string into a SocketAddr
-///
-/// Accepts formats:
-/// - "tcp://host:port"
-/// - "host:port"
+/// Parse a TCP endpoint string into a SocketAddr (legacy format, used in tests).
+#[cfg(test)]
 fn parse_tcp_endpoint(endpoint: &[u8]) -> Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+
     let endpoint_str = std::str::from_utf8(endpoint).context("endpoint is not valid UTF-8")?;
 
     // Strip "tcp://" prefix if present
@@ -495,41 +538,15 @@ fn parse_tcp_endpoint(endpoint: &[u8]) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("no addresses resolved"))
 }
 
-/// Resolve a wildcard bind address to a routable address for advertisement.
-///
-/// When binding to 0.0.0.0 (IPv4 unspecified) or :: (IPv6 unspecified),
-/// we need to advertise a routable address that peers can actually connect to.
-///
-/// For 0.0.0.0, we use 127.0.0.1 (localhost) which works for same-machine communication.
-/// For ::, we use ::1 (IPv6 localhost).
-///
-/// In a production multi-node deployment, this should be replaced with actual
-/// network interface discovery or explicit configuration.
-fn resolve_advertise_address(bind_addr: SocketAddr) -> SocketAddr {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-    match bind_addr.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => {
-            // 0.0.0.0 -> 127.0.0.1 for local testing
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bind_addr.port())
-        }
-        IpAddr::V6(ip) if ip.is_unspecified() => {
-            // :: -> ::1 for local testing
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), bind_addr.port())
-        }
-        _ => {
-            // Already a specific address, use as-is
-            bind_addr
-        }
-    }
-}
-
 /// Builder for TcpTransport
 pub struct TcpTransportBuilder {
     bind_addr: Option<SocketAddr>,
     key: Option<TransportKey>,
     channel_capacity: usize,
+    connect_timeout: Duration,
     listener: Option<std::net::TcpListener>,
+    interface_filter: InterfaceFilter,
+    numa_hint: Option<u32>,
 }
 
 impl TcpTransportBuilder {
@@ -539,7 +556,10 @@ impl TcpTransportBuilder {
             bind_addr: None,
             key: None,
             channel_capacity: 256,
+            connect_timeout: Duration::from_secs(5),
             listener: None,
+            interface_filter: InterfaceFilter::default(),
+            numa_hint: None,
         }
     }
 
@@ -558,6 +578,26 @@ impl TcpTransportBuilder {
     /// Set the channel capacity for backpressure (default: 256)
     pub fn channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
+        self
+    }
+
+    /// Set the connect timeout for outbound connections (default: 5s)
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the interface selection filter for multi-NIC environments.
+    pub fn interface_filter(mut self, filter: InterfaceFilter) -> Self {
+        self.interface_filter = filter;
+        self
+    }
+
+    /// Set the NUMA node hint for topology-aware NIC selection.
+    ///
+    /// Callers typically resolve this via `dynamo_memory::numa::get_device_numa_node(gpu_id)`.
+    pub fn numa_hint(mut self, node: u32) -> Self {
+        self.numa_hint = Some(node);
         self
     }
 
@@ -585,16 +625,45 @@ impl TcpTransportBuilder {
 
     /// Build the TcpTransport
     pub fn build(self) -> Result<TcpTransport> {
-        let bind_addr = self
-            .bind_addr
-            .ok_or_else(|| anyhow::anyhow!("bind_addr is required"))?;
         let key = self.key.unwrap_or_else(|| TransportKey::from("tcp"));
 
-        // Resolve advertise address (handle 0.0.0.0 -> 127.0.0.1 for local testing)
-        let advertise_addr = resolve_advertise_address(bind_addr);
-        let local_endpoint = format!("tcp://{}", advertise_addr);
+        // If we have a listener, use its address; otherwise pre-bind to resolve port 0.
+        let (bind_addr, listener) = if let Some(listener) = self.listener {
+            let addr = listener.local_addr()?;
+            (addr, Some(listener))
+        } else {
+            let requested = self
+                .bind_addr
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let std_listener = std::net::TcpListener::bind(requested)
+                .context("Failed to pre-bind TCP listener")?;
+            let actual = std_listener.local_addr()?;
+            (actual, Some(std_listener))
+        };
+
+        // Resolve advertise endpoints (multi-interface discovery)
+        let endpoints = resolve_advertise_endpoints(bind_addr, &self.interface_filter)?;
+
+        // Warn if NUMA hint conflicts with interface filter
+        if let (Some(numa), InterfaceFilter::ByName(name)) =
+            (self.numa_hint, &self.interface_filter)
+        {
+            for ep in &endpoints {
+                if let Some(ep_numa) = ep.numa_node
+                    && ep_numa != numa as i32
+                {
+                    warn!(
+                        "NIC {} is on NUMA node {} but GPU NUMA hint is {}",
+                        name, ep_numa, numa
+                    );
+                }
+            }
+        }
+
+        let encoded =
+            rmp_serde::to_vec(&endpoints).context("Failed to encode interface endpoints")?;
         let mut addr_builder = crate::address::WorkerAddressBuilder::new();
-        addr_builder.add_entry(key.clone(), local_endpoint.as_bytes().to_vec())?;
+        addr_builder.add_entry(key.clone(), encoded)?;
         let local_address = addr_builder.build()?;
 
         Ok(TcpTransport::new(
@@ -602,7 +671,9 @@ impl TcpTransportBuilder {
             key,
             local_address,
             self.channel_capacity,
-            self.listener,
+            self.connect_timeout,
+            listener,
+            self.numa_hint,
         ))
     }
 }
@@ -649,13 +720,22 @@ mod tests {
         }
     }
 
-    /// Build a `PeerInfo` whose TCP endpoint points at `addr`.
+    /// Build a `PeerInfo` whose TCP endpoint points at `addr` using legacy format.
     fn make_tcp_peer(addr: SocketAddr) -> PeerInfo {
         let instance_id = crate::InstanceId::new_v4();
         let mut builder = WorkerAddressBuilder::new();
         builder
             .add_entry("tcp", format!("tcp://{}", addr).into_bytes())
             .unwrap();
+        PeerInfo::new(instance_id, builder.build().unwrap())
+    }
+
+    /// Build a `PeerInfo` whose TCP endpoint uses the new multi-endpoint format.
+    fn make_tcp_peer_multi(endpoints: Vec<InterfaceEndpoint>) -> PeerInfo {
+        let instance_id = crate::InstanceId::new_v4();
+        let mut builder = WorkerAddressBuilder::new();
+        let encoded = rmp_serde::to_vec(&endpoints).unwrap();
+        builder.add_entry("tcp", encoded).unwrap();
         PeerInfo::new(instance_id, builder.build().unwrap())
     }
 
@@ -702,9 +782,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_requires_bind_addr() {
+    fn test_builder_default_prebinds() {
+        // Builder without explicit bind_addr should pre-bind to 0.0.0.0:0
         let result = TcpTransportBuilder::new().build();
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -736,35 +817,51 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_advertise_address_ipv4_unspecified() {
-        use std::net::{IpAddr, Ipv4Addr};
+    fn test_builder_multi_endpoint_format() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let transport = TcpTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap();
 
-        // 0.0.0.0 should resolve to 127.0.0.1
-        let bind_addr: SocketAddr = "0.0.0.0:12345".parse().unwrap();
-        let resolved = resolve_advertise_address(bind_addr);
-        assert_eq!(resolved.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(resolved.port(), 12345);
-
-        // Already specific address should remain unchanged
-        let specific: SocketAddr = "192.168.1.100:8080".parse().unwrap();
-        let resolved = resolve_advertise_address(specific);
-        assert_eq!(resolved, specific);
+        // The address should contain msgpack-encoded endpoints
+        let wa = transport.address();
+        let raw = wa.get_entry("tcp").unwrap().unwrap();
+        let endpoints: Vec<InterfaceEndpoint> = rmp_serde::from_slice(&raw).unwrap();
+        assert!(!endpoints.is_empty());
+        // All endpoints should have the correct port
+        for ep in &endpoints {
+            assert_eq!(ep.port, addr.port());
+        }
     }
 
-    #[test]
-    fn test_resolve_advertise_address_ipv6_unspecified() {
-        use std::net::{IpAddr, Ipv6Addr};
+    #[tokio::test]
+    async fn test_register_legacy_format() {
+        let (transport, _our_addr) = make_transport();
+        let peer_addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let peer = make_tcp_peer(peer_addr);
+        let iid = peer.instance_id();
+        // Legacy "tcp://host:port" format should still work
+        transport.register(peer).unwrap();
+        assert!(transport.peers.contains_key(&iid));
+    }
 
-        // :: should resolve to ::1
-        let bind_addr: SocketAddr = "[::]:12345".parse().unwrap();
-        let resolved = resolve_advertise_address(bind_addr);
-        assert_eq!(resolved.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
-        assert_eq!(resolved.port(), 12345);
-
-        // Already specific IPv6 address should remain unchanged
-        let specific: SocketAddr = "[::1]:8080".parse().unwrap();
-        let resolved = resolve_advertise_address(specific);
-        assert_eq!(resolved, specific);
+    #[tokio::test]
+    async fn test_register_multi_endpoint_format() {
+        let (transport, _our_addr) = make_transport();
+        let endpoints = vec![InterfaceEndpoint {
+            name: "eth0".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: 9999,
+            prefix_len: 8,
+            numa_node: None,
+        }];
+        let peer = make_tcp_peer_multi(endpoints);
+        let iid = peer.instance_id();
+        transport.register(peer).unwrap();
+        assert!(transport.peers.contains_key(&iid));
     }
 
     #[tokio::test]
@@ -843,7 +940,14 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Spawn the writer task
-        let writer = tokio::spawn(connection_writer_task(addr, iid, rx, conns, cancel));
+        let writer = tokio::spawn(connection_writer_task(
+            addr,
+            iid,
+            rx,
+            conns,
+            cancel,
+            Duration::from_secs(5),
+        ));
 
         // Accept the connection, then immediately drop it + the listener
         let (stream, _) = listener.accept().await.unwrap();
@@ -952,7 +1056,14 @@ mod tests {
         let conns = Arc::clone(&connections);
         let cancel = CancellationToken::new();
 
-        let writer = tokio::spawn(connection_writer_task(addr, iid, rx, conns, cancel));
+        let writer = tokio::spawn(connection_writer_task(
+            addr,
+            iid,
+            rx,
+            conns,
+            cancel,
+            Duration::from_secs(5),
+        ));
         let _ = writer.await;
 
         assert_eq!(

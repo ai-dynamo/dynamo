@@ -45,6 +45,9 @@ pub struct UdsTransport {
 
     // Send channel capacity for backpressure
     channel_capacity: usize,
+
+    // Connect timeout for outbound connections
+    connect_timeout: Duration,
 }
 
 /// Handle to a connection's writer task
@@ -75,6 +78,7 @@ impl UdsTransport {
         key: TransportKey,
         local_address: WorkerAddress,
         channel_capacity: usize,
+        connect_timeout: Duration,
     ) -> Self {
         Self {
             key,
@@ -86,6 +90,7 @@ impl UdsTransport {
             cancel_token: CancellationToken::new(),
             shutdown_state: OnceLock::new(),
             channel_capacity,
+            connect_timeout,
         }
     }
 
@@ -155,9 +160,17 @@ impl UdsTransport {
 
         let cancel = self.cancel_token.clone();
         let conns = Arc::clone(&self.connections);
+        let connect_timeout = self.connect_timeout;
 
         debug!("Created new UDS connection to {} ({:?})", instance_id, path);
-        rt.spawn(connection_writer_task(path, instance_id, rx, conns, cancel));
+        rt.spawn(connection_writer_task(
+            path,
+            instance_id,
+            rx,
+            conns,
+            cancel,
+            connect_timeout,
+        ));
         Ok(handle)
     }
 }
@@ -405,8 +418,10 @@ async fn connection_writer_task(
     rx: flume::Receiver<SendTask>,
     connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
     cancel_token: CancellationToken,
+    connect_timeout: Duration,
 ) -> Result<()> {
-    let result = connection_writer_inner(&path, instance_id, &rx, &cancel_token).await;
+    let result =
+        connection_writer_inner(&path, instance_id, &rx, &cancel_token, connect_timeout).await;
 
     // Always drain queued messages and notify their error handlers.
     while let Ok(msg) = rx.try_recv() {
@@ -430,13 +445,25 @@ async fn connection_writer_inner(
     instance_id: crate::InstanceId,
     rx: &flume::Receiver<SendTask>,
     cancel_token: &CancellationToken,
+    connect_timeout: Duration,
 ) -> Result<()> {
     debug!("Connecting to UDS {:?}", path);
 
     let mut stream = tokio::select! {
         _ = cancel_token.cancelled() => return Ok(()),
-        res = UnixStream::connect(path) => res.context("UDS connect failed")?,
+        res = tokio::time::timeout(connect_timeout, UnixStream::connect(path)) => {
+            res.context("UDS connect timeout")?.context("UDS connect failed")?
+        },
     };
+
+    // Set large buffers for high throughput (2MB each)
+    let sock = socket2::SockRef::from(&stream);
+    if let Err(e) = sock.set_send_buffer_size(2_097_152) {
+        warn!("Failed to set UDS send buffer size: {}", e);
+    }
+    if let Err(e) = sock.set_recv_buffer_size(2_097_152) {
+        warn!("Failed to set UDS recv buffer size: {}", e);
+    }
 
     debug!("Connected to UDS {:?}", path);
 
@@ -484,6 +511,7 @@ pub struct UdsTransportBuilder {
     socket_path: Option<PathBuf>,
     key: Option<TransportKey>,
     channel_capacity: usize,
+    connect_timeout: Duration,
 }
 
 impl UdsTransportBuilder {
@@ -493,6 +521,7 @@ impl UdsTransportBuilder {
             socket_path: None,
             key: None,
             channel_capacity: 256,
+            connect_timeout: Duration::from_secs(5),
         }
     }
 
@@ -514,6 +543,12 @@ impl UdsTransportBuilder {
         self
     }
 
+    /// Set the connect timeout for outbound connections (default: 5s)
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
     /// Build the UdsTransport
     pub fn build(self) -> Result<UdsTransport> {
         let socket_path = self
@@ -531,6 +566,7 @@ impl UdsTransportBuilder {
             key,
             local_address,
             self.channel_capacity,
+            self.connect_timeout,
         ))
     }
 }
@@ -756,6 +792,7 @@ mod tests {
             rx,
             conns,
             cancel,
+            Duration::from_secs(5),
         ));
 
         // Accept the connection, then immediately drop it + the listener
@@ -947,7 +984,14 @@ mod tests {
         let conns = Arc::clone(&connections);
         let cancel = CancellationToken::new();
 
-        let writer = tokio::spawn(connection_writer_task(dead_socket, iid, rx, conns, cancel));
+        let writer = tokio::spawn(connection_writer_task(
+            dead_socket,
+            iid,
+            rx,
+            conns,
+            cancel,
+            Duration::from_secs(5),
+        ));
         let _ = writer.await;
 
         assert_eq!(
