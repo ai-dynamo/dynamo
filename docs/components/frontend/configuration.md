@@ -90,6 +90,12 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 | `--metrics-prefix` | `DYN_METRICS_PREFIX` | `dynamo_frontend` | Prefix for frontend Prometheus metrics |
 | `--dump-config-to` | `DYN_DUMP_CONFIG_TO` | — | Dump resolved config to file path |
 
+## Tokenizer
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer backend: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer Backends](tokenizer-backends.md) |
+
 ## Experimental
 
 | CLI Argument | Env Var | Default | Description |
