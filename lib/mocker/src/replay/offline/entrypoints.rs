@@ -20,8 +20,8 @@ use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs};
 use crate::loadgen::{Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
-    ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest,
-    ReplayWorkerArtifacts, TraceCollector, TraceSimulationReport,
+    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
+    ReplayTimedRequest, ReplayWorkerArtifacts, TraceCollector, TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -106,6 +106,7 @@ pub(crate) fn generate_trace_worker_artifacts(
 pub(crate) fn simulate_trace(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -117,6 +118,7 @@ pub(crate) fn simulate_trace(
         simulate_trace_multi(
             args,
             router_config,
+            prefill_load_estimator,
             requests,
             num_workers,
             arrival_speedup_ratio,
@@ -128,6 +130,7 @@ pub(crate) fn simulate_trace(
 pub(crate) fn simulate_concurrency(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -139,6 +142,7 @@ pub(crate) fn simulate_concurrency(
         simulate_concurrency_multi(
             args,
             router_config,
+            prefill_load_estimator,
             requests,
             max_in_flight,
             num_workers,
@@ -150,6 +154,7 @@ pub(crate) fn simulate_concurrency(
 pub(crate) fn simulate_trace_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -157,13 +162,21 @@ pub(crate) fn simulate_trace_workload(
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
         simulate_trace_workload_single(args, trace)
     } else {
-        simulate_trace_workload_multi(args, router_config, trace, num_workers, router_mode)
+        simulate_trace_workload_multi(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+        )
     }
 }
 
 pub(crate) fn simulate_concurrency_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -175,6 +188,7 @@ pub(crate) fn simulate_concurrency_workload(
         simulate_concurrency_workload_multi(
             args,
             router_config,
+            prefill_load_estimator,
             trace,
             max_in_flight,
             num_workers,
@@ -186,6 +200,7 @@ pub(crate) fn simulate_concurrency_workload(
 pub(crate) fn simulate_trace_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
@@ -194,6 +209,7 @@ pub(crate) fn simulate_trace_disagg(
     let (collector, _) = DisaggRuntime::new(
         &config,
         router_config,
+        prefill_load_estimator,
         pending,
         DisaggReplayMode::Trace,
         router_mode,
@@ -205,6 +221,7 @@ pub(crate) fn simulate_trace_disagg(
 pub(crate) fn simulate_concurrency_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
@@ -213,6 +230,7 @@ pub(crate) fn simulate_concurrency_disagg(
     let (collector, _) = DisaggRuntime::new(
         &config,
         router_config,
+        prefill_load_estimator,
         pending,
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
@@ -224,6 +242,7 @@ pub(crate) fn simulate_concurrency_disagg(
 pub(crate) fn simulate_trace_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
@@ -231,6 +250,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
+        prefill_load_estimator,
         driver,
         DisaggReplayMode::Trace,
         router_mode,
@@ -242,6 +262,7 @@ pub(crate) fn simulate_trace_workload_disagg(
 pub(crate) fn simulate_concurrency_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
@@ -250,6 +271,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
+        prefill_load_estimator,
         driver,
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
@@ -314,6 +336,7 @@ pub(crate) fn simulate_concurrency_workload_single(
 pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -324,6 +347,7 @@ pub(crate) fn simulate_trace_multi(
     let (collector, _) = AggRuntime::new(
         &args,
         router_config,
+        prefill_load_estimator,
         pending,
         num_workers,
         AggReplayMode::Trace,
@@ -336,6 +360,7 @@ pub(crate) fn simulate_trace_multi(
 pub(crate) fn simulate_concurrency_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -346,6 +371,7 @@ pub(crate) fn simulate_concurrency_multi(
     let (collector, _) = AggRuntime::new(
         &args,
         router_config,
+        prefill_load_estimator,
         pending,
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
@@ -358,6 +384,7 @@ pub(crate) fn simulate_concurrency_multi(
 pub(crate) fn simulate_trace_workload_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -366,6 +393,7 @@ pub(crate) fn simulate_trace_workload_multi(
     let (collector, _) = AggRuntime::new_workload(
         &args,
         router_config,
+        prefill_load_estimator,
         trace.into_trace_driver()?,
         num_workers,
         AggReplayMode::Trace,
@@ -378,6 +406,7 @@ pub(crate) fn simulate_trace_workload_multi(
 pub(crate) fn simulate_concurrency_workload_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -387,6 +416,7 @@ pub(crate) fn simulate_concurrency_workload_multi(
     let (collector, _) = AggRuntime::new_workload(
         &args,
         router_config,
+        prefill_load_estimator,
         trace.into_concurrency_driver()?,
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
@@ -463,6 +493,7 @@ pub(super) fn run_trace_multi_collect_with_stats(
     AggRuntime::new(
         args,
         None,
+        None,
         pending,
         num_workers,
         AggReplayMode::Trace,
@@ -484,6 +515,7 @@ pub(super) fn run_concurrency_multi_collect_with_stats(
     AggRuntime::new(
         args,
         None,
+        None,
         VecDeque::from(requests),
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
@@ -503,6 +535,7 @@ pub(super) fn run_trace_workload_multi_collect_with_stats(
 ) -> (TraceCollector, AggRuntimeStats) {
     AggRuntime::new_workload(
         args,
+        None,
         None,
         trace.into_trace_driver().unwrap(),
         num_workers,
@@ -524,6 +557,7 @@ pub(super) fn run_concurrency_workload_multi_collect_with_stats(
 ) -> (TraceCollector, AggRuntimeStats) {
     AggRuntime::new_workload(
         args,
+        None,
         None,
         trace.into_concurrency_driver().unwrap(),
         num_workers,
@@ -547,6 +581,7 @@ pub(super) fn run_trace_collect(
     DisaggRuntime::new(
         config,
         router_config,
+        None,
         pending,
         DisaggReplayMode::Trace,
         router_mode,
@@ -567,6 +602,7 @@ pub(super) fn run_concurrency_collect(
     DisaggRuntime::new(
         config,
         router_config,
+        None,
         VecDeque::from(requests),
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
@@ -586,6 +622,7 @@ pub(super) fn run_trace_workload_collect(
     DisaggRuntime::new_workload(
         config,
         router_config,
+        None,
         trace.into_trace_driver().unwrap(),
         DisaggReplayMode::Trace,
         router_mode,
@@ -606,6 +643,7 @@ pub(super) fn run_concurrency_workload_collect(
     DisaggRuntime::new_workload(
         config,
         router_config,
+        None,
         trace.into_concurrency_driver().unwrap(),
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,

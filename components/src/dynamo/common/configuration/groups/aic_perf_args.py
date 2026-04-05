@@ -38,28 +38,34 @@ class AicPerfArgGroup(ArgGroup):
             flag_name="--aic-backend",
             env_var="DYN_AIC_BACKEND",
             default=None,
-            help="AIC backend family to model (for example: vllm or sglang).",
+            help=(
+                "[EXPERIMENTAL] AIC backend family to model "
+                "(for example: vllm or sglang)."
+            ),
         )
         add_argument(
             g,
             flag_name="--aic-system",
             env_var="DYN_AIC_SYSTEM",
             default=None,
-            help="AIC hardware/system identifier (for example: h200_sxm).",
+            help=(
+                "[EXPERIMENTAL] AIC hardware/system identifier "
+                "(for example: h200_sxm)."
+            ),
         )
         add_argument(
             g,
             flag_name="--aic-backend-version",
             env_var="DYN_AIC_BACKEND_VERSION",
             default=None,
-            help="Pinned backend version for AIC database lookup.",
+            help="[EXPERIMENTAL] Pinned backend version for AIC database lookup.",
         )
         add_argument(
             g,
             flag_name="--aic-tp-size",
             env_var="DYN_AIC_TP_SIZE",
             default=1,
-            help="Tensor parallel size to model in AIC.",
+            help="[EXPERIMENTAL] Tensor parallel size to model in AIC.",
             arg_type=int,
         )
         add_argument(
@@ -67,5 +73,8 @@ class AicPerfArgGroup(ArgGroup):
             flag_name="--aic-model-path",
             env_var="DYN_AIC_MODEL_PATH",
             default=None,
-            help="Model path or model identifier to use for AIC perf lookup.",
+            help=(
+                "[EXPERIMENTAL] Model path or model identifier to use for "
+                "AIC perf lookup."
+            ),
         )

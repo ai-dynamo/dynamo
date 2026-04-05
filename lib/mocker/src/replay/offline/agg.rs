@@ -21,7 +21,7 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{ReplayRouterMode, TraceCollector};
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector};
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
@@ -80,6 +80,7 @@ impl AggRuntime {
     pub(super) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: VecDeque<DirectRequest>,
         num_workers: usize,
         mode: ReplayMode,
@@ -88,6 +89,7 @@ impl AggRuntime {
         Self::new_with_source(
             args,
             router_config,
+            prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
             num_workers,
             router_mode,
@@ -98,6 +100,7 @@ impl AggRuntime {
     pub(super) fn new_workload(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         driver: WorkloadDriver,
         num_workers: usize,
         mode: ReplayMode,
@@ -106,6 +109,7 @@ impl AggRuntime {
         Self::new_with_source(
             args,
             router_config,
+            prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
             num_workers,
             router_mode,
@@ -116,6 +120,7 @@ impl AggRuntime {
     fn new_with_source(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         admission: AdmissionQueue,
         num_workers: usize,
         router_mode: ReplayRouterMode,
@@ -123,9 +128,12 @@ impl AggRuntime {
         let args = args.clone().normalized()?;
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => {
-                Some(OfflineReplayRouter::new(&args, router_config, num_workers)?)
-            }
+            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
+                &args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+            )?),
         };
         let capture_kv_events = router.is_some();
         let engine = EngineComponent::new(
@@ -816,6 +824,7 @@ mod tests {
         let args = queueing_router_args(RouterQueuePolicy::Fcfs);
         let mut runtime = AggRuntime::new(
             &args,
+            None,
             None,
             normalize_trace_requests(
                 vec![

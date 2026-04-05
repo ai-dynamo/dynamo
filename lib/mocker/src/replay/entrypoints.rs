@@ -14,7 +14,8 @@ use super::validate::{
     validate_online_concurrency_args, validate_online_replay_args,
 };
 use super::{
-    OfflineDisaggReplayConfig, ReplayRouterMode, ReplayWorkerArtifacts, TraceSimulationReport,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
+    TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::Trace;
@@ -36,6 +37,7 @@ pub fn simulate_trace_file(
     simulate_trace_file_with_router_mode(
         args,
         None,
+        None,
         trace_path,
         num_workers,
         arrival_speedup_ratio,
@@ -46,6 +48,7 @@ pub fn simulate_trace_file(
 pub fn simulate_trace_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -60,6 +63,7 @@ pub fn simulate_trace_file_with_router_mode(
     let report = crate::replay::offline::simulate_trace_workload(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         num_workers,
         router_mode,
@@ -70,6 +74,7 @@ pub fn simulate_trace_file_with_router_mode(
 pub fn simulate_trace_file_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
@@ -83,6 +88,7 @@ pub fn simulate_trace_file_disagg_with_router_mode(
     let report = crate::replay::offline::simulate_trace_workload_disagg(
         config,
         router_config,
+        prefill_load_estimator,
         trace,
         router_mode,
     )?;
@@ -98,6 +104,7 @@ pub fn simulate_trace_live_file(
     simulate_trace_live_file_with_router_mode(
         args,
         None,
+        None,
         trace_path,
         num_workers,
         arrival_speedup_ratio,
@@ -108,6 +115,7 @@ pub fn simulate_trace_live_file(
 pub fn simulate_trace_live_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -118,7 +126,14 @@ pub fn simulate_trace_live_file_with_router_mode(
     let trace = Trace::from_mooncake(trace_path, args.block_size)?
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    online::simulate_trace_workload(args, router_config, trace, num_workers, router_mode)
+    online::simulate_trace_workload(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+    )
 }
 
 pub fn simulate_trace_requests(
@@ -130,6 +145,7 @@ pub fn simulate_trace_requests(
     simulate_trace_requests_with_router_mode(
         args,
         None,
+        None,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -140,6 +156,7 @@ pub fn simulate_trace_requests(
 pub fn simulate_trace_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -155,6 +172,7 @@ pub fn simulate_trace_requests_with_router_mode(
     let report = crate::replay::offline::simulate_trace(
         args,
         router_config,
+        prefill_load_estimator,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -166,6 +184,7 @@ pub fn simulate_trace_requests_with_router_mode(
 pub fn simulate_trace_requests_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
@@ -180,6 +199,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
     let report = crate::replay::offline::simulate_trace_disagg(
         config,
         router_config,
+        prefill_load_estimator,
         requests,
         arrival_speedup_ratio,
         router_mode,
@@ -196,6 +216,7 @@ pub fn simulate_trace_live_requests(
     simulate_trace_live_requests_with_router_mode(
         args,
         None,
+        None,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -206,6 +227,7 @@ pub fn simulate_trace_live_requests(
 pub fn simulate_trace_live_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -220,6 +242,7 @@ pub fn simulate_trace_live_requests_with_router_mode(
     online::simulate_trace_requests(
         args,
         router_config,
+        prefill_load_estimator,
         requests,
         num_workers,
         arrival_speedup_ratio,
@@ -236,6 +259,7 @@ pub fn simulate_concurrency_file(
     simulate_concurrency_file_with_router_mode(
         args,
         None,
+        None,
         trace_path,
         max_in_flight,
         num_workers,
@@ -246,6 +270,7 @@ pub fn simulate_concurrency_file(
 pub fn simulate_concurrency_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     max_in_flight: usize,
     num_workers: usize,
@@ -258,6 +283,7 @@ pub fn simulate_concurrency_file_with_router_mode(
     let report = simulate_concurrency_workload_with_router_mode(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         num_workers,
@@ -269,6 +295,7 @@ pub fn simulate_concurrency_file_with_router_mode(
 pub fn simulate_concurrency_file_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
@@ -280,6 +307,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
     let report = simulate_concurrency_workload_disagg_with_router_mode(
         config,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         router_mode,
@@ -296,6 +324,7 @@ pub fn simulate_concurrency_live_file(
     simulate_concurrency_live_file_with_router_mode(
         args,
         None,
+        None,
         trace_path,
         max_in_flight,
         num_workers,
@@ -306,6 +335,7 @@ pub fn simulate_concurrency_live_file(
 pub fn simulate_concurrency_live_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     max_in_flight: usize,
     num_workers: usize,
@@ -317,6 +347,7 @@ pub fn simulate_concurrency_live_file_with_router_mode(
     online::simulate_concurrency_workload(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         num_workers,
@@ -333,6 +364,7 @@ pub fn simulate_concurrency_live_requests(
     simulate_concurrency_live_requests_with_router_mode(
         args,
         None,
+        None,
         requests,
         max_in_flight,
         num_workers,
@@ -343,6 +375,7 @@ pub fn simulate_concurrency_live_requests(
 pub fn simulate_concurrency_live_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -357,6 +390,7 @@ pub fn simulate_concurrency_live_requests_with_router_mode(
     online::simulate_concurrency_requests(
         args,
         router_config,
+        prefill_load_estimator,
         requests,
         max_in_flight,
         num_workers,
@@ -373,6 +407,7 @@ pub fn simulate_concurrency_requests(
     simulate_concurrency_requests_with_router_mode(
         args,
         None,
+        None,
         requests,
         max_in_flight,
         num_workers,
@@ -383,6 +418,7 @@ pub fn simulate_concurrency_requests(
 pub fn simulate_concurrency_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -397,6 +433,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
     crate::replay::offline::simulate_concurrency(
         args,
         router_config,
+        prefill_load_estimator,
         requests,
         max_in_flight,
         num_workers,
@@ -407,6 +444,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
 pub fn simulate_concurrency_requests_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
@@ -420,6 +458,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
     crate::replay::offline::simulate_concurrency_disagg(
         config,
         router_config,
+        prefill_load_estimator,
         requests,
         max_in_flight,
         router_mode,
@@ -434,6 +473,7 @@ pub fn simulate_trace_workload(
     simulate_trace_workload_with_router_mode(
         args,
         None,
+        None,
         trace,
         num_workers,
         ReplayRouterMode::RoundRobin,
@@ -443,6 +483,7 @@ pub fn simulate_trace_workload(
 pub fn simulate_trace_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -453,6 +494,7 @@ pub fn simulate_trace_workload_with_router_mode(
     let report = crate::replay::offline::simulate_trace_workload(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         num_workers,
         router_mode,
@@ -463,6 +505,7 @@ pub fn simulate_trace_workload_with_router_mode(
 pub fn simulate_trace_workload_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
@@ -472,6 +515,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
     let report = crate::replay::offline::simulate_trace_workload_disagg(
         config,
         router_config,
+        prefill_load_estimator,
         trace,
         router_mode,
     )?;
@@ -486,6 +530,7 @@ pub fn simulate_trace_live_workload(
     simulate_trace_live_workload_with_router_mode(
         args,
         None,
+        None,
         trace,
         num_workers,
         ReplayRouterMode::RoundRobin,
@@ -495,13 +540,21 @@ pub fn simulate_trace_live_workload(
 pub fn simulate_trace_live_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
-    online::simulate_trace_workload(args, router_config, trace, num_workers, router_mode)
+    online::simulate_trace_workload(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+    )
 }
 
 pub fn simulate_concurrency_workload(
@@ -513,6 +566,7 @@ pub fn simulate_concurrency_workload(
     simulate_concurrency_workload_with_router_mode(
         args,
         None,
+        None,
         trace,
         max_in_flight,
         num_workers,
@@ -523,6 +577,7 @@ pub fn simulate_concurrency_workload(
 pub fn simulate_concurrency_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -533,6 +588,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
     crate::replay::offline::simulate_concurrency_workload(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         num_workers,
@@ -543,6 +599,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
 pub fn simulate_concurrency_workload_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
@@ -552,6 +609,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
     crate::replay::offline::simulate_concurrency_workload_disagg(
         config,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         router_mode,
@@ -567,6 +625,7 @@ pub fn simulate_concurrency_live_workload(
     simulate_concurrency_live_workload_with_router_mode(
         args,
         None,
+        None,
         trace,
         max_in_flight,
         num_workers,
@@ -577,6 +636,7 @@ pub fn simulate_concurrency_live_workload(
 pub fn simulate_concurrency_live_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -587,6 +647,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
     online::simulate_concurrency_workload(
         args,
         router_config,
+        prefill_load_estimator,
         trace,
         max_in_flight,
         num_workers,

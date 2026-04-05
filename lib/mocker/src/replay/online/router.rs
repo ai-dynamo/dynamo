@@ -19,11 +19,11 @@ use uuid::Uuid;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
 };
-use crate::replay::ReplayRouterMode;
 use crate::replay::router_shared::{
     ReplayScheduler, replay_policy, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs,
 };
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 
 #[derive(Clone)]
 enum ReplayIndexer {
@@ -120,6 +120,7 @@ impl KvReplayRouter {
     fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Self {
         let config = replay_router_config(args, router_config);
@@ -138,7 +139,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             policy,
-            None,
+            prefill_load_estimator,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             CancellationToken::new(),
@@ -239,6 +240,20 @@ impl KvReplayRouter {
             .map_err(|e| anyhow!("replay router event task failed: {e}"))?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn debug_potential_loads(
+        &self,
+        isl_tokens: usize,
+        track_prefill_tokens: bool,
+    ) -> Vec<dynamo_kv_router::PotentialLoad> {
+        self.scheduler.get_potential_loads(
+            None,
+            isl_tokens,
+            OverlapScores::default(),
+            track_prefill_tokens,
+        )
+    }
 }
 
 #[expect(
@@ -255,13 +270,17 @@ impl ReplayRouter {
         mode: ReplayRouterMode,
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Self {
         match mode {
             ReplayRouterMode::RoundRobin => Self::RoundRobin(RoundRobinRouter::default()),
-            ReplayRouterMode::KvRouter => {
-                Self::Kv(KvReplayRouter::new(args, router_config, num_workers))
-            }
+            ReplayRouterMode::KvRouter => Self::Kv(KvReplayRouter::new(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+            )),
         }
     }
 
@@ -307,6 +326,18 @@ impl ReplayRouter {
         match self {
             Self::RoundRobin(_) => Ok(()),
             Self::Kv(router) => router.shutdown().await,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_potential_loads(
+        &self,
+        isl_tokens: usize,
+        track_prefill_tokens: bool,
+    ) -> Vec<dynamo_kv_router::PotentialLoad> {
+        match self {
+            Self::RoundRobin(_) => Vec::new(),
+            Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
         }
     }
 }

@@ -10,8 +10,10 @@ mod router_shared;
 mod validate;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
@@ -34,6 +36,8 @@ pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
 }
+
+pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {

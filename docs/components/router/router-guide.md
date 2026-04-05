@@ -344,6 +344,8 @@ Use `--router-track-output-blocks` **(experimental)** when your workload is outp
 
 The `--router-queue-threshold` (default: 4.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.priority`. Set to None to disable queueing entirely.
 
+Use `--router-prefill-load-model aic` **(experimental)** when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config (`--aic-backend`, `--aic-system`, and `--aic-model-path`; `--aic-tp-size` defaults to `1`, and `--aic-backend-version` is optional). This path is still experimental because the decay model is based on expected prefill duration rather than observed worker-side progress.
+
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
 
 ### Prometheus Metrics

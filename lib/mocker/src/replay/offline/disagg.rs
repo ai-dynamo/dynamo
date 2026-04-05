@@ -23,7 +23,9 @@ use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, TraceCollector};
+use crate::replay::{
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
+};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,7 @@ impl DisaggRuntime {
     pub(super) fn new(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: VecDeque<DirectRequest>,
         mode: ReplayMode,
         router_mode: ReplayRouterMode,
@@ -84,6 +87,7 @@ impl DisaggRuntime {
         Self::new_with_source(
             config,
             router_config,
+            prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
             router_mode,
         )
@@ -93,6 +97,7 @@ impl DisaggRuntime {
     pub(super) fn new_workload(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         driver: WorkloadDriver,
         mode: ReplayMode,
         router_mode: ReplayRouterMode,
@@ -100,6 +105,7 @@ impl DisaggRuntime {
         Self::new_with_source(
             config,
             router_config,
+            prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
             router_mode,
         )
@@ -109,6 +115,7 @@ impl DisaggRuntime {
     fn new_with_source(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         admission: AdmissionQueue,
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
@@ -123,11 +130,13 @@ impl DisaggRuntime {
                     Some(OfflineReplayRouter::new(
                         &config.prefill_args,
                         Some(prefill_router_config),
+                        prefill_load_estimator,
                         config.num_prefill_workers,
                     )?),
                     Some(OfflineReplayRouter::new(
                         &config.decode_args,
                         Some(decode_router_config),
+                        None,
                         config.num_decode_workers,
                     )?),
                 )
@@ -712,6 +721,7 @@ fn derive_decode_router_config(
     config.overlap_score_weight = 0.0;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
+    config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
     config
 }
 

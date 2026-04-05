@@ -192,7 +192,7 @@ class KvRouterArgGroup(ArgGroup):
             default="none",
             choices=["none", "aic"],
             help=(
-                "KV Router: Prompt-side prefill load model. "
+                "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "
                 "'aic' decays the oldest active prefill request using AIC-predicted duration."
             ),

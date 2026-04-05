@@ -15,7 +15,7 @@ from typing import Protocol
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -72,6 +72,35 @@ def _load_engine_args(raw_args: str | None):
     return MockEngineArgs.from_json(json.dumps(raw))
 
 
+def _load_aic_perf_config(args: argparse.Namespace):
+    values = {
+        "aic_backend": args.aic_backend,
+        "aic_system": args.aic_system,
+        "aic_model_path": args.aic_model_path,
+        "aic_backend_version": args.aic_backend_version,
+        "aic_tp_size": args.aic_tp_size,
+    }
+    if not any(value is not None for value in values.values()):
+        return None
+
+    missing = [
+        name
+        for name in ("aic_backend", "aic_system", "aic_model_path")
+        if values[name] is None
+    ]
+    if missing:
+        missing_flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        raise ValueError(f"AIC replay modeling requires {missing_flags}")
+
+    return AicPerfConfig(
+        aic_backend=values["aic_backend"],
+        aic_system=values["aic_system"],
+        aic_model_path=values["aic_model_path"],
+        aic_tp_size=values["aic_tp_size"] or 1,
+        aic_backend_version=values["aic_backend_version"],
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_file", nargs="?")
@@ -79,6 +108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--prefill-engine-args")
     parser.add_argument("--decode-engine-args")
     parser.add_argument("--router-config")
+    parser.add_argument("--aic-backend")
+    parser.add_argument("--aic-system")
+    parser.add_argument("--aic-backend-version")
+    parser.add_argument("--aic-tp-size", type=int)
+    parser.add_argument("--aic-model-path")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(
@@ -140,6 +174,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.router_config is not None
         else None
     )
+    try:
+        aic_perf_config = _load_aic_perf_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if using_trace_file:
         report = run_trace_replay(
@@ -148,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             router_config=router_config,
+            aic_perf_config=aic_perf_config,
             num_workers=args.num_workers,
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,
@@ -165,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             router_config=router_config,
+            aic_perf_config=aic_perf_config,
             num_workers=args.num_workers,
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,

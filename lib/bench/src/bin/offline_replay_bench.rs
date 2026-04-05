@@ -115,6 +115,7 @@ fn main() -> Result<()> {
         last_report = Some(simulate_trace_file_with_router_mode(
             engine_args.clone(),
             None,
+            None,
             &args.trace_file,
             args.num_workers,
             args.arrival_speedup_ratio,

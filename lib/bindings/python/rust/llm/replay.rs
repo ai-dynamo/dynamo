@@ -19,8 +19,8 @@ use pythonize::pythonize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::aic_callback::create_aic_callback;
-use super::entrypoint::{KvRouterConfig, to_pyerr};
+use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -475,7 +475,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -484,6 +484,7 @@ pub fn run_mocker_trace_replay(
     prefill_engine_args: Option<MockEngineArgs>,
     decode_engine_args: Option<MockEngineArgs>,
     router_config: Option<KvRouterConfig>,
+    aic_perf_config: Option<&AicPerfConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -501,9 +502,15 @@ pub fn run_mocker_trace_replay(
         num_prefill_workers,
         num_decode_workers,
     )?;
+    let router_mode = parse_replay_router_mode(router_mode)?;
+    let prefill_load_estimator = load_replay_prefill_load_estimator(
+        py,
+        router_mode,
+        router_config.as_ref(),
+        aic_perf_config,
+    )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
-    let router_mode = parse_replay_router_mode(router_mode)?;
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
 
@@ -514,6 +521,7 @@ pub fn run_mocker_trace_replay(
                         dynamo_mocker::replay::simulate_concurrency_file_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             &trace_file,
                             max_in_flight,
                             num_workers,
@@ -524,6 +532,7 @@ pub fn run_mocker_trace_replay(
                         dynamo_mocker::replay::simulate_trace_file_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             &trace_file,
                             num_workers,
                             arrival_speedup_ratio,
@@ -534,6 +543,7 @@ pub fn run_mocker_trace_replay(
                         dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             &trace_file,
                             max_in_flight,
                             num_workers,
@@ -544,6 +554,7 @@ pub fn run_mocker_trace_replay(
                         dynamo_mocker::replay::simulate_trace_live_file_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             &trace_file,
                             num_workers,
                             arrival_speedup_ratio,
@@ -562,6 +573,7 @@ pub fn run_mocker_trace_replay(
                     dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode(
                         *config,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         &trace_file,
                         max_in_flight,
                         router_mode,
@@ -571,6 +583,7 @@ pub fn run_mocker_trace_replay(
                     dynamo_mocker::replay::simulate_trace_file_disagg_with_router_mode(
                         *config,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         &trace_file,
                         arrival_speedup_ratio,
                         router_mode,
@@ -591,7 +604,7 @@ pub fn run_mocker_trace_replay(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -602,6 +615,7 @@ pub fn run_mocker_synthetic_trace_replay(
     prefill_engine_args: Option<MockEngineArgs>,
     decode_engine_args: Option<MockEngineArgs>,
     router_config: Option<KvRouterConfig>,
+    aic_perf_config: Option<&AicPerfConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -624,9 +638,15 @@ pub fn run_mocker_synthetic_trace_replay(
         num_prefill_workers,
         num_decode_workers,
     )?;
+    let router_mode = parse_replay_router_mode(router_mode)?;
+    let prefill_load_estimator = load_replay_prefill_load_estimator(
+        py,
+        router_mode,
+        router_config.as_ref(),
+        aic_perf_config,
+    )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
-    let router_mode = parse_replay_router_mode(router_mode)?;
     let block_size = match &args_selection {
         ReplayArgsSelection::Aggregated(args) => args.block_size.max(1),
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
@@ -661,6 +681,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             max_in_flight,
                             num_workers,
@@ -671,6 +692,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         dynamo_mocker::replay::simulate_trace_workload_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
@@ -680,6 +702,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             max_in_flight,
                             num_workers,
@@ -690,6 +713,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode(
                             *args,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
@@ -705,6 +729,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode(
                             *config,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             max_in_flight,
                             router_mode,
@@ -712,6 +737,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         ("offline", None) => dynamo_mocker::replay::simulate_trace_workload_disagg_with_router_mode(
                             *config,
                             router_config.clone(),
+                            prefill_load_estimator.clone(),
                             trace,
                             router_mode,
                         ),
@@ -742,6 +768,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode(
                         *args,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         requests,
                         max_in_flight,
                         num_workers,
@@ -751,6 +778,7 @@ pub fn run_mocker_synthetic_trace_replay(
                 ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode(
                     *args,
                     router_config.clone(),
+                    prefill_load_estimator.clone(),
                     requests,
                     num_workers,
                     arrival_speedup_ratio,
@@ -760,6 +788,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
                         *args,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         requests,
                         max_in_flight,
                         num_workers,
@@ -770,6 +799,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
                         *args,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         requests,
                         num_workers,
                         arrival_speedup_ratio,
@@ -787,6 +817,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode(
                         *config,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         requests,
                         max_in_flight,
                         router_mode,
@@ -796,6 +827,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     dynamo_mocker::replay::simulate_trace_requests_disagg_with_router_mode(
                         *config,
                         router_config.clone(),
+                        prefill_load_estimator.clone(),
                         requests,
                         arrival_speedup_ratio,
                         router_mode,
@@ -911,6 +943,57 @@ fn load_replay_router_config(
     router_config: Option<KvRouterConfig>,
 ) -> Option<dynamo_kv_router::config::KvRouterConfig> {
     router_config.map(|config| config.inner())
+}
+
+fn load_replay_prefill_load_estimator(
+    py: Python<'_>,
+    router_mode: dynamo_mocker::replay::ReplayRouterMode,
+    router_config: Option<&KvRouterConfig>,
+    aic_perf_config: Option<&AicPerfConfig>,
+) -> PyResult<Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>> {
+    if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
+        if aic_perf_config.is_some() {
+            return Err(PyException::new_err(
+                "aic_perf_config requires router_mode='kv_router'",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let Some(router_config) = router_config else {
+        if aic_perf_config.is_some() {
+            return Err(PyException::new_err(
+                "aic_perf_config requires router_config with router_prefill_load_model='aic'",
+            ));
+        }
+        return Ok(None);
+    };
+
+    let router_config = router_config.inner();
+    if !router_config.router_prefill_load_model.is_enabled() {
+        if aic_perf_config.is_some() {
+            return Err(PyException::new_err(
+                "aic_perf_config requires router_prefill_load_model='aic'",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let Some(aic_perf_config) = aic_perf_config else {
+        return Err(PyException::new_err(
+            "router_prefill_load_model='aic' requires aic_perf_config",
+        ));
+    };
+
+    create_aic_prefill_load_estimator(
+        py,
+        aic_perf_config.backend_name(),
+        aic_perf_config.system(),
+        aic_perf_config.model_path(),
+        aic_perf_config.tp_size(),
+        aic_perf_config.backend_version(),
+    )
+    .map(Some)
 }
 
 fn parse_replay_router_mode(

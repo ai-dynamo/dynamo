@@ -130,6 +130,11 @@ The dedicated replay CLI exposes:
 - `--prefill-engine-args` (JSON string)
 - `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
+- `--aic-backend`
+- `--aic-system`
+- `--aic-backend-version`
+- `--aic-tp-size`
+- `--aic-model-path`
 - `--report-json`
 
 Defaults:
@@ -167,6 +172,12 @@ Both `--extra-engine-args` and `--router-config` accept partial JSON objects. En
 as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_ratio` belong in
 `--extra-engine-args`, not as top-level replay CLI flags. Unspecified fields fall back to the same
 defaults used by `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+Replay has two independent AIC surfaces:
+
+- engine timing AIC via `--extra-engine-args` / staged engine JSON
+- router-side prompt-load AIC via top-level `--aic-*` flags together with
+  `router_prefill_load_model: "aic"` in `--router-config`
 
 Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
 
@@ -292,6 +303,8 @@ provided through `--router-config`, not a dedicated top-level replay flag. In of
 - KV visibility is delayed slightly relative to request lifecycle events
 - queue admission is driven by router lifecycle edges (`add_request`, `mark_prefill_completed`, and `free`)
 - transient in-pass prefill occupancy is still approximated at the router level rather than modeled exactly
+- when `router_prefill_load_model` is `"aic"`, replay predicts one expected prefill duration per
+  admitted request and decays only the oldest active prefill request on each worker
 
 To compare queue policies manually, keep the same trace and engine args fixed and swap only
 `router_queue_policy` inside `--router-config`:
@@ -314,6 +327,24 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
 
 `lcfs` is intentionally a worse comparison policy under saturation; use it for experiments, not as
 an expected production default.
+
+To enable router-side AIC prefill-load modeling during replay:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --extra-engine-args '{"block_size":512}' \
+    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --aic-tp-size 1
+```
+
+For offline disagg replay, the same top-level `--aic-*` flags are supported, but the estimator is
+applied only to the prefill-stage router.
 
 ## Output
 
@@ -371,6 +402,8 @@ If you violate those constraints, replay fails immediately with a validation err
   `--inter-turn-delay-ms` only apply to synthetic replay
 - `--extra-engine-args`, `--prefill-engine-args`, `--decode-engine-args`, and `--router-config`
   are JSON strings on the standalone replay CLI
+- top-level `--aic-*` flags are used only for router-side prompt-load modeling; engine timing AIC
+  still belongs in the engine-args JSON
 - offline replay does not need planner runtime setup, router registration, or external event transport
 - the replay block size should match the trace block size, because token synthesis expands `hash_ids`
   using the configured block size
