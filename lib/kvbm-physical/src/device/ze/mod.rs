@@ -69,6 +69,10 @@ struct DeviceContextCache {
     device: ze::Device,
     context: Arc<ze::Context>,
     event_pool: Arc<SharedEventPool>,
+    /// Queue group ordinal for compute engine (CCS).
+    compute_ordinal: u32,
+    /// Queue group ordinal for copy engine (BCS); equals compute_ordinal if no dedicated BCS.
+    copy_ordinal: u32,
 }
 
 unsafe impl Send for DeviceContextCache {}
@@ -124,11 +128,18 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         .map_err(|e| anyhow::anyhow!("Failed to create event pool: {:?}", e))?;
     let event_pool = Arc::new(SharedEventPool::new(raw_pool, EVENT_POOL_SIZE));
 
+    // Probe queue group ordinals for engine selection.
+    let compute_ordinal = context.compute_queue_ordinal(device)?;
+    let copy_ordinal = context.copy_queue_ordinal(device)
+        .unwrap_or(compute_ordinal);
+
     let cache_entry = Arc::new(DeviceContextCache {
         _driver: driver.clone(),
         device: device.clone(),
         context,
         event_pool,
+        compute_ordinal,
+        copy_ordinal,
     });
 
     cache.insert(device_id, Arc::clone(&cache_entry));
@@ -165,11 +176,15 @@ impl DeviceContextOps for ZeContext {
         self.device_id
     }
 
-    fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
+    fn create_stream(&self, hint: EngineHint) -> Result<Box<dyn DeviceStreamOps>> {
+        let ordinal = match hint {
+            EngineHint::Copy => self.cache.copy_ordinal,
+            EngineHint::Compute => self.cache.compute_ordinal,
+        };
         let cmd_list = self
             .cache
             .context
-            .create_immediate_command_list(&self.cache.device)
+            .create_immediate_command_list_with_ordinal(&self.cache.device, ordinal)
             .map_err(|e| anyhow::anyhow!("Failed to create immediate command list: {:?}", e))?;
 
         Ok(Box::new(ZeStreamWrapper {

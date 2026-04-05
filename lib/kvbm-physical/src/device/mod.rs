@@ -18,7 +18,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps};
+pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps, EngineHint};
 
 /// Device backend type selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,8 +103,8 @@ impl DeviceContext {
         self.device_id
     }
 
-    pub fn create_stream(&self) -> Result<DeviceStream> {
-        let stream_ops = self.ops.create_stream()?;
+    pub fn create_stream(&self, hint: EngineHint) -> Result<DeviceStream> {
+        let stream_ops = self.ops.create_stream(hint)?;
         Ok(DeviceStream {
             backend: self.backend,
             ops: stream_ops,
