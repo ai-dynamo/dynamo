@@ -69,18 +69,21 @@ pub fn execute_device_transfer(
     // Track whether caller provided stream (affects event recording)
     let caller_manages_sync = device_stream.is_some();
 
-    // Get appropriate device stream — use caller-provided or acquire from round-robin pool
+    // Check if whole-block optimization is applicable (needed for engine selection)
+    let whole_block = can_use_whole_block_transfer(src, dst, Some(&layers));
+
+    let is_d2h = matches!(strategy, TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H);
+
+    // Select stream: caller-provided takes precedence, otherwise pick by engine×direction.
+    // - Whole-block (batch_copy): Copy engine (BCS on ZE) — dedicated DMA.
+    // - FC↔LW (vectorized_copy): Compute engine (CCS on ZE) — kernel + small H2D.
     let device_stream = if let Some(s) = device_stream {
         s
+    } else if whole_block {
+        if is_d2h { ctx.next_copy_d2h_stream() } else { ctx.next_copy_h2d_stream() }
     } else {
-        match strategy {
-            TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H => ctx.next_d2h_stream(),
-            _ => ctx.next_h2d_stream(), // H2D and D2D use h2d_stream
-        }
+        if is_d2h { ctx.next_compute_d2h_stream() } else { ctx.next_compute_h2d_stream() }
     };
-
-    // Check if whole-block optimization is applicable
-    let whole_block = can_use_whole_block_transfer(src, dst, Some(&layers));
 
     let strategy_name = match strategy {
         TransferStrategy::AsyncH2D | TransferStrategy::BlockingH2D => "H2D",

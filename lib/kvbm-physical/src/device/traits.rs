@@ -9,13 +9,27 @@
 use anyhow::Result;
 use std::fmt::Debug;
 
+/// Hint for which hardware engine to bind a stream to.
+///
+/// - `Copy`: dedicated DMA engine (ZE: BCS queue group; CUDA: ignored).
+/// - `Compute`: compute engine for kernel launch (ZE: CCS queue group; CUDA: ignored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineHint {
+    Copy,
+    Compute,
+}
+
 /// Device context operations — the main interface for device management.
 pub trait DeviceContextOps: Send + Sync + Debug {
     /// Get the device ID this context is bound to.
     fn device_id(&self) -> u32;
 
     /// Create a new stream/queue for async operations.
-    fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>>;
+    ///
+    /// The `hint` selects the hardware engine class:
+    /// - `EngineHint::Copy`: dedicated DMA engine for bulk transfers.
+    /// - `EngineHint::Compute`: compute engine for kernel + small memcpy.
+    fn create_stream(&self, hint: EngineHint) -> Result<Box<dyn DeviceStreamOps>>;
 
     /// Allocate device memory, returning a device pointer.
     fn allocate_device(&self, size: usize) -> Result<u64>;

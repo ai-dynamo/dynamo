@@ -43,7 +43,7 @@ impl DeviceContextOps for CudaContext {
         self.device_id
     }
 
-    fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
+    fn create_stream(&self, _hint: EngineHint) -> Result<Box<dyn DeviceStreamOps>> {
         let stream = self.context.new_stream()
             .context("Failed to create CUDA stream")?;
         Ok(Box::new(CudaStreamWrapper { stream }))
