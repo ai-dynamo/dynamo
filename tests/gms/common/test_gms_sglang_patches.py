@@ -37,8 +37,7 @@ def test_patch_model_runner_rewrites_total_gpu_memory(monkeypatch):
     )
 
     class FakeImpl:
-        def get_imported_weights_bytes(self):
-            return 8 << 30
+        imported_weights_bytes = 8 << 30
 
     fake_memory_saver.get_gms_memory_saver_impl = lambda: FakeImpl()
 
@@ -54,6 +53,11 @@ def test_patch_model_runner_rewrites_total_gpu_memory(monkeypatch):
         sys.modules,
         "gpu_memory_service.integrations.sglang.memory_saver",
         fake_memory_saver,
+    )
+    monkeypatch.setattr(
+        sglang_patches,
+        "get_gms_memory_saver_impl",
+        lambda: FakeImpl(),
     )
     monkeypatch.setattr(sglang_patches, "_model_runner_patched", False)
     monkeypatch.delattr(FakeModelRunner, "_gms_patched", raising=False)
