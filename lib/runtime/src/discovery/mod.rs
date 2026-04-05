@@ -21,7 +21,7 @@ pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
 use crate::component::TransportType;
-pub use utils::watch_and_extract_field;
+pub use utils::{watch_and_extract_base_model_field, watch_and_extract_field};
 
 /// Transport kind for event plane - used for configuration and env var selection.
 ///

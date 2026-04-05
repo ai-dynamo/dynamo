@@ -20,7 +20,7 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
-use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
+use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_base_model_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
@@ -341,7 +341,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         let cancellation_token = component.drt().child_token();
 
-        // Watch for runtime config updates from model deployment cards via discovery interface
+        // Watch for worker runtime config updates from base model cards via discovery interface
         let discovery = component.drt().discovery();
         let discovery_stream = match discovery
             .list_and_watch(DiscoveryQuery::AllModels, Some(cancellation_token.clone()))
@@ -356,7 +356,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             }
         };
         let mut config_events_rx =
-            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+            watch_and_extract_base_model_field(discovery_stream, |card: ModelDeploymentCard| {
                 card.runtime_config
             });
 
