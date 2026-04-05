@@ -3,10 +3,10 @@
 
 use super::*;
 
+use super::zmq::*;
 use async_trait::async_trait;
 use transfer::*;
 use utils::*;
-use zmq::*;
 
 use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,

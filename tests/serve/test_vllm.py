@@ -428,14 +428,6 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -536,11 +528,11 @@ vllm_configs = {
             ),
         ],
     ),
-    # Video multimodal tests for CI using the vLLM video launch scripts.
+    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory=vllm_dir,
-        script_name="video_agg.sh",
+        script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
@@ -568,7 +560,7 @@ vllm_configs = {
     "multimodal_video_disagg": VLLMConfig(
         name="multimodal_video_disagg",
         directory=vllm_dir,
-        script_name="video_disagg.sh",
+        script_name="disagg_multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,

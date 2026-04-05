@@ -89,10 +89,12 @@ pub async fn tensor_response_stream(
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Tensor, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Tensor,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 

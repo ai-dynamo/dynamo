@@ -894,7 +894,7 @@ fn materialize_replay_mocker_args(
                 e
             ))
         })?;
-        tracing::info!(
+        tracing::debug!(
             "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
             backend,
             system,

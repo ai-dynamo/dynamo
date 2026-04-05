@@ -253,7 +253,7 @@ async fn handle_shared_request(
     tokio::spawn(async move {
         tracing::trace!(instance_id, "handling new HTTP request");
         let result = service_handler
-            .handle_payload(body)
+            .handle_payload(body, traceparent.request_id.clone())
             .instrument(tracing::info_span!(
                 "handle_payload",
                 component = component_name.as_ref(),

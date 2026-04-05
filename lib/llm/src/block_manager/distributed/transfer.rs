@@ -3,10 +3,10 @@
 
 use super::*;
 
+use super::zmq::*;
 use futures::future::try_join_all;
 use nixl_sys::NixlDescriptor;
 use utils::*;
-use zmq::*;
 
 use BlockTransferPool::*;
 

@@ -194,8 +194,17 @@ def _aggregate_junit_xml(junit_dir: str) -> str | None:
 
 def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
     """Run pytest --collect-only to get test IDs, filtered by --max-vram-gib."""
-    _strip_flags = {"-v", "-vv", "-vvv", "--verbose", "-s", "--capture=no"}
-    collect_args = [a for a in pytest_args if a not in _strip_flags]
+    _strip_exact = {"-v", "-vv", "-vvv", "--verbose", "-s", "--capture=no"}
+    collect_args = []
+    for a in pytest_args:
+        if a in _strip_exact:
+            continue
+        if a.startswith("-") and not a.startswith("--") and "v" in a:
+            stripped = a.replace("v", "")
+            if stripped != "-":
+                collect_args.append(stripped)
+            continue
+        collect_args.append(a)
     cmd = [
         sys.executable,
         "-m",
@@ -209,7 +218,7 @@ def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
     test_ids = []
     for line in result.stdout.strip().split("\n"):
         line = line.strip()
-        if "::" in line and not line.startswith(" "):
+        if ".py::" in line and not line.startswith(" "):
             test_ids.append(line)
     return test_ids
 

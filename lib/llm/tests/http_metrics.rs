@@ -78,6 +78,7 @@ async fn test_metrics_prefix_default() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 false,
+                "",
             );
         }
 
@@ -117,6 +118,7 @@ async fn test_metrics_prefix_custom() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -151,6 +153,7 @@ async fn test_metrics_prefix_sanitized() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
