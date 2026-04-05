@@ -149,6 +149,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// must be narrower than or equal to the spec-level packDomain.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Failover configures active-passive GPU failover for this service.
+	// When enabled, the operator creates two engine containers in the same pod
+	// sharing GPUs via DRA, with a GMS weight sidecar for shadow-mode loading.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {

@@ -2,58 +2,71 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::core::v1::Pod;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-/// Hash a pod name to get a consistent instance ID
-pub fn hash_pod_name(pod_name: &str) -> u64 {
-    // Clear top 11 bits to ensure it can be safely rounded to IEEE-754 f64
-    const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
+/// Mask to clear top 11 bits, ensuring the instance ID can be safely
+/// round-tripped through IEEE-754 f64 (JSON number).
+const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
+
+/// Build the CR name for a given pod and container.
+///
+/// The CR name uniquely identifies a container within a pod:
+/// `"{pod_name}-{container_name}"`.
+pub fn cr_name(pod_name: &str, container_name: &str) -> String {
+    format!("{}-{}", pod_name, container_name)
+}
+
+/// Compute a deterministic instance ID from pod name and container name.
+///
+/// The ID is derived from `"{pod_name}:{container_name}"` and masked to
+/// fit within 53 bits for safe JSON serialization.
+pub fn instance_id(pod_name: &str, container_name: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    pod_name.hash(&mut hasher);
+    format!("{}:{}", pod_name, container_name).hash(&mut hasher);
     hasher.finish() & INSTANCE_ID_MASK
 }
 
-/// Extract endpoint information from an EndpointSlice
-/// Returns (instance_id, pod_name) tuples for ready endpoints
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
-    let mut result = Vec::new();
+/// Extract ready containers from a Pod.
+///
+/// Returns `(instance_id, cr_name)` tuples for each container whose
+/// `containerStatuses[].ready` is `true`. Init containers and sidecars
+/// that never call `register()` are naturally excluded by the daemon's
+/// CR correlation step (no matching CR → not included in snapshot).
+pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
+    let pod_name = match pod.metadata.name.as_deref() {
+        Some(name) => name,
+        None => return vec![],
+    };
 
-    for endpoint in &slice.endpoints {
-        let is_ready = endpoint
-            .conditions
-            .as_ref()
-            .and_then(|c| c.ready)
-            .unwrap_or(false);
+    let container_statuses = match pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+    {
+        Some(statuses) => statuses,
+        None => return vec![],
+    };
 
-        if !is_ready {
-            continue;
-        }
-
-        let pod_name = match endpoint.target_ref.as_ref() {
-            Some(target_ref) => target_ref.name.as_deref().unwrap_or(""),
-            None => continue,
-        };
-
-        if pod_name.is_empty() {
-            continue;
-        }
-
-        let instance_id = hash_pod_name(pod_name);
-
-        result.push((instance_id, pod_name.to_string()));
-    }
-
-    result
+    container_statuses
+        .iter()
+        .filter(|cs| cs.ready)
+        .map(|cs| {
+            let id = instance_id(pod_name, &cs.name);
+            let name = cr_name(pod_name, &cs.name);
+            (id, name)
+        })
+        .collect()
 }
 
 /// Pod information extracted from environment
 #[derive(Debug, Clone)]
 pub(super) struct PodInfo {
     pub pod_name: String,
+    pub container_name: String,
     pub pod_namespace: String,
     pub pod_uid: String,
     pub system_port: u16,
@@ -89,6 +102,7 @@ impl PodInfo {
     /// - `POD_NAME`: Name of the pod (required)
     /// - `POD_UID`: UID of the pod (required for CR owner reference)
     /// - `POD_NAMESPACE`: Namespace of the pod (defaults to "default")
+    /// - `CONTAINER_NAME`: Name of this container (required)
     pub fn from_env() -> Result<Self> {
         let podinfo_path = Path::new(DEFAULT_PODINFO_PATH);
 
@@ -104,6 +118,9 @@ impl PodInfo {
                     tracing::warn!("POD_NAMESPACE not set, defaulting to 'default'");
                     "default".to_string()
                 });
+
+        let container_name = std::env::var("CONTAINER_NAME")
+            .map_err(|_| anyhow::anyhow!("CONTAINER_NAME environment variable is required"))?;
 
         // Log where we got the pod info from for debugging
         if podinfo_path.join("pod_name").exists() {
@@ -121,10 +138,21 @@ impl PodInfo {
 
         Ok(Self {
             pod_name,
+            container_name,
             pod_namespace,
             pod_uid,
             system_port,
         })
+    }
+
+    /// CR name for this container: `"{pod_name}-{container_name}"`.
+    pub fn cr_name(&self) -> String {
+        cr_name(&self.pod_name, &self.container_name)
+    }
+
+    /// Instance ID for this container.
+    pub fn instance_id(&self) -> u64 {
+        instance_id(&self.pod_name, &self.container_name)
     }
 }
 
@@ -133,8 +161,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hash_json_serialization_roundtrip() {
-        // Verify that JSON serialization/deserialization preserves exact values
+    fn test_instance_id_deterministic() {
+        let id1 = instance_id("worker-0", "engine-0");
+        let id2 = instance_id("worker-0", "engine-0");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_instance_id_differs_by_container() {
+        let id0 = instance_id("worker-0", "engine-0");
+        let id1 = instance_id("worker-0", "engine-1");
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn test_instance_id_differs_by_pod() {
+        let id0 = instance_id("worker-0", "main");
+        let id1 = instance_id("worker-1", "main");
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn test_cr_name_format() {
+        assert_eq!(cr_name("worker-0", "engine-0"), "worker-0-engine-0");
+        assert_eq!(cr_name("my-pod", "main"), "my-pod-main");
+    }
+
+    #[test]
+    fn test_instance_id_json_roundtrip() {
         let pod_names = [
             "worker-0",
             "worker-99999",
@@ -143,21 +197,20 @@ mod tests {
         ];
 
         for pod_name in &pod_names {
-            let original_hash = hash_pod_name(pod_name);
-            let json = serde_json::to_string(&original_hash).unwrap();
-            let deserialized_hash: u64 = serde_json::from_str(&json).unwrap();
+            let original = instance_id(pod_name, "main");
+            let json = serde_json::to_string(&original).unwrap();
+            let deserialized: u64 = serde_json::from_str(&json).unwrap();
 
             assert_eq!(
-                original_hash, deserialized_hash,
-                "JSON roundtrip changed hash value for pod_name={:?}: {} -> {} (json: {})",
-                pod_name, original_hash, deserialized_hash, json
+                original, deserialized,
+                "JSON roundtrip changed value for pod_name={:?}: {} -> {} (json: {})",
+                pod_name, original, deserialized, json
             );
         }
     }
 
     #[test]
-    fn test_hash_in_struct_serialization() {
-        // Test serialization when the hash is embedded in a struct
+    fn test_instance_id_in_struct_serialization() {
         #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
         struct WorkerInfo {
             instance_id: u64,
@@ -166,7 +219,7 @@ mod tests {
 
         let pod_name = "fake-name-1-0-worker-nrdfv";
         let info = WorkerInfo {
-            instance_id: hash_pod_name(pod_name),
+            instance_id: instance_id(pod_name, "main"),
             name: pod_name.to_string(),
         };
 

@@ -1,0 +1,40 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-32b-mn-baseline
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+    Worker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: aks-a100exp-11297970-vmss000001
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-32B
+            - --tensor-parallel-size
+            - "4"
+            - --enforce-eager
+            - --gpu-memory-utilization
+            - "0.85"

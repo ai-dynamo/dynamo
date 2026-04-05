@@ -10772,6 +10772,28 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      failover:
+                        description: |-
+                          Failover configures active-passive GPU failover for this service.
+                          When enabled, the operator creates two engine containers in the same pod
+                          sharing GPUs via DRA, with a GMS weight sidecar for shadow-mode loading.
+                        properties:
+                          coordinationEndpoint:
+                            description: |-
+                              CoordinationEndpoint is the etcd endpoint used for multinode failover
+                              coordination (leader election and group formation). Required when
+                              failover is enabled with multinode (nodeCount > 1). If omitted, the
+                              operator falls back to Infrastructure.ETCDAddress from operator config.
+                            type: string
+                          enabled:
+                            description: |-
+                              Enabled activates failover mode. Two engine containers are created
+                              in the same pod, sharing GPUs via DRA and coordinating via a
+                              file-based lock on a shared emptyDir volume.
+                            type: boolean
+                        required:
+                          - enabled
+                        type: object
                       frontendSidecar:
                         description: |-
                           FrontendSidecar configures an auto-generated frontend sidecar container.
