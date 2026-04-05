@@ -1995,6 +1995,7 @@ class EntrypointArgs:
         is_prefill: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
+        aic_perf_config: Optional[AicPerfConfig] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -2021,6 +2022,7 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
+            aic_perf_config: Optional AIC perf-model configuration for default KV routing
         """
         ...
 

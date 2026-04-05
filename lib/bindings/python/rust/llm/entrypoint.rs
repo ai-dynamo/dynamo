@@ -25,7 +25,7 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::create_aic_callback;
+use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -323,13 +323,14 @@ pub(crate) struct EntrypointArgs {
     is_prefill: bool,
     migration_limit: u32,
     chat_engine_factory: Option<PyEngineFactory>,
+    aic_perf_config: Option<AicPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -353,6 +354,7 @@ impl EntrypointArgs {
         is_prefill: bool,
         migration_limit: u32,
         chat_engine_factory: Option<PyObject>,
+        aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -401,6 +403,7 @@ impl EntrypointArgs {
             is_prefill,
             migration_limit,
             chat_engine_factory,
+            aic_perf_config,
         })
     }
 }
@@ -541,9 +544,26 @@ async fn select_engine(
         EngineType::Dynamic => {
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
+            let prefill_load_estimator = args
+                .aic_perf_config
+                .as_ref()
+                .map(|config| {
+                    Python::with_gil(|py| {
+                        create_aic_prefill_load_estimator(
+                            py,
+                            config.backend_name(),
+                            config.system(),
+                            config.model_path(),
+                            config.tp_size(),
+                            config.backend_version(),
+                        )
+                    })
+                })
+                .transpose()?;
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,
+                prefill_load_estimator,
             }
         }
         EngineType::Mocker => {

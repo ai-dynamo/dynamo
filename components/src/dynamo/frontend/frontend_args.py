@@ -107,6 +107,11 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--router-prefill-load-model=aic requires --router-mode=kv"
                 )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--router-prefill-load-model=aic currently requires "
+                    "--dyn-chat-processor=dynamo"
+                )
             missing = [
                 flag
                 for flag, value in (
