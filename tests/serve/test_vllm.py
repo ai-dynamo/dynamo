@@ -908,7 +908,7 @@ def test_multimodal_b64(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
