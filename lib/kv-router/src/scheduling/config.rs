@@ -4,6 +4,7 @@
 use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use derive_builder::Builder;
 use rand::Rng;
@@ -50,6 +51,43 @@ impl fmt::Display for RouterQueuePolicy {
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterPrefillLoadModel {
+    #[default]
+    None,
+    Aic,
+}
+
+impl fmt::Display for RouterPrefillLoadModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Aic => f.write_str("aic"),
+        }
+    }
+}
+
+impl FromStr for RouterPrefillLoadModel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "aic" => Ok(Self::Aic),
+            _ => Err(format!(
+                "unknown prefill load model: {s:?}, expected 'none' or 'aic'"
+            )),
+        }
+    }
+}
+
+impl RouterPrefillLoadModel {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 
@@ -124,6 +162,9 @@ pub struct KvRouterConfig {
     #[serde(default = "default_track_prefill_tokens")]
     pub router_track_prefill_tokens: bool,
 
+    /// Optional model for estimating effective prompt-side prefill load over time.
+    pub router_prefill_load_model: RouterPrefillLoadModel,
+
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     #[validate(range(min = 1))]
     pub router_snapshot_threshold: Option<u32>,
@@ -183,6 +224,7 @@ impl Default for KvRouterConfig {
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
+            router_prefill_load_model: RouterPrefillLoadModel::default(),
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
@@ -214,10 +256,26 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_track_output_blocks requires router_track_active_blocks=true",
         ));
     }
+    if config.router_prefill_load_model.is_enabled() && !config.router_track_prefill_tokens {
+        return Err(ValidationError::new(
+            "router_prefill_load_model requires router_track_prefill_tokens=true",
+        ));
+    }
     Ok(())
 }
 
 impl KvRouterConfig {
+    pub fn router_queue_recheck_interval(&self) -> Duration {
+        const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+        const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+        if self.router_prefill_load_model.is_enabled() && self.router_queue_threshold.is_some() {
+            return PREFILL_LOAD_RECHECK_INTERVAL;
+        }
+
+        DEFAULT_RECHECK_INTERVAL
+    }
+
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
         config_override
             .and_then(|cfg| cfg.assume_kv_reuse)

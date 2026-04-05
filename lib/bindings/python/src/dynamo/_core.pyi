@@ -1159,6 +1159,17 @@ class RouterConfig:
         """
         ...
 
+class AicPerfConfig:
+    def __init__(
+        self,
+        aic_backend: str,
+        aic_system: str,
+        aic_model_path: str,
+        aic_tp_size: int = 1,
+        aic_backend_version: Optional[str] = None,
+    ) -> None:
+        ...
+
 class KvRouterConfig:
     """Values for KV router"""
 
@@ -1172,6 +1183,8 @@ class KvRouterConfig:
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
+        router_track_prefill_tokens: bool = True,
+        router_prefill_load_model: str = "none",
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
@@ -1199,6 +1212,10 @@ class KvRouterConfig:
                 sequence length (agent_hints.osl in nvext).
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
+            router_track_prefill_tokens: Include prompt-side prefill tokens in active load accounting (default: True).
+            router_prefill_load_model: Prompt-side prefill load model (default: "none").
+                "none" keeps static prompt load accounting.
+                "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
@@ -1755,6 +1772,7 @@ class KvRouter:
         endpoint: Endpoint,
         block_size: int,
         kv_router_config: KvRouterConfig,
+        aic_perf_config: Optional[AicPerfConfig] = None,
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -1763,6 +1781,7 @@ class KvRouter:
             endpoint: The endpoint to connect to for routing requests
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
+            aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
         """
         ...
 

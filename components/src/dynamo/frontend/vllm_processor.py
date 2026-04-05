@@ -27,6 +27,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
+    AicPerfConfig,
     KvRouter,
     ModelCardInstanceId,
     PythonAsyncEngine,
@@ -479,10 +480,16 @@ class EngineFactory:
         )
         router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
+            aic_perf_config = (
+                AicPerfConfig(**self.config.aic_perf_kwargs())
+                if self.config.router_prefill_load_model == "aic"
+                else None
+            )
             router = KvRouter(
                 endpoint=generate_endpoint,
                 block_size=self.config.kv_cache_block_size or 16,
                 kv_router_config=self.router_config.kv_router_config,
+                aic_perf_config=aic_perf_config,
             )
         else:
             router = await generate_endpoint.client(

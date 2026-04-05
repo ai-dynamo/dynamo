@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, PrefillLoadHint,
+    WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -93,6 +94,7 @@ pub struct SequenceRequest {
     pub overlap: u32,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
+    pub prefill_load_hint: Option<PrefillLoadHint>,
     pub worker: WorkerWithDpRank,
     pub lora_name: Option<String>,
 }
@@ -235,6 +237,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             overlap,
                             track_prefill_tokens,
                             expected_output_tokens,
+                            prefill_load_hint,
                         } => {
                             self.request_to_worker
                                 .insert(event.request_id.clone(), event.worker);
@@ -253,6 +256,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     *overlap,
                                     *expected_output_tokens,
                                     *track_prefill_tokens,
+                                    *prefill_load_hint,
                                 );
                             } else {
                                 tracing::warn!(
@@ -389,6 +393,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             overlap,
             track_prefill_tokens,
             expected_output_tokens,
+            prefill_load_hint,
             worker,
             lora_name,
         } = req;
@@ -435,6 +440,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 overlap,
                 expected_output_tokens,
                 track_prefill_tokens,
+                prefill_load_hint,
             )
         };
 
@@ -458,6 +464,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 overlap: req.overlap,
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
+                prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
@@ -863,6 +870,7 @@ mod tests {
                 overlap: 0,
                 track_prefill_tokens: false,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker,
                 lora_name: None,
             })

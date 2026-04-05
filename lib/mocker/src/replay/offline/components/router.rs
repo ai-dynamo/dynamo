@@ -428,6 +428,7 @@ impl OfflineReplayRouter {
                 overlap: selection.overlap_blocks,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
+                prefill_load_hint: None,
                 worker: selection.worker,
                 lora_name: None,
             })

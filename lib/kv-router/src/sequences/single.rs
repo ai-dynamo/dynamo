@@ -20,11 +20,13 @@
 
 use derive_getters::Getters;
 use dynamo_tokens::SequenceHash;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
+
+use crate::protocols::PrefillLoadHint;
 
 /// Duration after which stale requests may be expired (5 minutes).
 const EXPIRY_DURATION: Duration = Duration::from_secs(300);
@@ -36,31 +38,41 @@ const CHECK_EXPIRY_FREQUENCY: Duration = Duration::from_secs(30);
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
 
+#[derive(Debug, Clone, Copy)]
+struct PrefillLoadState {
+    initial_effective_prefill_tokens: usize,
+    expected_prefill_duration: Option<Duration>,
+}
+
+#[derive(Debug)]
+struct RequestState {
+    blocks: Vec<(SequenceHash, Arc<()>)>,
+    started_at: Instant,
+    prefill: Option<PrefillLoadState>,
+    expected_output_tokens: Option<u32>,
+}
+
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
 pub struct ActiveSequences {
-    active_seqs: HashMap<RequestId, Vec<(SequenceHash, Arc<()>)>>,
+    requests: HashMap<RequestId, RequestState>,
 
-    prefill_tokens: HashMap<RequestId, usize>,
+    /// Admission order for requests still contributing prompt-side load.
+    /// The front entry is the only request whose prompt load decays with time.
+    prefill_order: VecDeque<RequestId>,
 
-    /// Expected output tokens per request (used for resource estimation)
-    expected_output_tokens: HashMap<RequestId, u32>,
+    /// Cached sum of each active prefill request's full prompt-side load.
+    prefill_full_tokens_sum: usize,
 
-    unique_blocks: HashMap<SequenceHash, std::sync::Weak<()>>,
+    unique_blocks: HashMap<SequenceHash, Weak<()>>,
 
-    /// Fractional block counts for blocks that are partially cached
+    /// Fractional block counts for blocks that are partially cached.
     /// When a block is in both unique_blocks and fractional_blocks,
-    /// it contributes the fractional value instead of 1 to active_blocks()
+    /// it contributes the fractional value instead of 1 to active_blocks().
     fractional_blocks: HashMap<SequenceHash, f64>,
 
     #[getter(copy)]
     block_size: usize,
-
-    #[getter(copy)]
-    active_tokens: usize,
-
-    // Request timestamps, for expiration.
-    request_timestamps: HashMap<RequestId, Instant>,
 
     last_expiry_check_time: Instant,
 }
@@ -68,18 +80,15 @@ pub struct ActiveSequences {
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub fn new(block_size: usize) -> Self {
-        // TODO: make this not a hard req
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
-            active_seqs: HashMap::new(),
-            prefill_tokens: HashMap::new(),
-            expected_output_tokens: HashMap::new(),
+            requests: HashMap::new(),
+            prefill_order: VecDeque::new(),
+            prefill_full_tokens_sum: 0,
             unique_blocks: HashMap::new(),
             fractional_blocks: HashMap::new(),
             block_size,
-            active_tokens: 0,
-            request_timestamps: HashMap::new(),
             last_expiry_check_time: Instant::now(),
         }
     }
@@ -105,37 +114,159 @@ impl ActiveSequences {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
+    fn assert_consistent(&self) {
+        let active_prefills: HashSet<RequestId> = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.prefill.is_some())
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        let ordered_prefills: HashSet<RequestId> = self.prefill_order.iter().cloned().collect();
+        let recomputed_prefill_sum: usize = self
+            .requests
+            .values()
+            .filter_map(|state| state.prefill)
+            .map(|prefill| prefill.initial_effective_prefill_tokens)
+            .sum();
+
+        assert_eq!(
+            ordered_prefills.len(),
+            self.prefill_order.len(),
+            "prefill_order contains duplicate request ids",
+        );
+        assert_eq!(
+            ordered_prefills, active_prefills,
+            "prefill_order must match requests with active prefill load",
+        );
+        assert_eq!(
+            self.prefill_full_tokens_sum, recomputed_prefill_sum,
+            "prefill_full_tokens_sum drifted from request state",
+        );
+        if let Some(oldest_request_id) = self.prefill_order.front() {
+            assert!(
+                self.requests
+                    .get(oldest_request_id)
+                    .is_some_and(|state| state.prefill.is_some()),
+                "prefill_order front must point to an active prefill request",
+            );
+        }
+        assert!(
+            self.fractional_blocks
+                .keys()
+                .all(|hash| self.unique_blocks.contains_key(hash)),
+            "fractional_blocks cannot reference non-active blocks",
+        );
+    }
+
+    #[inline]
+    fn validate_state(&self) {
+        #[cfg(any(test, debug_assertions))]
+        self.assert_consistent();
+    }
+
     pub fn active_blocks(&self) -> usize {
         let mut count = self.unique_blocks.len() as f64;
         for (hash, frac) in &self.fractional_blocks {
             if self.unique_blocks.contains_key(hash) {
-                // Subtract 1 (the full block) and add the fractional value
                 count = count - 1.0 + frac;
             }
         }
         count.round() as usize
     }
 
+    fn insert_prefill_load(&mut self, request_id: &RequestId, prefill: PrefillLoadState) {
+        self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
+        self.prefill_order.push_back(request_id.clone());
+    }
+
+    fn remove_prefill_load(&mut self, request_id: &RequestId) -> Option<PrefillLoadState> {
+        let state = self.requests.get_mut(request_id)?;
+        let prefill = state.prefill.take()?;
+        self.prefill_full_tokens_sum = self
+            .prefill_full_tokens_sum
+            .checked_sub(prefill.initial_effective_prefill_tokens)
+            .expect("prefill_full_tokens_sum underflow");
+        self.prefill_order
+            .retain(|queued_request_id| queued_request_id != request_id);
+        Some(prefill)
+    }
+
+    fn oldest_prefill_request_id(&self) -> Option<&RequestId> {
+        self.prefill_order.front()
+    }
+
+    fn remaining_prefill_tokens_at(&self, request_id: &RequestId, now: Instant) -> usize {
+        let Some(prefill) = self
+            .requests
+            .get(request_id)
+            .and_then(|state| state.prefill)
+        else {
+            return 0;
+        };
+
+        let Some(expected_prefill_duration) = prefill.expected_prefill_duration else {
+            return prefill.initial_effective_prefill_tokens;
+        };
+
+        if expected_prefill_duration.is_zero() {
+            return 0;
+        }
+
+        let started_at = self
+            .requests
+            .get(request_id)
+            .map(|state| state.started_at)
+            .expect("prefill-active request missing started_at timestamp");
+        let elapsed = now.saturating_duration_since(started_at);
+        let remaining_fraction = (1.0
+            - (elapsed.as_secs_f64() / expected_prefill_duration.as_secs_f64()))
+        .clamp(0.0, 1.0);
+
+        ((prefill.initial_effective_prefill_tokens as f64) * remaining_fraction).ceil() as usize
+    }
+
+    fn active_prefill_tokens_at(&self, now: Instant) -> usize {
+        let Some(oldest_request_id) = self.oldest_prefill_request_id() else {
+            return 0;
+        };
+        let oldest_full = self
+            .requests
+            .get(oldest_request_id)
+            .and_then(|state| state.prefill)
+            .map(|prefill| prefill.initial_effective_prefill_tokens)
+            .expect("prefill_order front missing prefill load");
+        let oldest_remaining = self.remaining_prefill_tokens_at(oldest_request_id, now);
+
+        self.prefill_full_tokens_sum
+            .checked_sub(oldest_full)
+            .expect("prefill_full_tokens_sum smaller than oldest load")
+            + oldest_remaining
+    }
+
+    pub fn active_tokens(&self) -> usize {
+        self.active_prefill_tokens_at(Instant::now())
+    }
+
     /// Find all blocks in a request that have only a single strong reference (only used by this request)
     /// and insert them into fractional_blocks with the given fraction value.
     pub fn set_single_ref_blocks_as_fractional(&mut self, request_id: &RequestId, fraction: f64) {
-        let Some(blocks) = self.active_seqs.get(request_id) else {
+        let Some(request_state) = self.requests.get(request_id) else {
             tracing::warn!(
                 "Request {request_id} not found for set_single_ref_blocks_as_fractional"
             );
             return;
         };
 
-        for (hash, rc) in blocks {
-            // A block with strong_count == 1 means only this request holds a reference
+        for (hash, rc) in &request_state.blocks {
             if Arc::strong_count(rc) == 1 {
                 self.fractional_blocks.insert(*hash, fraction);
             }
         }
     }
 
-    /// Add a new request with its initial tokens
-    /// Returns the set of expired request IDs that were removed during cleanup
+    /// Add a new request with its initial tokens.
+    /// Returns the set of expired request IDs that were removed during cleanup.
     pub fn add_request(
         &mut self,
         request_id: RequestId,
@@ -151,11 +282,13 @@ impl ActiveSequences {
             overlap,
             expected_output_tokens,
             true,
+            None,
         )
     }
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns the set of expired request IDs that were removed during cleanup.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
@@ -164,68 +297,79 @@ impl ActiveSequences {
         overlap: u32,
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
+        prefill_load_hint: Option<PrefillLoadHint>,
     ) -> HashSet<RequestId> {
-        // Check for double-add and log error, returning early
-        if self.active_seqs.contains_key(&request_id) {
+        if self.requests.contains_key(&request_id) {
             tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
             return HashSet::new();
         }
 
-        // Lazily check and clean up expired requests, capturing removed IDs
         let removed_requests = self.force_expiry();
+        let started_at = Instant::now();
 
-        let prefill_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap)
-        } else {
-            0
+        let blocks = match token_sequence {
+            Some(sequence) => sequence
+                .into_iter()
+                .map(|block| {
+                    let rc = self.touch_block(&block);
+                    (block, rc)
+                })
+                .collect(),
+            None => Vec::new(),
         };
-        self.prefill_tokens
-            .insert(request_id.clone(), prefill_tokens);
-        self.active_tokens += prefill_tokens;
 
-        // Store expected output tokens if provided
-        if let Some(tokens) = expected_output_tokens {
-            self.expected_output_tokens
-                .insert(request_id.clone(), tokens);
-        }
+        let prefill = if track_prefill_tokens {
+            let default_tokens = self.new_tokens(isl, overlap);
+            let hint = prefill_load_hint.unwrap_or(PrefillLoadHint {
+                initial_effective_prefill_tokens: default_tokens,
+                expected_prefill_duration: None,
+            });
 
-        if let Some(sequence) = token_sequence {
-            let sequence_with_refs: Vec<(SequenceHash, Arc<()>)> = sequence
-                .iter()
-                .map(|block| (*block, self.touch_block(block)))
-                .collect();
-            self.active_seqs
-                .insert(request_id.clone(), sequence_with_refs);
+            (hint.initial_effective_prefill_tokens > 0).then_some(PrefillLoadState {
+                initial_effective_prefill_tokens: hint.initial_effective_prefill_tokens,
+                expected_prefill_duration: hint.expected_prefill_duration,
+            })
         } else {
-            // dummy empty sequence
-            self.active_seqs.insert(request_id.clone(), Vec::new());
-        }
-        self.request_timestamps
-            .insert(request_id.clone(), Instant::now());
+            None
+        };
 
+        self.requests.insert(
+            request_id.clone(),
+            RequestState {
+                blocks,
+                started_at,
+                prefill,
+                expected_output_tokens,
+            },
+        );
+
+        if let Some(prefill) = self
+            .requests
+            .get(&request_id)
+            .and_then(|state| state.prefill)
+        {
+            self.insert_prefill_load(&request_id, prefill);
+        }
+
+        self.validate_state();
         removed_requests
     }
 
-    /// Mark prefill as completed for a request, removing it from prefill_tokens tracking
+    /// Mark prefill as completed for a request, removing it from prompt-load tracking.
     pub fn mark_prefill_completed(&mut self, request_id: &RequestId) {
-        if let Some(tokens) = self.prefill_tokens.remove(request_id) {
-            self.active_tokens = self
-                .active_tokens
-                .checked_sub(tokens)
-                .expect("active_tokens underflow");
-        }
+        let _ = self.remove_prefill_load(request_id);
+        self.validate_state();
     }
 
     pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
         let cached_tokens = (overlap as usize) * self.block_size;
-        isl.checked_sub(cached_tokens)
-            .unwrap_or_else(|| {
-                tracing::error!(
-                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
-                    self.block_size
-                );
-                0
-            })
+        isl.checked_sub(cached_tokens).unwrap_or_else(|| {
+            tracing::error!(
+                "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
+                self.block_size
+            );
+            0
+        })
     }
 
     pub fn potential_blocks_and_tokens(
@@ -249,11 +393,13 @@ impl ActiveSequences {
         } else {
             self.active_blocks()
         };
+        let active_tokens = self.active_tokens();
         let potential_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap) + self.active_tokens
+            self.new_tokens(isl, overlap) + active_tokens
         } else {
-            self.active_tokens
+            active_tokens
         };
+
         (potential_blocks, potential_tokens)
     }
 
@@ -265,8 +411,7 @@ impl ActiveSequences {
             .count()
     }
 
-    /// Return the total number of blocks that would be used if the token sequence was added
-    /// This is the sum of new blocks that would be added plus the current active blocks
+    /// Return the total number of blocks that would be used if the token sequence was added.
     pub fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
         self.new_blocks(token_sequence) + self.active_blocks()
     }
@@ -278,93 +423,74 @@ impl ActiveSequences {
     pub fn free(&mut self, request_id: &RequestId) -> usize {
         self.mark_prefill_completed(request_id);
 
-        // Remove expected output tokens tracking
-        self.expected_output_tokens.remove(request_id);
-
-        // Remove from active_seqs and get the token sequence
-        self.request_timestamps.remove(request_id);
-        let token_seq = match self.active_seqs.remove(request_id) {
-            Some(seq) => seq,
-            None => {
-                tracing::warn!("Trying to free non-existent request {request_id}");
-                return self.active_blocks();
-            }
+        let Some(request_state) = self.requests.remove(request_id) else {
+            tracing::warn!("Trying to free non-existent request {request_id}");
+            return self.active_blocks();
         };
 
-        // Drop each Rc reference, then clean up the corresponding weak reference
-        for (block_hash, rc) in token_seq {
+        let _ = request_state.expected_output_tokens;
+        for (block_hash, rc) in request_state.blocks {
             drop(rc);
             self.try_remove_block(&block_hash);
         }
 
+        self.validate_state();
         self.active_blocks()
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
     ///
     /// This is used during generation to track output blocks as they are created.
-    /// The decay_fraction (if provided) represents how "temporary" the block is:
-    /// - 1.0 means fully counted (early in generation)
-    /// - 0.0 means not counted (near end of expected output)
-    /// - Computed as: 1 - (current_osl / expected_output_tokens)
-    ///
-    /// Returns true if the block was added, false if the request was not found.
     pub fn add_output_block(
         &mut self,
         request_id: &RequestId,
         decay_fraction: Option<f64>,
     ) -> bool {
-        // Check if request exists first (immutable borrow)
-        if !self.active_seqs.contains_key(request_id) {
+        if !self.requests.contains_key(request_id) {
             tracing::warn!("Request {request_id} not found for add_output_block");
             return false;
         }
 
-        // Generate a random block hash using UUID
         let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-
-        // Touch the block (adds to unique_blocks)
         let rc = self.touch_block(&random_hash);
-
-        // Now we can safely get_mut and push
-        self.active_seqs
+        self.requests
             .get_mut(request_id)
-            .unwrap()
+            .expect("request existence was checked above")
+            .blocks
             .push((random_hash, rc));
 
-        // Apply fractional decay to all single-ref blocks in this request if provided
         if let Some(frac) = decay_fraction {
             self.set_single_ref_blocks_as_fractional(request_id, frac);
         }
 
+        self.validate_state();
         true
     }
 
-    /// Force expiry of stale requests if the timer has elapsed
-    /// Returns the set of expired request IDs that were removed
+    /// Force expiry of stale requests if the timer has elapsed.
+    /// Returns the set of expired request IDs that were removed.
     pub fn force_expiry(&mut self) -> HashSet<RequestId> {
         let now = Instant::now();
 
-        // Early return if timer hasn't expired yet.
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
             return HashSet::new();
         }
 
         self.last_expiry_check_time = now;
         let expired_requests_time = now - EXPIRY_DURATION;
-
-        let mut expired_requests: HashSet<RequestId> = HashSet::new();
-        for (request_id, timestamp) in self.request_timestamps.iter() {
-            if *timestamp < expired_requests_time {
-                expired_requests.insert(request_id.clone());
-            }
-        }
+        let expired_requests: HashSet<RequestId> = self
+            .requests
+            .iter()
+            .filter(|(_, state)| state.started_at < expired_requests_time)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
 
         for request_id in &expired_requests {
             tracing::warn!("Expiring stale request: {}", request_id);
             self.free(request_id);
         }
 
+        self.validate_state();
         expired_requests
     }
 }
@@ -372,6 +498,13 @@ impl ActiveSequences {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prefill_hint(tokens: usize, duration_secs: u64) -> PrefillLoadHint {
+        PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
+        }
+    }
 
     #[test]
     fn test_active_sequences_shared_blocks() {
@@ -408,32 +541,18 @@ mod tests {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
 
-        // Add request with 3 prefill blocks
         seq_manager.add_request("r1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
         assert_eq!(seq_manager.active_blocks(), 3);
 
-        // Add output block with 0.5 decay fraction.
-        // This adds a random block and sets all single-ref blocks to 0.5.
         assert!(seq_manager.add_output_block(&"r1".to_string(), Some(0.5)));
-        // 4 unique blocks, all single-ref → all fractional at 0.5
-        // active_blocks = 4 - 4 + 4*0.5 = 2
         assert_eq!(seq_manager.active_blocks(), 2);
 
-        // Add second request sharing prefix [1, 2]
         seq_manager.add_request("r2".to_string(), Some(vec![1, 2]), 8, 0, None);
-        // Blocks 1,2 now have strong_count=2 but still have fractional 0.5 from before
-        // No new unique blocks → active_blocks = 4 - 4 + 2.0 = 2
         assert_eq!(seq_manager.active_blocks(), 2);
 
-        // Add another output block with 0.0 decay for r1.
-        // set_single_ref_blocks_as_fractional updates only single-ref blocks:
-        //   blocks 1,2: strong_count=2, NOT updated (remain 0.5)
-        //   block 3, old output, new output: strong_count=1, set to 0.0
-        // active_blocks = 5 - 5 + (0.5+0.5+0.0+0.0+0.0) = 1
         assert!(seq_manager.add_output_block(&"r1".to_string(), Some(0.0)));
         assert_eq!(seq_manager.active_blocks(), 1);
 
-        // Free both requests, verify clean state
         seq_manager.free(&"r2".to_string());
         seq_manager.free(&"r1".to_string());
         assert_eq!(seq_manager.active_blocks(), 0);
@@ -445,23 +564,18 @@ mod tests {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
 
-        // Add request with isl=12, overlap=0 → active_tokens=12
         seq_manager.add_request("r1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
         assert_eq!(seq_manager.active_tokens(), 12);
 
-        // Mark prefill completed → active_tokens drops to 0
         seq_manager.mark_prefill_completed(&"r1".to_string());
         assert_eq!(seq_manager.active_tokens(), 0);
 
-        // Double-mark: no panic, still 0
         seq_manager.mark_prefill_completed(&"r1".to_string());
         assert_eq!(seq_manager.active_tokens(), 0);
 
-        // Add second request with isl=8
         seq_manager.add_request("r2".to_string(), Some(vec![4, 5]), 8, 0, None);
         assert_eq!(seq_manager.active_tokens(), 8);
 
-        // Free it (internally calls mark_prefill_completed) → active_tokens=0
         seq_manager.free(&"r2".to_string());
         assert_eq!(seq_manager.active_tokens(), 0);
     }
@@ -477,9 +591,13 @@ mod tests {
             0,
             None,
             false,
+            None,
         );
 
         assert_eq!(seq_manager.active_tokens(), 0);
+        assert!(seq_manager.prefill_order.is_empty());
+        assert_eq!(seq_manager.prefill_full_tokens_sum, 0);
+
         seq_manager.mark_prefill_completed(&"r1".to_string());
         assert_eq!(seq_manager.active_tokens(), 0);
         seq_manager.free(&"r1".to_string());
@@ -496,6 +614,7 @@ mod tests {
             0,
             None,
             false,
+            None,
         );
 
         let (blocks, tokens) = seq_manager.potential_blocks_and_tokens_with_prefill_tracking(
@@ -509,43 +628,154 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_prefill_decay_only_applies_to_oldest_request() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            100,
+            0,
+            None,
+            true,
+            Some(prefill_hint(100, 10)),
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            60,
+            0,
+            None,
+            true,
+            Some(prefill_hint(60, 6)),
+        );
+
+        assert_eq!(seq_manager.active_tokens(), 140);
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(seq_manager.active_tokens(), 110);
+        assert!(seq_manager.active_tokens() <= 160);
+        assert!(seq_manager.active_tokens() >= 60);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_prefill_decay_hands_off_to_next_oldest_request() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            100,
+            0,
+            None,
+            true,
+            Some(prefill_hint(100, 10)),
+        );
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            40,
+            0,
+            None,
+            true,
+            Some(prefill_hint(40, 8)),
+        );
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(seq_manager.active_tokens(), 110);
+
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.active_tokens(), 25);
+        assert_eq!(
+            seq_manager.prefill_order,
+            VecDeque::from(vec!["r2".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_prefill_queue_and_sum_invariants_survive_idempotent_cleanup() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            50,
+            0,
+            None,
+            true,
+            Some(prefill_hint(50, 10)),
+        );
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            30,
+            0,
+            None,
+            true,
+            Some(prefill_hint(30, 10)),
+        );
+
+        assert_eq!(seq_manager.prefill_full_tokens_sum, 80);
+        assert_eq!(
+            seq_manager.prefill_order,
+            VecDeque::from(vec!["r1".to_string(), "r2".to_string()])
+        );
+
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.prefill_full_tokens_sum, 30);
+        assert_eq!(
+            seq_manager.prefill_order,
+            VecDeque::from(vec!["r2".to_string()])
+        );
+
+        seq_manager.free(&"r1".to_string());
+        seq_manager.free(&"r1".to_string());
+        assert_eq!(seq_manager.prefill_full_tokens_sum, 30);
+        assert_eq!(
+            seq_manager.prefill_order,
+            VecDeque::from(vec!["r2".to_string()])
+        );
+
+        seq_manager.free(&"r2".to_string());
+        assert_eq!(seq_manager.prefill_full_tokens_sum, 0);
+        assert!(seq_manager.prefill_order.is_empty());
+        assert!(seq_manager.requests.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_force_expiry() {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
 
-        // Add two requests at time 0 (paused clock)
         seq_manager.add_request("r1".to_string(), Some(vec![1, 2]), 8, 0, None);
         seq_manager.add_request("r2".to_string(), Some(vec![3, 4]), 8, 0, None);
         assert_eq!(seq_manager.active_blocks(), 4);
 
-        // Advance 20s: check interval (CHECK_EXPIRY_FREQUENCY = 30s) not reached,
-        // force_expiry returns without running the check.
         tokio::time::advance(Duration::from_secs(20)).await;
         let expired = seq_manager.force_expiry();
         assert!(expired.is_empty(), "no check before CHECK_EXPIRY_FREQUENCY");
         assert_eq!(seq_manager.active_blocks(), 4);
 
-        // Advance to 31s: first time we pass the check interval. Requests are 31s old,
-        // still under EXPIRY_DURATION (300s), so none are expired.
         tokio::time::advance(Duration::from_secs(11)).await;
         let expired = seq_manager.force_expiry();
         assert!(expired.is_empty(), "requests not old enough to expire");
         assert_eq!(seq_manager.active_blocks(), 4);
+        seq_manager.assert_consistent();
 
-        // Advance to 301s: requests are now older than EXPIRY_DURATION.
-        // force_expiry runs and expires r1, r2.
         tokio::time::advance(Duration::from_secs(270)).await;
         let expired = seq_manager.force_expiry();
         assert_eq!(expired, HashSet::from(["r1".to_string(), "r2".to_string()]));
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(), 0);
+        seq_manager.assert_consistent();
 
-        // add_request calls force_expiry internally. Add r3; no old requests remain,
-        // so expired set is empty and only r3 is active.
         tokio::time::advance(Duration::from_secs(31)).await;
         let expired = seq_manager.add_request("r3".to_string(), Some(vec![5]), 4, 0, None);
         assert!(expired.is_empty());
         assert_eq!(seq_manager.active_blocks(), 1);
         assert_eq!(seq_manager.active_tokens(), 4);
+        seq_manager.assert_consistent();
     }
 }

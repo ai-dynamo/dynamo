@@ -224,6 +224,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::new(0, 0),
             lora_name: None,
         })?;
@@ -235,6 +236,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::new(0, 1),
             lora_name: None,
         })?;
@@ -246,6 +248,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::new(1, 0),
             lora_name: None,
         })?;
@@ -371,6 +374,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::from_worker_id(0),
             lora_name: None,
         })?;
@@ -382,6 +386,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::from_worker_id(1),
             lora_name: None,
         })?;
@@ -393,6 +398,7 @@ mod tests {
             overlap: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
+            prefill_load_hint: None,
             worker: WorkerWithDpRank::from_worker_id(2),
             lora_name: None,
         })?;

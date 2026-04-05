@@ -5,6 +5,7 @@
 
 import logging
 
+from dynamo._core import AicPerfConfig as AicPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmEventRelay as FpmEventRelay

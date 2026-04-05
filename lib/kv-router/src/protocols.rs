@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::future::Future;
+use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token};
 use rustc_hash::FxHashMap;
@@ -429,6 +430,12 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLoadHint {
+    pub initial_effective_prefill_tokens: usize,
+    pub expected_prefill_duration: Option<Duration>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveSequenceEventData {
     AddRequest {
@@ -438,6 +445,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
+        #[serde(default)]
+        prefill_load_hint: Option<PrefillLoadHint>,
     },
     Free,
     MarkPrefillCompleted,

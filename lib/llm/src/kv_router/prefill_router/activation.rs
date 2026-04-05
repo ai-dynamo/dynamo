@@ -127,6 +127,7 @@ impl PrefillRouter {
                     &endpoint,
                     kv_cache_block_size,
                     kv_router_config,
+                    None,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
                     self.is_eagle,

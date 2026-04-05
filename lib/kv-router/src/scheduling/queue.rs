@@ -11,9 +11,10 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 use super::policy::{FcfsPolicy, SchedulingPolicy};
+use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -68,6 +69,7 @@ pub struct SchedulerQueue<
     block_size: u32,
     selector: Sel,
     policy: S,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
 }
 
 impl<
@@ -84,6 +86,7 @@ impl<
         block_size: u32,
         selector: Sel,
         policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
@@ -98,6 +101,7 @@ impl<
             block_size,
             selector,
             policy,
+            prefill_load_estimator,
         }
     }
 
@@ -231,6 +235,12 @@ impl<
             return;
         };
 
+        let prefill_load_hint = self.prefill_load_hint_for(
+            request.isl_tokens,
+            selection.overlap_blocks,
+            request.track_prefill_tokens,
+        );
+
         if let Err(e) = self.slots.add_request(SequenceRequest {
             request_id: request_id.clone(),
             token_sequence: request.token_seq,
@@ -238,10 +248,47 @@ impl<
             overlap: selection.overlap_blocks,
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
+            prefill_load_hint,
             worker: selection.worker,
             lora_name: request.lora_name.clone(),
         }) {
             tracing::warn!("Failed to add request {request_id}: {e}");
+        }
+    }
+
+    fn prefill_load_hint_for(
+        &self,
+        isl_tokens: usize,
+        overlap_blocks: u32,
+        track_prefill_tokens: bool,
+    ) -> Option<PrefillLoadHint> {
+        if !track_prefill_tokens {
+            return None;
+        }
+
+        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let effective_isl = isl_tokens.saturating_sub(prefix);
+        if effective_isl == 0 {
+            return None;
+        }
+
+        let Some(estimator) = &self.prefill_load_estimator else {
+            return None;
+        };
+
+        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: effective_isl,
+                expected_prefill_duration: Some(expected_prefill_duration),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    effective_isl,
+                    prefix,
+                    "failed to predict prefill duration for active load tracking: {error}"
+                );
+                None
+            }
         }
     }
 
@@ -289,6 +336,7 @@ impl<
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tokio::sync::watch;
 
@@ -297,6 +345,21 @@ mod tests {
     use crate::selector::DefaultWorkerSelector;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+
+    struct FixedPrefillLoadEstimator {
+        duration: Duration,
+    }
+
+    impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
+        fn predict_prefill_duration(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<Duration> {
+            Ok(self.duration)
+        }
+    }
 
     fn make_queue(
         num_workers: usize,
@@ -308,7 +371,7 @@ mod tests {
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
         let (queue, slots, _tx) =
-            make_queue_with_sender(num_workers, block_size, isl, threshold_frac);
+            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
         (queue, slots)
     }
 
@@ -318,6 +381,7 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
@@ -354,6 +418,7 @@ mod tests {
             block_size,
             selector,
             FcfsPolicy,
+            prefill_load_estimator,
         ));
 
         (queue, slots, cfg_tx)
@@ -517,6 +582,33 @@ mod tests {
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_queue_update_uses_decayed_oldest_prefill_load() {
+        let estimator: Arc<dyn PrefillLoadEstimator> = Arc::new(FixedPrefillLoadEstimator {
+            duration: Duration::from_secs(10),
+        });
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender(1, 16, 100, Some(0.5), Some(estimator));
+
+        let (req1, rx1) = make_request("req-1", 100);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (req2, mut rx2) = make_request("req-2", 100);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        queue.update().await;
+
+        let scheduled = rx2
+            .try_recv()
+            .expect("queued request should have been scheduled");
+        let response = scheduled.expect("scheduling returned error");
+        assert_eq!(response.best_worker.worker_id, 0);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
     #[tokio::test]
     async fn test_no_workers_returns_error() {
         let (queue, _slots) = make_queue(0, 16, 512, None);
@@ -542,7 +634,7 @@ mod tests {
         let isl = 512;
 
         // Start with zero workers (mimics skip_initial_worker_wait=true)
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Routing with no workers must fail
         let (req_fail, rx_fail) = make_request("before-register", isl);
@@ -601,7 +693,7 @@ mod tests {
         let block_size = 16;
         let isl = 256;
 
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register worker 10 in slots and config
         let mut dp1 = std::collections::HashMap::new();
@@ -659,7 +751,7 @@ mod tests {
         let block_size = 16;
         let isl = 256;
 
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register three workers
         let mut dp = std::collections::HashMap::new();

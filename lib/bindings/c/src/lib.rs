@@ -716,6 +716,7 @@ pub unsafe extern "C" fn create_routers(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
+                None,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
