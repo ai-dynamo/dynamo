@@ -31,6 +31,13 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 
 
 class SGLangEngineQuiesceController:
+    """Manage SGLang engine memory release and resume transitions.
+
+    This controller only tracks engine state. Discovery registration is kept in
+    the request handler because registration can fail after the engine is already
+    serving again.
+    """
+
     def __init__(self, engine: sgl.Engine):
         self._engine = engine
         self._quiesced_tags: Optional[list[str]] = None
@@ -41,6 +48,7 @@ class SGLangEngineQuiesceController:
         return self._is_quiesced
 
     async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
+        """Pause generation and release the requested GPU memory."""
         if self._is_quiesced:
             return False
 
@@ -59,6 +67,7 @@ class SGLangEngineQuiesceController:
         return True
 
     async def resume(self, tags: Optional[list[str]] = None) -> bool:
+        """Restore GPU memory and continue generation."""
         if not self._is_quiesced:
             return False
 
@@ -75,11 +84,9 @@ class SGLangEngineQuiesceController:
         await self._engine.tokenizer_manager.continue_generation(
             ContinueGenerationReqInput()
         )
-        return True
-
-    def mark_resumed(self) -> None:
         self._quiesced_tags = None
         self._is_quiesced = False
+        return True
 
 
 RequestT = TypeVar("RequestT")
@@ -194,6 +201,8 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
         self._quiesce_lock = asyncio.Lock()
+        # Discovery can fail after the engine state has already changed.
+        self._endpoint_needs_registration = False
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -233,8 +242,12 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
 
             try:
                 # Stop new requests and drain in-flight work before releasing memory.
-                if self.generate_endpoint is not None:
+                if (
+                    self.generate_endpoint is not None
+                    and not self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    self._endpoint_needs_registration = True
 
                 await self._quiesce_controller.quiesce(tags)
 
@@ -270,18 +283,25 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            if (
+                not self._quiesce_controller.is_quiesced
+                and not self._endpoint_needs_registration
+            ):
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
                 }
 
             try:
-                await self._quiesce_controller.resume(tags)
+                if self._quiesce_controller.is_quiesced:
+                    await self._quiesce_controller.resume(tags)
 
-                if self.generate_endpoint is not None:
+                if (
+                    self.generate_endpoint is not None
+                    and self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.register_endpoint_instance()
-                self._quiesce_controller.mark_resumed()
+                    self._endpoint_needs_registration = False
 
                 return {
                     "status": "ok",

@@ -73,7 +73,6 @@ class CheckpointConfig:
                 logger.info("Restore signal detected (SIGCONT)")
                 logger.info("Resuming model after restore")
                 await quiesce_controller.resume()
-                quiesce_controller.mark_resumed()
                 return True
 
             logger.info("Checkpoint completion signal detected (SIGUSR1)")
