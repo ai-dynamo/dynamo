@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sglang-dsv31-aggregated-gaie-epp-config
+  namespace: dynamo-system
+  labels:
+    nvidia.com/dynamo-component: Epp
+    nvidia.com/dynamo-component-type: epp
+    nvidia.com/dynamo-graph-deployment-name: sglang-dsv31-aggregated-gaie
+data:
+  epp-config-dynamo.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - name: ""
+      parameters: null
+      type: disagg-profile-handler
+    - name: decode-filter
+      parameters:
+        allowsNoLabel: true
+        label: nvidia.com/dynamo-sub-component-type
+        validValues:
+        - decode
+      type: label-filter
+    - name: picker
+      parameters: null
+      type: max-score-picker
+    - name: dyn-decode
+      parameters: null
+      type: dyn-decode-scorer
+    schedulingProfiles:
+    - name: decode
+      plugins:
+      - pluginRef: decode-filter
+        weight: 1
+      - pluginRef: dyn-decode
+        weight: 1
+      - pluginRef: picker
+        weight: 1

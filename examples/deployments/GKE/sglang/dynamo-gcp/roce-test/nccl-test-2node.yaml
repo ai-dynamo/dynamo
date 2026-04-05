@@ -1,0 +1,88 @@
+apiVersion: kubeflow.org/v1
+kind: MPIJob
+metadata:
+  name: nccltest-b200-2node
+  namespace: dynamo-system
+spec:
+  slotsPerWorker: 8
+  runPolicy:
+    cleanPodPolicy: Running
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        spec:
+          containers:
+          - image: docker.io/deepops/nccl-tests:2312
+            name: nccltest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              # 1. Connectivity Basics (Matching DeepOps Plugin)
+              export NCCL_NET=IBext
+              export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
+              export NCCL_SOCKET_IFNAME=eth0
+              
+              # 2. Blackwell Performance: Enable CuMem but Disable NVLS to fix OOM
+              export NCCL_CUMEM_ENABLE=1
+              export NCCL_NVLS_ENABLE=0
+              export NCCL_MNNVL_ENABLE=0
+              export MC_FORCE_MNNVL=0
+
+              # 3. Google GKE RoCE v2 Networking
+              export NCCL_IB_GID_INDEX=3
+              export NCCL_IB_TC=41
+              export NCCL_IB_TIMEOUT=22
+              export NCCL_IB_RETRY_CNT=7
+              export NCCL_DEBUG=INFO
+              
+              mpirun --allow-run-as-root \
+                -np 16 \
+                -bind-to none -map-by slot \
+                -x NCCL_DEBUG -x NCCL_NET -x NCCL_IB_HCA -x NCCL_IB_GID_INDEX \
+                -x NCCL_IB_TC -x NCCL_IB_TIMEOUT -x NCCL_SOCKET_IFNAME \
+                -x NCCL_CUMEM_ENABLE -x NCCL_NVLS_ENABLE -x NCCL_MNNVL_ENABLE \
+                all_reduce_perf_mpi -b 8 -e 2G -f 2 -g 1
+    Worker:
+      replicas: 2
+      template:
+        metadata:
+          annotations:
+            networking.gke.io/default-interface: "eth0"
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"},{"interfaceName":"rdma4","network":"rdma-4"},{"interfaceName":"rdma5","network":"rdma-5"},{"interfaceName":"rdma6","network":"rdma-6"},{"interfaceName":"rdma7","network":"rdma-7"}]'
+        spec:
+          containers:
+          - image: docker.io/deepops/nccl-tests:2312
+            name: nccltest
+            securityContext:
+              capabilities:
+                add: [ "IPC_LOCK" ]
+            resources:
+              requests:
+                nvidia.com/gpu: "8"
+                networking.gke.io.networks/rdma-0: "1"
+                networking.gke.io.networks/rdma-1: "1"
+                networking.gke.io.networks/rdma-2: "1"
+                networking.gke.io.networks/rdma-3: "1"
+                networking.gke.io.networks/rdma-4: "1"
+                networking.gke.io.networks/rdma-5: "1"
+                networking.gke.io.networks/rdma-6: "1"
+                networking.gke.io.networks/rdma-7: "1"
+              limits:
+                nvidia.com/gpu: "8"
+                networking.gke.io.networks/rdma-0: "1"
+                networking.gke.io.networks/rdma-1: "1"
+                networking.gke.io.networks/rdma-2: "1"
+                networking.gke.io.networks/rdma-3: "1"
+                networking.gke.io.networks/rdma-4: "1"
+                networking.gke.io.networks/rdma-5: "1"
+                networking.gke.io.networks/rdma-6: "1"
+                networking.gke.io.networks/rdma-7: "1"
+            volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          volumes:
+          - name: shm
+            emptyDir:
+              medium: Memory
