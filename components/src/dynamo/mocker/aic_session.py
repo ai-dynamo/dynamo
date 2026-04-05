@@ -72,11 +72,12 @@ class AicSession:
             tp_size,
         )
 
-    def _predict_context_latency(self, batch_size: int, isl: int, prefix: int) -> float:
-        effective_isl = isl - prefix
+    def _predict_context_latency(
+        self, batch_size: int, effective_isl: int, prefix: int
+    ) -> float:
         if effective_isl <= 0:
             raise ValueError(
-                f"isl must be greater than prefix, got isl={isl}, prefix={prefix}"
+                f"effective_isl must be positive, got effective_isl={effective_isl}"
             )
 
         total_latency = 0.0
@@ -126,12 +127,10 @@ class AicSession:
         return total_latency
 
     def predict_prefill(
-        self, batch_size: int, isl: int, prefix: int, osl: int
+        self, batch_size: int, effective_isl: int, prefix: int
     ) -> float:
-        """Predict prefill latency in ms. Parameters match AIC RuntimeConfig."""
-        # AIC requires at least 1 new token (isl > prefix)
-        actual_prefix = min(prefix, isl - 1) if isl > 0 else 0
-        return self._predict_context_latency(batch_size, isl, actual_prefix)
+        """Predict prefill latency in ms from uncached tokens and cached prefix."""
+        return self._predict_context_latency(batch_size, effective_isl, prefix)
 
     def predict_decode(self, batch_size: int, isl: int, osl: int) -> float:
         """Predict decode (generation) latency in ms."""

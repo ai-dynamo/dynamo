@@ -6,7 +6,7 @@ mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
-mod router;
+mod router_shared;
 mod validate;
 
 use std::collections::VecDeque;

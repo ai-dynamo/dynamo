@@ -16,14 +16,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::shared::{
-    ReplayScheduler, replay_policy, replay_router_config, replay_selector, replay_slots,
-    replay_workers_with_configs,
-};
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
 };
 use crate::replay::ReplayRouterMode;
+use crate::replay::router_shared::{
+    ReplayScheduler, replay_policy, replay_router_config, replay_selector, replay_slots,
+    replay_workers_with_configs,
+};
 
 #[derive(Clone)]
 enum ReplayIndexer {
