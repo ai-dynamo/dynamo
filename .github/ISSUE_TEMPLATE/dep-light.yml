@@ -1,0 +1,23 @@
+name: Lightweight DEP
+description: Quick proposal for smaller changes
+title: "DEP (light): "
+labels: ["dep:draft", "dep:lightweight"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
