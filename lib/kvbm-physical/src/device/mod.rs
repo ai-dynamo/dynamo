@@ -168,8 +168,18 @@ impl DeviceStream {
         self.ops.batch_copy(src_ptrs, dst_ptrs, size)
     }
 
-    pub fn vectorized_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], chunk_size: usize) -> Result<()> {
-        self.ops.vectorized_copy(src_ptrs, dst_ptrs, chunk_size)
+    pub fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()> {
+        self.ops.memcpy_htod(dst_device, src_host)
+    }
+
+    pub fn vectorized_copy(
+        &self,
+        src_ptrs_device: u64,
+        dst_ptrs_device: u64,
+        chunk_size: usize,
+        count: usize,
+    ) -> Result<()> {
+        self.ops.vectorized_copy(src_ptrs_device, dst_ptrs_device, chunk_size, count)
     }
 
     pub fn record_event(&self) -> Result<DeviceEvent> {

@@ -14,7 +14,7 @@
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
-use crate::device::DeviceStream;
+use crate::device::{DeviceMemPool, DeviceStream};
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::validate_layout_compatibility;
 use crate::transfer::can_use_whole_block_transfer;
@@ -100,7 +100,10 @@ pub fn execute_device_transfer(
     if whole_block {
         execute_whole_block_device(src, dst, src_block_ids, dst_block_ids, &device_stream)?;
     } else {
-        execute_fc_lw_vectorized(src, dst, src_block_ids, dst_block_ids, layers, &device_stream)?;
+        execute_fc_lw_vectorized(
+            src, dst, src_block_ids, dst_block_ids, layers,
+            &device_stream, ctx.device_pool(),
+        )?;
     }
 
     // For blocking strategies, synchronize the stream
@@ -175,11 +178,20 @@ fn execute_whole_block_device(
 // FC↔LW vectorized transfer
 // ======================================================================
 
-/// FC↔LW (or partial-layer) transfer via `vectorized_copy`.
+/// FC↔LW (or partial-layer) transfer via pool-based `vectorized_copy`.
 ///
-/// Builds one pointer pair per (block, layer, outer) chunk and dispatches
-/// to `vectorized_copy` which uses a GPU kernel (CUDA) or falls back to
-/// `batch_copy` (Level-Zero).
+/// Builds one pointer pair per (block, layer, outer) chunk, uploads the pointer
+/// arrays to device memory via the memory pool, and dispatches to
+/// `vectorized_copy` which launches a GPU kernel (CUDA/SYCL).
+///
+/// The flow:
+/// 1. Build host pointer arrays
+/// 2. `pool.alloc_async` — allocate device memory for pointer arrays
+/// 3. `stream.memcpy_htod` — upload pointer arrays to device (async)
+/// 4. `stream.record_event` — capture event right after uploads
+/// 5. `stream.vectorized_copy` — launch GPU kernel with device pointers
+/// 6. `pool.free_async` — async-free device pointer arrays (stream-ordered on CUDA, event-deferred on ZE)
+/// 7. `upload_event.synchronize` — wait for H2D only, safe to drop host Vecs
 fn execute_fc_lw_vectorized(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -187,6 +199,7 @@ fn execute_fc_lw_vectorized(
     dst_block_ids: &[BlockId],
     layers: Range<usize>,
     stream: &Arc<DeviceStream>,
+    pool: &Arc<DeviceMemPool>,
 ) -> Result<()> {
     let src_layout = src.layout();
     let nl = layers.len();
@@ -200,6 +213,7 @@ fn execute_fc_lw_vectorized(
         return Ok(());
     }
 
+    // Step 1: Build host pointer arrays
     let mut src_ptrs: Vec<u64> = Vec::with_capacity(total_chunks);
     let mut dst_ptrs: Vec<u64> = Vec::with_capacity(total_chunks);
 
@@ -227,12 +241,44 @@ fn execute_fc_lw_vectorized(
         }
     }
 
-    stream.vectorized_copy(&src_ptrs, &dst_ptrs, chunk_size)?;
+    let ptr_array_bytes = total_chunks * std::mem::size_of::<u64>();
+
+    // Step 2: Allocate device memory for pointer arrays from pool
+    let src_ptrs_device = pool.alloc_async(ptr_array_bytes, stream)?;
+    let dst_ptrs_device = pool.alloc_async(ptr_array_bytes, stream)?;
+
+    // Step 3: Upload pointer arrays host → device (async, stream-ordered)
+    let src_bytes = unsafe {
+        std::slice::from_raw_parts(src_ptrs.as_ptr() as *const u8, ptr_array_bytes)
+    };
+    let dst_bytes = unsafe {
+        std::slice::from_raw_parts(dst_ptrs.as_ptr() as *const u8, ptr_array_bytes)
+    };
+    stream.memcpy_htod(src_ptrs_device, src_bytes)?;
+    stream.memcpy_htod(dst_ptrs_device, dst_bytes)?;
+
+    // Step 4: Record event right after uploads so we can wait on just the H2D
+    // copies without also blocking on the kernel. The in-order stream guarantees
+    // the kernel still executes after the uploads.
+    let upload_event = stream.record_event()?;
+
+    // Step 5: Launch vectorized_copy GPU kernel with device pointers.
+    // With IN_ORDER immediate command list (ZE) or CUDA stream, the kernel
+    // is guaranteed to execute after the preceding H2D uploads complete.
+    stream.vectorized_copy(src_ptrs_device, dst_ptrs_device, chunk_size, total_chunks)?;
+
+    // Step 6: Async-free device pointer arrays (stream-ordered on CUDA, event-deferred on ZE)
+    pool.free_async(src_ptrs_device, stream)?;
+    pool.free_async(dst_ptrs_device, stream)?;
+
+    // Step 7: Wait for H2D uploads to finish so host Vecs (src_ptrs, dst_ptrs)
+    // are safe to drop. Does NOT wait for the vectorized_copy kernel.
+    upload_event.synchronize()?;
 
     tracing::debug!(
         total_chunks,
         chunk_size,
-        "Per-chunk transfer completed via vectorized_copy"
+        "Per-chunk transfer completed via pool-based vectorized_copy"
     );
 
     Ok(())
