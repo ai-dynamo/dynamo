@@ -67,6 +67,12 @@ sglang = [
     "cupy-cuda12x>=13.0.0",
 ]
 
+fastvideo = [
+    "uvloop",
+    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git@833a33b66318125ac449f05a87aa7ada1a1b120d",
+    "flash-attn-4==4.0.0b5",
+]
+
 mocker = [
     "aiconfigurator>=0.7.0",
 ]
@@ -75,6 +81,7 @@ mocker = [
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+fastvideo_tests = "dynamo.fastvideo.tests.conftest"
 
 [dependency-groups]
 docs = [
@@ -148,7 +155,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "fastvideo", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -247,6 +254,7 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "fastvideo: marks tests as requiring fastvideo",
     "lmcache: marks tests as requiring lmcache",
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
@@ -337,6 +345,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tensorrt_llm", "tensorrt_llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["fastvideo", "fastvideo.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

@@ -20,6 +20,7 @@ from tests.utils.payloads import (
     ResponsesStreamPayload,
     SGLangMetricsPayload,
     TRTLLMMetricsPayload,
+    VideoGenerationPayload,
     VLLMMetricsPayload,
 )
 
@@ -176,6 +177,40 @@ def multimodal_payload_default(
         max_tokens=max_tokens,
         temperature=temperature,
         stream=stream,
+    )
+
+
+def video_generation_payload_default(
+    prompt: str = "A cinematic drone shot over snowy mountains at sunrise.",
+    repeat_count: int = 1,
+    expected_log: Optional[List[str]] = None,
+    size: str = "256x256",
+    response_format: str = "b64_json",
+    fps: int = 8,
+    num_frames: int = 8,
+    num_inference_steps: int = 1,
+    guidance_scale: float = 1.0,
+    seed: int = 10,
+) -> VideoGenerationPayload:
+    """Create a minimal `/v1/videos` payload for backend smoke tests."""
+
+    return VideoGenerationPayload(
+        body={
+            "prompt": prompt,
+            "size": size,
+            "response_format": response_format,
+            "nvext": {
+                "fps": fps,
+                "num_frames": num_frames,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+            },
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=[],
+        timeout=600,
     )
 
 

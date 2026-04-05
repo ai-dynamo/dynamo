@@ -6,7 +6,7 @@ sidebar-title: FastVideo
 
 # FastVideo
 
-This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
+This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo as a built-in backend via `python -m dynamo.fastvideo`, exposed through the `/v1/videos` endpoint.
 
 > [!NOTE]
 > Dynamo also supports diffusion through built-in backends: [SGLang Diffusion](../../backends/sglang/sglang-diffusion.md) (LLM diffusion, image, video), [vLLM-Omni](../../backends/vllm/vllm-omni.md) (text-to-image, text-to-video), and [TRT-LLM Video Diffusion](../../backends/trtllm/trtllm-video-diffusion.md). See the [Diffusion Overview](README.md) for the full support matrix.
@@ -15,12 +15,23 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
-- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations`; attention backend selection is controlled separately via `--attention-backend`.
-- **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
+- **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
+- **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request as `data[0].b64_json` by default. Requests may also set `"response_format": "url"` to store output via Dynamo media storage.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
+- **Deployment mode:** FastVideo currently supports aggregated deployment only. Disaggregated serving is not supported yet.
 
 > [!IMPORTANT]
-> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
+> `dynamo.fastvideo` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. On Blackwell GPUs, the optimized path is typically `--torch-compile --fp4-quantization`; if desired, you can also opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
+
+## Direct Launch
+
+Launch the built-in backend directly:
+
+```bash
+python -m dynamo.fastvideo --model-path FastVideo/LTX2-Distilled-Diffusers
+```
+
+The local example flow in `examples/diffusers/` now shells into this built-in entrypoint rather than maintaining separate worker logic.
 
 ## Docker Image Build
 
@@ -28,38 +39,16 @@ The local Docker workflow builds a runtime image from the [`Dockerfile`](https:/
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
 - Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
-- Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
-- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
-
-The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
+- Builds and installs the local `ai-dynamo-runtime` bindings plus the local Dynamo source tree so the image runs the built-in `dynamo.fastvideo` backend from this repo
 
 ```bash
-# Blackwell (default)
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
-
-# Hopper
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
+docker build -f examples/diffusers/Dockerfile .
 ```
 
-`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
-
-```bash
-docker build examples/diffusers/ --build-arg MAX_JOBS=2
-```
-
-When using Docker Compose, set these as environment variables before running `docker compose up --build`:
-
-```bash
-# Hopper on a memory-constrained builder
-TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
-```
-
-> [!WARNING]
-> The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
 ## Warmup Time
 
-On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+On first start, workers download model weights. When `--torch-compile` is enabled, compile and warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
 > [!TIP]
 > When using Kubernetes, mount a shared Hugging Face cache PVC (see [Kubernetes Deployment](#kubernetes-deployment)) so model weights are downloaded once and reused across pod restarts.
@@ -105,7 +94,7 @@ Environment variables:
 | `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `dynamo.fastvideo` (for example, `--torch-compile --fp4-quantization --attention-backend FLASH_ATTN`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -114,12 +103,21 @@ Example:
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
+WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
+> `--torch-compile`, `--fp4-quantization`, and `--attention-backend` are `dynamo.fastvideo` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default backend configuration.
+
+Use the built-in entrypoint directly if you prefer not to use the wrapper script:
+
+```bash
+PYTHONPATH=<dynamo-root>/components/src \
+python -m dynamo.fastvideo \
+  --model-path FastVideo/LTX2-Distilled-Diffusers \
+  --discovery-backend file
+```
 
 The script writes logs to:
 
@@ -136,6 +134,9 @@ The script writes logs to:
 | `agg_user_workload.yaml` | Same deployment with `user-workload` tolerations and `imagePullSecrets` |
 | `huggingface-cache-pvc.yaml` | Shared HF cache PVC for model weights |
 | `dynamo-platform-values-user-workload.yaml` | Optional Helm values for clusters with tainted `user-workload` nodes |
+
+> [!NOTE]
+> FastVideo currently has only an aggregated deployment path in Dynamo. The example manifests in this directory do not include a disaggregated FastVideo setup.
 
 ### Prerequisites
 
@@ -235,10 +236,19 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
+| `--model-path` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
+| `--served-model-name` | `--model-path` | Model name registered with Dynamo discovery |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--enable-optimizations` | off | Enables FP4 quantization and `torch.compile` |
 | `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
+| `--dit-cpu-offload` / `--no-dit-cpu-offload` | `enabled` | Enable or disable DiT CPU offload |
+| `--vae-cpu-offload` / `--no-vae-cpu-offload` | `enabled` | Enable or disable VAE CPU offload |
+| `--text-encoder-cpu-offload` / `--no-text-encoder-cpu-offload` | `enabled` | Enable or disable text encoder CPU offload |
+| `--torch-compile` / `--no-torch-compile` | `disabled` | Enable or disable `torch.compile` for FastVideo |
+| `--torch-compile-mode` | `max-autotune-no-cudagraphs` | `torch.compile` mode to use when compilation is enabled |
+| `--torch-compile-fullgraph` / `--no-torch-compile-fullgraph` | `enabled` | Enable or disable fullgraph mode for `torch.compile` |
+| `--fp4-quantization` / `--no-fp4-quantization` | `disabled` | Enable FP4 quantization for DiT weights on Blackwell GPUs and newer |
+| `--extra-generator-args-file` | — | YAML or JSON file with extra FastVideo generator keyword arguments, including model-specific options such as `ltx2_vae_tiling` |
+| `--override-generator-args-json` | — | JSON object string applied on top of the generator args file and built-in defaults |
 
 ### Request Parameters (`nvext`)
 
@@ -257,20 +267,20 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 |---|---|---|
 | `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
 | `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN` |
+| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `dynamo.fastvideo` reads this as the default for `--attention-backend` and then exports the resolved value to FastVideo |
 | `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
-| `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
+| `FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT` | `0` | Preserved FastVideo toggle for pre-quantized RMSNorm behavior |
+| `FASTVIDEO_LOG_LEVEL` | — | FastVideo-specific log level override; when unset, `dynamo.fastvideo` derives it from `DYN_LOG` |
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
-| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
-| 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
+| OOM during Docker build | Building local runtime bindings or CUDA-dependent packages uses too much RAM | Rebuild on a machine with more RAM |
+| 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
-| Startup or import failure after enabling optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--enable-optimizations`, or use `--attention-backend TORCH_SDPA` |
+| Lower throughput than expected on B200/B300 | `torch.compile`, FP4, and flash-attention are configured separately | Try `--torch-compile --fp4-quantization` and, if desired, `--attention-backend FLASH_ATTN` |
+| Startup or import failure after enabling FP4 or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `python -m dynamo.fastvideo` without `--fp4-quantization`, or use `--attention-backend TORCH_SDPA` |
 
 ## Source Code
 
