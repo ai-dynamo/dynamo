@@ -152,10 +152,15 @@ impl TcpStreamServer {
                     .to_string()
             }
             None => {
-                let resolved_ip = resolver.local_ip().or_else(|err| match err {
-                    Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-                    _ => Err(err),
-                });
+                // Try IPv4 first, then fall back to IPv6 on any error (including StrategyError)
+                let resolved_ip = match resolver.local_ip() {
+                    Ok(addr) => Ok(addr),
+                    Err(_) => {
+                        // Fall back to IPv6 on any IPv4 error, including StrategyError
+                        // which can occur in IPv6-only environments
+                        resolver.local_ipv6()
+                    }
+                };
 
                 match resolved_ip {
                     Ok(addr) => addr,
