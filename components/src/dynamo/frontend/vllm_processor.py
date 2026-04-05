@@ -14,7 +14,6 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.inputs.data import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -38,6 +37,13 @@ from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import extract_mm_urls, random_uuid
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to old structure
+try:
+    from vllm.inputs.llm import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
+
 
 logger = logging.getLogger(__name__)
 

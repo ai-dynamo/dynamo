@@ -23,7 +23,6 @@ _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
 _engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
-_inputs_data = importlib.import_module("vllm.inputs.data")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
 _tool_parsers = importlib.import_module("vllm.tool_parsers")
@@ -34,7 +33,6 @@ _output_processor_mod = importlib.import_module("vllm.v1.engine.output_processor
 ChatCompletionRequest = _chat_protocol.ChatCompletionRequest
 DeltaMessage = _engine_protocol.DeltaMessage
 DeltaToolCall = _engine_protocol.DeltaToolCall
-TokensPrompt = _inputs_data.TokensPrompt
 ReasoningParser = _reasoning.ReasoningParser
 ReasoningParserManager = _reasoning.ReasoningParserManager
 RequestOutputKind = _sampling_params.RequestOutputKind
@@ -47,6 +45,14 @@ FinishReason = _engine.FinishReason
 InputProcessor = _input_processor_mod.InputProcessor
 OutputProcessor = _output_processor_mod.OutputProcessor
 OutputProcessorOutput = _output_processor_mod.OutputProcessorOutput
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to legacy location
+try:
+    _inputs_mod = importlib.import_module("vllm.inputs.llm")
+except (ImportError, ModuleNotFoundError):
+    _inputs_mod = importlib.import_module("vllm.inputs.data")
+
+TokensPrompt = _inputs_mod.TokensPrompt
 
 pytestmark = [
     pytest.mark.vllm,

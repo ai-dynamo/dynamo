@@ -17,7 +17,6 @@ from typing import Tuple
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -39,6 +38,12 @@ from utils.args import (
 from utils.image_loader import ImageLoader
 from utils.model import construct_mm_data
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/35182), fallback to old structure
+try:
+    from vllm.inputs.llm import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
