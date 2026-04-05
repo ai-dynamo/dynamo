@@ -403,6 +403,16 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "LayoutType::FullyContiguous")]
     disk_layout_type: LayoutType,
 
+    /// Explicit outer dimension (1 for MLA, 2 for standard K/V).
+    /// When set, skips shape inference. Python should always provide this.
+    #[builder(default = "None")]
+    pub outer_dim: Option<usize>,
+
+    /// Explicit inner dimension (head_size for MLA, num_heads * head_dim for standard).
+    /// When set, skips shape inference. Python should always provide this.
+    #[builder(default = "None")]
+    pub inner_dim: Option<usize>,
+
     #[builder(default = "None")]
     scheduler_client: Option<TransferSchedulerClient>,
 
@@ -416,6 +426,61 @@ pub struct KvbmWorkerConfig {
 impl KvbmWorkerConfig {
     pub fn builder() -> KvbmWorkerConfigBuilder {
         KvbmWorkerConfigBuilder::default()
+    }
+
+    /// Validate configuration contract before use.
+    ///
+    /// Rules:
+    /// - `outer_dim` must be None, 1, or 2
+    /// - `inner_dim` must be None or non-zero
+    /// - `outer_dim` and `inner_dim` must be coupled: both Some or both None
+    /// - `page_size` must be a power of two and ≤ 1024
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // outer_dim: None | 1 | 2
+        if let Some(od) = self.outer_dim {
+            if od != 1 && od != 2 {
+                anyhow::bail!(
+                    "outer_dim must be 1 (MLA) or 2 (standard K/V), got {}",
+                    od
+                );
+            }
+        }
+
+        // inner_dim: None or non-zero
+        if let Some(id) = self.inner_dim {
+            if id == 0 {
+                anyhow::bail!("inner_dim must be non-zero when provided");
+            }
+        }
+
+        // coupling: both Some or both None
+        match (self.outer_dim, self.inner_dim) {
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!(
+                    "outer_dim and inner_dim must be provided together (both Some or both None); \
+                     got outer_dim={:?}, inner_dim={:?}",
+                    self.outer_dim,
+                    self.inner_dim
+                );
+            }
+            _ => {}
+        }
+
+        // page_size: power of two, ≤ 1024
+        if !self.page_size.is_power_of_two() {
+            anyhow::bail!(
+                "page_size must be a power of two, got {}",
+                self.page_size
+            );
+        }
+        if self.page_size > 1024 {
+            anyhow::bail!(
+                "page_size must be ≤ 1024, got {}",
+                self.page_size
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -433,6 +498,8 @@ impl KvbmWorker {
             config.dtype_width_bytes
         );
 
+        config.validate()?;
+
         if config.num_device_blocks == 0 {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
         }
@@ -449,8 +516,10 @@ impl KvbmWorker {
         let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
             LayoutType::FullyContiguous => {
                 let num_layers = shape[1];
-                let outer_dim = shape[2];
-                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                let outer_dim = config.outer_dim.unwrap_or(shape[2]);
+                let inner_dim = config
+                    .inner_dim
+                    .unwrap_or_else(|| shape[3..].iter().product::<usize>() / config.page_size);
                 tracing::info!(
                     "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
                     num_layers,
@@ -467,21 +536,22 @@ impl KvbmWorker {
                 )
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
-                // Use the already-detected layout type from config (no re-detection needed)
                 let layout_type = config.device_layout_type;
-
-                // Extract outer_dim based on the provided outer_contiguous value
-                let outer_dim = if outer_contiguous {
-                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
-                } else {
-                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
-                };
-
                 let num_layers = device_tensors.len();
-                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+
+                let outer_dim = config.outer_dim.unwrap_or_else(|| {
+                    if outer_contiguous {
+                        shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                    } else {
+                        shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                    }
+                });
+                let inner_dim = config
+                    .inner_dim
+                    .unwrap_or_else(|| shape[2..].iter().product::<usize>() / config.page_size);
 
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    "Layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
                     num_layers,
                     outer_dim,
                     outer_contiguous,
@@ -770,5 +840,126 @@ impl Drop for KvbmWorker {
             task.cancel();
             task.detach();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    fn base_config() -> KvbmWorkerConfig {
+        KvbmWorkerConfig::builder()
+            .cancel_token(CancellationToken::new())
+            .num_device_blocks(1)
+            .build()
+            .expect("base config should build")
+    }
+
+    // --- outer_dim ---
+
+    #[test]
+    fn validate_outer_dim_none_is_ok() {
+        let mut cfg = base_config();
+        cfg.outer_dim = None;
+        cfg.inner_dim = None;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_outer_dim_1_is_ok() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(1);
+        cfg.inner_dim = Some(64);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_outer_dim_2_is_ok() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(2);
+        cfg.inner_dim = Some(64);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_outer_dim_3_is_err() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(3);
+        cfg.inner_dim = Some(64);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("outer_dim must be 1"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_outer_dim_0_is_err() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(0);
+        cfg.inner_dim = Some(64);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("outer_dim must be 1"), "got: {err}");
+    }
+
+    // --- inner_dim ---
+
+    #[test]
+    fn validate_inner_dim_zero_is_err() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(2);
+        cfg.inner_dim = Some(0);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("inner_dim must be non-zero"), "got: {err}");
+    }
+
+    // --- coupling ---
+
+    #[test]
+    fn validate_outer_some_inner_none_is_err() {
+        let mut cfg = base_config();
+        cfg.outer_dim = Some(2);
+        cfg.inner_dim = None;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("provided together"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_outer_none_inner_some_is_err() {
+        let mut cfg = base_config();
+        cfg.outer_dim = None;
+        cfg.inner_dim = Some(64);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("provided together"), "got: {err}");
+    }
+
+    // --- page_size ---
+
+    #[test]
+    fn validate_page_size_power_of_two_is_ok() {
+        for size in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+            let mut cfg = base_config();
+            cfg.page_size = size;
+            assert!(cfg.validate().is_ok(), "expected ok for page_size={size}");
+        }
+    }
+
+    #[test]
+    fn validate_page_size_not_power_of_two_is_err() {
+        for size in [3, 5, 6, 7, 100, 300] {
+            let mut cfg = base_config();
+            cfg.page_size = size;
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("power of two"),
+                "expected power-of-two error for page_size={size}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_page_size_exceeds_max_is_err() {
+        let mut cfg = base_config();
+        cfg.page_size = 2048;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("≤ 1024"), "got: {err}");
     }
 }
