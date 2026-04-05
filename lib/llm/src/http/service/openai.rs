@@ -1779,9 +1779,9 @@ pub fn validate_response_unsupported_fields(
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
 fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+    if !_state.is_ready() {
+        return Err(ErrorMessage::_service_unavailable());
+    }
     Ok(())
 }
 
