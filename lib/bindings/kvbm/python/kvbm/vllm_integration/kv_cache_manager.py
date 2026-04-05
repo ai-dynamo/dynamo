@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from kvbm.vllm_integration.kv_cache_utils import KvbmCacheBlocks
+from kvbm.vllm_integration.mm_block_hashes import compute_mm_block_hashes
 from kvbm.vllm_integration.rust import BlockManager
 from kvbm.vllm_integration.rust import KvbmCacheManager as RustKvbmCacheManager
 from kvbm.vllm_integration.rust import KvbmRequest, SlotUpdate
@@ -108,13 +109,21 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
-        if bool(request.mm_positions):
-            raise ValueError("Unsupported request - requires mm extra keys")
-
         all_token_ids = request.all_token_ids
 
+        mm_positions = getattr(request, "mm_positions", None)
+        mm_features = getattr(request, "mm_features", None)
+        extra_block_hashes = None
+        if mm_positions or mm_features:
+            extra_block_hashes = compute_mm_block_hashes(
+                mm_positions=mm_positions,
+                mm_features=mm_features,
+                num_tokens=len(all_token_ids),
+                block_size=self.block_size,
+            )
+
         # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
+        kvbm_request = KvbmRequest(
             request_id=request.request_id,
             lora_name=request.lora_request.lora_name()
             if request.lora_request
@@ -122,7 +131,9 @@ class KvbmCacheManager(KVConnectorBase_V1):
             salt_hash=request.cache_salt,
         )
 
-        return self.cache_manager.create_slot(request, all_token_ids)
+        return self.cache_manager.create_slot(
+            kvbm_request, all_token_ids, extra_block_hashes
+        )
 
     def allocate_slots(
         self,

@@ -76,9 +76,39 @@ impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
 }
 
 impl<S: Storage, L: LocalityProvider> Slot<S, L> {
-    /// Creates a new slot.
+    /// Creates a new slot (text-only, no multimodal extra hashes).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(tokens: Tokens, block_size: usize, salt_hash: SaltHash) -> Self {
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        let prefill_position = sequence.total_tokens();
+
+        Self {
+            computed_position: 0,
+            prefill_position,
+            sequence,
+            immutable: Vec::new(),
+            mutable: VecDeque::new(),
+            onboard_from_host: None,
+            onboard_from_disk: None,
+            blocks_cached_from_device: 0,
+            blocks_cached_from_host: 0,
+            blocks_cached_from_disk: 0,
+        }
+    }
+
+    /// Creates a new slot with optional per-block extra hashes for multimodal content.
+    pub fn new_with_extra_hashes(
+        tokens: Tokens,
+        block_size: usize,
+        salt_hash: SaltHash,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> Self {
+        let sequence = TokenBlockSequence::new_with_extra_hashes(
+            tokens,
+            block_size as u32,
+            Some(salt_hash),
+            extra_block_hashes,
+        );
         let prefill_position = sequence.total_tokens();
 
         Self {

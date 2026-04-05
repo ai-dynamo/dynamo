@@ -339,12 +339,19 @@ impl Leader for KvConnectorLeaderRecorder {
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
-    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
+    fn create_slot(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> anyhow::Result<()> {
         let input_copy = CreateSlotInput {
             request: request.clone(),
             tokens: tokens.clone(),
         };
-        let _ = self.connector_leader.create_slot(request, tokens);
+        let _ = self
+            .connector_leader
+            .create_slot(request, tokens, extra_block_hashes);
         let _ = self
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));

@@ -376,6 +376,26 @@ impl TokenBlockChunk {
             block_hash,
         }
     }
+
+    /// Creates a new chunk from a slice of `&[Token]` with an optional extra hash for multimodal
+    /// content. Uses a two-stage hash: stage 1 hashes tokens, stage 2 combines with extra_hash.
+    /// When extra_hash is None, behaves identically to [`from_tokens`].
+    fn from_tokens_with_extra(
+        tokens: &[Token],
+        salt_hash: SaltHash,
+        extra_hash: Option<u64>,
+    ) -> Self {
+        let token_hash = compute_hash_v2(cast_slice(tokens), salt_hash);
+        let block_hash = match extra_hash {
+            Some(extra) => compute_hash_v2(cast_slice(&[token_hash, extra]), salt_hash),
+            None => token_hash,
+        };
+        Self {
+            tokens: tokens.into(),
+            salt_hash,
+            block_hash,
+        }
+    }
 }
 
 /// Represents a completed, immutable block of tokens with associated hashes.
@@ -904,6 +924,74 @@ impl TokenBlockSequence {
             salt_hash,
             block_size: block_size as usize,
         }
+    }
+
+    /// Creates a new [`TokenBlockSequence`] with optional per-block extra hashes for multimodal
+    /// content. When `extra_block_hashes` is `None` or all entries are `None`, behaves identically
+    /// to [`new`].
+    pub fn new_with_extra_hashes(
+        tokens: Tokens,
+        block_size: u32,
+        salt_hash: Option<SaltHash>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let salt_hash = salt_hash.unwrap_or(0);
+        let (blocks, current_block) = match extra_block_hashes {
+            Some(ref hashes) => Self::split_tokens_mm(&tokens, block_size, salt_hash, hashes),
+            None => Self::split_tokens(&tokens, block_size, salt_hash),
+        };
+
+        Self {
+            blocks,
+            current_block,
+            salt_hash,
+            block_size: block_size as usize,
+        }
+    }
+
+    /// Like [`split_tokens`] but applies per-block extra hashes for multimodal blocks.
+    /// Blocks whose index has a `Some` entry in `extra_block_hashes` use two-stage hashing;
+    /// blocks with `None` use the standard single-stage hash.
+    pub fn split_tokens_mm(
+        tokens: &[Token],
+        block_size: u32,
+        salt_hash: u64,
+        extra_block_hashes: &[Option<u64>],
+    ) -> (Vec<TokenBlock>, PartialTokenBlock) {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let chunks: Vec<TokenBlockChunk> = tokens
+            .as_ref()
+            .par_chunks_exact(block_size as usize)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let extra = extra_block_hashes.get(i).copied().flatten();
+                TokenBlockChunk::from_tokens_with_extra(chunk, salt_hash, extra)
+            })
+            .collect();
+
+        let mut result_blocks = Vec::with_capacity(chunks.len());
+        let mut last_sequence_hash: Option<SequenceHash> = None;
+
+        for chunk in chunks {
+            let new_block = TokenBlock::from_chunk(chunk, last_sequence_hash);
+            last_sequence_hash = Some(new_block.sequence_hash());
+            result_blocks.push(new_block);
+        }
+
+        let remainder = tokens
+            .as_ref()
+            .chunks_exact(block_size as usize)
+            .remainder();
+
+        let current_block = PartialTokenBlock {
+            tokens: remainder.into(),
+            block_size,
+            salt_hash,
+            parent_sequence_hash: last_sequence_hash,
+        };
+
+        (result_blocks, current_block)
     }
 }
 
@@ -1574,5 +1662,209 @@ mod tests {
         let remaining = partial.push_tokens(tokens);
         assert_eq!(partial.tokens.len(), 4);
         assert_eq!(remaining.len(), 6);
+    }
+
+    // =========================================================================
+    // Multimodal extra-hash tests (from_tokens_with_extra / split_tokens_mm /
+    // new_with_extra_hashes)
+    // =========================================================================
+
+    #[test]
+    fn test_from_tokens_with_extra_none_matches_from_tokens() {
+        let tokens: &[Token] = &[1, 2, 3, 4];
+        let salt = TEST_SALT_HASH;
+
+        let chunk_plain = TokenBlockChunk::from_tokens(tokens, salt);
+        let chunk_extra_none = TokenBlockChunk::from_tokens_with_extra(tokens, salt, None);
+
+        assert_eq!(chunk_plain.block_hash, chunk_extra_none.block_hash);
+    }
+
+    #[test]
+    fn test_from_tokens_with_extra_changes_block_hash() {
+        let tokens: &[Token] = &[1, 2, 3, 4];
+        let salt = TEST_SALT_HASH;
+        let extra: u64 = 0xDEAD_BEEF;
+
+        let chunk_plain = TokenBlockChunk::from_tokens(tokens, salt);
+        let chunk_with_extra = TokenBlockChunk::from_tokens_with_extra(tokens, salt, Some(extra));
+
+        // Extra hash must change the block hash
+        assert_ne!(chunk_plain.block_hash, chunk_with_extra.block_hash);
+    }
+
+    #[test]
+    fn test_from_tokens_with_extra_different_extras_differ() {
+        let tokens: &[Token] = &[1, 2, 3, 4];
+        let salt = TEST_SALT_HASH;
+
+        let chunk_a = TokenBlockChunk::from_tokens_with_extra(tokens, salt, Some(0xAAAA));
+        let chunk_b = TokenBlockChunk::from_tokens_with_extra(tokens, salt, Some(0xBBBB));
+
+        // Two different extra hashes on the same tokens must produce different block hashes
+        assert_ne!(chunk_a.block_hash, chunk_b.block_hash);
+    }
+
+    #[test]
+    fn test_from_tokens_with_extra_is_deterministic() {
+        let tokens: &[Token] = &[10, 20, 30, 40];
+        let salt = TEST_SALT_HASH;
+        let extra: u64 = 42;
+
+        let a = TokenBlockChunk::from_tokens_with_extra(tokens, salt, Some(extra));
+        let b = TokenBlockChunk::from_tokens_with_extra(tokens, salt, Some(extra));
+
+        assert_eq!(a.block_hash, b.block_hash);
+    }
+
+    #[test]
+    fn test_split_tokens_mm_all_none_matches_split_tokens() {
+        let tokens: Vec<Token> = (1..=12).collect(); // 3 blocks of 4
+        let salt = TEST_SALT_HASH;
+        let block_size: u32 = 4;
+
+        let (blocks_plain, partial_plain) =
+            TokenBlockSequence::split_tokens(&tokens, block_size, salt);
+        let extra_all_none = vec![None, None, None];
+        let (blocks_mm, partial_mm) =
+            TokenBlockSequence::split_tokens_mm(&tokens, block_size, salt, &extra_all_none);
+
+        assert_eq!(blocks_plain.len(), blocks_mm.len());
+        for (bp, bm) in blocks_plain.iter().zip(blocks_mm.iter()) {
+            assert_eq!(bp.block_hash(), bm.block_hash());
+            assert_eq!(bp.sequence_hash(), bm.sequence_hash());
+        }
+        assert_eq!(partial_plain.tokens(), partial_mm.tokens());
+    }
+
+    #[test]
+    fn test_split_tokens_mm_extra_on_some_blocks() {
+        let tokens: Vec<Token> = (1..=12).collect(); // 3 blocks of 4
+        let salt = TEST_SALT_HASH;
+        let block_size: u32 = 4;
+
+        let (blocks_plain, _) = TokenBlockSequence::split_tokens(&tokens, block_size, salt);
+
+        // Only the middle block (index 1) gets an extra hash
+        let extras = vec![None, Some(0xCAFE_u64), None];
+        let (blocks_mm, _) =
+            TokenBlockSequence::split_tokens_mm(&tokens, block_size, salt, &extras);
+
+        // Block 0: no extra → same block hash
+        assert_eq!(blocks_plain[0].block_hash(), blocks_mm[0].block_hash());
+        // Block 0: same sequence hash (first block)
+        assert_eq!(
+            blocks_plain[0].sequence_hash(),
+            blocks_mm[0].sequence_hash()
+        );
+
+        // Block 1: has extra → different block hash
+        assert_ne!(blocks_plain[1].block_hash(), blocks_mm[1].block_hash());
+        // Block 1: different sequence hash (chained from block hash)
+        assert_ne!(
+            blocks_plain[1].sequence_hash(),
+            blocks_mm[1].sequence_hash()
+        );
+
+        // Block 2: no extra → same block hash as plain
+        assert_eq!(blocks_plain[2].block_hash(), blocks_mm[2].block_hash());
+        // Block 2: BUT different sequence hash because parent (block 1) differs
+        assert_ne!(
+            blocks_plain[2].sequence_hash(),
+            blocks_mm[2].sequence_hash()
+        );
+    }
+
+    #[test]
+    fn test_split_tokens_mm_extra_shorter_than_blocks() {
+        // extra_block_hashes may have fewer entries than the number of blocks;
+        // missing entries should behave as None.
+        let tokens: Vec<Token> = (1..=8).collect(); // 2 blocks of 4
+        let salt = TEST_SALT_HASH;
+        let block_size: u32 = 4;
+
+        let extras = vec![Some(0xFF_u64)]; // only covers block 0
+        let (blocks_mm, _) =
+            TokenBlockSequence::split_tokens_mm(&tokens, block_size, salt, &extras);
+
+        let (blocks_plain, _) = TokenBlockSequence::split_tokens(&tokens, block_size, salt);
+
+        // Block 0 should differ (has extra)
+        assert_ne!(blocks_plain[0].block_hash(), blocks_mm[0].block_hash());
+        // Block 1 should have same block hash (extra_block_hashes.get(1) == None)
+        assert_eq!(blocks_plain[1].block_hash(), blocks_mm[1].block_hash());
+    }
+
+    #[test]
+    fn test_new_with_extra_hashes_none_matches_new() {
+        let tokens = Tokens::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let block_size: u32 = 4;
+        let salt = Some(TEST_SALT_HASH);
+
+        let seq_plain = TokenBlockSequence::new(tokens.clone(), block_size, salt);
+        let seq_mm = TokenBlockSequence::new_with_extra_hashes(tokens, block_size, salt, None);
+
+        assert_eq!(seq_plain.blocks().len(), seq_mm.blocks().len());
+        for (bp, bm) in seq_plain.blocks().iter().zip(seq_mm.blocks().iter()) {
+            assert_eq!(bp.sequence_hash(), bm.sequence_hash());
+        }
+    }
+
+    #[test]
+    fn test_new_with_extra_hashes_produces_different_sequence() {
+        let tokens = Tokens::from(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let block_size: u32 = 4;
+        let salt = Some(TEST_SALT_HASH);
+
+        let seq_plain =
+            TokenBlockSequence::new_with_extra_hashes(tokens.clone(), block_size, salt, None);
+        let seq_img1 = TokenBlockSequence::new_with_extra_hashes(
+            tokens.clone(),
+            block_size,
+            salt,
+            Some(vec![None, Some(0xAA)]),
+        );
+        let seq_img2 = TokenBlockSequence::new_with_extra_hashes(
+            tokens,
+            block_size,
+            salt,
+            Some(vec![None, Some(0xBB)]),
+        );
+
+        // All three should have different sequence hashes for block 1
+        let h_plain = seq_plain.blocks()[1].sequence_hash();
+        let h_img1 = seq_img1.blocks()[1].sequence_hash();
+        let h_img2 = seq_img2.blocks()[1].sequence_hash();
+
+        assert_ne!(h_plain, h_img1);
+        assert_ne!(h_plain, h_img2);
+        assert_ne!(h_img1, h_img2);
+
+        // But block 0 (text-only, no extra) should match across all three
+        assert_eq!(
+            seq_plain.blocks()[0].sequence_hash(),
+            seq_img1.blocks()[0].sequence_hash()
+        );
+        assert_eq!(
+            seq_plain.blocks()[0].sequence_hash(),
+            seq_img2.blocks()[0].sequence_hash()
+        );
+    }
+
+    #[test]
+    fn test_new_with_extra_hashes_empty_extras_vec() {
+        // An empty extras vec should behave like all-None
+        let tokens = Tokens::from(vec![1, 2, 3, 4]);
+        let block_size: u32 = 4;
+        let salt = Some(TEST_SALT_HASH);
+
+        let seq_plain = TokenBlockSequence::new(tokens.clone(), block_size, salt);
+        let seq_empty =
+            TokenBlockSequence::new_with_extra_hashes(tokens, block_size, salt, Some(vec![]));
+
+        assert_eq!(
+            seq_plain.blocks()[0].sequence_hash(),
+            seq_empty.blocks()[0].sequence_hash()
+        );
     }
 }

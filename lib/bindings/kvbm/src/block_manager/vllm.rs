@@ -97,14 +97,21 @@ impl KvbmCacheManager {
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
+    #[pyo3(signature = (request, tokens, extra_block_hashes=None))]
     pub fn create_slot(
         &self,
         request: KvbmRequest,
         tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
     ) -> PyResult<Vec<SequenceHash>> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager
-            .create_slot(&request.request_id, request.salt_hash, tokens)
+            .create_slot(
+                &request.request_id,
+                request.salt_hash,
+                tokens,
+                extra_block_hashes,
+            )
             .map_err(to_pyerr)
     }
 
@@ -432,11 +439,17 @@ impl<R: RequestKey> SlotManager<R> {
         request_id: &R,
         salt_hash: SaltHash,
         tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
     ) -> Result<Vec<SequenceHash>, SlotError> {
         if !self.slots.contains_key(request_id) {
             self.slots.insert(
                 request_id.clone(),
-                Slot::new(tokens.into(), self.block_size, salt_hash),
+                Slot::new_with_extra_hashes(
+                    tokens.into(),
+                    self.block_size,
+                    salt_hash,
+                    extra_block_hashes,
+                ),
             );
             tracing::debug!(
                 request_id,
