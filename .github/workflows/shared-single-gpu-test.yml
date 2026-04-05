@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Single-GPU and CPU Test Flow
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
+        required: true
+        type: string
+      test_tag_plain:
+        description: 'Plain test image tag prefix from the build workflow'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA versions to test as a JSON array'
+        required: true
+        type: string
+      platform:
+        description: 'Target platforms to test as a JSON array'
+        required: true
+        type: string
+      run_cpu_only_tests:
+        description: 'Whether to run CPU-only tests'
+        required: false
+        type: boolean
+        default: true
+      cpu_only_test_markers:
+        description: 'CPU-only pytest markers'
+        required: false
+        type: string
+      cpu_only_test_timeout_minutes:
+        description: 'Timeout in minutes for CPU tests'
+        required: false
+        type: number
+        default: 10
+      run_single_gpu_tests:
+        description: 'Whether to run single GPU tests'
+        required: false
+        type: boolean
+        default: true
+      single_gpu_test_markers:
+        description: 'Single GPU pytest markers'
+        required: false
+        type: string
+      single_gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for single GPU tests'
+        required: false
+        type: number
+        default: 30
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      HF_TOKEN:
+        required: false
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platform) }}
+        cuda_version: ${{ fromJson(inputs.cuda_version) }}
+    if: ${{ inputs.run_cpu_only_tests || inputs.run_single_gpu_tests }}
+    name: cuda${{ matrix.cuda_version }}, ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ inputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ inputs.test_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          start_time=$(date +%s)
+          retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
+          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          retry_pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
+
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+      - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_cpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'auto'
+          dind_as_sidecar: 'true'
+      - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_single_gpu_tests }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ inputs.single_gpu_test_markers }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
