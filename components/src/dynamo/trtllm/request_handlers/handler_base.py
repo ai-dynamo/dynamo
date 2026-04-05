@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import re
@@ -83,6 +84,16 @@ class RequestHandlerConfig:
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
+    # Server-level default for thinking mode when combining reasoning with guided decoding.
+    # - True: Model generates <think>...</think> before the final answer (thinking-on)
+    # - False: Model skips the thinking phase (thinking-off)
+    # - None: No auto-generation; require explicit enable_thinking per request
+    enable_thinking_default: Optional[bool] = None
+    # When True, the model's chat template already appends <think> to the end of the
+    # prompt. The structural_tag begin tag is set to "" to avoid a duplicate <think>
+    # that causes model degeneration. Applies to any model whose template injects the
+    # reasoning start tag (e.g., GLM-4.7, Qwen3).
+    prompt_injects_thinking_tag: bool = False
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -114,6 +125,20 @@ class HandlerBase(BaseGenerativeHandler):
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
+        # Server-level default for enable_thinking (reasoning + guided decoding)
+        # Coerce to bool — argparse returns bool but pydantic/config may stringify it
+        _etd = config.enable_thinking_default
+        if isinstance(_etd, str):
+            self.enable_thinking_default = _etd.lower() in ("true", "1", "yes")
+        elif _etd is None:
+            self.enable_thinking_default = None
+        else:
+            self.enable_thinking_default = bool(_etd)
+        _pitt = config.prompt_injects_thinking_tag
+        if isinstance(_pitt, str):
+            self.prompt_injects_thinking_tag = _pitt.lower() in ("true", "1", "yes")
+        else:
+            self.prompt_injects_thinking_tag = bool(_pitt)
 
     def check_error(self, result: dict) -> bool:
         """
@@ -995,7 +1020,73 @@ class HandlerBase(BaseGenerativeHandler):
             await self._initiate_shutdown(e)
 
     @staticmethod
-    def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
+    def _build_xgrammar_content(
+        json_schema: Optional[dict] = None,
+        regex: Optional[str] = None,
+        grammar: Optional[str] = None,
+        json_object: bool = False,
+    ) -> Optional[dict]:
+        """
+        Build xgrammar content dict for structural_tag from guided decoding params.
+
+        See tensorrt_llm/serve/openai_protocol.py lines 260-269 for format reference.
+
+        Returns:
+            xgrammar content dict, or None if no guided decoding is specified.
+        """
+        if json_schema is not None:
+            return {"type": "json_schema", "json_schema": json_schema}
+        elif json_object:
+            return {"type": "json_schema", "json_schema": {"type": "object"}}
+        elif regex is not None:
+            return {"type": "regex", "pattern": regex}
+        elif grammar is not None:
+            return {"type": "grammar", "grammar": grammar}
+        return None
+
+    @staticmethod
+    def _generate_structural_tag_for_reasoning(
+        content: dict,
+        prompt_injects_thinking_tag: bool = False,
+    ) -> dict:
+        """
+        Generate a structural_tag for combining reasoning with guided decoding.
+
+        Creates an xgrammar structural_tag that treats the <think>...</think>
+        reasoning section as unconstrained free text and applies the guided
+        decoding constraint only to the final answer that follows </think>.
+
+        Args:
+            content: The xgrammar content dict (json_schema, regex, or grammar format).
+            prompt_injects_thinking_tag: If True, the model's chat template already
+                appended <think> to the prompt. The structural_tag begin tag is set
+                to "" so xgrammar does not constrain the model to emit a duplicate
+                <think>, which would cause degenerate output. If False, xgrammar
+                constrains the model to produce <think> as the first output tokens.
+
+        Returns:
+            A structural_tag dict in xgrammar sequence format.
+        """
+        # When the template already injected <think>, the model's generation starts
+        # mid-reasoning; the begin constraint must be empty to avoid a double <think>.
+        # When it did not, xgrammar must enforce <think> as the first output token.
+        begin_tag = "" if prompt_injects_thinking_tag else "<think>"
+        return {
+            "type": "sequence",
+            "elements": [
+                {
+                    "type": "tag",
+                    "begin": begin_tag,
+                    "content": {"type": "any_text"},
+                    "end": "</think>",
+                },
+                content,
+            ],
+        }
+
+    def _override_sampling_params(
+        self, sampling_params, request: dict
+    ) -> SamplingParams:
         overrides = {
             key: value
             for key, value in request["sampling_options"].items()
@@ -1017,12 +1108,88 @@ class HandlerBase(BaseGenerativeHandler):
                 if valid_choices:
                     regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
 
+            # Mode-aware structural_tag generation for reasoning + guided decoding.
+            # Generate structural_tag for ALL guided decoding types (json, regex, grammar, json_object)
+            # when enable_thinking is set, to allow <think>...</think> before constrained output.
+            #
+            # Priority: request enable_thinking > server enable_thinking_default
+            # If neither is set, use normal guided decoding (no structural_tag wrapping).
+            structural_tag = guided_decoding.get("structural_tag")
+            json_schema = guided_decoding.get("json")
+            grammar = guided_decoding.get("grammar")
+            json_object = guided_decoding.get("json_object", False)
+            enable_thinking = guided_decoding.get("enable_thinking")
+
+            # Fall back to server-level default if request didn't specify
+            if enable_thinking is None:
+                enable_thinking = self.enable_thinking_default
+
+            # Generate structural_tag if:
+            # 1. Any guided decoding is specified (json, regex, grammar, json_object)
+            # 2. structural_tag is NOT already provided (user didn't override)
+            # 3. enable_thinking is set (from request or server default)
+            has_guided_decoding = (
+                json_schema is not None
+                or regex is not None
+                or grammar is not None
+                or json_object
+            )
+
+            if (
+                has_guided_decoding
+                and structural_tag is None
+                and enable_thinking is True
+            ):
+                # Build xgrammar content from guided decoding params
+                content = self._build_xgrammar_content(
+                    json_schema=json_schema,
+                    regex=regex,
+                    grammar=grammar,
+                    json_object=json_object,
+                )
+                if content is not None:
+                    # Wrap the guided decoding constraint in a structural_tag that
+                    # treats <think>...</think> as unconstrained free text and applies
+                    # the constraint only to the final answer after </think>.
+                    structural_tag = self._generate_structural_tag_for_reasoning(
+                        content,
+                        prompt_injects_thinking_tag=self.prompt_injects_thinking_tag,
+                    )
+                    # When using structural_tag, clear other params to avoid conflict
+                    # (xgrammar uses structural_tag exclusively)
+                    json_schema = None
+                    regex = None
+                    grammar = None
+                    json_object = False
+                    tag_str = str(structural_tag)
+                    logging.debug(
+                        "Generated structural_tag for reasoning mode: %s",
+                        tag_str[:200] + "..." if len(tag_str) > 200 else tag_str,
+                    )
+
+            # TRT-LLM expects structural_tag as a JSON string in ResponseFormat wrapper:
+            # {"type": "structural_tag", "format": {...}}
+            # See tensorrt_llm/serve/openai_protocol.py lines 307-309
+            if isinstance(structural_tag, dict):
+                # Check if already wrapped (user-provided full format)
+                if (
+                    structural_tag.get("type") == "structural_tag"
+                    and "format" in structural_tag
+                ):
+                    structural_tag_str = json.dumps(structural_tag)
+                else:
+                    # Wrap inner format dict
+                    wrapped = {"type": "structural_tag", "format": structural_tag}
+                    structural_tag_str = json.dumps(wrapped)
+            else:
+                # Already a string (user-provided JSON or None)
+                structural_tag_str = structural_tag
             overrides["guided_decoding"] = GuidedDecodingParams(
-                json=guided_decoding.get("json"),
+                json=json_schema,
                 regex=regex,
-                grammar=guided_decoding.get("grammar"),
-                json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                grammar=grammar,
+                json_object=json_object,
+                structural_tag=structural_tag_str,
             )
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:

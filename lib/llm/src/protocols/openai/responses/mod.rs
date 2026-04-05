@@ -521,6 +521,35 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Map service_tier
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
+        // Reasoning + guided decoding interaction for Responses API.
+        //
+        // The server-level reasoning parser is always active when configured. We should NOT
+        // disable it just because the `reasoning` param is absent — the model may still emit
+        // <think>...</think> content by default, and the reasoning parser needs to run to
+        // split reasoning_content from the final answer.
+        //
+        // Set enable_thinking=true only when the Responses API caller explicitly requests
+        // reasoning alongside guided decoding; this signals the Python handler to wrap the
+        // guided decoding constraint in a structural_tag that allows free-text reasoning.
+        let has_guided_decoding = response_format.is_some() || tools.is_some();
+        let chat_template_args = if has_guided_decoding && resp.inner.reasoning.is_some() {
+            // Guided decoding WITH explicit reasoning → enable thinking
+            // The Python handler generates a structural_tag with sequence format
+            let mut args = std::collections::HashMap::new();
+            args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            Some(args)
+        } else {
+            // No guided decoding, or guided decoding without explicit reasoning param:
+            // Don't set chat_template_args — let the server's default reasoning parser
+            // handle it. The preprocessor will check prompt_injected_reasoning from the
+            // rendered template and enable reasoning parsing accordingly.
+            //
+            // Note: thinking-off with guided decoding is not currently expressible via
+            // the Responses API surface. It relies on the server's dyn_enable_thinking_default
+            // being unset (None), which applies plain guided decoding without structural_tag.
+            None
+        };
+
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
@@ -540,7 +569,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })

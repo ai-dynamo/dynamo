@@ -341,7 +341,7 @@ pub struct SamplingOptions {
 
 /// Guided Decoding Options
 ///
-/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+/// Only one of `json`, `regex`, `choice`, `grammar`, or `structural_tag` should be set.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
@@ -367,10 +367,27 @@ pub struct GuidedDecodingOptions {
     /// If specified, whitespace pattern to use for guided decoding. Can be a string or null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whitespace_pattern: Option<String>,
+
+    /// If specified, structural tag format for mixed free-text and constrained regions.
+    /// Used for combining reasoning (free text) with structured output (JSON schema).
+    /// Format: {"type": "sequence", "elements": [...]} or {"type": "triggered_tags", ...}
+    /// Supported by xgrammar backend only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<serde_json::Value>,
+
+    /// Hint for backend to enable mode-aware structural_tag generation.
+    /// When true AND guided_json is set but structural_tag is not, the backend should
+    /// generate structural_tag that allows <think>...</think> free text before JSON.
+    /// When false/None, the backend should generate structural_tag that triggers JSON
+    /// constraint immediately after </think> (for thinking-off mode).
+    /// This is used to combine reasoning parsing with guided decoding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 impl GuidedDecodingOptions {
     /// Construct without validation
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -378,6 +395,8 @@ impl GuidedDecodingOptions {
         grammar: Option<String>,
         backend: Option<String>,
         whitespace_pattern: Option<String>,
+        structural_tag: Option<serde_json::Value>,
+        enable_thinking: Option<bool>,
     ) -> Self {
         Self {
             json,
@@ -386,10 +405,13 @@ impl GuidedDecodingOptions {
             grammar,
             backend,
             whitespace_pattern,
+            structural_tag,
+            enable_thinking,
         }
     }
 
     /// Construct and validate (fallible)
+    #[allow(clippy::too_many_arguments)]
     pub fn validated(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -397,13 +419,25 @@ impl GuidedDecodingOptions {
         grammar: Option<String>,
         backend: Option<String>,
         whitespace_pattern: Option<String>,
+        structural_tag: Option<serde_json::Value>,
+        enable_thinking: Option<bool>,
     ) -> Result<Self> {
-        let instance = Self::new(json, regex, choice, grammar, backend, whitespace_pattern);
+        let instance = Self::new(
+            json,
+            regex,
+            choice,
+            grammar,
+            backend,
+            whitespace_pattern,
+            structural_tag,
+            enable_thinking,
+        );
         instance.validate()?;
         Ok(instance)
     }
 
     /// Construct only if one field is Some (fallible)
+    #[allow(clippy::too_many_arguments)]
     pub fn from_optional(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -411,6 +445,8 @@ impl GuidedDecodingOptions {
         grammar: Option<String>,
         backend: Option<String>,
         whitespace_pattern: Option<String>,
+        structural_tag: Option<serde_json::Value>,
+        enable_thinking: Option<bool>,
     ) -> Result<Option<Self>> {
         let is_empty_choice = choice.as_ref().is_none_or(|v| v.is_empty());
         if json.is_none()
@@ -418,10 +454,20 @@ impl GuidedDecodingOptions {
             && is_empty_choice
             && grammar.is_none()
             && whitespace_pattern.is_none()
+            && structural_tag.is_none()
         {
             return Ok(None);
         }
-        let instance = Self::validated(json, regex, choice, grammar, backend, whitespace_pattern)?;
+        let instance = Self::validated(
+            json,
+            regex,
+            choice,
+            grammar,
+            backend,
+            whitespace_pattern,
+            structural_tag,
+            enable_thinking,
+        )?;
         Ok(Some(instance))
     }
 
@@ -434,6 +480,7 @@ impl GuidedDecodingOptions {
             self.choice.as_ref().is_some_and(|v| !v.is_empty()),
             self.grammar.is_some(),
             self.whitespace_pattern.is_some(),
+            self.structural_tag.is_some(),
         ]
         .iter()
         .filter(|&&v| v)
@@ -441,7 +488,7 @@ impl GuidedDecodingOptions {
 
         if count > 1 {
             return Err(anyhow::anyhow!(
-                "Only one of json, regex, choice, or grammar can be set, but multiple are specified: {:?}",
+                "Only one of json, regex, choice, grammar, or structural_tag can be set, but multiple are specified: {:?}",
                 self
             ));
         }
@@ -732,6 +779,8 @@ mod tests {
             None,
             backend.clone(),
             None,
+            None,
+            None,
         );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
@@ -741,10 +790,20 @@ mod tests {
         assert!(opts.grammar.is_none());
         assert_eq!(opts.backend, backend);
         assert!(opts.whitespace_pattern.is_none());
+        assert!(opts.structural_tag.is_none());
 
         // Only regex set
         let regex = Some(r"\d+".to_string());
-        let opts = GuidedDecodingOptions::validated(None, regex.clone(), None, None, None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            regex.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.regex, regex);
@@ -755,7 +814,16 @@ mod tests {
 
         // Only choice set
         let choice = Some(vec!["A".to_string(), "B".to_string()]);
-        let opts = GuidedDecodingOptions::validated(None, None, choice.clone(), None, None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            choice.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.choice, choice);
@@ -766,7 +834,16 @@ mod tests {
 
         // Only grammar set
         let grammar = Some("root ::= 'yes' | 'no'".to_string());
-        let opts = GuidedDecodingOptions::validated(None, None, None, grammar.clone(), None, None);
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            grammar.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.grammar, grammar);
@@ -784,6 +861,8 @@ mod tests {
             None,
             None,
             whitespace_pattern.clone(),
+            None,
+            None,
         );
         assert!(opts.is_ok());
         let opts = opts.unwrap();
@@ -793,10 +872,33 @@ mod tests {
         assert!(opts.choice.is_none());
         assert!(opts.grammar.is_none());
 
+        // Only structural_tag set
+        let structural_tag = Some(serde_json::json!({"type": "sequence", "elements": []}));
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            structural_tag.clone(),
+            None,
+        );
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.structural_tag, structural_tag);
+        assert!(opts.json.is_none());
+        assert!(opts.regex.is_none());
+        assert!(opts.choice.is_none());
+        assert!(opts.grammar.is_none());
+        assert!(opts.whitespace_pattern.is_none());
+
         // Multiple fields set (should error)
         let opts = GuidedDecodingOptions::validated(
             Some(serde_json::json!({})),
             Some(r"\d+".to_string()),
+            None,
+            None,
             None,
             None,
             None,
@@ -808,6 +910,8 @@ mod tests {
             None,
             Some(r"\d+".to_string()),
             Some(vec!["A".to_string()]),
+            None,
+            None,
             None,
             None,
             None,
@@ -821,25 +925,49 @@ mod tests {
             Some("root ::= 'yes'".to_string()),
             None,
             None,
+            None,
+            None,
+        );
+        assert!(opts.is_err());
+
+        // structural_tag with json (should error)
+        let opts = GuidedDecodingOptions::validated(
+            Some(serde_json::json!({})),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(serde_json::json!({"type": "sequence"})),
+            None,
         );
         assert!(opts.is_err());
 
         // All fields None (should be ok, but not useful)
-        let opts = GuidedDecodingOptions::validated(None, None, None, None, None, None);
+        let opts = GuidedDecodingOptions::validated(None, None, None, None, None, None, None, None);
         assert!(opts.is_ok());
     }
 
     #[test]
     fn test_guided_decoding_options_from_optional() {
         // All None returns Ok(None)
-        let opts = GuidedDecodingOptions::from_optional(None, None, None, None, None, None);
+        let opts =
+            GuidedDecodingOptions::from_optional(None, None, None, None, None, None, None, None);
         assert!(opts.is_ok());
         assert!(opts.unwrap().is_none());
 
         // Only one set returns Ok(Some)
         let regex = Some(r"\w+".to_string());
-        let opts =
-            GuidedDecodingOptions::from_optional(None, regex.clone(), None, None, None, None);
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            regex.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_some());
@@ -854,11 +982,22 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         assert!(opts.is_err());
 
         // Choice set but empty vector should not count as set
-        let opts = GuidedDecodingOptions::from_optional(None, None, Some(vec![]), None, None, None);
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            Some(vec![]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_none());
@@ -871,18 +1010,48 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_some());
         let val = val.unwrap();
         assert_eq!(val.choice, Some(vec!["A".to_string()]));
+
+        // structural_tag set returns Ok(Some)
+        let structural_tag =
+            Some(serde_json::json!({"type": "triggered_tags", "triggers": ["</think>"]}));
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            structural_tag.clone(),
+            None,
+        );
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_some());
+        let val = val.unwrap();
+        assert_eq!(val.structural_tag, structural_tag);
     }
 
     #[test]
     fn test_guided_grammar_deep_nesting_rejected() {
         let grammar = "(".repeat(501) + "a" + &")".repeat(501);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        let result = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            Some(grammar),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nesting depth"));
     }
@@ -890,7 +1059,16 @@ mod tests {
     #[test]
     fn test_guided_grammar_acceptable_nesting_ok() {
         let grammar = "(".repeat(500) + "a" + &")".repeat(500);
-        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        let result = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            Some(grammar),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok());
     }
 }

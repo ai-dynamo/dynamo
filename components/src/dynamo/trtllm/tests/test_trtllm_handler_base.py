@@ -52,6 +52,17 @@ class TestOverrideSamplingParams:
     ensures that falsy values like 0, False, and "" are correctly applied.
     """
 
+    def _make_handler(
+        self,
+        enable_thinking_default=None,
+        prompt_injects_thinking_tag=False,
+    ) -> HandlerBase:
+        """Create a _ConcreteHandler instance for testing _override_sampling_params."""
+        config = MagicMock()
+        config.enable_thinking_default = enable_thinking_default
+        config.prompt_injects_thinking_tag = prompt_injects_thinking_tag
+        return _ConcreteHandler(config)
+
     def test_falsy_values_are_applied(self):
         """Test that falsy values (0, False) are correctly set.
 
@@ -67,7 +78,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0
         assert result.top_k == 0
@@ -86,7 +99,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
@@ -103,7 +118,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0.7
         assert result.top_p == 0.9
@@ -123,7 +140,7 @@ class TestOverrideSamplingParams:
         }
 
         with pytest.raises(TypeError):
-            HandlerBase._override_sampling_params(sampling_params, request)
+            self._make_handler()._override_sampling_params(sampling_params, request)
 
     def test_mixed_values(self):
         """Test a mix of None, falsy, and truthy values."""
@@ -139,7 +156,9 @@ class TestOverrideSamplingParams:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.temperature == 0
         assert result.top_p == original_top_p  # Unchanged
@@ -151,7 +170,7 @@ class TestOverrideSamplingParams:
         request = {"sampling_options": {"non_existent_param": 123}}
 
         with pytest.raises(TypeError, match="unexpected keyword argument"):
-            _ = HandlerBase._override_sampling_params(sampling_params, request)
+            _ = self._make_handler()._override_sampling_params(sampling_params, request)
 
     def test_post_init_called_when_overriding(self):
         # This allows us to check that potential validation logic in `__post_init__` is run when
@@ -160,7 +179,7 @@ class TestOverrideSamplingParams:
         request = {"sampling_options": {"temperature": 0.5}}
 
         with mock.patch.object(MockSamplingParams, "__post_init__") as mock_post_init:
-            HandlerBase._override_sampling_params(sampling_params, request)
+            self._make_handler()._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
 
@@ -173,6 +192,17 @@ class TestGuidedDecodingFromToolChoice:
     object before passing to TRT-LLM, which expects attribute access
     (e.g. .json_object, .json) on the guided_decoding field.
     """
+
+    def _make_handler(
+        self,
+        enable_thinking_default=None,
+        prompt_injects_thinking_tag=False,
+    ) -> HandlerBase:
+        """Create a _ConcreteHandler instance for testing _override_sampling_params."""
+        config = MagicMock()
+        config.enable_thinking_default = enable_thinking_default
+        config.prompt_injects_thinking_tag = prompt_injects_thinking_tag
+        return _ConcreteHandler(config)
 
     # Matches what the Rust frontend serializes when
     # tool_choice="required" with a single tool definition.
@@ -215,7 +245,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(
             result.guided_decoding, dict
@@ -240,7 +272,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         assert result.guided_decoding.regex == "(yes|no|maybe)"
@@ -257,7 +291,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         expected = (
@@ -279,7 +315,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex == "[0-9]+"
 
@@ -294,7 +332,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex is None
 
@@ -309,7 +349,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert not isinstance(result.guided_decoding, dict)
         assert result.guided_decoding.regex == "(yes|no)"
@@ -325,7 +367,9 @@ class TestGuidedDecodingFromToolChoice:
             }
         }
 
-        result = HandlerBase._override_sampling_params(sampling_params, request)
+        result = self._make_handler()._override_sampling_params(
+            sampling_params, request
+        )
 
         assert result.guided_decoding.regex is None
 
