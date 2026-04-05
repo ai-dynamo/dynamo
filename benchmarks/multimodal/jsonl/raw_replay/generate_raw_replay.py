@@ -99,13 +99,14 @@ def build_conversation(
         }
 
         turn_messages = accumulated + [system_msg, user_msg]
-        lines.append(
-            {
-                "messages": turn_messages,
-                "max_tokens": phase["max_output_tokens"],
-                "model": model,
-            }
-        )
+        payload = {
+            "messages": turn_messages,
+            "max_tokens": phase["max_output_tokens"],
+            "model": model,
+        }
+        if config.get("extra_inputs"):
+            payload.update(config["extra_inputs"])
+        lines.append(payload)
 
         assistant_msg = {
             "role": "assistant",
