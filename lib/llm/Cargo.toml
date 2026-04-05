@@ -167,7 +167,6 @@ tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
 
 # Publishers
-zeromq = "0.4.1"
 rmp-serde = "1.3"
 
 [dev-dependencies]

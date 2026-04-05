@@ -871,14 +871,14 @@ def _test_router_indexers_sync(
             router_event_threads=router_event_threads,
         )
 
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
             tmp_runtime = get_runtime(store_backend, request_plane)
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
-            await engine_workers.launch_mockers_with_indexer(tmp_endpoint)
+            await engine_workers.launch_workers_with_indexer(tmp_endpoint)
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1511,10 +1511,10 @@ def _test_router_decisions(
     # Create KvRouterConfig with lower snapshot threshold for testing
     # Use async to manage the test flow
     async def test_sync():
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # Must happen before KvRouter creation since KvRouter blocks until workers appear.
         if standalone_indexer_url:
-            await engine_workers.launch_mockers_with_indexer(endpoint)
+            await engine_workers.launch_workers_with_indexer(endpoint)
 
         # Workers register one instance per process (not per dp_rank)
         expected_num_instances = engine_workers.num_workers
