@@ -433,11 +433,13 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
+        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
 
         model_config = ModelConfig(
             model=source_path,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
+            trust_remote_code=trust_remote_code,
         )
         vllm_config = VllmConfig(
             model_config=model_config,
