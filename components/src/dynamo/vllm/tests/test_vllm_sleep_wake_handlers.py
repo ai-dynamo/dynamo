@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
 from dynamo.vllm.handlers import BaseWorkerHandler, VllmEngineQuiesceController
@@ -37,6 +39,11 @@ def _make_handler() -> _TestWorkerHandler:
     handler._quiesce_controller = VllmEngineQuiesceController(handler.engine_client)
     handler._quiesce_lock = asyncio.Lock()
     return handler
+
+
+async def _yield_responses(*responses):
+    for response in responses:
+        yield response
 
 
 @pytest.mark.asyncio
@@ -132,3 +139,54 @@ async def test_wake_up_returns_error_for_register_failure():
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
     assert handler._quiesce_controller.is_quiesced is True
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_emits_routed_experts_on_final_chunk_only():
+    handler = _make_handler()
+    handler._log_with_lora_context = Mock()
+    handler._extract_logprobs = Mock(return_value=(None, None))
+    handler.runtime = SimpleNamespace(shutdown=Mock())
+
+    routed_experts = np.array([[2, 4], [6, 8]], dtype=np.int32)
+    first_response = SimpleNamespace(
+        outputs=[
+            SimpleNamespace(
+                token_ids=[11],
+                routed_experts=None,
+                finish_reason=None,
+                stop_reason=None,
+            )
+        ],
+        prompt_token_ids=[1, 2],
+        num_cached_tokens=0,
+    )
+    final_response = SimpleNamespace(
+        outputs=[
+            SimpleNamespace(
+                token_ids=[11, 12],
+                routed_experts=routed_experts,
+                finish_reason="stop",
+                stop_reason=None,
+            )
+        ],
+        prompt_token_ids=[1, 2],
+        num_cached_tokens=0,
+    )
+    handler.engine_client.generate = Mock(
+        return_value=_yield_responses(first_response, final_response)
+    )
+
+    chunks = []
+    async for chunk in handler.generate_tokens(
+        prompt="hello",
+        sampling_params=object(),
+        request_id="req-1",
+    ):
+        chunks.append(chunk)
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
+    assert "disaggregated_params" not in chunks[0]
+    assert chunks[1]["disaggregated_params"] == {
+        "routed_experts": base64.b64encode(routed_experts.tobytes()).decode("utf-8")
+    }
