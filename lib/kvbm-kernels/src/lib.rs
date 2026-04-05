@@ -12,6 +12,3 @@ pub use tensor_kernels::{
 #[cfg(feature = "permute_kernels")]
 pub use tensor_kernels::{BlockLayout, TensorDataType, block_from_universal, universal_from_block};
 
-// XPU (SYCL) kernels - JIT-compiled via oneAPI-rs (requires xpu feature)
-#[cfg(feature = "xpu")]
-pub mod sycl_kernels;

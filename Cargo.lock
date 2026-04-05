@@ -4730,6 +4730,7 @@ dependencies = [
  "clap 4.6.1",
  "cudarc",
  "half 2.7.1",
+ "level-zero",
  "ndarray 0.17.2",
  "rand 0.9.4",
  "oneapi-rs",

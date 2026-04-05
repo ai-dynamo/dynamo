@@ -35,17 +35,16 @@ permute_kernels = []
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]
 
-# Enable XPU (SYCL) kernel support via oneAPI-rs.
-# When enabled, provides SYCL-based kernel implementations that are
-# JIT-compiled at runtime. Does not require icpx/dpcpp at build time.
-xpu = ["dep:oneapi-rs"]
-
-# Enable XPU tests - only works when SYCL runtime and XPU hardware are available
-testing-xpu = ["xpu"]
+# Enable XPU kvbench example (pulls in clap + level-zero)
+kvbench-xpu = ["dep:clap", "dep:level-zero"]
 
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
+
+[[example]]
+name = "kvbench_xpu"
+required-features = ["kvbench-xpu"]
 
 [dependencies]
 cudarc = { workspace = true }
@@ -54,7 +53,9 @@ cudarc = { workspace = true }
 clap = { version = "4", features = ["derive"], optional = true }
 
 # XPU SYCL support
-oneapi-rs = { workspace = true, optional = true }
+
+# XPU Level Zero support (for kvbench_xpu)
+level-zero = { workspace = true, optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"
