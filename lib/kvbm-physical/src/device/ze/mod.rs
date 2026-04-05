@@ -12,6 +12,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Embedded SPIR-V binary for the vectorized_copy kernel.
+/// Compiled offline from kvbm-kernels/sycl/vectorized_copy_kernel.cpp:
+///   clang++ -fsycl -fsycl-device-only -fsycl-targets=spir64 -O2 \
+///           -o vectorized_copy_kernel.spv vectorized_copy_kernel.cpp
+/// Replace the placeholder .spv with the real binary on the XPU build machine.
+static VECTORIZED_COPY_SPIRV: &[u8] =
+    include_bytes!("../../../../kvbm-kernels/sycl/vectorized_copy_kernel.spv");
+
+const COPY_KERNEL_NAME: &str = "kvbm_vectorized_copy";
+const COPY_WG_SIZE: u32 = 128;
+const COPY_MAX_WGS: u32 = 65535;
+
 /// Global initialization state for Level-Zero runtime.
 fn ensure_ze_initialized() -> Result<()> {
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -73,6 +85,8 @@ struct DeviceContextCache {
     compute_ordinal: u32,
     /// Queue group ordinal for copy engine (BCS); equals compute_ordinal if no dedicated BCS.
     copy_ordinal: u32,
+    /// Compiled SPIR-V module for vectorized_copy kernel (None if .spv invalid).
+    copy_module: Option<ze::Module>,
 }
 
 unsafe impl Send for DeviceContextCache {}
@@ -133,6 +147,22 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
     let copy_ordinal = context.copy_queue_ordinal(device)
         .unwrap_or(compute_ordinal);
 
+    // Try to load the vectorized_copy SPIR-V module. Falls back gracefully
+    // if the .spv is a placeholder or invalid (e.g. dev machine without SYCL compiler).
+    let copy_module = match context.create_module_from_spirv(device, VECTORIZED_COPY_SPIRV, None) {
+        Ok(module) => {
+            tracing::info!("Loaded vectorized_copy SPIR-V module for device {}", device_id);
+            Some(module)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load vectorized_copy SPIR-V for device {}: {:?}. Using host-readback fallback.",
+                device_id, e
+            );
+            None
+        }
+    };
+
     let cache_entry = Arc::new(DeviceContextCache {
         _driver: driver.clone(),
         device: device.clone(),
@@ -140,6 +170,7 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         event_pool,
         compute_ordinal,
         copy_ordinal,
+        copy_module,
     });
 
     cache.insert(device_id, Arc::clone(&cache_entry));
@@ -187,10 +218,22 @@ impl DeviceContextOps for ZeContext {
             .create_immediate_command_list_with_ordinal(&self.cache.device, ordinal)
             .map_err(|e| anyhow::anyhow!("Failed to create immediate command list: {:?}", e))?;
 
+        // Create a per-stream kernel instance (avoids set_arg races between streams).
+        let copy_kernel = self.cache.copy_module.as_ref().and_then(|module| {
+            match module.create_kernel(COPY_KERNEL_NAME) {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    tracing::warn!("Failed to create copy kernel: {:?}", e);
+                    None
+                }
+            }
+        });
+
         Ok(Box::new(ZeStreamWrapper {
             cmd_list: Arc::new(cmd_list),
             event_pool: Arc::clone(&self.cache.event_pool),
             device_id: self.device_id,
+            copy_kernel,
         }))
     }
 
@@ -402,6 +445,8 @@ pub struct ZeStreamWrapper {
     pub cmd_list: Arc<ze::CommandList>,
     event_pool: Arc<SharedEventPool>,
     device_id: u32,
+    /// Per-stream kernel instance for vectorized_copy (None = fallback to host readback).
+    copy_kernel: Option<ze::Kernel>,
 }
 
 impl std::fmt::Debug for ZeStreamWrapper {
@@ -454,36 +499,62 @@ impl DeviceStreamOps for ZeStreamWrapper {
             return Ok(());
         }
 
-        // TODO: Replace with SYCL JIT kernel for GPU-parallel copy.
-        // For now, read pointer arrays back to host and use batch_copy.
-        let ptr_bytes = count * std::mem::size_of::<u64>();
+        // Fast path: launch GPU kernel from pre-compiled SPIR-V.
+        if let Some(ref kernel) = self.copy_kernel {
+            let num_pairs = count as i32;
+            let grid_dim = std::cmp::min(count as u32, COPY_MAX_WGS);
 
-        let mut src_ptrs = vec![0u64; count];
-        let mut dst_ptrs = vec![0u64; count];
+            kernel.set_group_size(COPY_WG_SIZE, 1, 1)
+                .map_err(|e| anyhow::anyhow!("set_group_size failed: {:?}", e))?;
+            kernel.set_arg(0, &src_ptrs_device)
+                .map_err(|e| anyhow::anyhow!("set_arg(0) failed: {:?}", e))?;
+            kernel.set_arg(1, &dst_ptrs_device)
+                .map_err(|e| anyhow::anyhow!("set_arg(1) failed: {:?}", e))?;
+            kernel.set_arg(2, &chunk_size)
+                .map_err(|e| anyhow::anyhow!("set_arg(2) failed: {:?}", e))?;
+            kernel.set_arg(3, &num_pairs)
+                .map_err(|e| anyhow::anyhow!("set_arg(3) failed: {:?}", e))?;
+
+            self.cmd_list
+                .append_launch_kernel(kernel, ze::GroupCount { x: grid_dim, y: 1, z: 1 })
+                .map_err(|e| anyhow::anyhow!("append_launch_kernel failed: {:?}", e))?;
+
+            return Ok(());
+        }
+
+        // Fallback: read pointer arrays back to host via DMA and use batch_copy.
+        // Used when SPIR-V module is unavailable (placeholder .spv or load failure).
 
         // Synchronize to ensure the H2D uploads of pointer arrays have completed.
-        // the host_synchronize at line 344 inside vectorized_copy is actually redundant given that Step 4 already waited 
-        // via upload_event.synchronize(). The uploads are guaranteed done before vectorized_copy is even called. 
         self.cmd_list
             .host_synchronize(u64::MAX)
             .map_err(|e| anyhow::anyhow!("XPU sync before vectorized_copy readback failed: {:?}", e))?;
 
-        // Read pointer arrays from device back to host.
-        // SAFETY: src_ptrs_device/dst_ptrs_device point to count * 8 bytes of device memory.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                src_ptrs_device as *const u64,
-                src_ptrs.as_mut_ptr(),
-                count,
-            );
-            std::ptr::copy_nonoverlapping(
-                dst_ptrs_device as *const u64,
-                dst_ptrs.as_mut_ptr(),
-                count,
-            );
-        }
+        let mut src_ptrs = vec![0u64; count];
+        let mut dst_ptrs = vec![0u64; count];
+        let byte_len = count * std::mem::size_of::<u64>();
 
-        // Fall back to batch_copy with the recovered host pointers.
+        // Copy pointer arrays from device to host via append_memcpy (safe on discrete GPUs).
+        self.cmd_list
+            .append_memcpy(
+                src_ptrs.as_mut_ptr() as *mut std::ffi::c_void,
+                src_ptrs_device as *const std::ffi::c_void,
+                byte_len,
+            )
+            .map_err(|e| anyhow::anyhow!("XPU readback src_ptrs failed: {:?}", e))?;
+        self.cmd_list
+            .append_memcpy(
+                dst_ptrs.as_mut_ptr() as *mut std::ffi::c_void,
+                dst_ptrs_device as *const std::ffi::c_void,
+                byte_len,
+            )
+            .map_err(|e| anyhow::anyhow!("XPU readback dst_ptrs failed: {:?}", e))?;
+
+        // Wait for readback to complete before accessing host buffers.
+        self.cmd_list
+            .host_synchronize(u64::MAX)
+            .map_err(|e| anyhow::anyhow!("XPU sync after vectorized_copy readback failed: {:?}", e))?;
+
         self.batch_copy(&src_ptrs, &dst_ptrs, chunk_size)
     }
 
