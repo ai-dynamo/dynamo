@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 static VECTORIZED_COPY_SPIRV: &[u8] =
     include_bytes!("../../../../kvbm-kernels/sycl/vectorized_copy_kernel.spv");
 
-const COPY_KERNEL_NAME: &str = "kvbm_vectorized_copy";
+const COPY_KERNEL_NAME: &str = "__sycl_kernel_kvbm_vectorized_copy";
 const COPY_WG_SIZE: u32 = 128;
 const COPY_MAX_WGS: u32 = 65535;
 
@@ -116,7 +116,7 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         return Ok(Arc::clone(cached));
     }
 
-    let drivers = ze::Driver::get()
+    let drivers = ze::drivers()
         .map_err(|e| anyhow::anyhow!("Failed to get Level-Zero drivers: {:?}", e))?;
 
     let driver = drivers
@@ -132,13 +132,13 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         .ok_or_else(|| anyhow::anyhow!("Device {} not found ({} available)", device_id, devices.len()))?;
 
     let context = Arc::new(
-        ze::Context::new(driver)
+        ze::Context::create(driver)
             .map_err(|e| anyhow::anyhow!("Failed to create Level-Zero context: {:?}", e))?,
     );
 
     const EVENT_POOL_SIZE: u32 = 8192;
     let raw_pool = context
-        .create_event_pool(&[*device], EVENT_POOL_SIZE, ZE_EVENT_SCOPE_FLAG_HOST)
+        .create_event_pool(&[device.clone()], EVENT_POOL_SIZE, ZE_EVENT_SCOPE_FLAG_HOST)
         .map_err(|e| anyhow::anyhow!("Failed to create event pool: {:?}", e))?;
     let event_pool = Arc::new(SharedEventPool::new(raw_pool, EVENT_POOL_SIZE));
 
@@ -442,7 +442,7 @@ fn remove_host_buffer(ptr: u64) {
 
 /// XPU stream wrapper (immediate command list).
 pub struct ZeStreamWrapper {
-    pub cmd_list: Arc<ze::CommandList>,
+    pub cmd_list: Arc<ze::ImmediateCommandList>,
     event_pool: Arc<SharedEventPool>,
     device_id: u32,
     /// Per-stream kernel instance for vectorized_copy (None = fallback to host readback).
@@ -599,10 +599,9 @@ impl std::fmt::Debug for ZeEventWrapper {
 
 impl DeviceEventOps for ZeEventWrapper {
     fn is_complete(&self) -> Result<bool> {
-        match self.event.query_status() {
-            Ok(()) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.event
+            .is_signaled()
+            .map_err(|e| anyhow::anyhow!("XPU event query failed: {:?}", e))
     }
 
     fn synchronize(&self) -> Result<()> {

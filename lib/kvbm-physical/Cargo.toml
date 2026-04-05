@@ -42,7 +42,7 @@ testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 testing-xpu = ["xpu"]
-xpu = ["kvbm-kernels/xpu", "dep:level-zero", "dep:oneapi-rs", "dynamo-memory/level-zero"]
+xpu = ["dep:level-zero", "dynamo-memory/level-zero"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
