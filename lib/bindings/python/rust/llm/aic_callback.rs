@@ -49,6 +49,7 @@ impl AicCallback for PyAicCallback {
 /// Initialize an AIC callback by importing and calling the Python setup function.
 ///
 /// Called once at mocker startup when `--aic-perf-model` is requested.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_callback(
     py: Python<'_>,
     backend_name: &str,
@@ -56,11 +57,23 @@ pub(super) fn create_aic_callback(
     model_path: &str,
     tp_size: usize,
     backend_version: Option<&str>,
+    moe_tp_size: Option<usize>,
+    moe_ep_size: Option<usize>,
+    attention_dp_size: Option<usize>,
 ) -> PyResult<Arc<dyn AicCallback>> {
     let module = py.import("dynamo.mocker.aic_session")?;
     let session = module.call_method1(
         "create_session",
-        (backend_name, system, model_path, tp_size, backend_version),
+        (
+            backend_name,
+            system,
+            model_path,
+            tp_size,
+            backend_version,
+            moe_tp_size,
+            moe_ep_size,
+            attention_dp_size,
+        ),
     )?;
     Ok(Arc::new(PyAicCallback {
         session: session.into(),

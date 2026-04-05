@@ -35,6 +35,9 @@ class AicSession:
         model_path: str,
         tp_size: int,
         backend_version: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
+        attention_dp_size: int | None = None,
     ):
         version = backend_version or DEFAULT_BACKEND_VERSIONS.get(
             backend_name, DEFAULT_BACKEND_VERSIONS["vllm"]
@@ -49,7 +52,17 @@ class AicSession:
                 f"system={system!r}, backend={backend_name!r}, version={version!r}. "
                 f"Supported versions for this system/backend: {supported_versions}"
             )
-        model_config = config.ModelConfig(tp_size=tp_size)
+        # Build ModelConfig. For MoE models, aic_moe_tp_size, aic_moe_ep_size, and
+        # aic_attention_dp_size must be set to satisfy AIC's constraint:
+        #   tp_size * attention_dp_size == moe_tp_size * moe_ep_size
+        # AIC SDK validates this internally and raises a clear AssertionError if violated.
+        effective_dp = attention_dp_size or 1
+        model_config = config.ModelConfig(
+            tp_size=tp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            attention_dp_size=effective_dp,
+        )
         model = get_model(
             model_path=model_path,
             model_config=model_config,
@@ -144,6 +157,18 @@ def create_session(
     model_path: str,
     tp_size: int,
     backend_version: str | None = None,
+    moe_tp_size: int | None = None,
+    moe_ep_size: int | None = None,
+    attention_dp_size: int | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
-    return AicSession(backend_name, system, model_path, tp_size, backend_version)
+    return AicSession(
+        backend_name,
+        system,
+        model_path,
+        tp_size,
+        backend_version,
+        moe_tp_size,
+        moe_ep_size,
+        attention_dp_size,
+    )
