@@ -76,19 +76,39 @@ pub trait DeviceStreamOps: Send + Sync + Debug {
     /// transfers when GPU kernel launch is not available.
     fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()>;
 
+    /// Async host-to-device memcpy on this stream.
+    ///
+    /// Enqueues a copy of `src_host` bytes to `dst_device` (a device pointer).
+    /// The copy is stream-ordered: it executes after all preceding operations
+    /// on this stream and before any subsequent ones.
+    ///
+    /// # Safety contract
+    /// `dst_device` must point to at least `src_host.len()` bytes of device memory.
+    /// `src_host` must remain valid until the copy completes (caller should
+    /// record an event and synchronize before dropping the source buffer).
+    fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()>;
+
     /// Vectorized copy: N independent copies executed in parallel via a GPU kernel.
     ///
-    /// The implementation uploads the pointer arrays to device memory and launches
-    /// a single kernel that copies all pairs concurrently. Each pair copies
-    /// `chunk_size` bytes.
+    /// Both `src_ptrs_device` and `dst_ptrs_device` are device pointers to arrays
+    /// of `count` device pointers (previously uploaded via [`memcpy_htod`]).
+    /// The kernel reads these arrays and copies `chunk_size` bytes per pair.
     ///
     /// Used for FC↔LW per-chunk transfers where many small copies benefit from
     /// GPU-parallel execution rather than sequential DMA enqueues.
     ///
-    /// The default implementation falls back to `batch_copy`.
-    fn vectorized_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], chunk_size: usize) -> Result<()> {
-        self.batch_copy(src_ptrs, dst_ptrs, chunk_size)
-    }
+    /// # Arguments
+    /// * `src_ptrs_device` - Device pointer to array of `count` source pointers
+    /// * `dst_ptrs_device` - Device pointer to array of `count` destination pointers
+    /// * `chunk_size` - Bytes to copy per pointer pair
+    /// * `count` - Number of pointer pairs
+    fn vectorized_copy(
+        &self,
+        src_ptrs_device: u64,
+        dst_ptrs_device: u64,
+        chunk_size: usize,
+        count: usize,
+    ) -> Result<()>;
 
     /// Record an event on this stream.
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>>;
