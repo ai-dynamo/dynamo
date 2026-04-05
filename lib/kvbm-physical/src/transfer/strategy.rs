@@ -26,6 +26,15 @@ pub enum TransferStrategy {
     /// CUDA async device-to-device transfer
     CudaAsyncD2D,
 
+    /// Level Zero async host-to-device transfer
+    ZeAsyncH2D,
+
+    /// Level Zero async device-to-host transfer
+    ZeAsyncD2H,
+
+    /// Level Zero async device-to-device transfer
+    ZeAsyncD2D,
+
     /// NIXL read operation (pull from remote)
     NixlRead,
 
@@ -68,6 +77,12 @@ pub enum TransferPlan {
         first: TransferStrategy,
 
         /// Bounce buffer location (always Pinned for best performance)
+        ///
+        /// Callers determine the correct allocator from the hop strategies:
+        /// - CUDA hops (`CudaAsyncD2H` / `CudaAsyncH2D`) → `allocate_pinned()`
+        /// - Level Zero hops (`ZeAsyncD2H` / `ZeAsyncH2D`) → `allocate_ze_host()`
+        ///
+        /// Both report `StorageKind::Pinned`, so validation passes either way.
         bounce_location: StorageKind,
 
         /// Second hop strategy (bounce → dst)
@@ -157,12 +172,10 @@ fn select_direct_strategy(
         }
 
         // Host → Device - direct CUDA
-        (System, Device(_)) => panic!("System to Device transfers are not supported"),
-        (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
+        (System, Device(_)) | (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
 
         // Device → Host - direct CUDA
-        (Device(_), System) => panic!("Device to System transfers are not supported"),
-        (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
+        (Device(_), System) | (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
 
         // Device ↔ Device - direct CUDA
         (Device(_), Device(_)) => TransferPlan::Direct(CudaAsyncD2D),
@@ -206,6 +219,34 @@ fn select_direct_strategy(
                 }
             }
         }
+
+        // ── XPU (Level Zero) transfers ──────────────────────────────
+
+        // Host → XPU Device
+        (System, XpuDevice(_)) | (Pinned, XpuDevice(_)) => TransferPlan::Direct(ZeAsyncH2D),
+
+        // XPU Device → Host
+        (XpuDevice(_), System) | (XpuDevice(_), Pinned) => TransferPlan::Direct(ZeAsyncD2H),
+
+        // XPU Device ↔ XPU Device
+        (XpuDevice(_), XpuDevice(_)) => TransferPlan::Direct(ZeAsyncD2D),
+
+        // XPU Device ↔ Disk - always stage through host for now
+        (XpuDevice(_), Disk(_)) => TransferPlan::TwoHop {
+            first: ZeAsyncD2H,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+        (Disk(_), XpuDevice(_)) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
+            bounce_location: Pinned,
+            second: ZeAsyncH2D,
+        },
+
+        // Cross-vendor GPU transfers are not supported
+        (Device(_), XpuDevice(_)) | (XpuDevice(_), Device(_)) => {
+            panic!("Cross-vendor GPU transfers (CUDA ↔ XPU) are not supported")
+        }
     }
 }
 
@@ -234,6 +275,19 @@ fn select_remote_strategy(src: StorageKind, capabilities: &TransferCapabilities)
         }
 
         // Disk → Remote - always stage through host
+
+        // XPU Device → Remote - stage through host
+        XpuDevice(_) => {
+            if capabilities.allows_device_remote_direct() {
+                TransferPlan::Direct(NixlWrite)
+            } else {
+                TransferPlan::TwoHop {
+                    first: ZeAsyncD2H,
+                    bounce_location: Pinned,
+                    second: NixlWrite,
+                }
+            }
+        }
         Disk(_) => TransferPlan::TwoHop {
             first: NixlWrite,
             bounce_location: Pinned,
@@ -259,7 +313,7 @@ fn select_remote_strategy_v2(
     }
 
     if !capabilities.allow_gpu_rdma
-        && (matches!(src, StorageKind::Device(_)) || matches!(dst, StorageKind::Device(_)))
+        && (matches!(src, StorageKind::Device(_) | StorageKind::XpuDevice(_)) || matches!(dst, StorageKind::Device(_) | StorageKind::XpuDevice(_)))
     {
         return Err(anyhow::anyhow!(
             "GPU RDMA is disabled - this transfer requires GPU RDMA."
@@ -309,11 +363,11 @@ mod tests {
     #[test]
     fn test_host_to_device_transfers() {
         let caps = default_caps();
-        // // System (unpinned) to device should be blocking
-        // assert_eq!(
-        //     select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
-        //     TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
-        // );
+        // System (unpinned) to device should be async
+        assert_eq!(
+            select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
+            TransferPlan::Direct(TransferStrategy::CudaAsyncH2D)
+        );
 
         // Pinned to device should be async
         assert_eq!(
@@ -325,11 +379,11 @@ mod tests {
     #[test]
     fn test_device_to_host_transfers() {
         let caps = default_caps();
-        //    // Device to system should be blocking
-        //     assert_eq!(
-        //         select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
-        //         TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
-        //     );
+        // Device to system should be async
+        assert_eq!(
+            select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
+            TransferPlan::Direct(TransferStrategy::CudaAsyncD2H)
+        );
 
         // Device to pinned should be async
         assert_eq!(
@@ -499,5 +553,131 @@ mod tests {
             }
             _ => panic!("Expected TwoHop plan"),
         }
+    }
+
+    #[test]
+    fn test_host_to_xpu_device_transfers() {
+        let caps = default_caps();
+        // System to XPU device should be async Ze
+        assert_eq!(
+            select_direct_strategy(StorageKind::System, StorageKind::XpuDevice(0), false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncH2D)
+        );
+        // Pinned to XPU device should be async Ze
+        assert_eq!(
+            select_direct_strategy(StorageKind::Pinned, StorageKind::XpuDevice(0), false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncH2D)
+        );
+    }
+
+    #[test]
+    fn test_xpu_device_to_host_transfers() {
+        let caps = default_caps();
+        // XPU device to system should be async Ze
+        assert_eq!(
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::System, false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncD2H)
+        );
+        // XPU device to pinned should be async Ze
+        assert_eq!(
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::Pinned, false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncD2H)
+        );
+    }
+
+    #[test]
+    fn test_xpu_device_to_xpu_device_transfers() {
+        let caps = default_caps();
+        assert_eq!(
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::XpuDevice(1), false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncD2D)
+        );
+        assert_eq!(
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::XpuDevice(0), false, &caps),
+            TransferPlan::Direct(TransferStrategy::ZeAsyncD2D)
+        );
+    }
+
+    #[test]
+    fn test_xpu_device_to_disk_transfers() {
+        let caps = default_caps();
+        // XPU → Disk should use bounce buffer
+        let plan =
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::Disk(42), false, &caps);
+        match plan {
+            TransferPlan::TwoHop {
+                first,
+                bounce_location,
+                second,
+            } => {
+                assert_eq!(first, TransferStrategy::ZeAsyncD2H);
+                assert_eq!(bounce_location, StorageKind::Pinned);
+                assert_eq!(second, TransferStrategy::NixlWrite);
+            }
+            _ => panic!("Expected TwoHop plan"),
+        }
+    }
+
+    #[test]
+    fn test_disk_to_xpu_device_transfers() {
+        let caps = default_caps();
+        // Disk → XPU should use bounce buffer
+        let plan =
+            select_direct_strategy(StorageKind::Disk(42), StorageKind::XpuDevice(0), false, &caps);
+        match plan {
+            TransferPlan::TwoHop {
+                first,
+                bounce_location,
+                second,
+            } => {
+                assert_eq!(first, TransferStrategy::NixlReadFlipped);
+                assert_eq!(bounce_location, StorageKind::Pinned);
+                assert_eq!(second, TransferStrategy::ZeAsyncH2D);
+            }
+            _ => panic!("Expected TwoHop plan"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Cross-vendor GPU transfers")]
+    fn test_cross_vendor_cuda_to_xpu_panics() {
+        let caps = default_caps();
+        select_direct_strategy(StorageKind::Device(0), StorageKind::XpuDevice(0), false, &caps);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cross-vendor GPU transfers")]
+    fn test_cross_vendor_xpu_to_cuda_panics() {
+        let caps = default_caps();
+        select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::Device(0), false, &caps);
+    }
+
+    #[test]
+    fn test_xpu_device_to_remote_without_rdma() {
+        let caps = default_caps(); // GPU RDMA disabled
+        // XPU → Remote should use bounce buffer
+        let plan = select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::System, true, &caps);
+        match plan {
+            TransferPlan::TwoHop {
+                first,
+                bounce_location,
+                second,
+            } => {
+                assert_eq!(first, TransferStrategy::ZeAsyncD2H);
+                assert_eq!(bounce_location, StorageKind::Pinned);
+                assert_eq!(second, TransferStrategy::NixlWrite);
+            }
+            _ => panic!("Expected TwoHop plan"),
+        }
+    }
+
+    #[test]
+    fn test_xpu_device_to_remote_with_rdma() {
+        let caps = TransferCapabilities::default().with_gpu_rdma(true);
+        // XPU → Remote should be direct with GPU RDMA
+        assert_eq!(
+            select_direct_strategy(StorageKind::XpuDevice(0), StorageKind::XpuDevice(0), true, &caps),
+            TransferPlan::Direct(TransferStrategy::NixlWrite)
+        );
     }
 }

@@ -102,6 +102,14 @@ pub trait TensorDescriptorExt: TensorDescriptor {
             _ => None,
         }
     }
+
+    /// Returns the XPU device ID if the tensor is on an Intel XPU device.
+    fn xpu_device_id(&self) -> Option<usize> {
+        match self.storage_kind() {
+            StorageKind::XpuDevice(idx) => Some(idx as usize),
+            _ => None,
+        }
+    }
 }
 
 // Blanket impl for all TensorDescriptor types
@@ -116,6 +124,7 @@ impl nixl::NixlCompatible for Arc<dyn TensorDescriptor> {
         let storage = self.storage_kind();
         let (mem_type, device_id) = match storage {
             StorageKind::Device(idx) => (nixl::MemType::Vram, idx as u64),
+            StorageKind::XpuDevice(idx) => (nixl::MemType::Vram, idx as u64),
             StorageKind::System => (nixl::MemType::Dram, 0),
             StorageKind::Pinned => (nixl::MemType::Dram, 0),
             StorageKind::Disk(fd) => (nixl::MemType::File, fd),
@@ -169,6 +178,7 @@ impl nixl::NixlCompatible for Arc<dyn TensorDescriptor + Send + Sync> {
         let storage = self.storage_kind();
         let (mem_type, device_id) = match storage {
             StorageKind::Device(idx) => (nixl::MemType::Vram, idx as u64),
+            StorageKind::XpuDevice(idx) => (nixl::MemType::Vram, idx as u64),
             StorageKind::System => (nixl::MemType::Dram, 0),
             StorageKind::Pinned => (nixl::MemType::Dram, 0),
             StorageKind::Disk(fd) => (nixl::MemType::File, fd),

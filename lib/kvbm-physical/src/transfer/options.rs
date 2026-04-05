@@ -8,6 +8,8 @@ use crate::layout::KvBlockLayout;
 use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
+#[cfg(feature = "level-zero")]
+use syclrc::level_zero::ze::safe::ZeImmediateCmdList;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -60,6 +62,17 @@ pub struct TransferOptions {
     /// on the same stream to allow proper event sequencing.
     #[builder(default, setter(strip_option))]
     pub cuda_stream: Option<Arc<CudaStream>>,
+
+    /// Optional caller-provided Level Zero immediate command list.
+    ///
+    /// When provided, the Ze transfer executor will use this command list instead
+    /// of acquiring one from the per-device cache. The caller is responsible for
+    /// synchronization — no event is recorded by the executor.
+    ///
+    /// This mirrors the `cuda_stream` option for CUDA transfers.
+    #[cfg(feature = "level-zero")]
+    #[builder(default, setter(strip_option))]
+    pub ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
 
     /// Override source block layout interpretation.
     ///

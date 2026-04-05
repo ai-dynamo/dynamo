@@ -28,6 +28,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KVBM_REQUIRE_CUDA");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NO_CUDA");
 
     // Check if CUDA is required (set by Python bindings build)
     let require_cuda = env::var("KVBM_REQUIRE_CUDA").is_ok();
@@ -83,7 +84,13 @@ enum BuildMode {
 }
 
 /// Determine the build mode based on nvcc availability.
+///
+/// When the `no-cuda` feature is enabled, always force stubs regardless
+/// of whether nvcc is available. This eliminates the libcudart.so dependency.
 fn determine_build_mode(nvcc_available: bool) -> BuildMode {
+    if env::var("CARGO_FEATURE_NO_CUDA").is_ok() {
+        return BuildMode::Stubs;
+    }
     if nvcc_available {
         BuildMode::FromSource
     } else {

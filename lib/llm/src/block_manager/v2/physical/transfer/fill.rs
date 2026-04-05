@@ -21,6 +21,45 @@ use std::{
     os::fd::FromRawFd,
 };
 
+/// Synchronous H2D/D2H copy using Level Zero immediate command list.
+///
+/// Creates a temporary immediate command list, appends a memcpy, and
+/// blocks until the copy completes. Used only for testing utilities
+/// (fill_blocks, checksum) where async transfer is unnecessary.
+#[cfg(feature = "level-zero")]
+fn ze_sync_copy(
+    dst: *mut std::ffi::c_void,
+    src: *const std::ffi::c_void,
+    size: usize,
+    device_ordinal: u32,
+) -> Result<()> {
+    use syclrc::level_zero::ze::safe::{ZeDevice, ZeImmediateCmdList};
+
+    let dev = ZeDevice::new(device_ordinal as usize)
+        .map_err(|e| anyhow!("Failed to create ZeDevice {}: {}", device_ordinal, e))?;
+    let cmdlist = ZeImmediateCmdList::new(dev)
+        .map_err(|e| anyhow!("Failed to create ZeImmediateCmdList: {}", e))?;
+
+    unsafe {
+        cmdlist
+            .append_memcpy(
+                dst,
+                src,
+                size,
+                std::ptr::null_mut(), // no signal event
+                &mut [],              // no wait events
+            )
+            .map_err(|e| anyhow!("zeCommandListAppendMemoryCopy failed: {}", e))?;
+    }
+
+    cmdlist
+        .host_synchronize(u64::MAX)
+        .map_err(|e| anyhow!("ZeImmediateCmdList host_synchronize failed: {}", e))?;
+
+    Ok(())
+}
+
+
 /// Fill strategy for block memory.
 #[derive(Debug, Clone, Copy)]
 pub enum FillPattern {
@@ -93,6 +132,27 @@ pub fn fill_blocks(
                                 cudaMemcpyKind::cudaMemcpyHostToDevice,
                             );
                         }
+                    }
+                    #[cfg(feature = "level-zero")]
+                    StorageKind::XpuDevice(device_id) => {
+                        let system_region: Vec<u8> = vec![0; region.size()];
+                        fill_memory_region(
+                            system_region.as_ptr() as usize,
+                            system_region.len(),
+                            block_id,
+                            layer_id,
+                            pattern,
+                        )?;
+                        ze_sync_copy(
+                            region.addr() as *mut std::ffi::c_void,
+                            system_region.as_ptr() as *const std::ffi::c_void,
+                            region.size(),
+                            device_id,
+                        )?;
+                    }
+                    #[cfg(not(feature = "level-zero"))]
+                    StorageKind::XpuDevice(_) => {
+                        return Err(anyhow!("fill_blocks for XPU requires the level-zero feature"));
                     }
                     StorageKind::Disk(fd) => {
                         let system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];

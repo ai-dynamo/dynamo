@@ -35,15 +35,41 @@ permute_kernels = []
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]
 
+# Enable kvbench_xpu example (pulls in clap + syclrc for Level Zero)
+kvbench-xpu = ["dep:clap", "dep:syclrc", "level-zero"]
+
+# Expose SPIR-V vectorized_copy kernel for Level Zero / Intel XPU.
+# The ze_vectorized_copy module is always compiled (it has no external deps),
+# but this feature is provided so consumers can express the intent.
+level-zero = ["dep:libloading"]
+
+# SYCL kernel is now always available when level-zero is enabled.
+# This feature is kept as a no-op alias for backward compatibility.
+sycl-kernel = ["level-zero"]
+
+# Enable optional L0 SPIR-V (OCL) kernel backends (vectorized, vec_indirect).
+# These are provided as fallback/comparison alternatives to the default SYCL kernel.
+ocl-kernel = ["level-zero"]
+
+# Skip CUDA compilation and linking entirely (forces stub path).
+# Use this when building for XPU-only targets without libcudart.
+no-cuda = []
+
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
+
+[[example]]
+name = "kvbench_xpu"
+required-features = ["kvbench-xpu"]
 
 [dependencies]
 cudarc = { workspace = true }
 
 # kvbench
 clap = { version = "4", features = ["derive"], optional = true }
+syclrc = { path = "../../../zxue2_syclrc", optional = true }
+libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"

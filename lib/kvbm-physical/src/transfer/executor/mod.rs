@@ -6,6 +6,8 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+#[cfg(feature = "level-zero")]
+mod ze;
 
 use super::strategy::select_strategy;
 use super::strategy::{TransferPlan, TransferStrategy};
@@ -17,6 +19,8 @@ use crate::transfer::BounceBufferInternal;
 use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
+#[cfg(feature = "level-zero")]
+use syclrc::level_zero::ze::safe::ZeImmediateCmdList;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -126,6 +130,10 @@ pub(crate) struct TransferOptionsInternal {
     /// If provided, use this stream instead of acquiring from pool.
     /// Caller manages synchronization - no event is recorded by the executor.
     pub(crate) cuda_stream: Option<Arc<CudaStream>>,
+    /// If provided, use this command list instead of the per-device cached one.
+    /// Caller manages synchronization.
+    #[cfg(feature = "level-zero")]
+    pub(crate) ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     /// Override source block layout interpretation.
     /// If None, uses the layout's block_layout() method.
     pub(crate) src_kv_layout: Option<KvBlockLayout>,
@@ -146,6 +154,8 @@ pub(crate) struct TransferOptionsInternalBuilder {
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
     cuda_stream: Option<Arc<CudaStream>>,
+    #[cfg(feature = "level-zero")]
+    ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     src_kv_layout: Option<KvBlockLayout>,
     dst_kv_layout: Option<KvBlockLayout>,
 }
@@ -179,6 +189,17 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    /// Set a specific Level Zero immediate command list for this transfer.
+    ///
+    /// When provided, the Ze executor will use this command list instead of
+    /// acquiring one from the per-device cache. The caller is responsible
+    /// for synchronization.
+    #[cfg(feature = "level-zero")]
+    pub(crate) fn ze_cmdlist(mut self, cmdlist: Arc<ZeImmediateCmdList>) -> Self {
+        self.ze_cmdlist = Some(cmdlist);
+        self
+    }
+
     /// Override the source block layout interpretation.
     ///
     /// When set, the transfer executor will treat source blocks as having
@@ -207,6 +228,8 @@ impl TransferOptionsInternalBuilder {
             nixl_write_notification: self.nixl_write_notification,
             bounce_buffer: self.bounce_buffer,
             cuda_stream: self.cuda_stream,
+            #[cfg(feature = "level-zero")]
+            ze_cmdlist: self.ze_cmdlist,
             src_kv_layout: self.src_kv_layout,
             dst_kv_layout: self.dst_kv_layout,
         })
@@ -249,6 +272,8 @@ pub(crate) fn execute_transfer(
             options.layer_range,
             strategy,
             options.cuda_stream,
+            #[cfg(feature = "level-zero")]
+            options.ze_cmdlist,
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -279,6 +304,7 @@ fn execute_direct_transfer(
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
+    #[cfg(feature = "level-zero")] ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     match strategy {
@@ -309,6 +335,29 @@ fn execute_direct_transfer(
             cuda_stream,
             ctx,
         )?),
+        #[cfg(feature = "level-zero")]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => ze::execute_ze_transfer(
+            src,
+            dst,
+            src_block_ids,
+            dst_block_ids,
+            layer_range,
+            strategy,
+            ze_cmdlist,
+            ctx,
+        ),
+        #[cfg(not(feature = "level-zero"))]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => {
+            Err(anyhow::anyhow!(
+                "ZeAsync transfer requires the level-zero feature, src={:?}, dst={:?}",
+                src.location(),
+                dst.location()
+            ))
+        }
         TransferStrategy::NixlRead
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped
@@ -442,6 +491,8 @@ async fn execute_two_hop_transfer_chunk(
         layer_range.clone(),
         first_strategy,
         None, // Two-hop transfers don't support caller-provided streams
+        #[cfg(feature = "level-zero")]
+        None, // Two-hop transfers don't support caller-provided cmdlists
         ctx,
     )?
     .await?;
@@ -454,6 +505,8 @@ async fn execute_two_hop_transfer_chunk(
         layer_range.clone(),
         second_strategy,
         None, // Two-hop transfers don't support caller-provided streams
+        #[cfg(feature = "level-zero")]
+        None, // Two-hop transfers don't support caller-provided cmdlists
         ctx,
     )?
     .await?;

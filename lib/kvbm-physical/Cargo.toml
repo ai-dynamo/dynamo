@@ -31,6 +31,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
+syclrc = { path = "../../../zxue2_syclrc", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
 
 [features]
 default = []
@@ -38,8 +40,18 @@ collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
+level-zero = ["dynamo-memory/level-zero", "dep:syclrc", "kvbm-kernels/level-zero"]
+sycl-kernel = ["level-zero", "kvbm-kernels/sycl-kernel"]
+ocl-kernel = ["level-zero", "kvbm-kernels/ocl-kernel"]
+bench-xpu = ["level-zero", "dep:clap"]
+# Skip CUDA compilation/linking — forward to kvbm-kernels/no-cuda
+no-cuda = ["kvbm-kernels/no-cuda"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
 rstest = "0.26"
 tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "bench_xpu_transfer"
+required-features = ["bench-xpu"]
