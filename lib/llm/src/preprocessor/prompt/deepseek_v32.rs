@@ -140,6 +140,33 @@ fn render_tools(tools: &[JsonValue]) -> String {
         .replace("{thinking_end_token}", tokens::THINKING_END)
 }
 
+/// Strip `reasoning_content` from assistant messages that appear before the last
+/// user/developer message. This avoids wasting context window on stale thinking
+/// history in multi-turn conversations.
+///
+/// Matches the `drop_thinking_messages` function in the reference implementation
+/// (encoding_dsv32.py): assistant messages before the last user turn have their
+/// `reasoning_content` field removed; all other messages pass through unchanged.
+fn drop_thinking_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
+    let last_user_idx = find_last_user_index(messages);
+    messages
+        .iter()
+        .enumerate()
+        .map(|(idx, msg)| {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role == "assistant" && last_user_idx.is_some_and(|last_idx| idx < last_idx) {
+                let mut cleaned = msg.clone();
+                if let Some(obj) = cleaned.as_object_mut() {
+                    obj.remove("reasoning_content");
+                }
+                cleaned
+            } else {
+                msg.clone()
+            }
+        })
+        .collect()
+}
+
 /// Find the last user or developer message index
 fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
     messages
@@ -325,41 +352,31 @@ fn render_message(
             // NOTE: If this assistant comes after last user message, the opening <think>
             // was already added in the user message. We only need to add content and closing tag.
             //
-            // Handle reasoning_content which may be a plain string or an array of segments.
-            // DeepSeek V3.2 always places its <think> block before all tool calls, so
-            // joining segments produces the correct flat form here.
+            // The reference implementation (encoding_dsv32.py) ALWAYS emits
+            // reasoning_content + </think> when in thinking mode after the last user
+            // message, even when reasoning_content is empty — this ensures the think
+            // block is properly closed before any subsequent tool calls.
             if thinking_mode == ThinkingMode::Thinking
                 && last_user_idx.is_some_and(|idx| index > idx)
             {
-                let reasoning = msg.get("reasoning_content").and_then(|v| match v {
-                    serde_json::Value::String(s) => {
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s.clone())
-                        }
-                    }
-                    serde_json::Value::Array(arr) => {
-                        let joined = arr
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if joined.is_empty() {
-                            None
-                        } else {
+                let reasoning = msg
+                    .get("reasoning_content")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Array(arr) => {
+                            let joined = arr
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             Some(joined)
                         }
-                    }
-                    _ => None,
-                });
+                        _ => None,
+                    })
+                    .unwrap_or_default();
 
-                if let Some(reasoning) = reasoning {
-                    // DON'T add THINKING_START - it was already added in user message
-                    prompt.push_str(&reasoning);
-                    prompt.push_str(tokens::THINKING_END);
-                }
+                prompt.push_str(&reasoning);
+                prompt.push_str(tokens::THINKING_END);
             }
 
             // Handle content
@@ -463,6 +480,10 @@ fn render_message(
 /// * `thinking_mode` - Whether to use thinking mode
 /// * `add_bos_token` - Whether to add BOS token at start
 ///
+/// When `thinking_mode` is `Thinking`, historical `reasoning_content` from
+/// assistant messages before the last user turn is automatically stripped
+/// (matching the reference `drop_thinking` behavior) to save context window.
+///
 /// # Returns
 /// Formatted prompt string ready for tokenization
 pub fn encode_messages(
@@ -470,16 +491,24 @@ pub fn encode_messages(
     thinking_mode: ThinkingMode,
     add_bos_token: bool,
 ) -> Result<String> {
+    let effective_messages;
+    let msgs = if thinking_mode == ThinkingMode::Thinking {
+        effective_messages = drop_thinking_messages(messages);
+        &effective_messages
+    } else {
+        messages
+    };
+
     let mut prompt = String::new();
 
     if add_bos_token {
         prompt.push_str(tokens::BOS);
     }
 
-    let last_user_idx = find_last_user_index(messages);
+    let last_user_idx = find_last_user_index(msgs);
 
-    for (index, _) in messages.iter().enumerate() {
-        let msg_prompt = render_message(index, messages, thinking_mode, last_user_idx)?;
+    for (index, _) in msgs.iter().enumerate() {
+        let msg_prompt = render_message(index, msgs, thinking_mode, last_user_idx)?;
         prompt.push_str(&msg_prompt);
     }
 
@@ -1348,6 +1377,226 @@ mod tests {
                 tokens::THINKING_END
             )),
             "Boolean 'thinking' key should take precedence over 'thinking_mode' string",
+        );
+    }
+
+    // ==================== P0: </think> Tag Tests ====================
+
+    #[test]
+    fn test_think_tag_closed_with_empty_reasoning_and_tool_calls() {
+        // P0: When reasoning_content is empty but tool_calls are present,
+        // </think> must still be emitted to close the think block.
+        let messages = json!([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Search for X"},
+            {
+                "role": "assistant",
+                "reasoning_content": "",
+                "content": "",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "arguments": "{\"query\": \"X\"}"
+                    }
+                }]
+            }
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            result.contains(&format!("{}{}", tokens::THINKING_END, "\n\n")),
+            "Empty reasoning + tool_calls: </think> must appear before tool calls.\nGot: {}",
+            result
+        );
+        assert!(
+            result.contains("search"),
+            "Tool call should still be rendered"
+        );
+    }
+
+    #[test]
+    fn test_think_tag_closed_with_null_reasoning_and_tool_calls() {
+        // reasoning_content field absent entirely, but tool_calls present
+        let messages = json!([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Search for X"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "arguments": "{\"query\": \"X\"}"
+                    }
+                }]
+            }
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            result.contains(tokens::THINKING_END),
+            "Missing reasoning_content + tool_calls: </think> must still appear.\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_think_tag_with_nonempty_reasoning_and_tool_calls() {
+        // Control case: non-empty reasoning + tool_calls (should still work)
+        let messages = json!([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Search for X"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Let me search for that.",
+                "content": "",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "arguments": "{\"query\": \"X\"}"
+                    }
+                }]
+            }
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            result.contains("Let me search for that."),
+            "Non-empty reasoning should be rendered"
+        );
+        assert!(
+            result.contains(tokens::THINKING_END),
+            "Non-empty reasoning: </think> should appear"
+        );
+        assert!(result.contains("search"), "Tool call should be rendered");
+    }
+
+    // ==================== P1: drop_thinking Tests ====================
+
+    #[test]
+    fn test_drop_thinking_strips_historical_reasoning() {
+        // Multi-turn: earlier assistant has reasoning_content, last msg is user.
+        // In thinking mode, historical reasoning should be stripped from the prompt.
+        let messages = json!([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is 1+1?"},
+            {"role": "assistant", "reasoning_content": "HISTORICAL_THINKING_CONTENT", "content": "2"},
+            {"role": "user", "content": "What is 2+2?"}
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            !result.contains("HISTORICAL_THINKING_CONTENT"),
+            "Historical reasoning_content should be stripped in thinking mode.\nGot: {}",
+            result
+        );
+        assert!(
+            result.contains("2"),
+            "Assistant content '2' should be preserved"
+        );
+        assert!(
+            result.contains("What is 2+2?"),
+            "Latest user message should be present"
+        );
+    }
+
+    #[test]
+    fn test_drop_thinking_preserves_latest_assistant_reasoning() {
+        // The last assistant message (after last user) should keep its reasoning_content
+        let messages = json!([
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "reasoning_content": "OLD_THINKING", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "reasoning_content": "CURRENT_THINKING", "content": "A2"}
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            !result.contains("OLD_THINKING"),
+            "Earlier reasoning should be stripped"
+        );
+        assert!(
+            result.contains("CURRENT_THINKING"),
+            "Latest assistant reasoning (after last user) should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_drop_thinking_multiple_historical_assistants() {
+        // Multiple historical assistants should all have reasoning stripped
+        let messages = json!([
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "reasoning_content": "THINKING_1", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "reasoning_content": "THINKING_2", "content": "A2"},
+            {"role": "user", "content": "Q3"}
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        assert!(
+            !result.contains("THINKING_1"),
+            "THINKING_1 should be stripped"
+        );
+        assert!(
+            !result.contains("THINKING_2"),
+            "THINKING_2 should be stripped"
+        );
+        assert!(result.contains("A1"), "Content A1 should be preserved");
+        assert!(result.contains("A2"), "Content A2 should be preserved");
+    }
+
+    #[test]
+    fn test_drop_thinking_not_applied_in_chat_mode() {
+        // In chat mode, reasoning is not stripped (drop_thinking only applies in thinking mode)
+        let messages = json!([
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "reasoning_content": "SHOULD_REMAIN", "content": "A1"},
+            {"role": "user", "content": "Q2"}
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, true).unwrap();
+
+        // In chat mode, drop_thinking is not applied, but reasoning_content is not
+        // rendered by render_message in chat mode either (thinking_mode != Thinking),
+        // so it simply won't appear regardless. This test verifies no crash occurs.
+        assert!(
+            result.contains("A1"),
+            "Content should be preserved in chat mode"
+        );
+    }
+
+    #[test]
+    fn test_drop_thinking_last_message_not_user() {
+        // When last message is assistant (not user), no messages should have reasoning stripped
+        // because drop_thinking only strips messages BEFORE the last user turn.
+        let messages = json!([
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "reasoning_content": "THINKING", "content": "A1"}
+        ]);
+
+        let result =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+
+        // The assistant is after the last user, so reasoning is preserved and rendered
+        assert!(
+            result.contains("THINKING"),
+            "Reasoning after last user should be preserved and rendered"
         );
     }
 }
