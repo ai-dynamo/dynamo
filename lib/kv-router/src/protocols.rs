@@ -360,8 +360,8 @@ pub struct WorkerSelectionResult {
 
 /// Active load metrics for a worker, used for busy detection.
 ///
-/// Published by workers (with only `active_decode_blocks`) and by the scheduler
-/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `active_decode_blocks` and `kv_used_blocks`) and by
+/// the scheduler (with `active_decode_blocks` and `active_prefill_tokens`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
@@ -371,6 +371,12 @@ pub struct ActiveLoad {
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
+    /// Total KV blocks currently in use on the worker.
+    ///
+    /// This is published by workers only and is the authoritative signal for
+    /// backend KV occupancy used by busy detection.
+    #[serde(default)]
+    pub kv_used_blocks: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,

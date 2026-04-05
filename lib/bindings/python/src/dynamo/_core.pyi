@@ -433,13 +433,15 @@ class WorkerMetricsPublisher:
         self,
         dp_rank: Optional[int],
         active_decode_blocks: int,
+        kv_used_blocks: int,
     ) -> None:
         """
         Publish worker metrics for load monitoring.
 
         Args:
             dp_rank: Data parallel rank of the worker (None defaults to 0)
-            active_decode_blocks: Number of active KV cache blocks
+            active_decode_blocks: Scheduler-compatible active decode block count
+            kv_used_blocks: Authoritative total KV blocks currently in use
         """
         ...
 

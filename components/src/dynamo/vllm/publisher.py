@@ -58,7 +58,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         **kwargs: object,
     ) -> None:
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
-        self.inner.publish(self.dp_rank, active_decode_blocks)
+        self.inner.publish(self.dp_rank, active_decode_blocks, active_decode_blocks)
 
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, self.num_gpu_block)

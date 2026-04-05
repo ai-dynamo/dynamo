@@ -91,6 +91,7 @@ impl LoadThresholdConfig {
 #[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
     pub active_decode_blocks: HashMap<u32, u64>,
+    pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
@@ -103,7 +104,8 @@ impl WorkerLoadState {
     /// For each dp_rank, a dp_rank is busy if ANY of these conditions is met (OR logic):
     /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute threshold)
     /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fraction-based threshold)
-    /// 3. `active_decode_blocks / total_blocks > active_decode_blocks_threshold` (blocks threshold)
+    /// 3. `kv_used_blocks / total_blocks > active_decode_blocks_threshold` (blocks threshold)
+    ///    falling back to `active_decode_blocks` for older worker payloads
     ///
     /// If none of these checks can be performed (missing data), that dp_rank is considered free.
     ///
@@ -118,6 +120,7 @@ impl WorkerLoadState {
         let all_dp_ranks: std::collections::HashSet<_> = self
             .active_decode_blocks
             .keys()
+            .chain(self.kv_used_blocks.keys())
             .chain(self.active_prefill_tokens.keys())
             .copied()
             .collect();
@@ -150,13 +153,18 @@ impl WorkerLoadState {
 
             // Check 3: blocks threshold
             // Skip if total_blocks is 0 (no capacity means threshold check is meaningless)
-            if let (Some(&active_blocks), Some(&total_blocks)) = (
-                self.active_decode_blocks.get(&dp_rank),
-                self.kv_total_blocks.get(&dp_rank),
-            ) && total_blocks > 0
-                && (active_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
+            if let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank)
+                && total_blocks > 0
             {
-                return true; // This dp_rank is busy due to blocks
+                let used_blocks = self
+                    .kv_used_blocks
+                    .get(&dp_rank)
+                    .or(self.active_decode_blocks.get(&dp_rank));
+                if let Some(&used_blocks) = used_blocks
+                    && (used_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
+                {
+                    return true; // This dp_rank is busy due to blocks
+                }
             }
 
             // If we can't perform any check or no threshold exceeded, this dp_rank is free
@@ -511,6 +519,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             if let Some(active_blocks) = active_load.active_decode_blocks {
                                 state.active_decode_blocks.insert(dp_rank, active_blocks);
                             }
+                            if let Some(kv_used_blocks) = active_load.kv_used_blocks {
+                                state.kv_used_blocks.insert(dp_rank, kv_used_blocks);
+                            }
                             if let Some(active_tokens) = active_load.active_prefill_tokens {
                                 state.active_prefill_tokens.insert(dp_rank, active_tokens);
                             }
@@ -646,5 +657,38 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkerLoadState;
+
+    #[test]
+    fn is_busy_prefers_kv_used_blocks_over_active_decode_blocks() {
+        let mut state = WorkerLoadState::default();
+        state.active_decode_blocks.insert(0, 10);
+        state.kv_used_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn is_busy_falls_back_to_active_decode_blocks_when_kv_used_missing() {
+        let mut state = WorkerLoadState::default();
+        state.active_decode_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn is_busy_recognizes_dp_rank_known_only_from_kv_used_blocks() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
     }
 }

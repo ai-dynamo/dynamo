@@ -140,7 +140,9 @@ class DynamoSglangPublisher:
                     else self.dp_rank
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
-                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                self.metrics_publisher.publish(
+                    dp_rank, active_decode_blocks, active_decode_blocks
+                )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
                 self.component_gauges.set_total_blocks(
