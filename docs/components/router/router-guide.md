@@ -89,12 +89,60 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
+| `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
 | `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 
 For all available options: `python -m dynamo.frontend --help`
 
 For detailed configuration options and tuning parameters, see [Advanced Router Usage](#advanced-router-usage).
+
+#### AIC Prefill Load Model
+
+The KV router can use AIC to estimate the expected duration of the selected worker's prompt-side prefill work. When enabled, the router:
+
+- computes `prefix = overlap_blocks * block_size` for the chosen worker
+- computes `effective_isl = input_tokens - prefix`
+- stores one prompt-load hint for the admitted request
+- decays only the **oldest** active prefill request on each worker over time
+
+This affects router-side prompt load accounting only. It does not change backend execution or decode-side accounting.
+
+Enable it on the frontend like this:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+The standalone router uses the same AIC flags:
+
+```bash
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+Required when `--router-prefill-load-model=aic` is enabled:
+
+- `--router-mode kv` on the frontend
+- `--router-track-prefill-tokens`
+- `--aic-backend`
+- `--aic-system`
+- `--aic-model-path`
+
+Optional AIC knobs:
+
+- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
+- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
 
 ### Kubernetes Deployment
 
@@ -234,6 +282,10 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 - `--router-kv-overlap-score-weight`: Controls the importance of prefix cache overlaps in prefill cost calculations. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and uses pure load balancing. Defaults to 1.
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
+
+- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
+
+- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `priority` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
 

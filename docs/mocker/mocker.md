@@ -265,8 +265,11 @@ Important notes:
 
 - AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
 - `python -m dynamo.replay` also does not use AIC unless you explicitly put AIC fields in the engine-args JSON.
+- The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
 - `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
 - In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
+
+This mocker AIC path is separate from the live router's prompt-load estimator. Router/frontend prompt-load decay uses `--router-prefill-load-model=aic` plus `--aic-*` flags, while replay does not yet use that router-side estimator path.
 
 When using `python -m dynamo.replay`, there are no dedicated AIC flags. For aggregated replay,
 pass the equivalent fields via `--extra-engine-args`:
