@@ -16,7 +16,7 @@ use dynamo_mocker::common::perf_model::AicCallback;
 /// Wraps a Python AIC InferenceSession for direct calls from Rust.
 ///
 /// The Python object must expose:
-/// - `predict_prefill(batch_size, isl, prefix, osl) -> float`
+/// - `predict_prefill(batch_size, effective_isl, prefix) -> float`
 /// - `predict_decode(batch_size, isl, osl) -> float`
 pub(super) struct PyAicCallback {
     pub(super) session: PyObject,
@@ -27,10 +27,10 @@ unsafe impl Send for PyAicCallback {}
 unsafe impl Sync for PyAicCallback {}
 
 impl AicCallback for PyAicCallback {
-    fn predict_prefill(&self, batch_size: usize, isl: usize, prefix: usize, osl: usize) -> f64 {
+    fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64 {
         Python::with_gil(|py| {
             self.session
-                .call_method1(py, "predict_prefill", (batch_size, isl, prefix, osl))
+                .call_method1(py, "predict_prefill", (batch_size, effective_isl, prefix))
                 .and_then(|r| r.extract::<f64>(py))
                 .unwrap_or_else(|e| panic!("AIC predict_prefill failed: {e}"))
         })
