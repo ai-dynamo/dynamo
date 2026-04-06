@@ -394,7 +394,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         } = req;
 
         if !self.workers.read().index.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
+            // The selector already picked this worker from the discovery watch,
+            // but the slot tracker hasn't been updated yet. Lazily register it
+            // so we don't drop tracking for this request.
+            let mut table = self.workers.write();
+            if !table.index.contains_key(&worker) {
+                tracing::debug!(?worker, "Lazily registering worker in slot tracker");
+                let idx = table.slots.len();
+                table
+                    .slots
+                    .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+                table.index.insert(worker, idx);
+            }
         }
 
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {

@@ -27,7 +27,6 @@ class SupportedModels:
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
-    LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
     QWEN_2_AUDIO_7B = "Qwen/Qwen2-Audio-7B-Instruct"
 
 
@@ -45,7 +44,6 @@ def construct_mm_data(
     model: str,
     embeddings_dtype: torch.dtype,
     image_embeds: Optional[torch.Tensor] = None,
-    video_numpy: Optional[Any] = None,
     image_grid_thw: Optional[List[Any]] = None,
     audio_embeds: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor | Dict[str, Any]]:
@@ -54,11 +52,6 @@ def construct_mm_data(
         audio_embeds = audio_embeds.to(torch.bfloat16)
         assert audio_embeds.ndim == 2, "Audio embeddings must be 2D"
         return {"audio": [audio_embeds]}
-    # Handle video models
-    if model == SupportedModels.LLAVA_NEXT_VIDEO_7B:
-        if video_numpy is None:
-            raise ValueError("No video frames provided.")
-        return {"video": video_numpy}
 
     # Handle image models - validate image embeddings first
     if image_embeds is None:
