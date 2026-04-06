@@ -485,9 +485,12 @@ impl OpenAIPreprocessor {
                 "messages": messages_json
             });
 
-            // Strip redundant inline data: URLs — the decoded pixels are already
-            // available via multi_modal_data RDMA descriptors.
-            Self::strip_inline_data_urls(&mut extra_args["messages"]);
+            // Strip redundant inline data: URLs only when frontend decoding is active
+            // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
+            // other backends that pass URLs through still need the original data: URIs.
+            if self.media_loader.is_some() {
+                Self::strip_inline_data_urls(&mut extra_args["messages"]);
+            }
 
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
