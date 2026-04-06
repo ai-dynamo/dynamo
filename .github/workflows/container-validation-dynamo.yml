@@ -48,6 +48,47 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
+  test-metrics-push-gitlab-group:
+    runs-on:
+      group: gitlab_ci_runners
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Test DNS resolution
+        run: |
+          echo "=== Runner: gitlab_ci_runners group ==="
+          echo "=== DNS test ==="
+          nslookup otlp-http.nvidia.com || dig otlp-http.nvidia.com || echo "DNS failed"
+          echo "=== Curl test ==="
+          curl -sf --max-time 5 https://otlp-http.nvidia.com/ || echo "Curl failed (expected - no GET handler)"
+      - name: Push test metric
+        uses: ./.github/actions/push-metrics
+        with:
+          otlp-endpoint: ${{ secrets.OTLP_ENDPOINT }}
+          otlp-token: ${{ secrets.OTLP_TOKEN }}
+          framework: dns-test-gitlab-group
+          job-status: success
+
+  test-metrics-push-gitlab:
+    runs-on: gitlab
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Test DNS resolution
+        run: |
+          echo "=== Runner: gitlab ==="
+          echo "=== DNS test ==="
+          nslookup otlp-http.nvidia.com || dig otlp-http.nvidia.com || echo "DNS failed"
+          echo "=== Curl test ==="
+          curl -sf --max-time 5 https://otlp-http.nvidia.com/ || echo "Curl failed (expected - no GET handler)"
+      - name: Push test metric
+        uses: ./.github/actions/push-metrics
+        with:
+          otlp-endpoint: ${{ secrets.OTLP_ENDPOINT }}
+          otlp-token: ${{ secrets.OTLP_TOKEN }}
+          framework: dns-test-gitlab
+          job-status: success
+
   dynamo-status-check:
     runs-on: ubuntu-latest
     needs: [changed-files, build, rust-checks, mypy, test-parallel, test-sequential]
