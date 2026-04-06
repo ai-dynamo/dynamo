@@ -386,7 +386,9 @@ class TestImageDiffusionWorkerHandler:
         )
 
     @pytest.mark.asyncio
-    async def test_generate_i2i_passes_image_path(self, handler, mock_context):
+    async def test_generate_i2i_passes_image_path(
+        self, handler, mock_context, tmp_path
+    ):
         """Test that input_reference is passed as image_path to the generator."""
         test_image = Image.new("RGB", (256, 256), color="green")
 
@@ -394,12 +396,13 @@ class TestImageDiffusionWorkerHandler:
             return_value=SimpleNamespace(frames=[test_image])
         )
 
+        input_ref = str(tmp_path / "test_input.png")
         request = {
             "prompt": "Transform this image",
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "input_reference": "/tmp/test_input.png",
+            "input_reference": input_ref,
         }
 
         results = []
@@ -409,7 +412,7 @@ class TestImageDiffusionWorkerHandler:
         # Verify image_path was passed to the generator
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
-        assert sampling_params["image_path"] == "/tmp/test_input.png"
+        assert sampling_params["image_path"] == input_ref
 
     @pytest.mark.asyncio
     async def test_generate_t2i_no_image_path(self, handler, mock_context):

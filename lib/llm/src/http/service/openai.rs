@@ -2027,16 +2027,19 @@ async fn images(
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
 /// Registers both `/v1/images/generations` (T2I) and `/v1/images/edits` (I2I).
+/// Both routes use the same handler — I2I vs T2I is determined by the
+/// presence of `input_reference` in the request body, not by the route.
+/// `/edits` is registered for OpenAI API compatibility.
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/images/generations".to_string());
-    let edits_path = path.replace("/generations", "/edits");
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let generations_path = path.unwrap_or("/v1/images/generations".to_string());
+    let edits_path = "/v1/images/edits".to_string();
+    let doc = RouteDoc::new(axum::http::Method::POST, &generations_path);
     let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
-        .route(&path, post(images))
+        .route(&generations_path, post(images))
         .route(&edits_path, post(images))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))

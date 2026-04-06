@@ -14,16 +14,19 @@ import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
+from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
 MAX_NUM_INFERENCE_STEPS = 50
+DEFAULT_NUM_INFERENCE_STEPS = 50
+DEFAULT_GUIDANCE_SCALE = 7.5
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -92,20 +95,34 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         try:
             req = CreateImageRequest(**request)
 
-            # When nvext is provided, use it; otherwise fall back to top-level params
+            # When nvext is provided, use it; otherwise build from top-level params.
+            # ImageNvExt has no opinionated defaults — SGLang defaults applied below.
             if req.nvext is not None:
                 nvext = req.nvext
             else:
-                nvext = NvExt(
+                nvext = ImageNvExt(
                     seed=req.seed,
                     negative_prompt=req.negative_prompt,
                     num_inference_steps=req.num_inference_steps,
-                    guidance_scale=req.guidance_scale
-                    if req.guidance_scale is not None
-                    else 7.5,
+                    guidance_scale=req.guidance_scale,
                 )
-            nvext.num_inference_steps = min(
-                nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
+
+            # Apply SGLang-specific defaults for unset values
+            raw_steps = (
+                nvext.num_inference_steps
+                if nvext.num_inference_steps is not None
+                else DEFAULT_NUM_INFERENCE_STEPS
+            )
+            if raw_steps > MAX_NUM_INFERENCE_STEPS:
+                logger.warning(
+                    f"num_inference_steps={raw_steps} exceeds max "
+                    f"{MAX_NUM_INFERENCE_STEPS}, clamping"
+                )
+            num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
+            guidance_scale = (
+                nvext.guidance_scale
+                if nvext.guidance_scale is not None
+                else DEFAULT_GUIDANCE_SCALE
             )
 
             width, height = self._parse_size(req.size)
@@ -115,8 +132,8 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 negative_prompt=nvext.negative_prompt,
                 width=width,
                 height=height,
-                num_inference_steps=nvext.num_inference_steps,
-                guidance_scale=nvext.guidance_scale,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
                 seed=nvext.seed,
                 input_reference=req.input_reference,
             )
@@ -167,11 +184,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
             "guidance_scale": guidance_scale,
-            "seed": seed if seed else random.randint(0, 1000000),
+            "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2I if provided
-        if input_reference:
+        # Add image_path for I2I/TI2I if provided
+        if input_reference is not None:
+            if not input_reference.strip():
+                raise ValueError("input_reference must be a non-empty string")
             args["image_path"] = input_reference
 
         result = await asyncio.to_thread(
@@ -192,7 +211,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         for img in images:
             if isinstance(img, bytes):
                 image_bytes_list.append(img)
-            elif Image is not None and isinstance(img, Image.Image):
+            elif isinstance(img, Image.Image):
                 # Convert PIL Image to bytes
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")

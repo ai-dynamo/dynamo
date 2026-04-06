@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from dynamo.common.multimodal import TransferRequest
+from dynamo.common.protocols.image_protocol import ImageNvExt
 
 TokenIdType = int
 
@@ -143,22 +144,16 @@ class DisaggSglangMultimodalRequest(BaseModel):
 # ============================================================================
 
 
-class NvExt(BaseModel):
-    """NVIDIA extensions for image generation"""
-
-    negative_prompt: Optional[str] = None
-    num_inference_steps: Optional[int] = 50
-    guidance_scale: float = 7.5
-    seed: Optional[int] = None
-    annotations: Optional[list[str]] = None
-
-
 class CreateImageRequest(BaseModel):
     """OpenAI /v1/images/generations and /v1/images/edits compatible request.
 
     Generation params (seed, guidance_scale, etc.) can be specified either
     at the top level (SGLang-compatible) or nested under ``nvext``
     (Dynamo convention).  When both are present, ``nvext`` wins.
+
+    Uses the shared ``ImageNvExt`` from ``dynamo.common.protocols.image_protocol``
+    for the ``nvext`` field. SGLang-specific defaults (guidance_scale=7.5,
+    num_inference_steps=50) are applied in the handler, not the model.
     """
 
     prompt: str
@@ -168,16 +163,17 @@ class CreateImageRequest(BaseModel):
     quality: Optional[str] = "standard"  # standard, hd
     response_format: Optional[str] = "url"  # url or b64_json
     user: Optional[str] = None
-    input_reference: Optional[str] = None  # For I2I (image-to-image) - image path/url
+    input_reference: Optional[str] = None  # For I2I/TI2I - image path/url
 
-    # Top-level generation params (SGLang-compatible)
+    # Top-level generation params (SGLang-compatible).
+    # These mirror fields in NvCreateImageRequest (image_protocol.py & images.rs).
     seed: Optional[int] = None
     negative_prompt: Optional[str] = None
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
 
     # NVIDIA extensions nested under nvext (takes precedence over top-level)
-    nvext: Optional[NvExt] = None
+    nvext: Optional[ImageNvExt] = None
 
 
 class ImageData(BaseModel):
