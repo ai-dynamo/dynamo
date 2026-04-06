@@ -566,16 +566,32 @@ impl KvbmWorker {
                 let layout_type = config.device_layout_type;
                 let num_layers = device_tensors.len();
 
-                let outer_dim = config.outer_dim.unwrap_or_else(|| {
-                    if outer_contiguous {
-                        shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
-                    } else {
-                        shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                let (outer_dim, inner_dim) = match (config.outer_dim, config.inner_dim) {
+                    // Explicit dims provided by caller (e.g. Python via KvTensorLayout) — use as-is.
+                    (Some(od), Some(id)) => (od, id),
+                    // No explicit dims: infer from shape.
+                    // outer_dim valid range is [1, 2] (1 = MLA fused, 2 = standard K/V split).
+                    // If the candidate dimension exceeds 2 the tensor has no explicit K/V axis
+                    // (e.g. MLA models produce [n_blocks, page_size, latent_dim]) — fall back to
+                    // outer_dim=1 and compute inner_dim from all dims after n_blocks.
+                    _ => {
+                        let candidate = if outer_contiguous { shape[0] } else { shape[1] };
+                        if candidate <= 2 {
+                            // Standard layout: outer_dim is encoded in the shape.
+                            //   outer_contiguous=true:  [outer_dim, n_blocks, page_size, inner_dim]
+                            //   outer_contiguous=false: [n_blocks, outer_dim, page_size, inner_dim]
+                            let inner_dim =
+                                shape[2..].iter().product::<usize>() / config.page_size;
+                            (candidate, inner_dim)
+                        } else {
+                            // MLA-style: no explicit K/V split, treat as outer_dim=1.
+                            let dims_start = if outer_contiguous { 2 } else { 1 };
+                            let inner_dim = shape[dims_start..].iter().product::<usize>()
+                                / config.page_size;
+                            (1, inner_dim)
+                        }
                     }
-                });
-                let inner_dim = config
-                    .inner_dim
-                    .unwrap_or_else(|| shape[2..].iter().product::<usize>() / config.page_size);
+                };
 
                 tracing::info!(
                     "Layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
