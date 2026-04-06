@@ -34,8 +34,12 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
     Returns None if loading fails (e.g. model not cached locally).
     """
     try:
-        processor = AutoImageProcessor.from_pretrained(model_name)
-        vision_config = AutoConfig.from_pretrained(model_name).vision_config
+        processor = AutoImageProcessor.from_pretrained(
+            model_name, trust_remote_code=True
+        )
+        vision_config = AutoConfig.from_pretrained(
+            model_name, trust_remote_code=True
+        ).vision_config
 
         patch_size: int = processor.patch_size
         merge_size: int = processor.merge_size
