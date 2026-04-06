@@ -22,6 +22,7 @@ use crate::block_manager::{
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
+use validator::Validate;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -394,13 +395,21 @@ impl Handler for BlockTransferDispatch {
     }
 }
 
-#[derive(Builder, Clone)]
+fn validate_page_size(value: usize) -> Result<(), validator::ValidationError> {
+    if !value.is_power_of_two() {
+        return Err(validator::ValidationError::new("page_size_not_power_of_two"));
+    }
+    Ok(())
+}
+
+#[derive(Builder, Clone, Validate)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
     cancel_token: CancellationToken,
 
     num_device_blocks: usize,
 
+    #[validate(custom(function = "validate_page_size"), range(max = 1024))]
     #[builder(default = "32")]
     page_size: usize,
 
@@ -424,11 +433,13 @@ pub struct KvbmWorkerConfig {
 
     /// Explicit outer dimension (1 for MLA, 2 for standard K/V).
     /// When set, skips shape inference. Python should always provide this.
+    #[validate(range(min = 1, max = 2))]
     #[builder(default = "None")]
     pub outer_dim: Option<usize>,
 
     /// Explicit inner dimension (head_size for MLA, num_heads * head_dim for standard).
     /// When set, skips shape inference. Python should always provide this.
+    #[validate(range(min = 1))]
     #[builder(default = "None")]
     pub inner_dim: Option<usize>,
 
@@ -457,30 +468,16 @@ impl KvbmWorkerConfig {
 
     /// Validate configuration contract before use.
     ///
-    /// Rules:
-    /// - `outer_dim` must be None, 1, or 2
-    /// - `inner_dim` must be None or non-zero
-    /// - `outer_dim` and `inner_dim` must be coupled: both Some or both None
-    /// - `page_size` must be a power of two and ≤ 1024
+    /// Field-level rules (`outer_dim`, `inner_dim`, `page_size`) are enforced via
+    /// `#[validate]` attributes on the struct. This method additionally checks the
+    /// cross-field coupling invariant: `outer_dim` and `inner_dim` must both be
+    /// `Some` or both be `None`.
     pub fn validate(&self) -> anyhow::Result<()> {
-        // outer_dim: None | 1 | 2
-        if let Some(od) = self.outer_dim {
-            if od != 1 && od != 2 {
-                anyhow::bail!(
-                    "outer_dim must be 1 (MLA) or 2 (standard K/V), got {}",
-                    od
-                );
-            }
-        }
+        // Run derive-based field validators (#[validate] attributes).
+        <Self as Validate>::validate(self)
+            .map_err(|e| anyhow::anyhow!("KvbmWorkerConfig validation failed: {}", e))?;
 
-        // inner_dim: None or non-zero
-        if let Some(id) = self.inner_dim {
-            if id == 0 {
-                anyhow::bail!("inner_dim must be non-zero when provided");
-            }
-        }
-
-        // coupling: both Some or both None
+        // Cross-field: outer_dim and inner_dim must be coupled (both Some or both None).
         match (self.outer_dim, self.inner_dim) {
             (Some(_), None) | (None, Some(_)) => {
                 anyhow::bail!(
@@ -491,20 +488,6 @@ impl KvbmWorkerConfig {
                 );
             }
             _ => {}
-        }
-
-        // page_size: power of two, ≤ 1024
-        if !self.page_size.is_power_of_two() {
-            anyhow::bail!(
-                "page_size must be a power of two, got {}",
-                self.page_size
-            );
-        }
-        if self.page_size > 1024 {
-            anyhow::bail!(
-                "page_size must be ≤ 1024, got {}",
-                self.page_size
-            );
         }
 
         Ok(())
@@ -931,7 +914,7 @@ mod tests {
         cfg.outer_dim = Some(3);
         cfg.inner_dim = Some(64);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("outer_dim must be 1"), "got: {err}");
+        assert!(err.contains("outer_dim") && err.contains("range"), "got: {err}");
     }
 
     #[test]
@@ -940,7 +923,7 @@ mod tests {
         cfg.outer_dim = Some(0);
         cfg.inner_dim = Some(64);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("outer_dim must be 1"), "got: {err}");
+        assert!(err.contains("outer_dim") && err.contains("range"), "got: {err}");
     }
 
     // --- inner_dim ---
@@ -951,7 +934,7 @@ mod tests {
         cfg.outer_dim = Some(2);
         cfg.inner_dim = Some(0);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("inner_dim must be non-zero"), "got: {err}");
+        assert!(err.contains("inner_dim") && err.contains("range"), "got: {err}");
     }
 
     // --- coupling ---
@@ -992,7 +975,7 @@ mod tests {
             cfg.page_size = size;
             let err = cfg.validate().unwrap_err().to_string();
             assert!(
-                err.contains("power of two"),
+                err.contains("page_size_not_power_of_two"),
                 "expected power-of-two error for page_size={size}, got: {err}"
             );
         }
@@ -1003,6 +986,9 @@ mod tests {
         let mut cfg = base_config();
         cfg.page_size = 2048;
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("≤ 1024"), "got: {err}");
+        assert!(
+            err.contains("page_size") && err.contains("range"),
+            "got: {err}"
+        );
     }
 }
