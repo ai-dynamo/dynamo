@@ -11,7 +11,7 @@
 #
 # Functions (all return via stdout):
 #
-#   build_vllm_gpu_mem_args [--workers-per-gpu N]
+#   build_vllm_gpu_mem_args
 #       vLLM:   _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES → --kv-cache-memory-bytes N --gpu-memory-utilization 0.01
 #
 #   build_sglang_gpu_mem_args
@@ -28,34 +28,21 @@
 
 
 # ---------------------------------------------------------------------------
-# build_vllm_gpu_mem_args [--workers-per-gpu N]
+# build_vllm_gpu_mem_args
 #   Returns vLLM CLI args for GPU memory control.
 #   Empty if _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES is not set.
+#
+#   --kv-cache-memory-bytes is per-process: each vLLM worker gets the same
+#   value, even in multi-worker-per-GPU setups (e.g. disagg_same_gpu.sh).
+#   The profiler finds the per-worker budget directly.
 #
 #   --gpu-memory-utilization 0.01 prevents vLLM's startup check from rejecting
 #   the launch when co-resident tests use >10% of VRAM (vLLM checks free memory
 #   against the fraction *before* applying the byte cap).
 # ---------------------------------------------------------------------------
 build_vllm_gpu_mem_args() {
-    local workers_per_gpu=1
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --workers-per-gpu)
-                if [[ -z "${2:-}" || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
-                    echo "build_vllm_gpu_mem_args: --workers-per-gpu requires a positive integer" >&2
-                    return 1
-                fi
-                workers_per_gpu="$2"; shift 2 ;;
-            *) echo "build_vllm_gpu_mem_args: unknown option '$1'" >&2; return 1 ;;
-        esac
-    done
-
     if [[ -n "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}" ]]; then
-        local kv_bytes="$_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"
-        if [[ "$workers_per_gpu" -gt 1 ]]; then
-            kv_bytes=$(awk -v b="$kv_bytes" -v n="$workers_per_gpu" 'BEGIN { printf "%d", b / n }')
-        fi
-        echo "--kv-cache-memory-bytes $kv_bytes --gpu-memory-utilization 0.01"
+        echo "--kv-cache-memory-bytes ${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES} --gpu-memory-utilization 0.01"
         return 0
     fi
 
@@ -174,12 +161,6 @@ _gpu_utils_self_test() {
     _assert "kv bytes" "--kv-cache-memory-bytes 942054000 --gpu-memory-utilization 0.01" "$result"
 
     echo ""
-    echo "=== vLLM: kv bytes with --workers-per-gpu 2 ==="
-    result=$(_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES=942054000 \
-        build_vllm_gpu_mem_args --workers-per-gpu 2)
-    _assert "kv bytes / 2" "--kv-cache-memory-bytes 471027000 --gpu-memory-utilization 0.01" "$result"
-
-    echo ""
     echo "=== vLLM: no override = empty ==="
     result=$(build_vllm_gpu_mem_args)
     _assert "empty (engine default)" "" "$result"
@@ -209,22 +190,6 @@ _gpu_utils_self_test() {
         build_sglang_gpu_mem_args)
     _assert "sglang ignores kv bytes" "" "$result"
 
-    # --- build_vllm_gpu_mem_args validation ---
-
-    echo ""
-    echo "=== vLLM: --workers-per-gpu 0 rejected ==="
-    (build_vllm_gpu_mem_args --workers-per-gpu 0 2>/dev/null)
-    _assert "zero rejected" "1" "$?"
-
-    echo ""
-    echo "=== vLLM: --workers-per-gpu missing value rejected ==="
-    (build_vllm_gpu_mem_args --workers-per-gpu 2>/dev/null)
-    _assert "missing value rejected" "1" "$?"
-
-    echo ""
-    echo "=== vLLM: --workers-per-gpu abc rejected ==="
-    (build_vllm_gpu_mem_args --workers-per-gpu abc 2>/dev/null)
-    _assert "non-numeric rejected" "1" "$?"
 
     # --- build_trtllm_override_args_with_mem ---
 
