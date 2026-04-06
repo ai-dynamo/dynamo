@@ -406,30 +406,21 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Build extra_args JSON for multimodal requests, stripping inline data: URLs
-    /// when all media items were decoded via frontend (RDMA descriptors).
-    /// Returns (extra_args, inline_media_stripped).
+    /// Build extra_args JSON for multimodal requests, stripping inline data: URLs.
+    /// Called only when all media items were decoded via frontend (RDMA), so the
+    /// inline base64 payloads are redundant and safe to remove.
     fn build_multimodal_extra_args(
-        media_map: &MultimodalDataMap,
         messages: serde_json::Value,
         formatted_prompt: Option<&str>,
-    ) -> (serde_json::Value, bool) {
-        let all_decoded = media_map
-            .values()
-            .flat_map(|v| v.iter())
-            .all(|item| matches!(item, MultimodalData::Decoded(_)));
-
+    ) -> serde_json::Value {
         let mut extra_args = serde_json::json!({ "messages": messages });
-
-        if all_decoded {
-            Self::strip_inline_data_urls(&mut extra_args["messages"]);
-        }
+        Self::strip_inline_data_urls(&mut extra_args["messages"]);
 
         if let Some(prompt) = formatted_prompt {
             extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
         }
 
-        (extra_args, all_decoded)
+        extra_args
     }
 
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
@@ -502,13 +493,12 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             let messages_json = serde_json::to_value(request.messages())?;
-            let (extra_args, stripped) = Self::build_multimodal_extra_args(
-                &media_map,
+            let extra_args = Self::build_multimodal_extra_args(
                 messages_json,
                 formatted_prompt.as_deref(),
             );
             builder.multi_modal_data(Some(media_map));
-            builder.inline_media_stripped(stripped);
+            builder.inline_media_stripped(true);
             builder.extra_args(Some(extra_args));
         }
 
@@ -1654,37 +1644,8 @@ mod strip_tests {
         assert_eq!(messages, serde_json::json!([]));
     }
 
-    use crate::preprocessor::media::{DataType, MediaTensorInfo, RdmaMediaDataDescriptor};
-    use crate::protocols::common::preprocessor::{MultimodalData, MultimodalDataMap};
-    use dynamo_memory::nixl::NixlDescriptor;
-    use std::collections::HashMap;
-
-    fn fake_rdma_descriptor() -> RdmaMediaDataDescriptor {
-        RdmaMediaDataDescriptor {
-            nixl_metadata: "fake".into(),
-            nixl_descriptor: NixlDescriptor {
-                addr: 0,
-                size: 0,
-                mem_type: dynamo_memory::nixl::MemType::Dram,
-                device_id: 0,
-            },
-            tensor_info: MediaTensorInfo {
-                shape: vec![1],
-                dtype: DataType::UINT8,
-                metadata: None,
-            },
-            source_storage: None,
-        }
-    }
-
     #[test]
-    fn test_build_extra_args_all_decoded_strips_and_sets_flag() {
-        let mut media_map: MultimodalDataMap = HashMap::new();
-        media_map
-            .entry("image_url".into())
-            .or_default()
-            .push(MultimodalData::Decoded(fake_rdma_descriptor()));
-
+    fn test_build_extra_args_strips_data_urls() {
         let messages = serde_json::json!([{
             "role": "user",
             "content": [
@@ -1693,10 +1654,9 @@ mod strip_tests {
             ]
         }]);
 
-        let (extra_args, stripped) =
-            OpenAIPreprocessor::build_multimodal_extra_args(&media_map, messages, None);
+        let extra_args =
+            OpenAIPreprocessor::build_multimodal_extra_args(messages, None);
 
-        assert!(stripped);
         let parts = extra_args["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["text"], "Describe this image");
         assert_eq!(parts[1]["image_url"]["url"], "");
@@ -1704,16 +1664,6 @@ mod strip_tests {
 
     #[test]
     fn test_build_extra_args_mixed_urls_strips_data_preserves_https() {
-        let mut media_map: MultimodalDataMap = HashMap::new();
-        media_map
-            .entry("image_url".into())
-            .or_default()
-            .push(MultimodalData::Decoded(fake_rdma_descriptor()));
-        media_map
-            .entry("image_url".into())
-            .or_default()
-            .push(MultimodalData::Decoded(fake_rdma_descriptor()));
-
         let messages = serde_json::json!([{
             "role": "user",
             "content": [
@@ -1723,10 +1673,9 @@ mod strip_tests {
             ]
         }]);
 
-        let (extra_args, stripped) =
-            OpenAIPreprocessor::build_multimodal_extra_args(&media_map, messages, Some("prompt"));
+        let extra_args =
+            OpenAIPreprocessor::build_multimodal_extra_args(messages, Some("prompt"));
 
-        assert!(stripped);
         let parts = extra_args["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["image_url"]["url"], "");
         assert_eq!(
