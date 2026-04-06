@@ -1278,6 +1278,9 @@ class MockEngineArgs:
         aic_backend_version: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1360,6 +1363,24 @@ class MockEngineArgs:
     def aic_model_path(self, value: Optional[str]) -> None: ...
 
     @property
+    def aic_moe_tp_size(self) -> Optional[int]: ...
+
+    @aic_moe_tp_size.setter
+    def aic_moe_tp_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_moe_ep_size(self) -> Optional[int]: ...
+
+    @aic_moe_ep_size.setter
+    def aic_moe_ep_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_attention_dp_size(self) -> Optional[int]: ...
+
+    @aic_attention_dp_size.setter
+    def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
+
+    @property
     def worker_type(self) -> str: ...
 
     @worker_type.setter
@@ -1381,6 +1402,9 @@ class MockEngineArgs:
         aic_backend_version: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
