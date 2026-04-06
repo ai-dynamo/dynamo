@@ -157,18 +157,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
+            mm_data = request.get("multi_modal_data", {})
             image_data: list[str] | None = None
-            image_items = request.get("multi_modal_data", {}).get("image_url")
-            if image_items:
-                image_data = []
-                for item in image_items:
+            video_data: list[str] | None = None
+            for key, target in [("image_url", "image"), ("video_url", "video")]:
+                items = mm_data.get(key)
+                if not items:
+                    continue
+                urls = []
+                for item in items:
                     if isinstance(item, str):
-                        image_data.append(item)
+                        urls.append(item)
                     elif isinstance(item, dict) and "Url" in item:
-                        image_data.append(item["Url"])
-                image_data = image_data or None
+                        urls.append(item["Url"])
+                if urls:
+                    if target == "image":
+                        image_data = urls
+                    else:
+                        video_data = urls
 
             trace_header = build_trace_headers(context) if self.enable_trace else None
 
@@ -179,6 +187,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
+                video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
                 return_routed_experts=return_routed_experts,
