@@ -47,27 +47,27 @@ def check_attributes(
 ):
     # Check children
     actual_children = list(graph.successors(node))
-    assert sorted(actual_children) == sorted(
-        expected_children
-    ), f"Node {node} has children {actual_children}, expected {expected_children}"
+    assert sorted(actual_children) == sorted(expected_children), (
+        f"Node {node} has children {actual_children}, expected {expected_children}"
+    )
 
     # Check 'visited' attribute if expected
     if expected_visited is not None:
-        assert (
-            graph.nodes[node].get("visited") == expected_visited
-        ), f"Node {node} has 'visited' value {graph.nodes[node].get('visited')}, expected {expected_visited}"
+        assert graph.nodes[node].get("visited") == expected_visited, (
+            f"Node {node} has 'visited' value {graph.nodes[node].get('visited')}, expected {expected_visited}"
+        )
 
     # Check 'length' attribute if expected
     if expected_length is not None:
-        assert (
-            graph.nodes[node].get("length") == expected_length
-        ), f"Node {node} has 'length' value {graph.nodes[node].get('length')}, expected {expected_length}"
+        assert graph.nodes[node].get("length") == expected_length, (
+            f"Node {node} has 'length' value {graph.nodes[node].get('length')}, expected {expected_length}"
+        )
 
     # Check 'to_leaf' attribute if expected
     if expected_to_leaf is not None:
-        assert (
-            graph.nodes[node].get("to_leaf") == expected_to_leaf
-        ), f"Node {node} has 'to_leaf' value {graph.nodes[node].get('to_leaf')}, expected {expected_to_leaf}"
+        assert graph.nodes[node].get("to_leaf") == expected_to_leaf, (
+            f"Node {node} has 'to_leaf' value {graph.nodes[node].get('to_leaf')}, expected {expected_to_leaf}"
+        )
 
     return True
 

@@ -305,16 +305,18 @@ def frontend_server(test_directory, runtime_services):
     frontend_log_dir.mkdir(parents=True, exist_ok=True)
 
     # Create managed process and start via context manager
-    with ManagedProcess(
-        command=command,
-        env=env,
-        health_check_urls=[f"http://localhost:{FRONTEND_PORT}/health"],
-        timeout=120,  # Increased timeout for frontend+router initialization
-        working_dir=str(test_directory),
-        display_output=False,
-        log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
-        terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
-    ) as frontend_process:
+    with (
+        ManagedProcess(
+            command=command,
+            env=env,
+            health_check_urls=[f"http://localhost:{FRONTEND_PORT}/health"],
+            timeout=120,  # Increased timeout for frontend+router initialization
+            working_dir=str(test_directory),
+            display_output=False,
+            log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
+            terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
+        ) as frontend_process
+    ):
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(frontend_process._log_path)
         logger.info(f"Frontend started on port {FRONTEND_PORT}, log file: {log_file}")
@@ -474,9 +476,9 @@ class TestConsolidatorRouterE2E:
         worker_errors = check_logs_for_patterns(
             worker_log, self.ERROR_PATTERNS, f"{engine_name} Worker"
         )
-        assert (
-            not worker_errors
-        ), f"Errors in {engine_name} Worker logs: {worker_errors}"
+        assert not worker_errors, (
+            f"Errors in {engine_name} Worker logs: {worker_errors}"
+        )
 
         frontend_errors = check_logs_for_patterns(
             frontend_log, self.ERROR_PATTERNS, "Frontend/Router"
@@ -531,7 +533,7 @@ class TestConsolidatorRouterE2E:
             response = tester.send_chat_request(messages)
             content = response["choices"][0]["message"]["content"]
             logger.info(
-                f"Request {i+1}/3: {messages[0]['content'][:30]}... => {content[:40]}..."
+                f"Request {i + 1}/3: {messages[0]['content'][:30]}... => {content[:40]}..."
             )
 
         # Wait for logs to flush
@@ -579,9 +581,9 @@ class TestConsolidatorRouterE2E:
         time.sleep(5)
 
         # Assertions
-        assert (
-            successes >= num_requests * 0.9
-        ), f"Too many failed requests: {num_requests - successes}"
+        assert successes >= num_requests * 0.9, (
+            f"Too many failed requests: {num_requests - successes}"
+        )
 
         # Check for errors in logs
         self.assert_no_errors_in_logs(
@@ -624,9 +626,9 @@ class TestConsolidatorRouterE2E:
         successes, _ = self.send_concurrent_requests(
             tester, num_requests, max_tokens=50
         )
-        assert (
-            successes >= num_requests * 0.9
-        ), f"Too many failed requests: {num_requests - successes}"
+        assert successes >= num_requests * 0.9, (
+            f"Too many failed requests: {num_requests - successes}"
+        )
 
         # Wait for events to be processed
         time.sleep(5)
@@ -667,23 +669,23 @@ class TestConsolidatorRouterE2E:
 
         # Assertions:
         # 1. We should receive STORE events from both sources (order doesn't matter)
-        assert (
-            first_source_stores > 0
-        ), f"Expected STORE events from first source (could be {engine.upper()} or KVBM)"
-        assert (
-            dedup_stores > 0
-        ), "Expected DEDUP STORE events from second source (proves deduplication working)"
+        assert first_source_stores > 0, (
+            f"Expected STORE events from first source (could be {engine.upper()} or KVBM)"
+        )
+        assert dedup_stores > 0, (
+            "Expected DEDUP STORE events from second source (proves deduplication working)"
+        )
 
         # 2. Published stores should equal first source stores
         #    (each unique block is published once when first stored, regardless of which source)
-        assert (
-            published_stores == first_source_stores
-        ), f"Expected published events ({published_stores}) to equal first-source stores ({first_source_stores})"
+        assert published_stores == first_source_stores, (
+            f"Expected published events ({published_stores}) to equal first-source stores ({first_source_stores})"
+        )
 
         # 3. Total stores should be first source + second source (each block stored in both)
-        assert (
-            total_stores_received == first_source_stores + dedup_stores
-        ), f"Total should be first-source ({first_source_stores}) + second-source ({dedup_stores})"
+        assert total_stores_received == first_source_stores + dedup_stores, (
+            f"Total should be first-source ({first_source_stores}) + second-source ({dedup_stores})"
+        )
 
         # 4. Check for errors in logs
         self.assert_no_errors_in_logs(worker_log, frontend_server["log_file"], engine)
@@ -740,16 +742,20 @@ class TestConsolidatorRouterE2E:
         frontend_log_dir = Path(os.path.join(test_directory, "frontend")).absolute()
         frontend_log_dir.mkdir(parents=True, exist_ok=True)
 
-        with ManagedProcess(
-            command=frontend_command,
-            env=frontend_env,
-            health_check_urls=[f"http://localhost:{FRONTEND_PORT}/health"],
-            timeout=120,
-            working_dir=str(test_directory),
-            display_output=False,
-            log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
-            terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
-        ) as _frontend_process:
+        with (
+            ManagedProcess(
+                command=frontend_command,
+                env=frontend_env,
+                health_check_urls=[f"http://localhost:{FRONTEND_PORT}/health"],
+                timeout=120,
+                working_dir=str(test_directory),
+                display_output=False,
+                log_dir=str(
+                    frontend_log_dir
+                ),  # Absolute path keeps logs in test directory
+                terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
+            ) as _frontend_process
+        ):
             # Get actual log file path from ManagedProcess
             frontend_log = Path(_frontend_process._log_path)
             logger.info(f"Frontend started on port {FRONTEND_PORT}")
@@ -965,20 +971,20 @@ class TestConsolidatorRouterE2E:
                 # 1. We should see removals where blocks still exist in another source
                 #    This proves deduplication is working (REMOVE not sent to router yet)
                 #    Order doesn't matter - could be engine→KVBM or KVBM→engine
-                assert (
-                    removes_but_still_in_other_source > 0
-                ), f"Expected removals where blocks still exist in another source (deduplication working) for {engine.upper()}"
+                assert removes_but_still_in_other_source > 0, (
+                    f"Expected removals where blocks still exist in another source (deduplication working) for {engine.upper()}"
+                )
 
                 # 2. REMOVE events should be published for last-source removals
                 #    Order doesn't matter - could be engine or KVBM as last source
-                assert (
-                    published_removes > 0
-                ), "Expected REMOVE events to be published for last-source removals"
+                assert published_removes > 0, (
+                    "Expected REMOVE events to be published for last-source removals"
+                )
 
                 # 3. Published removes should equal removes from last source
-                assert (
-                    published_removes == removes_from_last_source
-                ), f"Expected published REMOVE events ({published_removes}) to equal last-source removals ({removes_from_last_source})"
+                assert published_removes == removes_from_last_source, (
+                    f"Expected published REMOVE events ({published_removes}) to equal last-source removals ({removes_from_last_source})"
+                )
 
                 # 3. Check for errors in logs
                 self.assert_no_errors_in_logs(worker_log, frontend_log, engine)

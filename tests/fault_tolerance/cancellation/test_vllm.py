@@ -132,9 +132,9 @@ class DynamoWorkerProcess(ManagedProcess):
                     ),
                 ]
             )
-            env[
-                "VLLM_NIXL_SIDE_CHANNEL_PORT"
-            ] = "5601"  # TODO: use dynamic port allocation
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = (
+                "5601"  # TODO: use dynamic port allocation
+            )
 
         # Set log directory based on worker type
         if is_prefill is True:

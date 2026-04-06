@@ -77,9 +77,9 @@ class MultimodalEmbeddingCacheManager:
         Raises:
             AssertionError: If tensor is not contiguous.
         """
-        assert (
-            tensor.is_contiguous()
-        ), "Tensor must be contiguous for accurate size calculation"
+        assert tensor.is_contiguous(), (
+            "Tensor must be contiguous for accurate size calculation"
+        )
         return tensor.element_size() * tensor.numel()
 
     def get(self, key: str) -> Optional[CachedEmbedding]:

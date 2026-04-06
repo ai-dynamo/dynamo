@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for configuration utility functions."""
+
 import argparse
 
 import pytest

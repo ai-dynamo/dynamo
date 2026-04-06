@@ -87,7 +87,7 @@ class EmbeddingsProcessor:
         self, request: SglangMultimodalRequest
     ) -> tuple[torch.Tensor, int]:
         """Process one concatenated embedding tensor from serialized request."""
-        logger.debug("Processing embeddings with shape: " f"{request.embeddings_shape}")
+        logger.debug(f"Processing embeddings with shape: {request.embeddings_shape}")
 
         multimodal_groups = request.multimodal_inputs
         if not multimodal_groups:
@@ -459,7 +459,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                     "Shape mismatch error - this likely indicates a tokenization/embedding alignment issue"
                 )
                 logger.error(f"Request token IDs length: {len(input_ids)}")
-                logger.error("Embeddings shape: " f"{request.embeddings_shape}")
+                logger.error(f"Embeddings shape: {request.embeddings_shape}")
                 logger.error(f"Token sequence preview: {input_ids[:20]}...")
                 error_msg = (
                     f"Multimodal embedding alignment error: {str(e)}. "

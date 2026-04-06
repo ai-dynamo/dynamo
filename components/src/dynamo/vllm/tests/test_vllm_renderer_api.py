@@ -283,9 +283,9 @@ class TestVllmRendererApi:
             "update EngineFactory in "
             "components/src/dynamo/frontend/vllm_processor.py"
         )
-        assert callable(
-            getattr(InputProcessor, "get_tokenizer")
-        ), "InputProcessor.get_tokenizer is not callable"
+        assert callable(getattr(InputProcessor, "get_tokenizer")), (
+            "InputProcessor.get_tokenizer is not callable"
+        )
         get_tok_sig = inspect.signature(InputProcessor.get_tokenizer)
         assert list(get_tok_sig.parameters) == ["self"], (
             "InputProcessor.get_tokenizer signature changed; "

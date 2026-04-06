@@ -129,9 +129,9 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         # All workers need unique NIXL side channel ports for KV transfer
-        env[
-            "VLLM_NIXL_SIDE_CHANNEL_PORT"
-        ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = (
+            f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
+        )
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests

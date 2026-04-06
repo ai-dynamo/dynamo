@@ -437,12 +437,12 @@ class TestReplicaCalculation:
         )
         print(f"Load {num_req} req/s: P={prefill_replicas}, D={decode_replicas}")
 
-        assert (
-            prefill_replicas == expected_p
-        ), f"Prefill replicas mismatch: expected {expected_p}, got {prefill_replicas}"
-        assert (
-            decode_replicas == expected_d
-        ), f"Decode replicas mismatch: expected {expected_d}, got {decode_replicas}"
+        assert prefill_replicas == expected_p, (
+            f"Prefill replicas mismatch: expected {expected_p}, got {prefill_replicas}"
+        )
+        assert decode_replicas == expected_d, (
+            f"Decode replicas mismatch: expected {expected_d}, got {decode_replicas}"
+        )
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -499,9 +499,9 @@ class TestReplicaCalculation:
             f"GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
         )
 
-        assert (
-            total_gpus <= planner.config.max_gpu_budget
-        ), "Total GPU usage exceeds budget"
+        assert total_gpus <= planner.config.max_gpu_budget, (
+            "Total GPU usage exceeds budget"
+        )
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -550,12 +550,12 @@ class TestReplicaCalculation:
         )
         print(f"Min endpoint test: P={prefill_replicas}, D={decode_replicas}")
 
-        assert (
-            prefill_replicas >= planner.config.min_endpoint
-        ), "Prefill replicas below minimum"
-        assert (
-            decode_replicas >= planner.config.min_endpoint
-        ), "Decode replicas below minimum"
+        assert prefill_replicas >= planner.config.min_endpoint, (
+            "Prefill replicas below minimum"
+        )
+        assert decode_replicas >= planner.config.min_endpoint, (
+            "Decode replicas below minimum"
+        )
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -679,9 +679,9 @@ class TestReplicaCalculation:
             )
 
             # Should get a valid result (not crash)
-            assert (
-                decode_replicas >= 1
-            ), f"Should handle correction factor {correction_factor} gracefully"
+            assert decode_replicas >= 1, (
+                f"Should handle correction factor {correction_factor} gracefully"
+            )
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -811,15 +811,15 @@ class TestReplicaCalculation:
             f"Complex GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
         )
 
-        assert (
-            total_gpus <= planner.config.max_gpu_budget
-        ), "Total GPU usage should not exceed budget"
-        assert (
-            prefill_replicas >= planner.config.min_endpoint
-        ), "Should respect min_endpoint for prefill"
-        assert (
-            decode_replicas >= planner.config.min_endpoint
-        ), "Should respect min_endpoint for decode"
+        assert total_gpus <= planner.config.max_gpu_budget, (
+            "Total GPU usage should not exceed budget"
+        )
+        assert prefill_replicas >= planner.config.min_endpoint, (
+            "Should respect min_endpoint for prefill"
+        )
+        assert decode_replicas >= planner.config.min_endpoint, (
+            "Should respect min_endpoint for decode"
+        )
 
 
 # No need for unittest.main() with pytest!

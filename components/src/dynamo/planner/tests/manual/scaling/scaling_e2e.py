@@ -286,9 +286,9 @@ class ScalingE2ETest:
             validation["test_passed"] = True
             validation["summary"] = "PASS: Successfully scaled from 1P1D to 2P1D"
         else:
-            validation[
-                "summary"
-            ] = "FAIL: Did not achieve expected 1P1D -> 2P1D scaling"
+            validation["summary"] = (
+                "FAIL: Did not achieve expected 1P1D -> 2P1D scaling"
+            )
 
         baseline = results.get("baseline_results", {})
         trigger = results.get("trigger_results", {})

@@ -67,9 +67,7 @@ def parse_gpus(deployment_config_json_path):
             "prefill_tensor_parallelism"
         ) * deployment_config.get("prefill_data_parallelism") + deployment_config.get(
             "decode_tensor_parallelism"
-        ) * deployment_config.get(
-            "decode_data_parallelism"
-        )
+        ) * deployment_config.get("decode_data_parallelism")
 
 
 def parse_kind_and_mode(deployment_config_json_path):

@@ -438,9 +438,9 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                             # mark the transfer as completed to unblock the sender.
                             self._complete_transfer(tensor_id)
                             continue
-                        self.remote_agents[
-                            remote_agent_id
-                        ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
+                        self.remote_agents[remote_agent_id] = (
+                            self.nixl_agent.add_remote_agent(remote_agent_metadata)
+                        )
 
                     # initiate NIXL WRITE transfer
                     source_tensor, source_desc, _ = self.transfer_tracker[tensor_id]
@@ -660,10 +660,10 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
                 raise ValueError(
                     f"Missing agent metadata for new sender {nixl_request.sender_agent_id}"
                 )
-            self.remote_agents[
-                nixl_request.sender_agent_id
-            ] = self.nixl_agent.add_remote_agent(
-                base64.b64decode(nixl_request.agent_metadata)
+            self.remote_agents[nixl_request.sender_agent_id] = (
+                self.nixl_agent.add_remote_agent(
+                    base64.b64decode(nixl_request.agent_metadata)
+                )
             )
 
         # Allocate tensor to be written into.

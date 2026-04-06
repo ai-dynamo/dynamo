@@ -117,9 +117,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             # Generate video
             context_id = context.id()
             assert context_id is not None
-            assert (
-                nvext.num_inference_steps is not None
-            ), "Num inference steps is required"
+            assert nvext.num_inference_steps is not None, (
+                "Num inference steps is required"
+            )
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,

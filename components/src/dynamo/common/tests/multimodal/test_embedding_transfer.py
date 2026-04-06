@@ -157,17 +157,17 @@ class TestRingBuffer:
             id, tensor = ring_buffer.get_buffer(byte_size)
             assert id is not None, f"Failed to get buffer for size {byte_size}"
             assert tensor is not None, f"Failed to get tensor for size {byte_size}"
-            assert (
-                tensor.nbytes == byte_size
-            ), f"Expected buffer of size {byte_size}, got {tensor.nbytes}"
+            assert tensor.nbytes == byte_size, (
+                f"Expected buffer of size {byte_size}, got {tensor.nbytes}"
+            )
 
             ring_buffer.release_buffer(id)
         # Test allocation that exceeds buffer size
         id, tensor = ring_buffer.get_buffer(buffer_size + 1)
         assert id is None, "Expected None when requesting buffer larger than capacity"
-        assert (
-            tensor is None
-        ), "Expected None when requesting buffer larger than capacity"
+        assert tensor is None, (
+            "Expected None when requesting buffer larger than capacity"
+        )
 
     def test_release(self):
         buffer_size = 128
@@ -181,9 +181,9 @@ class TestRingBuffer:
             id, tensor = ring_buffer.get_buffer(byte_size)
             assert id is not None, f"Failed to get buffer for size {byte_size}"
             assert tensor is not None, f"Failed to get tensor for size {byte_size}"
-            assert (
-                tensor.nbytes == byte_size
-            ), f"Expected buffer of size {byte_size}, got {tensor.nbytes}"
+            assert tensor.nbytes == byte_size, (
+                f"Expected buffer of size {byte_size}, got {tensor.nbytes}"
+            )
             allocated_ids.append(id)
 
         # Release buffers except the first one, ring buffer will not actually reuse the released space
@@ -194,12 +194,12 @@ class TestRingBuffer:
             ring_buffer.release_buffer(id)
 
         failed_id, failed_tensor = ring_buffer.get_buffer(64)
-        assert (
-            failed_id is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
-        assert (
-            failed_tensor is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
+        assert failed_id is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
+        assert failed_tensor is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
 
         # Release the first allocated buffer to make sure the ring buffer can reuse the released space.
         ring_buffer.release_buffer(allocated_ids[0])
@@ -228,18 +228,18 @@ class TestRingBuffer:
             and allocated_id2 is not None
             and allocated_id3 is not None
         ), "Failed to allocate initial buffers"
-        assert (
-            tensor1.nbytes == 32 and tensor2.nbytes == 32 and tensor3.nbytes == 32
-        ), "Expected buffers of size 32"
+        assert tensor1.nbytes == 32 and tensor2.nbytes == 32 and tensor3.nbytes == 32, (
+            "Expected buffers of size 32"
+        )
 
         # Out of space
         failed_allocation_id, failed_allocation_tensor = ring_buffer.get_buffer(64)
-        assert (
-            failed_allocation_id is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
-        assert (
-            failed_allocation_tensor is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
+        assert failed_allocation_id is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
+        assert failed_allocation_tensor is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
 
         # Release the first buffer to create free space at the beginning,
         # but the 64 bytes allocation will fail as we don't allocate
@@ -251,9 +251,9 @@ class TestRingBuffer:
         # | 32 |-32-|-32-|-16-| 16 |
         # |    | id2| id3| id4|    |
         allocated_id4, tensor4 = ring_buffer.get_buffer(16)
-        assert (
-            allocated_id4 is not None
-        ), "Failed to allocate buffer after releasing space"
+        assert allocated_id4 is not None, (
+            "Failed to allocate buffer after releasing space"
+        )
         assert tensor4.nbytes == 16, f"Expected buffer of size 16, got {tensor4.nbytes}"
 
         # Make room for large allocation
@@ -262,18 +262,18 @@ class TestRingBuffer:
         # | id5| id3| id4|    |
         ring_buffer.release_buffer(allocated_id2)
         allocated_id5, tensor5 = ring_buffer.get_buffer(64)
-        assert (
-            allocated_id5 is not None
-        ), "Failed to allocate buffer after releasing space"
+        assert allocated_id5 is not None, (
+            "Failed to allocate buffer after releasing space"
+        )
         assert tensor5.nbytes == 64, f"Expected buffer of size 64, got {tensor5.nbytes}"
 
         failed_allocation_id, failed_allocation_tensor = ring_buffer.get_buffer(8)
-        assert (
-            failed_allocation_id is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
-        assert (
-            failed_allocation_tensor is None
-        ), "Expected None when requesting buffer larger than remaining capacity"
+        assert failed_allocation_id is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
+        assert failed_allocation_tensor is None, (
+            "Expected None when requesting buffer larger than remaining capacity"
+        )
 
         # Release all and make sure we have full capacity again
         ring_buffer.release_buffer(allocated_id3)
@@ -281,12 +281,12 @@ class TestRingBuffer:
         ring_buffer.release_buffer(allocated_id5)
         print(ring_buffer)
         allocated_id6, tensor6 = ring_buffer.get_buffer(buffer_size)
-        assert (
-            allocated_id6 is not None
-        ), "Failed to allocate buffer for full capacity after releasing all buffers"
-        assert (
-            tensor6.nbytes == buffer_size
-        ), f"Expected buffer of size {buffer_size}, got {tensor6.nbytes}"
+        assert allocated_id6 is not None, (
+            "Failed to allocate buffer for full capacity after releasing all buffers"
+        )
+        assert tensor6.nbytes == buffer_size, (
+            f"Expected buffer of size {buffer_size}, got {tensor6.nbytes}"
+        )
 
     def test_looping(self):
         buffer_size = 64 * 3
@@ -306,12 +306,12 @@ class TestRingBuffer:
             while allocated_bytes < 64:
                 new_byte_size = min(randint(8, 64), 64 - allocated_bytes)
                 allocated_id, tensor = ring_buffer.get_buffer(new_byte_size)
-                assert (
-                    allocated_id is not None
-                ), "Failed to allocate buffer in looping test"
-                assert (
-                    tensor.nbytes == new_byte_size
-                ), f"Expected buffer of size {new_byte_size} in looping test"
+                assert allocated_id is not None, (
+                    "Failed to allocate buffer in looping test"
+                )
+                assert tensor.nbytes == new_byte_size, (
+                    f"Expected buffer of size {new_byte_size} in looping test"
+                )
                 allocated_bytes += new_byte_size
                 current_batch_ids.append(allocated_id)
             # Release previous batch

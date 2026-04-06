@@ -3,7 +3,6 @@
 
 """Unit tests for DynamoMultimodalEmbeddingCacheConnector."""
 
-
 import pytest
 import torch
 

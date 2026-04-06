@@ -214,9 +214,8 @@ def _run_shadow_failover_test(
                     )
                     assert primary_memory_in_use > sleeping_memory_after_sleep
                     assert (
-                        (primary_memory_in_use - sleeping_memory_after_sleep)
-                        >= shadow_a_released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
-                    )
+                        primary_memory_in_use - sleeping_memory_after_sleep
+                    ) >= shadow_a_released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
 
                     deadline = time.monotonic() + 30.0
                     while True:
@@ -329,12 +328,12 @@ def _run_shadow_failover_test(
                             assert [
                                 event.kind for event in kv_events_while_lingering
                             ] == expected_kv_kinds_while_blocked
-                            assert _is_process_alive(
-                                primary
-                            ), "primary died before the linger window completed"
-                            assert (
-                                not wake_future.done()
-                            ), "shadow wake completed while the primary was still alive"
+                            assert _is_process_alive(primary), (
+                                "primary died before the linger window completed"
+                            )
+                            assert not wake_future.done(), (
+                                "shadow wake completed while the primary was still alive"
+                            )
                             time.sleep(0.2)
 
                         primary_memory_before_kill = get_gpu_memory_used()

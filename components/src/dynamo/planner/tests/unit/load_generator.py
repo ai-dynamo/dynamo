@@ -144,9 +144,10 @@ class LoadGenerator:
         stdout_path = os.path.join(artifact_dir, "aiperf.stdout.log")
         stderr_path = os.path.join(artifact_dir, "aiperf.stderr.log")
         try:
-            with open(stdout_path, "wb") as stdout_f, open(
-                stderr_path, "wb"
-            ) as stderr_f:
+            with (
+                open(stdout_path, "wb") as stdout_f,
+                open(stderr_path, "wb") as stderr_f,
+            ):
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=stdout_f,
@@ -288,7 +289,7 @@ class LoadGenerator:
             phase_results = {}
 
             for i, phase in enumerate(phases):
-                phase_name = f"phase{i+1}_{phase['name']}"
+                phase_name = f"phase{i + 1}_{phase['name']}"
                 logger.info(
                     f"Starting {phase_name}: {phase['rate']} req/s for {phase['duration']}s"
                 )

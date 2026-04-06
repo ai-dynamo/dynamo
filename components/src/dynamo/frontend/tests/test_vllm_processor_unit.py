@@ -54,9 +54,9 @@ class TestPrepareRequestToolStripping:
             tool_parser_class=None,
             exclude_tools_when_tool_choice_none=True,
         )
-        assert (
-            chat_params.chat_template_kwargs["tools"] is None
-        ), "tool_choice=none with exclude flag should strip tools from template"
+        assert chat_params.chat_template_kwargs["tools"] is None, (
+            "tool_choice=none with exclude flag should strip tools from template"
+        )
 
     def test_tool_choice_none_keeps_tools_when_flag_off(self, tokenizer):
         """When exclude flag is off, tool_choice=none still includes tools in template kwargs."""
@@ -67,9 +67,9 @@ class TestPrepareRequestToolStripping:
             exclude_tools_when_tool_choice_none=False,
         )
         tools = chat_params.chat_template_kwargs["tools"]
-        assert (
-            tools is not None and len(tools) == 1
-        ), "tool_choice=none with flag off should keep tools in template"
+        assert tools is not None and len(tools) == 1, (
+            "tool_choice=none with flag off should keep tools in template"
+        )
 
     def test_tool_choice_auto_keeps_tools(self, tokenizer):
         """tool_choice=auto should always include tools regardless of flag."""
@@ -80,9 +80,9 @@ class TestPrepareRequestToolStripping:
             exclude_tools_when_tool_choice_none=True,
         )
         tools = chat_params.chat_template_kwargs["tools"]
-        assert (
-            tools is not None and len(tools) == 1
-        ), "tool_choice=auto should keep tools in template"
+        assert tools is not None and len(tools) == 1, (
+            "tool_choice=auto should keep tools in template"
+        )
 
     def test_tool_choice_required_keeps_tools(self, tokenizer):
         """tool_choice=required should always include tools regardless of flag."""
@@ -93,9 +93,9 @@ class TestPrepareRequestToolStripping:
             exclude_tools_when_tool_choice_none=True,
         )
         tools = chat_params.chat_template_kwargs["tools"]
-        assert (
-            tools is not None and len(tools) == 1
-        ), "tool_choice=required should keep tools in template"
+        assert tools is not None and len(tools) == 1, (
+            "tool_choice=required should keep tools in template"
+        )
 
     def test_no_tools_in_request(self, tokenizer):
         """Request without tools should produce None tools in template kwargs."""
@@ -105,6 +105,6 @@ class TestPrepareRequestToolStripping:
             tool_parser_class=None,
             exclude_tools_when_tool_choice_none=True,
         )
-        assert (
-            chat_params.chat_template_kwargs["tools"] is None
-        ), "No tools in request should produce None tools in template"
+        assert chat_params.chat_template_kwargs["tools"] is None, (
+            "No tools in request should produce None tools in template"
+        )

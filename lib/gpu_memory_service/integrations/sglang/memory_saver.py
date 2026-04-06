@@ -70,7 +70,11 @@ class GMSMemorySaverImpl:
 
     def _init_allocators(
         self,
-    ) -> tuple[Optional["GMSClientMemoryManager"], "GMSClientMemoryManager", str,]:
+    ) -> tuple[
+        Optional["GMSClientMemoryManager"],
+        "GMSClientMemoryManager",
+        str,
+    ]:
         """Create allocator with mode from config (default: RW_OR_RO)."""
         mode = self._requested_mode or RequestedLockType.RW_OR_RO
         weights_allocator = get_or_create_gms_client_memory_manager(

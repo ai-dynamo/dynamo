@@ -636,7 +636,7 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             if new_blocks is None:
                 logger.warning(
-                    "KV exhausted at ctx_len=%d after %d requests, " "truncating batch",
+                    "KV exhausted at ctx_len=%d after %d requests, truncating batch",
                     ctx_len,
                     len(new_reqs_data),
                 )

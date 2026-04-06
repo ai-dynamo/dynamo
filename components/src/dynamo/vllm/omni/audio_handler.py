@@ -307,8 +307,7 @@ class AudioGenerationHandler:
                 )
             if req.max_new_tokens > self.config.tts_max_new_tokens_max:
                 raise ValueError(
-                    f"max_new_tokens cannot exceed "
-                    f"{self.config.tts_max_new_tokens_max}"
+                    f"max_new_tokens cannot exceed {self.config.tts_max_new_tokens_max}"
                 )
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:

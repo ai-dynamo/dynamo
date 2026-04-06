@@ -644,17 +644,19 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     # SAFETY: Do NOT use terminate_all_matching_process_names=True or stragglers=["vllm"] here.
     # Those kill ALL vLLM processes system-wide, breaking parallel test execution.
     # Port-based cleanup above is targeted and xdist-safe.
-    with ManagedProcess(
-        command=command,
-        env=env,
-        health_check_ports=[port, metrics_port],  # vLLM server + KVBM metrics
-        timeout=timeout,
-        display_output=True,
-        terminate_all_matching_process_names=False,  # Port-based cleanup done above instead
-        stragglers=[],  # Empty - we handle cleanup manually per port
-        straggler_commands=[],  # Empty - we handle cleanup manually per port
-        log_dir=log_dir,
-    ) as proc:
+    with (
+        ManagedProcess(
+            command=command,
+            env=env,
+            health_check_ports=[port, metrics_port],  # vLLM server + KVBM metrics
+            timeout=timeout,
+            display_output=True,
+            terminate_all_matching_process_names=False,  # Port-based cleanup done above instead
+            stragglers=[],  # Empty - we handle cleanup manually per port
+            straggler_commands=[],  # Empty - we handle cleanup manually per port
+            log_dir=log_dir,
+        ) as proc
+    ):
         # Give KVBM connector extra time to fully initialize
         print("Waiting 5 seconds for KVBM connector to fully initialize...")
         time.sleep(5)
@@ -888,19 +890,19 @@ class TestDeterminism:
         print("=" * 70)
         print(f"Total requests: {num_requests}")
         print(
-            f"Exact matches: {exact_matches}/{num_requests} ({exact_matches/num_requests:.1%})"
+            f"Exact matches: {exact_matches}/{num_requests} ({exact_matches / num_requests:.1%})"
         )
         print(
-            f"Semantic matches: {semantic_matches}/{num_requests} ({semantic_matches/num_requests:.1%})"
+            f"Semantic matches: {semantic_matches}/{num_requests} ({semantic_matches / num_requests:.1%})"
         )
         print(
-            f"Semantic divergence: {len(mismatches)}/{num_requests} ({len(mismatches)/num_requests:.1%})"
+            f"Semantic divergence: {len(mismatches)}/{num_requests} ({len(mismatches) / num_requests:.1%})"
         )
 
         if mismatches:
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"NON-DETERMINISTIC RESPONSES ({len(mismatches)} total):")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
             for mismatch in mismatches:
                 req_num = mismatch["request_num"]
                 if "error" in mismatch:
@@ -915,9 +917,9 @@ class TestDeterminism:
             semantic_success_rate = (semantic_matches / num_requests) * 100
             min_success_rate = 80.0
 
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"SEMANTIC SUCCESS RATE: {semantic_success_rate:.1f}%")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
             print(f"Failed requests: {[m['request_num'] for m in mismatches]}")
 
             if semantic_success_rate < min_success_rate:
@@ -931,11 +933,11 @@ class TestDeterminism:
                     f"TEST PASSED - SEMANTICALLY DETERMINISTIC (>= {min_success_rate:.0f}%)"
                 )
         else:
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print("TEST PASSED - ALL RESPONSES SEMANTICALLY EQUIVALENT")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
             print(
-                f"Exact matches: {exact_matches}/{num_requests} ({exact_matches/num_requests:.1%})"
+                f"Exact matches: {exact_matches}/{num_requests} ({exact_matches / num_requests:.1%})"
             )
 
     def _show_final_kvbm_stats(self, metrics_port: int, initial_offload: int):
@@ -948,9 +950,9 @@ class TestDeterminism:
         Raises:
             pytest.fail: If no offload activity was detected during the test
         """
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("FINAL KVBM STATS")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         try:
             final_metrics = fetch_kvbm_metrics(port=metrics_port)
             final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
@@ -1055,9 +1057,9 @@ class TestDeterminism:
             time.sleep(10)
 
             # Send requests and track results
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"SENDING {num_requests} REQUESTS (comparing against baseline)")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
 
             responses = []
             mismatches = []
@@ -1065,7 +1067,7 @@ class TestDeterminism:
             semantic_matches = 0
 
             for i in range(num_requests):
-                print(f"\n--- Request {i+1}/{num_requests} ---")
+                print(f"\n--- Request {i + 1}/{num_requests} ---")
 
                 try:
                     response = tester.make_request(
@@ -1260,9 +1262,9 @@ class TestDeterminism:
         if total_passed + total_failed == 0:
             pytest.skip("No tests were completed - insufficient data")
 
-        assert (
-            success_rate >= success_rate_threshold
-        ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed, success rate {success_rate:.1%} lower than expected {success_rate_threshold*100}%"
+        assert success_rate >= success_rate_threshold, (
+            f"Model is not deterministic across cache reset: {total_failed} comparisons failed, success rate {success_rate:.1%} lower than expected {success_rate_threshold * 100}%"
+        )
 
 
 # ============================================================================

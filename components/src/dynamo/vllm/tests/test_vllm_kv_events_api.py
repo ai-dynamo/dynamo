@@ -174,9 +174,9 @@ class TestVllmKvEventsApi:
 
         # Should be an array with tag as first element
         assert isinstance(decoded, list), f"Expected list, got {type(decoded)}"
-        assert (
-            decoded[0] == "BlockStored"
-        ), f"Expected tag 'BlockStored', got {decoded[0]}"
+        assert decoded[0] == "BlockStored", (
+            f"Expected tag 'BlockStored', got {decoded[0]}"
+        )
 
         # Verify field count (tag + 8 fields = 9 elements)
         assert len(decoded) == 9, (

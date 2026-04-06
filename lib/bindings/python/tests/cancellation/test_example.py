@@ -116,12 +116,12 @@ async def test_direct_connection_cancellation(
     server_output = stop_process("server_process", server_process)
 
     # Assert expected messages
-    assert (
-        "Client: Cancelling after 3 responses..." in client_output
-    ), f"Client output: {client_output}"
-    assert (
-        "Server: Cancelled at iteration" in server_output
-    ), f"Server output: {server_output}"
+    assert "Client: Cancelling after 3 responses..." in client_output, (
+        f"Client output: {client_output}"
+    )
+    assert "Server: Cancelled at iteration" in server_output, (
+        f"Server output: {server_output}"
+    )
 
 
 @pytest.mark.asyncio
@@ -141,12 +141,12 @@ async def test_middle_server_cancellation(
     middle_output = stop_process("middle_server_process", middle_server_process)
 
     # Assert expected messages
-    assert (
-        "Client: Cancelling after 3 responses..." in client_output
-    ), f"Client output: {client_output}"
-    assert (
-        "Middle server: Forwarding response 2" in middle_output
-    ), f"Middle server output: {middle_output}"
-    assert (
-        "Server: Cancelled at iteration" in server_output
-    ), f"Server output: {server_output}"
+    assert "Client: Cancelling after 3 responses..." in client_output, (
+        f"Client output: {client_output}"
+    )
+    assert "Middle server: Forwarding response 2" in middle_output, (
+        f"Middle server output: {middle_output}"
+    )
+    assert "Server: Cancelled at iteration" in server_output, (
+        f"Server output: {server_output}"
+    )

@@ -199,9 +199,9 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
                     # Step 5: Send initial inference request to verify system is working
                     logger.info("Sending initial inference request")
                     result = send_inference_request("What is 2+2? The answer is")
-                    assert (
-                        "4" in result.lower() or "four" in result.lower()
-                    ), f"Expected '4' or 'four' in response, got: '{result}'"
+                    assert "4" in result.lower() or "four" in result.lower(), (
+                        f"Expected '4' or 'four' in response, got: '{result}'"
+                    )
 
                     # Step 6: Cycle through each replica to terminate/verify/restart
                     for i in range(num_replicas):
@@ -216,9 +216,9 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
                         result = send_inference_request(
                             "The capital of France is", max_tokens=20
                         )
-                        assert (
-                            "paris" in result.lower()
-                        ), f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
+                        assert "paris" in result.lower(), (
+                            f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
+                        )
 
                         # Restart the terminated replica
                         logger.info(f"Iteration {i}: Restarting replica etcd-{i}")
@@ -280,9 +280,9 @@ def test_etcd_ha_failover_vllm_disaggregated(
                         # Step 6: Send initial inference request to verify system is working
                         logger.info("Sending initial inference request")
                         result = send_inference_request("What is 2+2? The answer is")
-                        assert (
-                            "4" in result.lower() or "four" in result.lower()
-                        ), f"Expected '4' or 'four' in response, got: '{result}'"
+                        assert "4" in result.lower() or "four" in result.lower(), (
+                            f"Expected '4' or 'four' in response, got: '{result}'"
+                        )
 
                         # Step 7: Cycle through each replica to terminate/verify/restart
                         for i in range(num_replicas):
@@ -297,9 +297,9 @@ def test_etcd_ha_failover_vllm_disaggregated(
                             result = send_inference_request(
                                 "The capital of France is", max_tokens=20
                             )
-                            assert (
-                                "paris" in result.lower()
-                            ), f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
+                            assert "paris" in result.lower(), (
+                                f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
+                            )
 
                             # Restart the terminated replica
                             logger.info(f"Iteration {i}: Restarting replica etcd-{i}")
@@ -345,9 +345,9 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
                     # Step 5: Send inference request to verify system is working
                     logger.info("Sending inference request")
                     result = send_inference_request("What is 2+2? The answer is")
-                    assert (
-                        "4" in result.lower() or "four" in result.lower()
-                    ), f"Expected '4' or 'four' in response, got: '{result}'"
+                    assert "4" in result.lower() or "four" in result.lower(), (
+                        f"Expected '4' or 'four' in response, got: '{result}'"
+                    )
 
                     logger.info("System is working correctly with single ETCD node")
 
@@ -410,9 +410,9 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
                         # Step 6: Send inference request to verify system is working
                         logger.info("Sending inference request")
                         result = send_inference_request("What is 2+2? The answer is")
-                        assert (
-                            "4" in result.lower() or "four" in result.lower()
-                        ), f"Expected '4' or 'four' in response, got: '{result}'"
+                        assert "4" in result.lower() or "four" in result.lower(), (
+                            f"Expected '4' or 'four' in response, got: '{result}'"
+                        )
 
                         logger.info(
                             "System is working correctly with single ETCD node in disaggregated mode"

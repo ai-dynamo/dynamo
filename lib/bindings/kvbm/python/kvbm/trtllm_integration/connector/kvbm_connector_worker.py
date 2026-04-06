@@ -17,12 +17,12 @@ if is_dyn_runtime_enabled():
 
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
     def _callable_object(self) -> callable:
-        assert (
-            self._connector is not None
-        ), "Expected cache connector worker to have non-None _connector obj"
-        assert (
-            self.event is not None
-        ), "Expected cache connector worker to have non-None event obj"
+        assert self._connector is not None, (
+            "Expected cache connector worker to have non-None _connector obj"
+        )
+        assert self.event is not None, (
+            "Expected cache connector worker to have non-None event obj"
+        )
 
         def callback():
             self.event.record()

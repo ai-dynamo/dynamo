@@ -108,9 +108,9 @@ class TestRapidSupported:
         assert config
         spec = config.get("spec", {})
         pvcs = spec.get("pvcs", [])
-        assert any(
-            p.get("name") == "model-cache" for p in pvcs
-        ), "PVC should be mounted"
+        assert any(p.get("name") == "model-cache" for p in pvcs), (
+            "PVC should be mounted"
+        )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -152,9 +152,9 @@ class TestRapidSupported:
         docs = list(yaml.safe_load_all(raw))
         assert len(docs) >= 2, "Planner config should produce multi-doc YAML"
         dgd = docs[-1]
-        assert "Planner" in dgd.get("spec", {}).get(
-            "services", {}
-        ), "Planner service should be added"
+        assert "Planner" in dgd.get("spec", {}).get("services", {}), (
+            "Planner service should be added"
+        )
 
 
 class TestRapidUnsupported:
@@ -506,9 +506,9 @@ def _assert_overrides_applied(final_config_path: Path, dgdr):
         if svc_name in dgd_services:
             dgd_svc = dgd_services[svc_name]
             if "sharedMemory" in svc_ovr:
-                assert (
-                    "sharedMemory" in dgd_svc
-                ), f"Override sharedMemory on {svc_name} should be applied"
+                assert "sharedMemory" in dgd_svc, (
+                    f"Override sharedMemory on {svc_name} should be applied"
+                )
             mc = svc_ovr.get("extraPodSpec", {}).get("mainContainer", {})
             if "args" in mc:
                 dgd_args = (
@@ -517,9 +517,9 @@ def _assert_overrides_applied(final_config_path: Path, dgdr):
                     .get("args", [])
                 )
                 for arg in mc["args"]:
-                    assert (
-                        arg in dgd_args
-                    ), f"Override arg '{arg}' should be in {svc_name} args"
+                    assert arg in dgd_args, (
+                        f"Override arg '{arg}' should be in {svc_name} args"
+                    )
 
 
 class TestThoroughMockedOverrides:

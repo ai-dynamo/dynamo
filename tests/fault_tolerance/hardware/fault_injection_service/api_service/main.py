@@ -140,13 +140,13 @@ class MetricsResponse(BaseModel):
 
     timestamp: str
     namespace: str
-    gpu_metrics: Optional[
-        dict[str, Any]
-    ] = None  # GPU utilization, memory, temperature, power
+    gpu_metrics: Optional[dict[str, Any]] = (
+        None  # GPU utilization, memory, temperature, power
+    )
     network_metrics: Optional[dict[str, Any]] = None  # Latency, packet loss, throughput
-    inference_metrics: Optional[
-        dict[str, Any]
-    ] = None  # Inference latency, throughput, accuracy
+    inference_metrics: Optional[dict[str, Any]] = (
+        None  # Inference latency, throughput, accuracy
+    )
     node_health: Optional[dict[str, Any]] = None  # Node status, resource availability
 
 

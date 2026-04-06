@@ -30,9 +30,9 @@ class MockServer:
         self.context_is_killed = False
 
         method_name = request
-        assert hasattr(
-            self, method_name
-        ), f"Method '{method_name}' not found on {self.__class__.__name__}"
+        assert hasattr(self, method_name), (
+            f"Method '{method_name}' not found on {self.__class__.__name__}"
+        )
         method = getattr(self, method_name)
         async for response in method(request, context):
             yield response
@@ -65,9 +65,9 @@ class MockServer:
             print(f"Sending iteration {i}")
             yield i
 
-        assert (
-            False
-        ), "Test failed: generate_until_cancelled did not raise CancelledError"
+        assert False, (
+            "Test failed: generate_until_cancelled did not raise CancelledError"
+        )
 
     async def _generate_until_asyncio_cancelled(self, request, context):
         """
@@ -86,9 +86,9 @@ class MockServer:
             self.context_is_killed = context.is_killed()
             raise
 
-        assert (
-            False
-        ), "Test failed: generate_until_cancelled did not raise CancelledError"
+        assert False, (
+            "Test failed: generate_until_cancelled did not raise CancelledError"
+        )
 
     async def _generate_and_cancel_context(self, request, context):
         """

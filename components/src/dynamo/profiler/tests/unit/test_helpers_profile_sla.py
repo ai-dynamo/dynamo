@@ -652,9 +652,9 @@ class TestAddProfileDataMockerGuard:
             args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
                 "args"
             ]
-            assert (
-                "--planner-profile-data" not in args
-            ), f"sglang worker '{name}' should not have --planner-profile-data"
+            assert "--planner-profile-data" not in args, (
+                f"sglang worker '{name}' should not have --planner-profile-data"
+            )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -668,9 +668,9 @@ class TestAddProfileDataMockerGuard:
             args = dgd["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
                 "args"
             ]
-            assert (
-                "--planner-profile-data" in args
-            ), f"mocker worker '{name}' should have --planner-profile-data"
+            assert "--planner-profile-data" in args, (
+                f"mocker worker '{name}' should have --planner-profile-data"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -720,13 +720,13 @@ class TestNaiveFallbackResolvedBackend:
             )
 
         # The resolved backend must be a concrete name, not 'auto'
-        assert (
-            "resolved_backend" in result
-        ), "result dict must contain 'resolved_backend' key"
+        assert "resolved_backend" in result, (
+            "result dict must contain 'resolved_backend' key"
+        )
         resolved = result["resolved_backend"]
-        assert (
-            resolved != "auto"
-        ), f"resolved_backend must not be 'auto', got {resolved!r}"
+        assert resolved != "auto", (
+            f"resolved_backend must not be 'auto', got {resolved!r}"
+        )
         assert resolved in (
             "vllm",
             "sglang",
@@ -1020,6 +1020,6 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             if call_kwargs.args
             else call_kwargs.kwargs.get("backend")
         )
-        assert (
-            called_backend == "vllm"
-        ), f"run_interpolation must be called with resolved backend 'vllm', got {called_backend!r}"
+        assert called_backend == "vllm", (
+            f"run_interpolation must be called with resolved backend 'vllm', got {called_backend!r}"
+        )

@@ -196,7 +196,7 @@ def wait_for_model_availability(
 
             timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
             logger.debug(
-                f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
+                f"Testing model availability at {test_url} (attempt {attempt + 1}/{max_attempts}, timeout={timeout_val}s)"
             )
             response = requests.post(
                 test_url, json=test_payload, timeout=timeout_val, headers=headers
@@ -221,10 +221,12 @@ def wait_for_model_availability(
 
         except requests.Timeout as e:
             logger.warning(
-                f"Model availability test timed out (attempt {attempt+1}): {e}"
+                f"Model availability test timed out (attempt {attempt + 1}): {e}"
             )
         except Exception as e:
-            logger.warning(f"Model availability test failed (attempt {attempt+1}): {e}")
+            logger.warning(
+                f"Model availability test failed (attempt {attempt + 1}): {e}"
+            )
 
         if attempt < max_attempts - 1:
             wait_time = 10 if attempt < 5 else 5

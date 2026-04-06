@@ -224,9 +224,9 @@ class DeploymentSpec:
     def disable_grove(self):
         if "annotations" not in self._deployment_spec["metadata"]:
             self._deployment_spec["metadata"]["annotations"] = {}
-        self._deployment_spec["metadata"]["annotations"][
-            "nvidia.com/enable-grove"
-        ] = "false"
+        self._deployment_spec["metadata"]["annotations"]["nvidia.com/enable-grove"] = (
+            "false"
+        )
 
     def set_model(self, model: str, service_name: Optional[str] = None):
         if service_name is None:
@@ -757,9 +757,9 @@ class ManagedDeployment:
                     continue
 
                 for cs in container_statuses:
-                    state: Literal[
-                        "Waiting", "Terminated", "Running", "Unknown"
-                    ] = "Unknown"
+                    state: Literal["Waiting", "Terminated", "Running", "Unknown"] = (
+                        "Unknown"
+                    )
                     reason = ""
                     message = ""
                     exit_code: Optional[int] = None
@@ -1057,7 +1057,7 @@ class ManagedDeployment:
                 # Check if port is assigned
                 if port_forward.local_port == 0:
                     self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
                     )
                     continue
 
@@ -1071,7 +1071,7 @@ class ManagedDeployment:
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
                     )
 
                 # Restart port-forward for next attempt (except on last attempt)

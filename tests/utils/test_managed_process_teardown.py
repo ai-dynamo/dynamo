@@ -119,9 +119,9 @@ class TestSimpleProcessTree:
             assert len(tree_pids) >= 2, f"Expected parent + children, got {tree_pids}"
 
         for pid in tree_pids:
-            assert _wait_for_pid_death(
-                pid, timeout=10
-            ), f"PID {pid} still alive after teardown"
+            assert _wait_for_pid_death(pid, timeout=10), (
+                f"PID {pid} still alive after teardown"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -147,14 +147,14 @@ class TestDeepProcessTree:
             assert mp.proc is not None
             root_pid = mp.proc.pid
             tree_pids = _wait_for_tree(root_pid, min_count=3)
-            assert (
-                len(tree_pids) >= 3
-            ), f"Expected parent + child + grandchild, got {tree_pids}"
+            assert len(tree_pids) >= 3, (
+                f"Expected parent + child + grandchild, got {tree_pids}"
+            )
 
         for pid in tree_pids:
-            assert _wait_for_pid_death(
-                pid, timeout=10
-            ), f"PID {pid} still alive after teardown"
+            assert _wait_for_pid_death(pid, timeout=10), (
+                f"PID {pid} still alive after teardown"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +198,9 @@ class TestChildWithOwnProcessGroup:
                 pytest.skip("Child didn't get a separate pgid (OS-dependent)")
 
         for pid in tree_pids:
-            assert _wait_for_pid_death(
-                pid, timeout=10
-            ), f"PID {pid} still alive after teardown (separate pgid scenario)"
+            assert _wait_for_pid_death(pid, timeout=10), (
+                f"PID {pid} still alive after teardown (separate pgid scenario)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +230,9 @@ class TestXdistSafeSkipsStragglers:
             with mp:
                 pass
 
-            assert _pid_alive(
-                bystander_pid
-            ), "Bystander was killed even though xdist-safe mode was on"
+            assert _pid_alive(bystander_pid), (
+                "Bystander was killed even though xdist-safe mode was on"
+            )
         finally:
             try:
                 os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
@@ -275,9 +275,9 @@ class TestXdistSafeSkipsStragglers:
             with mp:
                 time.sleep(0.5)
 
-            assert _wait_for_pid_death(
-                bystander_pid, timeout=10
-            ), "Bystander with matching straggler command should have been killed"
+            assert _wait_for_pid_death(bystander_pid, timeout=10), (
+                "Bystander with matching straggler command should have been killed"
+            )
         finally:
             try:
                 os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
@@ -350,6 +350,6 @@ class TestSigtermGracePeriod:
                 assert time.monotonic() < deadline, "Child never became ready"
                 time.sleep(0.05)
 
-        assert os.path.exists(
-            marker_file
-        ), "Process was SIGKILLed before SIGTERM handler could run"
+        assert os.path.exists(marker_file), (
+            "Process was SIGKILLed before SIGTERM handler could run"
+        )

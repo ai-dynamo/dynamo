@@ -38,17 +38,13 @@ pytestmark = [pytest.mark.nightly]
 
 
 class _SleepWakeEngine(Protocol):
-    def __enter__(self):
-        ...
+    def __enter__(self): ...
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
 
-    def sleep(self) -> dict:
-        ...
+    def sleep(self) -> dict: ...
 
-    def wake(self) -> dict:
-        ...
+    def wake(self) -> dict: ...
 
 
 def _list_committed_weight_allocations(
@@ -94,9 +90,9 @@ def _run_external_weight_mgr_test(
                 # The read-only engine must stall until some external writer
                 # publishes the first committed weights layout.
                 time.sleep(2.0)
-                assert (
-                    not start_future.done()
-                ), "read-only engine should still be waiting for committed weights"
+                assert not start_future.done(), (
+                    "read-only engine should still be waiting for committed weights"
+                )
                 assert weights_gms.get_runtime_state().state == ServerState.EMPTY
                 assert kv_cache_gms.get_runtime_state().state == ServerState.EMPTY
 

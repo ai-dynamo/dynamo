@@ -316,8 +316,7 @@ def run_parallel(
     for gi in gpu_indices:
         if gi not in gpu_by_idx:
             _print(
-                f"ERROR: GPU{gi} not found "
-                f"(available: {[g['index'] for g in gpus]})"
+                f"ERROR: GPU{gi} not found (available: {[g['index'] for g in gpus]})"
             )
             return 1
         total = gpu_by_idx[gi]["total_mib"] / 1024.0
@@ -368,8 +367,7 @@ def run_parallel(
         for t in no_kv:
             _print(f"  {t.name}")
         _print(
-            "\nAdd the appropriate marker via profile_pytest.py --kv-bytes, "
-            "then rerun."
+            "\nAdd the appropriate marker via profile_pytest.py --kv-bytes, then rerun."
         )
         return 1
 
@@ -443,7 +441,7 @@ def run_parallel(
     # --- Report skip-marked tests immediately (like xdist SKIPPED) ---
     completed: list[_CompletedTest] = []
     for test in skipped_tests:
-        _print(f"[w{test.w_id}] {test.name} SKIPPED" f" - {test.skip_reason}")
+        _print(f"[w{test.w_id}] {test.name} SKIPPED - {test.skip_reason}")
         completed.append(
             _CompletedTest(
                 test=test,
@@ -610,7 +608,7 @@ def run_parallel(
                     status = "FAILED"
 
                 if skipped:
-                    _print(f"[w{w_id}] {test.name} SKIPPED" f" - {skip_reason}")
+                    _print(f"[w{w_id}] {test.name} SKIPPED - {skip_reason}")
                 else:
                     _print(f"[w{w_id}] {test.name} {status} [{duration:.0f}s]")
 
@@ -770,9 +768,7 @@ def run_parallel(
             timeout = int(test.timeout)
             retries = test.retries
             retry_str = f" ({retries} retries)" if retries else ""
-            _print(
-                f"PASSED [w{w_id}] {test.name} " f"[{duration}s/{timeout}s]{retry_str}"
-            )
+            _print(f"PASSED [w{w_id}] {test.name} [{duration}s/{timeout}s]{retry_str}")
         else:
             duration = int(c.duration)
             timeout = int(test.timeout)

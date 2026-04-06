@@ -40,9 +40,9 @@ class ImageGenerationPayload(BasePayload):
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
         result = response.json()
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert "data" in result, (
+            f"Missing 'data' in response. Keys: {list(result.keys())}"
+        )
         assert len(result["data"]) > 0, "Empty data in image response"
         entry = result["data"][0]
         if "url" in entry:
@@ -66,9 +66,9 @@ class VideoGenerationPayload(BasePayload):
             f"Video generation not completed. Status: {result.get('status')}, "
             f"Error: {result.get('error', 'none')}"
         )
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert "data" in result, (
+            f"Missing 'data' in response. Keys: {list(result.keys())}"
+        )
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
         if "url" in entry:
@@ -122,12 +122,12 @@ class AudioSpeechPayload(BasePayload):
             return f"binary_audio_{len(audio_bytes)}_bytes"
         # JSON response (error or url format)
         result = response.json()
-        assert (
-            result.get("status") != "failed"
-        ), f"Audio generation failed: {result.get('error', 'unknown')}"
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert result.get("status") != "failed", (
+            f"Audio generation failed: {result.get('error', 'unknown')}"
+        )
+        assert "data" in result, (
+            f"Missing 'data' in response. Keys: {list(result.keys())}"
+        )
         assert len(result["data"]) > 0, "Empty data in audio response"
         entry = result["data"][0]
         if "url" in entry and entry["url"]:

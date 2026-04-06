@@ -57,12 +57,12 @@ class TritonEchoClient:
         output0_data = results.as_numpy("INPUT0")
         output1_data = results.as_numpy("INPUT1")
 
-        assert (
-            output0_data is not None
-        ), "Expected response to include output tensor 'INPUT0'"
-        assert (
-            output1_data is not None
-        ), "Expected response to include output tensor 'INPUT1'"
+        assert output0_data is not None, (
+            "Expected response to include output tensor 'INPUT0'"
+        )
+        assert output1_data is not None, (
+            "Expected response to include output tensor 'INPUT1'"
+        )
         assert np.array_equal(input0_data, output0_data)
         assert np.array_equal(input1_data, output1_data)
 
@@ -111,19 +111,19 @@ class TritonEchoClient:
         )
 
         data_item = user_data._completed_requests.get(timeout=5)
-        assert (
-            isinstance(data_item, Exception) is False
-        ), f"Stream inference failed: {data_item}"
+        assert isinstance(data_item, Exception) is False, (
+            f"Stream inference failed: {data_item}"
+        )
 
         output0_data = data_item.as_numpy("INPUT0")
         output1_data = data_item.as_numpy("INPUT1")
 
-        assert (
-            output0_data is not None
-        ), "Expected response to include output tensor 'INPUT0'"
-        assert (
-            output1_data is not None
-        ), "Expected response to include output tensor 'INPUT1'"
+        assert output0_data is not None, (
+            "Expected response to include output tensor 'INPUT0'"
+        )
+        assert output1_data is not None, (
+            "Expected response to include output tensor 'INPUT1'"
+        )
         assert np.array_equal(input0_data, output0_data)
         assert np.array_equal(input1_data, output1_data)
 

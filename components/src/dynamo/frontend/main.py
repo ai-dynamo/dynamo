@@ -289,9 +289,9 @@ async def async_main():
         os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
 
     if config.chat_processor == "vllm":
-        assert (
-            vllm_flags is not None
-        ), "vllm_flags is required when chat processor is vllm"
+        assert vllm_flags is not None, (
+            "vllm_flags is required when chat processor is vllm"
+        )
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
         ).chat_engine_factory

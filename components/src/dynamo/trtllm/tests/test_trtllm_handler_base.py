@@ -217,9 +217,9 @@ class TestGuidedDecodingFromToolChoice:
 
         result = HandlerBase._override_sampling_params(sampling_params, request)
 
-        assert not isinstance(
-            result.guided_decoding, dict
-        ), "guided_decoding should be converted from dict to GuidedDecodingParams"
+        assert not isinstance(result.guided_decoding, dict), (
+            "guided_decoding should be converted from dict to GuidedDecodingParams"
+        )
         # Downstream code (TRT-LLM sampling_params.py) accesses these attributes:
         assert result.guided_decoding.json_object is False
         assert result.guided_decoding.json == self.GUIDED_DECODING_DICT["json"]

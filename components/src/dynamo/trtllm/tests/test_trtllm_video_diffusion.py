@@ -536,9 +536,9 @@ class TestDiffusionEngineGenerate:
                 num_inference_steps=1,
             )
 
-        assert isinstance(
-            captured["prompt"], list
-        ), f"Expected list, got {type(captured['prompt'])}"
+        assert isinstance(captured["prompt"], list), (
+            f"Expected list, got {type(captured['prompt'])}"
+        )
         assert captured["prompt"] == ["a golden retriever"]
 
 
@@ -695,12 +695,15 @@ class TestVideoHandlerConcurrency:
 
             requests = [self._make_request() for _ in range(3)]
 
-            with patch(
-                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
-                return_value=b"fake_mp4_bytes",
-            ), patch(
-                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
-                return_value="http://fake/video.mp4",
+            with (
+                patch(
+                    "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+                    return_value=b"fake_mp4_bytes",
+                ),
+                patch(
+                    "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+                    return_value="http://fake/video.mp4",
+                ),
             ):
                 await asyncio.gather(
                     *(self._drain_generator(handler, req) for req in requests)
@@ -767,13 +770,16 @@ class TestVideoHandlerResponseFormats:
             "response_format": "url",
         }
 
-        with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
-            return_value=b"fake_mp4",
-        ), patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/videos/test.mp4",
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+                return_value=b"fake_mp4",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+                return_value="https://cdn.example.com/media/videos/test.mp4",
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
@@ -831,13 +837,16 @@ class TestVideoHandlerResponseFormats:
             # No response_format specified
         }
 
-        with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
-            return_value=b"fake_mp4",
-        ), patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/videos/test.mp4",
-        ) as mock_upload:
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+                return_value=b"fake_mp4",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+                return_value="https://cdn.example.com/media/videos/test.mp4",
+            ) as mock_upload,
+        ):
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)

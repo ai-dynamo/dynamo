@@ -5,7 +5,6 @@
 OpenTelemetry tracing header utilities for Dynamo components.
 """
 
-
 from dynamo._core import Context
 
 

@@ -200,13 +200,13 @@ def section_transport_breakdown(prom: Optional[PrometheusSnapshot]) -> Optional[
         if prom.work_handler_network_transit:
             t = prom.work_handler_network_transit
             parts_rows.append(
-                f"| Part 1 - Network transit (T2-T1) | {t['p50']*1000:.2f} | {t['p95']*1000:.2f} | {t['p99']*1000:.2f} |"
+                f"| Part 1 - Network transit (T2-T1) | {t['p50'] * 1000:.2f} | {t['p95'] * 1000:.2f} | {t['p99'] * 1000:.2f} |"
             )
 
         if prom.work_handler_time_to_first_response:
             t = prom.work_handler_time_to_first_response
             parts_rows.append(
-                f"| Part 2 - Processing (T3-T2) | {t['p50']*1000:.2f} | {t['p95']*1000:.2f} | {t['p99']*1000:.2f} |"
+                f"| Part 2 - Processing (T3-T2) | {t['p50'] * 1000:.2f} | {t['p95'] * 1000:.2f} | {t['p99'] * 1000:.2f} |"
             )
 
         if parts_rows:
@@ -581,7 +581,7 @@ def section_system_resources(obs_dir: Path) -> Optional[str]:
     if thread_data:
         values = [v for _, v in thread_data]
         rows.append(
-            f"| Threads | {min(values):.0f} | {max(values):.0f} | {sum(values)/len(values):.0f} | {len(values)} |"
+            f"| Threads | {min(values):.0f} | {max(values):.0f} | {sum(values) / len(values):.0f} | {len(values)} |"
         )
 
     # FD count
@@ -589,7 +589,7 @@ def section_system_resources(obs_dir: Path) -> Optional[str]:
     if fd_data:
         values = [v for _, v in fd_data]
         rows.append(
-            f"| FDs | {min(values):.0f} | {max(values):.0f} | {sum(values)/len(values):.0f} | {len(values)} |"
+            f"| FDs | {min(values):.0f} | {max(values):.0f} | {sum(values) / len(values):.0f} | {len(values)} |"
         )
 
     if not rows:
@@ -639,7 +639,7 @@ def section_key_findings(
         # Check transport breakdown
         if prom.request_plane_roundtrip_ttft_p50 > 0.1:
             findings.append(
-                f"High roundtrip TTFT p50: {prom.request_plane_roundtrip_ttft_p50*1000:.0f}ms (> 100ms)"
+                f"High roundtrip TTFT p50: {prom.request_plane_roundtrip_ttft_p50 * 1000:.0f}ms (> 100ms)"
             )
 
         # Tokio health

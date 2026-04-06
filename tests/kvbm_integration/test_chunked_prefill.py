@@ -192,9 +192,9 @@ def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
 
     # Verify onboarding occurred
     onboarded_blocks = metrics_p3["kvbm_onboard_blocks_h2d"]
-    assert (
-        onboarded_blocks > 0
-    ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache eviction."
+    assert onboarded_blocks > 0, (
+        "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache eviction."
+    )
 
     print(f"✓ Phase 3: {onboarded_blocks} blocks onboarded from CPU")
 

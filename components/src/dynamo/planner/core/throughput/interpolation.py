@@ -62,7 +62,9 @@ class PrefillInterpolator:
                         data = json.load(f)
                         self.prefill_isl = np.array(data["prefill_isl"])  # type: ignore[index]
                         self.prefill_ttft = np.array(data["prefill_ttft"])  # type: ignore[index]
-                        self.prefill_thpt_per_gpu = np.array(data["prefill_thpt_per_gpu"])  # type: ignore[index]
+                        self.prefill_thpt_per_gpu = np.array(
+                            data["prefill_thpt_per_gpu"]
+                        )  # type: ignore[index]
                 except FileNotFoundError:
                     raise FileNotFoundError(
                         f"Prefill interpolation files not found: {prefill_npz_fn} and {json_fn}\n"
@@ -299,7 +301,7 @@ if __name__ == "__main__":
     ) = decode_interpolator.find_best_throughput_per_gpu(args.itl, context_length)
     if est_itl <= args.itl:
         print(
-            f"\tEstimated ITL={est_itl:.2f}ms <= target ITL={args.itl:.2f}ms at {est_kv_usage*100:.2f}% active kv usage."
+            f"\tEstimated ITL={est_itl:.2f}ms <= target ITL={args.itl:.2f}ms at {est_kv_usage * 100:.2f}% active kv usage."
         )
         print(
             f"\tEstimated throughput: {est_thpt_per_gpu:.2f} token/s/gpu. Request rate at {est_thpt_per_gpu / args.osl:.2f} requests/s will saturate one GPU."

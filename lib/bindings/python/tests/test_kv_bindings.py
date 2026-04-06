@@ -68,16 +68,16 @@ def test_radix_tree_binding():
     # Verify the results
     # Note: scores is now Dict[(worker_id, dp_rank), score]
     assert overlap_scores.scores is not None
-    assert (
-        len(overlap_scores.scores) == 1
-    ), f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
+    assert len(overlap_scores.scores) == 1, (
+        f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
+    )
     worker_key = (worker_id, 0)  # (worker_id, dp_rank)
-    assert (
-        worker_key in overlap_scores.scores
-    ), f"Worker {worker_key} not found in scores"
-    assert (
-        overlap_scores.scores[worker_key] == 1
-    ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+    assert worker_key in overlap_scores.scores, (
+        f"Worker {worker_key} not found in scores"
+    )
+    assert overlap_scores.scores[worker_key] == 1, (
+        f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+    )
 
     blocks = radix_tree.dump_tree_as_events()
     assert len(blocks) == 1, f"Expected 1 block event, got {len(blocks)}"
@@ -86,9 +86,9 @@ def test_radix_tree_binding():
     # cleanup
     radix_tree.remove_worker(worker_id)
     blocks_empty = radix_tree.dump_tree_as_events()
-    assert (
-        len(blocks_empty) == 0
-    ), f"Expected 0 block events after removal, got {len(blocks_empty)}"
+    assert len(blocks_empty) == 0, (
+        f"Expected 0 block events after removal, got {len(blocks_empty)}"
+    )
 
     print(
         f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
@@ -148,9 +148,9 @@ def test_radix_tree_thread_safety(
     if prepopulate_worker_ids:
         for i in range(num_threads):
             worker(i, prepopulate_worker_ids=True)
-        assert (
-            exception_counter == 0
-        ), f"Warmup: expected 0 exceptions, got {exception_counter}"
+        assert exception_counter == 0, (
+            f"Warmup: expected 0 exceptions, got {exception_counter}"
+        )
 
     for i in range(num_threads):
         if is_threaded:
@@ -165,32 +165,32 @@ def test_radix_tree_thread_safety(
             t.join(timeout)
             assert not t.is_alive(), "Thread timed out"
     assert exception_counter == 0, f"Expected 0 exceptions, got {exception_counter}"
-    assert (
-        done_counter == num_threads
-    ), f"Expected {num_threads} done, got {done_counter}"
+    assert done_counter == num_threads, (
+        f"Expected {num_threads} done, got {done_counter}"
+    )
 
     for i in range(num_threads):
         overlap_scores = radix_tree.find_matches([i])
         assert overlap_scores.scores is not None
         worker_key = (i, 0)
-        assert (
-            worker_key in overlap_scores.scores
-        ), f"Worker {worker_key} not found in scores"
-        assert (
-            overlap_scores.scores[worker_key] == 1
-        ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+        assert worker_key in overlap_scores.scores, (
+            f"Worker {worker_key} not found in scores"
+        )
+        assert overlap_scores.scores[worker_key] == 1, (
+            f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+        )
     # get all blocks
     blocks = radix_tree.dump_tree_as_events()
     expected_blocks = num_threads + (prepopulate_worker_ids * num_threads)
-    assert (
-        len(blocks) == expected_blocks
-    ), f"Expected {expected_blocks} block events, got {len(blocks)}"
+    assert len(blocks) == expected_blocks, (
+        f"Expected {expected_blocks} block events, got {len(blocks)}"
+    )
     # remove single worker
     radix_tree.remove_worker(0)
     expected_blocks_after_removal = expected_blocks - (
         2 if prepopulate_worker_ids else 1
     )
     blocks_after_removal = radix_tree.dump_tree_as_events()
-    assert (
-        len(blocks_after_removal) == expected_blocks_after_removal
-    ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
+    assert len(blocks_after_removal) == expected_blocks_after_removal, (
+        f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
+    )

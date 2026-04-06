@@ -113,9 +113,9 @@ def start_sglang_backend():
 
 def validate_routed_experts(routed_experts):
     """Check that routed_experts is a base64-encoded string of int32 expert IDs."""
-    assert isinstance(
-        routed_experts, str
-    ), f"Expected base64 string, got {type(routed_experts)}"
+    assert isinstance(routed_experts, str), (
+        f"Expected base64 string, got {type(routed_experts)}"
+    )
     decoded = np.frombuffer(
         pybase64.b64decode(routed_experts.encode("utf-8")), dtype=np.int32
     )
@@ -145,9 +145,9 @@ def test_completions_non_streaming():
     assert len(data["choices"]) > 0
 
     nvext = data.get("nvext", {})
-    assert (
-        "routed_experts" in nvext
-    ), f"Expected routed_experts in nvext, got keys: {list(nvext.keys())}"
+    assert "routed_experts" in nvext, (
+        f"Expected routed_experts in nvext, got keys: {list(nvext.keys())}"
+    )
     validate_routed_experts(nvext["routed_experts"])
     print(f"  routed_experts shape: {len(nvext['routed_experts'])} layers")
     print("  PASSED")

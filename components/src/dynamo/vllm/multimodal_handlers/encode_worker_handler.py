@@ -138,9 +138,9 @@ class EncodeWorkerHandler:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
-        assert (
-            request.multimodal_inputs is not None
-        ), "multimodal_inputs must not be None for encode worker"
+        assert request.multimodal_inputs is not None, (
+            "multimodal_inputs must not be None for encode worker"
+        )
 
         # The following steps encode the requested image and provided useful embeddings.
         # 1. Open the image from the provided URL.
@@ -184,10 +184,11 @@ class EncodeWorkerHandler:
                         # keep track of key to avoid recompute of it
                         need_encode_indexes.append((idx, embedding_key))
 
-            with _nvtx.annotate(
-                "mm:enc:image_load", color="green"
-            ), time_and_log_code_section(
-                f"[ENCODE] request: {request_id} image loading"
+            with (
+                _nvtx.annotate("mm:enc:image_load", color="green"),
+                time_and_log_code_section(
+                    f"[ENCODE] request: {request_id} image loading"
+                ),
             ):
                 # Load and generate image tensors
                 image_tasks = []
@@ -221,19 +222,21 @@ class EncodeWorkerHandler:
                     )
 
             if loaded_images:
-                with _nvtx.annotate(
-                    "mm:enc:image_preprocess", color="yellow"
-                ), time_and_log_code_section(
-                    f"[ENCODE] request: {request_id} image processing"
+                with (
+                    _nvtx.annotate("mm:enc:image_preprocess", color="yellow"),
+                    time_and_log_code_section(
+                        f"[ENCODE] request: {request_id} image processing"
+                    ),
                 ):
                     image_embeds = await asyncio.to_thread(
                         self.image_processor, images=loaded_images, return_tensors="pt"
                     )
 
-                with _nvtx.annotate(
-                    "mm:enc:vision_encode", color="red"
-                ), time_and_log_code_section(
-                    f"[ENCODE] request: {request_id} encoding"
+                with (
+                    _nvtx.annotate("mm:enc:vision_encode", color="red"),
+                    time_and_log_code_section(
+                        f"[ENCODE] request: {request_id} encoding"
+                    ),
                 ):
                     # Encode the image embeddings using model-specific encoder
                     embeddings = await asyncio.to_thread(

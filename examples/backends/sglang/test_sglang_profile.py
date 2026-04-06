@@ -184,12 +184,12 @@ def test_profiling_endpoints():
             inference_url,
             json={
                 "model": MODEL,
-                "prompt": f"Hello, this is test request {i+1}. ",
+                "prompt": f"Hello, this is test request {i + 1}. ",
                 "max_tokens": 10,
                 "temperature": 0.8,
             },
         )
-        print(f"   Request {i+1}: {response.status_code}")
+        print(f"   Request {i + 1}: {response.status_code}")
         if response.status_code != 200:
             print(f"   Response: {response.text[:200]}")
         time.sleep(0.5)

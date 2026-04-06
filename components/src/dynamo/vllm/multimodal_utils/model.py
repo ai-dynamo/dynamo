@@ -180,9 +180,7 @@ def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Mo
             mm_encoder_only=True,
             enable_prefix_caching=False,
         )
-        return (
-            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
-        )
+        return vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
     return AutoModel.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
     )

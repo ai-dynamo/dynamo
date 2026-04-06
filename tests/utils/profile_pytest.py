@@ -802,8 +802,7 @@ def _find_min_vram(
     print(f"\n--- FIND MINIMUM {mode_label} (binary search) ---")
     print(f"  GPU total : {total_gib:.1f} GiB")
     print(
-        f"  GPU free  : {free_mib / 1024:.1f} GiB  "
-        f"(in use: {used_mib / 1024:.1f} GiB)"
+        f"  GPU free  : {free_mib / 1024:.1f} GiB  (in use: {used_mib / 1024:.1f} GiB)"
     )
     print(f"  Test      : {' '.join(pytest_args)}")
     if model_name:

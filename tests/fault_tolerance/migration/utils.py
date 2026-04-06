@@ -442,12 +442,12 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
             break
         time.sleep(0.005)
 
-    assert (
-        "Stream disconnected... recreating stream..." in log_content
-    ), "'Stream disconnected... recreating stream...' message not found in logs"
-    assert (
-        "Cannot recreate stream: " not in log_content
-    ), "'Cannot recreate stream: ...' error found in logs"
+    assert "Stream disconnected... recreating stream..." in log_content, (
+        "'Stream disconnected... recreating stream...' message not found in logs"
+    )
+    assert "Cannot recreate stream: " not in log_content, (
+        "'Cannot recreate stream: ...' error found in logs"
+    )
 
 
 def _parse_migration_metric(

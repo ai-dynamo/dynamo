@@ -322,17 +322,17 @@ class CUDAFaultInjector:
 
                     if not has_artifacts:
                         print(
-                            f"    ✓ Deployment spec verified clean after {(attempt+1)*5}s"
+                            f"    ✓ Deployment spec verified clean after {(attempt + 1) * 5}s"
                         )
                         spec_cleaned = True
                         break
                     else:
                         print(
-                            f"    ... {(attempt+1)*5}s: Artifacts: {', '.join(artifact_details)}"
+                            f"    ... {(attempt + 1) * 5}s: Artifacts: {', '.join(artifact_details)}"
                         )
 
                 except Exception as e:
-                    print(f"    ... {(attempt+1)*5}s: Error checking spec: {e}")
+                    print(f"    ... {(attempt + 1) * 5}s: Error checking spec: {e}")
 
             if not spec_cleaned:
                 print("    ⚠ Could not verify spec is clean, continuing anyway...")

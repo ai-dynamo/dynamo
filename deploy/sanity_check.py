@@ -1847,7 +1847,7 @@ class HuggingFaceInfo(NodeInfo):
         for i, model_info in enumerate(models):
             model_name, download_date, size_str = model_info
             model_node = NodeInfo(
-                label=f"Model {i+1}",
+                label=f"Model {i + 1}",
                 desc=f"{model_name}, downloaded={download_date}, size={size_str}",
                 status=NodeStatus.INFO,
             )

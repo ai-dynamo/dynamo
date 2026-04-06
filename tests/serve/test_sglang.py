@@ -418,9 +418,9 @@ def test_sglang_deployment(
     predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     config = dataclasses.replace(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

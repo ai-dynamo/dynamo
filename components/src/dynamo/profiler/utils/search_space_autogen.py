@@ -127,9 +127,9 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
-            assert (
-                model_info is not None
-            ), "model_info must be set when model is provided"
+            assert model_info is not None, (
+                "model_info must be set when model is provided"
+            )
 
             logger.info(
                 f"Auto-generating search space: {args.num_gpus_per_node}x {args.gpu_model} GPUs with {args.gpu_vram_mib} MiB VRAM per GPU"

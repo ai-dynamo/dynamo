@@ -1663,9 +1663,9 @@ def test_stream_interval_1(processor):
         if delta.get("content") is not None:
             seen_content = True
         if seen_content:
-            assert (
-                delta.get("reasoning_content") is None
-            ), "reasoning_content appeared after regular content started"
+            assert delta.get("reasoning_content") is None, (
+                "reasoning_content appeared after regular content started"
+            )
 
     for r in results:
         delta = r.get("delta", {})
@@ -1716,9 +1716,9 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
 
     # -- no <tool_call> markup should appear in content ---------------------
     all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
-    assert (
-        "<tool_call>" not in all_content
-    ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
+    assert "<tool_call>" not in all_content, (
+        f"Raw <tool_call> markup leaked into content: {all_content!r}"
+    )
     assert "</tool_call>" not in all_content
 
     # -- finish reason ------------------------------------------------------
@@ -1835,9 +1835,9 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
 
     # -- no <tool_call> markup should appear in content ---------------------
     all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
-    assert (
-        "<tool_call>" not in all_content
-    ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
+    assert "<tool_call>" not in all_content, (
+        f"Raw <tool_call> markup leaked into content: {all_content!r}"
+    )
     assert "</tool_call>" not in all_content
 
     # -- finish reason ------------------------------------------------------
@@ -1875,9 +1875,9 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
 
     # -- content must include the actual response ----------------------------
     all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
-    assert (
-        "The capital of Tuvalu is **Haka**." in all_content
-    ), f"Post-reasoning content was lost. Got content: {all_content!r}"
+    assert "The capital of Tuvalu is **Haka**." in all_content, (
+        f"Post-reasoning content was lost. Got content: {all_content!r}"
+    )
 
     # -- no tool calls should be present ------------------------------------
     tool_calls = _collect_tool_calls(results)

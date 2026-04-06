@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Base ArgGroup interface."""
+
 import argparse
 from abc import ABC, abstractmethod
 

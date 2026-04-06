@@ -278,9 +278,9 @@ class ChatProcessor:
                         if content:
                             # Extract only the new part from the full content
                             new_content = content[num_output_text_so_far:]
-                            full_response["choices"][0]["message"][
-                                "content"
-                            ] += new_content
+                            full_response["choices"][0]["message"]["content"] += (
+                                new_content
+                            )
                             num_output_text_so_far = len(content)
 
                     # Update finish reason if present

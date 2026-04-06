@@ -65,9 +65,9 @@ def sample_slots(
     """
     pool_size = len(pool)
     total_slots = num_requests * images_per_request
-    assert (
-        pool_size >= images_per_request
-    ), f"images-pool ({pool_size}) must be >= images-per-request ({images_per_request})"
+    assert pool_size >= images_per_request, (
+        f"images-pool ({pool_size}) must be >= images-per-request ({images_per_request})"
+    )
     assert total_slots >= pool_size, (
         f"total slots ({num_requests}×{images_per_request}={total_slots}) < "
         f"images-pool ({pool_size}). Increase --num-requests or --images-per-request, "

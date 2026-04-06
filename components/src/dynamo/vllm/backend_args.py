@@ -199,8 +199,7 @@ class DynamoVllmArgGroup(ArgGroup):
             default=6,
             type=int,
             help=(
-                "Number of context length sample points for decode sweep "
-                "(default: 6)."
+                "Number of context length sample points for decode sweep (default: 6)."
             ),
         )
         add_argument(
@@ -210,7 +209,7 @@ class DynamoVllmArgGroup(ArgGroup):
             default=6,
             type=int,
             help=(
-                "Number of batch size sample points per context length " "(default: 6)."
+                "Number of batch size sample points per context length (default: 6)."
             ),
         )
         add_argument(

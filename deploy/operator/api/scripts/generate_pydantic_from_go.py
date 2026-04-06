@@ -587,7 +587,7 @@ class GoToPydanticConverter:
                         comment_escaped = go_field.comment.replace('"', '\\"')
                         field_args.append(f'description="{comment_escaped}"')
 
-                    field_def += f' = Field({", ".join(field_args)})'
+                    field_def += f" = Field({', '.join(field_args)})"
 
                 lines.append(field_def)
 

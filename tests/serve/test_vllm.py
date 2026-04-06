@@ -1031,9 +1031,9 @@ def test_lora_aggregated_router(
     3. Loads the LoRA adapter on both workers via system API
     4. Runs inference with the LoRA model, verifying KV cache routing
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     minio_config: MinioLoraConfig = minio_lora_service
 
     # Create payloads that load LoRA on both workers and test inference

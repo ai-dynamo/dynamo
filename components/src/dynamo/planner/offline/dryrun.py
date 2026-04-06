@@ -130,9 +130,9 @@ def run_sla_planner_dryrun(
 
         # predict_load() returns Optional[float] values; in dryrun mode with
         # pre-loaded data the predictors always return valid floats.
-        assert (
-            _est_rr is not None and _est_isl is not None and _est_osl is not None
-        ), "predict_load() returned None in dryrun mode"
+        assert _est_rr is not None and _est_isl is not None and _est_osl is not None, (
+            "predict_load() returned None in dryrun mode"
+        )
 
         est_rr.append(_est_rr)
         est_isl.append(_est_isl)

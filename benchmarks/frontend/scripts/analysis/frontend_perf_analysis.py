@@ -200,9 +200,9 @@ def print_scalability_table(points: list[TestPoint]) -> None:
     concurrencies = sorted(set(p.concurrency for p in points))
 
     for isl in isls:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"ISL = {isl}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(
             f"{'Conc':>6} {'TTFT p50':>10} {'TTFT p95':>10} {'ITL p50':>10} "
             f"{'ITL p95':>10} {'Tput tok/s':>12} {'RPS':>8}"
@@ -225,9 +225,9 @@ def print_scalability_table(points: list[TestPoint]) -> None:
 
 def print_stage_waterfall(points: list[TestPoint]) -> None:
     """Print stage breakdown at each load level."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Pipeline Stage Breakdown (p50 seconds)")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     stages = ["preprocess", "route", "transport_roundtrip", "postprocess"]
     header = f"{'Key':>20}"
@@ -248,9 +248,9 @@ def print_stage_waterfall(points: list[TestPoint]) -> None:
 
 def print_transport_breakdown(points: list[TestPoint]) -> None:
     """Print transport overhead: queue_seconds vs roundtrip_ttft_seconds."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Transport Overhead (p50 seconds)")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"{'Key':>20} {'Queue (encode)':>16} {'RT TTFT (net)':>16} {'Inflight':>10}")
     print("-" * 70)
 
@@ -266,9 +266,9 @@ def print_transport_breakdown(points: list[TestPoint]) -> None:
 
 def print_tokio_health(points: list[TestPoint]) -> None:
     """Print tokio health indicators."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Tokio Health")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(
         f"{'Key':>20} {'Avg Poll ns':>12} {'Max Poll ns':>12} "
         f"{'Stalls':>8} {'Queue':>8} {'Yields':>8} {'Busy Avg':>10}"
@@ -329,12 +329,12 @@ def compare_runs(
         print("ERROR: No matching test points between baseline and candidate.")
         return
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print(
         f"A/B Comparison: {baseline_dir.name} (baseline) vs {candidate_dir.name} (candidate)"
     )
     print(f"Regression threshold: {threshold_pct}%")
-    print(f"{'='*100}")
+    print(f"{'=' * 100}")
     print(
         f"{'Key':>20} {'TTFT p50 B':>12} {'TTFT p50 C':>12} {'Delta%':>8} "
         f"{'ITL p50 B':>12} {'ITL p50 C':>12} {'Delta%':>8} {'Status':>12}"
@@ -400,9 +400,9 @@ def print_heatmap(points: list[TestPoint]) -> None:
 
     point_map = {(p.concurrency, p.isl): p for p in points}
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("TTFT p95 Heatmap (ms) — Concurrency x ISL")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Header
     header = f"{'Conc':>8}"

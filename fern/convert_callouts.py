@@ -368,9 +368,9 @@ def run_tests():
         "<Note>\nLine one.\nLine two.\n</Note>\n\nAfter.\n",
     )
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     return failed == 0
 

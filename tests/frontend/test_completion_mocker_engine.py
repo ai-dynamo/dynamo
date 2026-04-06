@@ -62,8 +62,7 @@ def test_completion_string_prompt(start_services_with_mocker) -> None:
     response = _send_completion_request(payload, frontend_port)
 
     assert response.status_code == 200, (
-        f"Completion request failed with status "
-        f"{response.status_code}: {response.text}"
+        f"Completion request failed with status {response.status_code}: {response.text}"
     )
 
 
@@ -94,8 +93,7 @@ def test_completion_single_element_array_prompt(start_services_with_mocker) -> N
     response = _send_completion_request(payload, frontend_port)
 
     assert response.status_code == 200, (
-        f"Completion request failed with status "
-        f"{response.status_code}: {response.text}"
+        f"Completion request failed with status {response.status_code}: {response.text}"
     )
 
 
@@ -115,13 +113,12 @@ def test_completion_multi_element_array_prompt(start_services_with_mocker) -> No
     response_data = response.json()
 
     assert response.status_code == 200, (
-        f"Completion request failed with status "
-        f"{response.status_code}: {response.text}"
+        f"Completion request failed with status {response.status_code}: {response.text}"
     )
 
     expected_choices = len(payload.get("prompt"))  # type: ignore
     choices = len(response_data.get("choices", []))
 
-    assert (
-        expected_choices == choices
-    ), f"Expected {expected_choices} choices, got {choices}"
+    assert expected_choices == choices, (
+        f"Expected {expected_choices} choices, got {choices}"
+    )

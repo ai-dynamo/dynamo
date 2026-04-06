@@ -757,9 +757,9 @@ class WorkflowMetricsUploader:
         # Identity & Context - container-specific fields only
         job_id = str(job_data["id"])
         job_name = job_data["name"]
-        container_data[
-            FIELD_ID
-        ] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        container_data[FIELD_ID] = (
+            f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        )
         container_data[FIELD_JOB_NAME] = str(job_name)
         container_data[FIELD_JOB_ID] = job_id
 
@@ -937,9 +937,9 @@ class WorkflowMetricsUploader:
                             if test_classname
                             else test_name
                         )
-                        test_data[
-                            FIELD_ID
-                        ] = f"github-test-{job_id}-{hash(test_full_name) & 0x7FFFFFFF}"  # Use hash for unique ID
+                        test_data[FIELD_ID] = (
+                            f"github-test-{job_id}-{hash(test_full_name) & 0x7FFFFFFF}"  # Use hash for unique ID
+                        )
                         test_data[FIELD_STEP_ID] = test_step_id
                         test_data[FIELD_JOB_ID] = job_id
 
@@ -991,9 +991,9 @@ class WorkflowMetricsUploader:
                             )
 
                         test_data[FIELD_TEST_STATUS] = test_status
-                        test_data[
-                            FIELD_STATUS
-                        ] = test_status  # Also set general status field
+                        test_data[FIELD_STATUS] = (
+                            test_status  # Also set general status field
+                        )
 
                         if error_msg:
                             test_data[FIELD_ERROR_MESSAGE] = error_msg[

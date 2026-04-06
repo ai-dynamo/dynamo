@@ -245,11 +245,12 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
         max_total_gpus=-1,  # Don't trigger discovery in __init__
     )
 
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesAPI"
-    ) as mock_kube_cls, patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
+    with (
+        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.scale_handler.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [
@@ -278,11 +279,12 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
         max_total_gpus=-1,  # Don't trigger discovery in __init__
     )
 
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesAPI"
-    ) as mock_kube_cls, patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
+    with (
+        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.scale_handler.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [

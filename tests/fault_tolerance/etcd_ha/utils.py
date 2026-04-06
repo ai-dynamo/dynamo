@@ -250,9 +250,9 @@ class EtcdCluster:
 
         # Set ETCDCTL_ENDPOINTS for etcdctl commands
         etcdctl_env = os.environ.copy()
-        etcdctl_env[
-            "ETCDCTL_ENDPOINTS"
-        ] = f"http://127.0.0.1:{healthy_replica.client_port}"
+        etcdctl_env["ETCDCTL_ENDPOINTS"] = (
+            f"http://127.0.0.1:{healthy_replica.client_port}"
+        )
         etcdctl_env["ETCDCTL_API"] = "3"
 
         # First, get member list to find the old member's ID

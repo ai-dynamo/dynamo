@@ -172,12 +172,12 @@ class KvConnectorLeader:
 
         # If A == B, and A == C, then B == C
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        assert len(cached_reqs.req_ids) == len(
-            cached_reqs.new_block_ids
-        ), "Number of cached req_ids doesn't match the number of cached new_block_ids"
-        assert len(cached_reqs.req_ids) == len(
-            cached_reqs.num_computed_tokens
-        ), "Number of cached req_ids doesn't match the number of cached num_computed_tokens"
+        assert len(cached_reqs.req_ids) == len(cached_reqs.new_block_ids), (
+            "Number of cached req_ids doesn't match the number of cached new_block_ids"
+        )
+        assert len(cached_reqs.req_ids) == len(cached_reqs.num_computed_tokens), (
+            "Number of cached req_ids doesn't match the number of cached num_computed_tokens"
+        )
 
         # In https://github.com/vllm-project/vllm/pull/26388/changes#diff-9eeca590fd99f15621897e559dba39b3ec4e7c2c65ec3c3229711689e008b5f4L732-L736,
         # new_token_ids was changed to return an empty list unless pipeline

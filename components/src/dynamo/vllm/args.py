@@ -234,9 +234,15 @@ def update_engine_config_with_dynamo(
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
+    # Set runner default only when the user did not explicitly pass --runner.
+    # vLLM 0.13+ renamed 'task' to 'runner'; None means the user did not
+    # specify a value, so we can safely apply the 'generate' default.
+    # Embedding models require --runner embed, which must not be overridden.
+    if hasattr(engine_config, "runner") and getattr(engine_config, "runner") is None:
+        engine_config.runner = "generate"
+        logger.debug(" engine_args.runner = generate (default)")
+
     defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
@@ -258,9 +264,9 @@ def update_engine_config_with_dynamo(
     if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
-            defaults[
-                "scheduler_cls"
-            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            defaults["scheduler_cls"] = (
+                "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            )
             logger.info(
                 "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
@@ -281,9 +287,9 @@ def update_engine_config_with_dynamo(
             )
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
-            defaults[
-                "scheduler_cls"
-            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            defaults["scheduler_cls"] = (
+                "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            )
             logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
         elif existing_cls is not None and "InstrumentedScheduler" not in str(
             existing_cls

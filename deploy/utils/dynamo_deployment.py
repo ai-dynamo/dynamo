@@ -46,7 +46,7 @@ def find_available_port(start_port: int = 8000) -> int:
         except OSError:
             continue
     raise RuntimeError(
-        f"No available ports found in range {start_port}-{start_port+99}"
+        f"No available ports found in range {start_port}-{start_port + 99}"
     )
 
 
@@ -120,9 +120,9 @@ class DynamoDeploymentClient:
         self.model_name = model_name
         self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
-        self.deployment_spec: Optional[
-            Dict[str, Any]
-        ] = None  # Will store the full deployment spec
+        self.deployment_spec: Optional[Dict[str, Any]] = (
+            None  # Will store the full deployment spec
+        )
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
         self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
@@ -236,9 +236,9 @@ class DynamoDeploymentClient:
             self.deployment_spec = deployment
 
         # Ensure deployment_spec is properly loaded
-        assert (
-            self.deployment_spec is not None
-        ), "Failed to load deployment specification"
+        assert self.deployment_spec is not None, (
+            "Failed to load deployment specification"
+        )
 
         # Extract component names (original case for label queries, lowercase for directories)
         self._original_components = list(
@@ -356,7 +356,7 @@ class DynamoDeploymentClient:
                         # Show first 2 components, abbreviate if more
                         components_str = ", ".join(not_ready_components[:2])
                         if len(not_ready_components) > 2:
-                            components_str += f" +{len(not_ready_components)-2} more"
+                            components_str += f" +{len(not_ready_components) - 2} more"
                         status_str = f"Waiting for: {components_str}"
                     else:
                         status_str = f"State: {current_state}"

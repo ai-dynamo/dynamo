@@ -245,9 +245,9 @@ def _test_router_two_routers(
                 consumer_names = [info.name for info in consumer_infos]
                 logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
 
-                assert (
-                    len(consumer_names) == 2
-                ), f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
+                assert len(consumer_names) == 2, (
+                    f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
+                )
                 logger.info("✓ Verified 2 durable consumers exist (one per router)")
 
                 # Kill the first router process
@@ -267,9 +267,9 @@ def _test_router_two_routers(
                     f"After killing router1, found {len(consumer_names)} consumers: {consumer_names}"
                 )
 
-                assert (
-                    len(consumer_names) == 1
-                ), f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
+                assert len(consumer_names) == 1, (
+                    f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
+                )
                 logger.info(
                     "✓ Verified 1 durable consumer remains after killing first router"
                 )
@@ -290,9 +290,9 @@ def _test_router_two_routers(
                     f"After killing router2, found {len(consumer_names)} consumers: {consumer_names}"
                 )
 
-                assert (
-                    len(consumer_names) == 0
-                ), f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
+                assert len(consumer_names) == 0, (
+                    f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
+                )
                 logger.info(
                     "✓ Verified 0 durable consumers remain after killing both routers"
                 )
@@ -502,9 +502,9 @@ def _test_router_query_instance_id(
                 logger.info("Sending request with query_instance_id annotation...")
 
                 async with session.post(url, json=annotated_payload) as response:
-                    assert (
-                        response.status == 200
-                    ), f"Expected 200 but got {response.status}"
+                    assert response.status == 200, (
+                        f"Expected 200 but got {response.status}"
+                    )
 
                     # Collect all response chunks
                     response_chunks = []
@@ -554,36 +554,36 @@ def _test_router_query_instance_id(
                             continue
 
                     # Validate worker_id info
-                    assert (
-                        worker_id_info is not None
-                    ), f"Missing worker_id in nvext. Response: {full_response}"
+                    assert worker_id_info is not None, (
+                        f"Missing worker_id in nvext. Response: {full_response}"
+                    )
 
                     # For aggregated mode, both prefill and decode should be the same
                     prefill_worker_id = worker_id_info.get("prefill_worker_id")
                     decode_worker_id = worker_id_info.get("decode_worker_id")
-                    assert (
-                        prefill_worker_id is not None
-                    ), f"Missing prefill_worker_id in worker_id: {worker_id_info}"
-                    assert (
-                        decode_worker_id is not None
-                    ), f"Missing decode_worker_id in worker_id: {worker_id_info}"
-                    assert (
-                        prefill_worker_id == decode_worker_id
-                    ), f"For aggregated mode, prefill and decode worker should be same: {worker_id_info}"
+                    assert prefill_worker_id is not None, (
+                        f"Missing prefill_worker_id in worker_id: {worker_id_info}"
+                    )
+                    assert decode_worker_id is not None, (
+                        f"Missing decode_worker_id in worker_id: {worker_id_info}"
+                    )
+                    assert prefill_worker_id == decode_worker_id, (
+                        f"For aggregated mode, prefill and decode worker should be same: {worker_id_info}"
+                    )
 
                     # Validate token_ids
-                    assert (
-                        token_list is not None
-                    ), f"Missing token_ids in nvext. Response: {full_response}"
-                    assert isinstance(
-                        token_list, list
-                    ), f"token_ids should be a list, got: {type(token_list)}"
-                    assert (
-                        len(token_list) > 0
-                    ), f"token_ids should not be empty: {token_list}"
-                    assert all(
-                        isinstance(token, int) for token in token_list
-                    ), f"All tokens should be integers: {token_list}"
+                    assert token_list is not None, (
+                        f"Missing token_ids in nvext. Response: {full_response}"
+                    )
+                    assert isinstance(token_list, list), (
+                        f"token_ids should be a list, got: {type(token_list)}"
+                    )
+                    assert len(token_list) > 0, (
+                        f"token_ids should not be empty: {token_list}"
+                    )
+                    assert all(isinstance(token, int) for token in token_list), (
+                        f"All tokens should be integers: {token_list}"
+                    )
 
                     logger.info(
                         f"Valid token_ids with {len(token_list)} tokens: {token_list[:10]}{'...' if len(token_list) > 10 else ''}"
@@ -745,7 +745,9 @@ def _test_router_overload_503(
                 assert (
                     "Service temporarily unavailable" in error_msg
                     or "All workers are busy" in error_msg
-                ), f"Expected service overload error message, got: {overload_response['body']}"
+                ), (
+                    f"Expected service overload error message, got: {overload_response['body']}"
+                )
                 return True
 
         # Run the test
@@ -777,17 +779,17 @@ async def _zmq_replay_cycle(
                     f"{indexer_url}/test/pause_listener",
                     json={"instance_id": wid, "dp_rank": dp_rank},
                 ) as resp:
-                    assert (
-                        resp.status == 200
-                    ), f"Pause {wid}:{dp_rank} failed: {await resp.text()}"
+                    assert resp.status == 200, (
+                        f"Pause {wid}:{dp_rank} failed: {await resp.text()}"
+                    )
 
     logger.info("Sending 10 requests while indexer listeners are paused")
     successful_gap = await send_requests_to_router(
         router, 10, f"{router_name} (indexer paused)", endpoint
     )
-    assert (
-        successful_gap == 10
-    ), f"Expected 10 requests while paused, got {successful_gap}"
+    assert successful_gap == 10, (
+        f"Expected 10 requests while paused, got {successful_gap}"
+    )
 
     async with aiohttp.ClientSession() as session:
         for wid in worker_ids:
@@ -796,17 +798,17 @@ async def _zmq_replay_cycle(
                     f"{indexer_url}/test/resume_listener",
                     json={"instance_id": wid, "dp_rank": dp_rank},
                 ) as resp:
-                    assert (
-                        resp.status == 200
-                    ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
+                    assert resp.status == 200, (
+                        f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
+                    )
 
     logger.info("Sending 5 requests after resume (triggers gap detection + replay)")
     successful_post = await send_requests_to_router(
         router, 5, f"{router_name} (post-resume)", endpoint
     )
-    assert (
-        successful_post == 5
-    ), f"Expected 5 requests post-resume, got {successful_post}"
+    assert successful_post == 5, (
+        f"Expected 5 requests post-resume, got {successful_post}"
+    )
     await asyncio.sleep(2)
 
 
@@ -939,9 +941,9 @@ def _test_router_indexers_sync(
         successful1 = await send_requests_to_router(
             kv_router1, 25, "Router 1", endpoint1
         )
-        assert (
-            successful1 == 25
-        ), f"Expected 25 successful requests to router 1, got {successful1}"
+        assert successful1 == 25, (
+            f"Expected 25 successful requests to router 1, got {successful1}"
+        )
 
         # NATS interruption test: stop NATS, send requests, restart
         if test_nats_interruption:
@@ -956,9 +958,9 @@ def _test_router_indexers_sync(
             successful_offline1 = await send_requests_to_router(
                 kv_router1, 10, "Router 1 (NATS down)", endpoint1
             )
-            assert (
-                successful_offline1 == 10
-            ), f"Expected 10 successful requests while NATS down, got {successful_offline1}"
+            assert successful_offline1 == 10, (
+                f"Expected 10 successful requests while NATS down, got {successful_offline1}"
+            )
 
             logger.info("Restarting NATS server (fresh state)")
             nats_server.start()
@@ -1038,9 +1040,9 @@ def _test_router_indexers_sync(
         successful2 = await send_requests_to_router(
             kv_router2, 25, "Router 2", endpoint2
         )
-        assert (
-            successful2 == 25
-        ), f"Expected 25 successful requests to router 2, got {successful2}"
+        assert successful2 == 25, (
+            f"Expected 25 successful requests to router 2, got {successful2}"
+        )
 
         # NATS interruption test: stop NATS again, send requests, restart, send more
         if test_nats_interruption:
@@ -1055,9 +1057,9 @@ def _test_router_indexers_sync(
             successful_offline2 = await send_requests_to_router(
                 kv_router2, 10, "Router 2 (NATS down)", endpoint2
             )
-            assert (
-                successful_offline2 == 10
-            ), f"Expected 10 successful requests while NATS down, got {successful_offline2}"
+            assert successful_offline2 == 10, (
+                f"Expected 10 successful requests while NATS down, got {successful_offline2}"
+            )
 
             logger.info("Restarting NATS server (fresh state)")
             nats_server.start()
@@ -1067,9 +1069,9 @@ def _test_router_indexers_sync(
             successful_recovery = await send_requests_to_router(
                 kv_router1, 5, "Router 1 (post-recovery)", endpoint1
             )
-            assert (
-                successful_recovery == 5
-            ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
+            assert successful_recovery == 5, (
+                f"Expected 5 successful requests post-recovery, got {successful_recovery}"
+            )
 
         if test_zmq_replay and standalone_indexer_url:
             await _zmq_replay_cycle(
@@ -1172,13 +1174,12 @@ def _test_router_indexers_sync(
             # /dump returns {model:tenant -> {"block_size": N, "events": [...]}}
             expected_key = f"{model_name}:default"
             assert expected_key in dump_a, (
-                f"Expected dump key '{expected_key}', "
-                f"got keys={list(dump_a.keys())}"
+                f"Expected dump key '{expected_key}', got keys={list(dump_a.keys())}"
             )
             for k, v in dump_a.items():
-                assert (
-                    isinstance(v, dict) and "events" in v
-                ), f"Dump key '{k}' returned unexpected format: {v}"
+                assert isinstance(v, dict) and "events" in v, (
+                    f"Dump key '{k}' returned unexpected format: {v}"
+                )
             sorted_standalone_a = sorted(dump_a[expected_key]["events"], key=sort_key)
             logger.info(f"Standalone Indexer A has {len(sorted_standalone_a)} events")
 
@@ -1190,9 +1191,9 @@ def _test_router_indexers_sync(
             if standalone_indexer_b_url:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(f"{standalone_indexer_b_url}/dump") as resp:
-                        assert (
-                            resp.status == 200
-                        ), f"GET /dump from Indexer B failed: {resp.status}"
+                        assert resp.status == 200, (
+                            f"GET /dump from Indexer B failed: {resp.status}"
+                        )
                         dump_b = await resp.json()
 
                 assert expected_key in dump_b, (
@@ -1213,8 +1214,7 @@ def _test_router_indexers_sync(
                     "Standalone B",
                 )
                 logger.info(
-                    "All 4 dumps match: Router 1, Router 2, "
-                    "Standalone A, Standalone B"
+                    "All 4 dumps match: Router 1, Router 2, Standalone A, Standalone B"
                 )
 
         # Verify NATS consumers are created (while routers are still alive)
@@ -1352,9 +1352,9 @@ def _test_router_decisions_disagg(
                     )
 
                     async with session.post(chat_url, json=payload) as response:
-                        assert (
-                            response.status == 200
-                        ), f"Request {i + 1} failed with status {response.status}"
+                        assert response.status == 200, (
+                            f"Request {i + 1} failed with status {response.status}"
+                        )
 
                         # Collect all chunks and look for nvext with worker_id and timing
                         prefill_wid = None
@@ -1406,9 +1406,9 @@ def _test_router_decisions_disagg(
                             decode_worker_ids.append(decode_wid)
 
                         # Verify timing info is present and valid
-                        assert (
-                            timing_info is not None
-                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        assert timing_info is not None, (
+                            f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        )
                         verify_response_timing(timing_info)
 
                     # Small delay between requests
@@ -1657,9 +1657,9 @@ def _test_router_decisions(
         f"got {req4['prefill_worker_id']}"
     )
     if test_dp_rank:
-        assert (
-            req4["prefill_dp_rank"] == dp_rank_a
-        ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
+        assert req4["prefill_dp_rank"] == dp_rank_a, (
+            f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
+        )
 
     # Verify request 5 routed to worker b (tiebreak by smaller tree)
     req5 = response_worker_ids[4]
@@ -1668,9 +1668,9 @@ def _test_router_decisions(
         f"got {req5['prefill_worker_id']}"
     )
     if test_dp_rank:
-        assert (
-            req5["prefill_dp_rank"] == dp_rank_b
-        ), f"Request 5: expected prefill_dp_rank={dp_rank_b}, got {req5['prefill_dp_rank']}"
+        assert req5["prefill_dp_rank"] == dp_rank_b, (
+            f"Request 5: expected prefill_dp_rank={dp_rank_b}, got {req5['prefill_dp_rank']}"
+        )
 
     logger.info(
         f"Response routing verified: req4 → worker_a (id={worker_a_id}, dp_rank={dp_rank_a}), "
@@ -1819,13 +1819,13 @@ def _test_busy_threshold_endpoint(
                 # Test 1: GET /busy_threshold - list all thresholds
                 logger.info("Testing GET /busy_threshold (list all)")
                 async with session.get(busy_threshold_url) as response:
-                    assert (
-                        response.status == 200
-                    ), f"GET /busy_threshold failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"GET /busy_threshold failed with status {response.status}"
+                    )
                     data = await response.json()
-                    assert (
-                        "thresholds" in data
-                    ), f"Expected 'thresholds' key in response: {data}"
+                    assert "thresholds" in data, (
+                        f"Expected 'thresholds' key in response: {data}"
+                    )
                     logger.info(f"GET /busy_threshold response: {data}")
 
                 # Test 2: POST /busy_threshold with model only (get thresholds)
@@ -1836,18 +1836,22 @@ def _test_busy_threshold_endpoint(
                     busy_threshold_url,
                     json={"model": model_name},
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (get) failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"POST /busy_threshold (get) failed with status {response.status}"
+                    )
                     data = await response.json()
                     assert (
                         data.get("active_decode_blocks_threshold")
                         == initial_active_decode_blocks_threshold
-                    ), f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
+                    ), (
+                        f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
+                    )
                     assert (
                         data.get("active_prefill_tokens_threshold")
                         == initial_active_prefill_tokens_threshold
-                    ), f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
+                    ), (
+                        f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
+                    )
                     logger.info(
                         f"POST /busy_threshold (get) response: status={response.status}, data={data}"
                     )
@@ -1864,17 +1868,19 @@ def _test_busy_threshold_endpoint(
                         "active_decode_blocks_threshold": test_active_decode_blocks_threshold,
                     },
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (set blocks) failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"POST /busy_threshold (set blocks) failed with status {response.status}"
+                    )
                     data = await response.json()
-                    assert (
-                        data.get("model") == model_name
-                    ), f"Expected model={model_name}: {data}"
+                    assert data.get("model") == model_name, (
+                        f"Expected model={model_name}: {data}"
+                    )
                     assert (
                         data.get("active_decode_blocks_threshold")
                         == test_active_decode_blocks_threshold
-                    ), f"Expected active_decode_blocks_threshold={test_active_decode_blocks_threshold}: {data}"
+                    ), (
+                        f"Expected active_decode_blocks_threshold={test_active_decode_blocks_threshold}: {data}"
+                    )
                     logger.info(f"POST /busy_threshold (set blocks) response: {data}")
 
                 # Test 4: POST /busy_threshold to set active_prefill_tokens_threshold only
@@ -1891,14 +1897,16 @@ def _test_busy_threshold_endpoint(
                         "active_prefill_tokens_threshold": test_active_prefill_tokens_threshold,
                     },
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (set tokens) failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"POST /busy_threshold (set tokens) failed with status {response.status}"
+                    )
                     data = await response.json()
                     assert (
                         data.get("active_prefill_tokens_threshold")
                         == test_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}: {data}"
+                    ), (
+                        f"Expected active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}: {data}"
+                    )
                     logger.info(f"POST /busy_threshold (set tokens) response: {data}")
 
                 # Test 5: POST /busy_threshold to set both thresholds
@@ -1918,42 +1926,50 @@ def _test_busy_threshold_endpoint(
                         "active_prefill_tokens_threshold": new_active_prefill_tokens_threshold,
                     },
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (set both) failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"POST /busy_threshold (set both) failed with status {response.status}"
+                    )
                     data = await response.json()
                     assert (
                         data.get("active_decode_blocks_threshold")
                         == new_active_decode_blocks_threshold
-                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    ), (
+                        f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    )
                     assert (
                         data.get("active_prefill_tokens_threshold")
                         == new_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    ), (
+                        f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    )
                     logger.info(f"POST /busy_threshold (set both) response: {data}")
 
                 # Test 6: GET /busy_threshold - verify thresholds appear in list
                 logger.info("Testing GET /busy_threshold to verify thresholds in list")
                 async with session.get(busy_threshold_url) as response:
-                    assert (
-                        response.status == 200
-                    ), f"GET /busy_threshold failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"GET /busy_threshold failed with status {response.status}"
+                    )
                     data = await response.json()
                     thresholds = data.get("thresholds", [])
                     model_entry = next(
                         (t for t in thresholds if t["model"] == model_name), None
                     )
-                    assert (
-                        model_entry is not None
-                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert model_entry is not None, (
+                        f"Expected model '{model_name}' in thresholds: {data}"
+                    )
                     assert (
                         model_entry.get("active_decode_blocks_threshold")
                         == new_active_decode_blocks_threshold
-                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    ), (
+                        f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    )
                     assert (
                         model_entry.get("active_prefill_tokens_threshold")
                         == new_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    ), (
+                        f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    )
                     logger.info(f"GET /busy_threshold (after set) response: {data}")
 
                 # Test 7: Invalid active_decode_blocks_threshold value (should fail validation)
@@ -1964,9 +1980,9 @@ def _test_busy_threshold_endpoint(
                     busy_threshold_url,
                     json={"model": model_name, "active_decode_blocks_threshold": 1.5},
                 ) as response:
-                    assert (
-                        response.status == 400
-                    ), f"Expected 400 for invalid active_decode_blocks_threshold, got {response.status}"
+                    assert response.status == 400, (
+                        f"Expected 400 for invalid active_decode_blocks_threshold, got {response.status}"
+                    )
                     data = await response.json()
                     logger.info(
                         f"POST /busy_threshold (invalid blocks) response: {data}"
@@ -1980,13 +1996,13 @@ def _test_busy_threshold_endpoint(
                     busy_threshold_url,
                     json={"model": model_name, "active_prefill_tokens_threshold": 5000},
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
+                    assert response.status == 200, (
+                        f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
+                    )
                     data = await response.json()
-                    assert (
-                        data.get("active_prefill_tokens_threshold") == 5000
-                    ), f"Expected active_prefill_tokens_threshold=5000: {data}"
+                    assert data.get("active_prefill_tokens_threshold") == 5000, (
+                        f"Expected active_prefill_tokens_threshold=5000: {data}"
+                    )
                     logger.info(
                         f"POST /busy_threshold (large tokens threshold) response: {data}"
                     )
@@ -2001,9 +2017,9 @@ def _test_busy_threshold_endpoint(
                     busy_threshold_url,
                     json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
                 ) as response:
-                    assert (
-                        response.status == 422
-                    ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                    assert response.status == 422, (
+                        f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                    )
                     data = await response.json()
                     logger.info(
                         f"POST /busy_threshold (invalid tokens) response: {data}"
@@ -2021,14 +2037,16 @@ def _test_busy_threshold_endpoint(
                         "active_prefill_tokens_threshold_frac": test_frac_threshold,
                     },
                 ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    )
                     data = await response.json()
                     assert (
                         data.get("active_prefill_tokens_threshold_frac")
                         == test_frac_threshold
-                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    ), (
+                        f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    )
                     logger.info(f"POST /busy_threshold (set frac) response: {data}")
 
                 # Test 11: Verify frac threshold appears in GET /busy_threshold list
@@ -2036,21 +2054,23 @@ def _test_busy_threshold_endpoint(
                     "Testing GET /busy_threshold to verify frac threshold in list"
                 )
                 async with session.get(busy_threshold_url) as response:
-                    assert (
-                        response.status == 200
-                    ), f"GET /busy_threshold failed with status {response.status}"
+                    assert response.status == 200, (
+                        f"GET /busy_threshold failed with status {response.status}"
+                    )
                     data = await response.json()
                     thresholds = data.get("thresholds", [])
                     model_entry = next(
                         (t for t in thresholds if t["model"] == model_name), None
                     )
-                    assert (
-                        model_entry is not None
-                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert model_entry is not None, (
+                        f"Expected model '{model_name}' in thresholds: {data}"
+                    )
                     assert (
                         model_entry.get("active_prefill_tokens_threshold_frac")
                         == test_frac_threshold
-                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    ), (
+                        f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    )
                     logger.info(
                         f"GET /busy_threshold (after set frac) response: {data}"
                     )
@@ -2177,12 +2197,12 @@ def _test_disagg_direct_mode(
                                 f"Direct-mode response (attempt {attempt + 1}): "
                                 f"status=200, model={data.get('model')}"
                             )
-                            assert (
-                                "choices" in data
-                            ), "Expected 'choices' in response data"
-                            assert (
-                                len(data["choices"]) > 0
-                            ), "Expected at least one choice in response"
+                            assert "choices" in data, (
+                                "Expected 'choices' in response data"
+                            )
+                            assert len(data["choices"]) > 0, (
+                                "Expected at least one choice in response"
+                            )
                             break
                         else:
                             logger.info(

@@ -86,9 +86,9 @@ def validate_chat_response(
     assert "message" in choice, f"Choice missing 'message' field: {choice}"
 
     message = choice["message"]
-    assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
+    assert message.get("role") == "assistant", (
+        f"Expected role 'assistant', got '{message.get('role')}'"
+    )
     assert "content" in message, f"Message missing 'content' field: {message}"
 
     content = message["content"]
@@ -98,9 +98,9 @@ def validate_chat_response(
     )
 
     assert "model" in data, f"Response missing 'model' field: {data}"
-    assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
+    assert data["model"] == expected_model, (
+        f"Expected model '{expected_model}', got '{data['model']}'"
+    )
 
     logger.info(
         f"Response validation passed: model={data['model']}, "
@@ -169,9 +169,9 @@ async def test_deployment(
         frontend_pods = deployment.get_pods([deployment.frontend_service_name])
         frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
 
-        assert (
-            len(frontend_pod_list) > 0
-        ), f"No frontend pods found for deployment {deployment_spec.name}"
+        assert len(frontend_pod_list) > 0, (
+            f"No frontend pods found for deployment {deployment_spec.name}"
+        )
 
         frontend_pod = frontend_pod_list[0]
         logger.info(f"Found frontend pod: {frontend_pod.name}")
@@ -179,9 +179,9 @@ async def test_deployment(
         # Setup port forwarding
         port = deployment_spec.port
         port_forward = deployment.port_forward(frontend_pod, port)
-        assert (
-            port_forward is not None
-        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
+        assert port_forward is not None, (
+            f"Failed to establish port forward to {frontend_pod.name}:{port}"
+        )
 
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info(f"Port forwarding established: {base_url}")
@@ -196,9 +196,9 @@ async def test_deployment(
             max_attempts=30,
         )
 
-        assert (
-            model_ready
-        ), f"Model '{model}' did not become available within the timeout period"
+        assert model_ready, (
+            f"Model '{model}' did not become available within the timeout period"
+        )
 
         # Send test request
         url = f"{base_url}{endpoint}"
@@ -258,9 +258,9 @@ async def test_gaie_deployment(
     httproute_path = os.path.join(gaie_dir, "http-route.yaml")
 
     assert os.path.exists(disagg_path), f"disagg.yaml not found: {disagg_path}"
-    assert os.path.exists(
-        httproute_path
-    ), f"http-route.yaml not found: {httproute_path}"
+    assert os.path.exists(httproute_path), (
+        f"http-route.yaml not found: {httproute_path}"
+    )
 
     deployment_spec = DeploymentSpec(disagg_path)
     deployment_spec.namespace = namespace
@@ -364,9 +364,9 @@ async def test_gaie_deployment(
         gateway_svcs = list(
             kr8s.get("services", "inference-gateway", namespace=namespace)
         )
-        assert (
-            len(gateway_svcs) > 0
-        ), f"inference-gateway service not found in namespace {namespace}"
+        assert len(gateway_svcs) > 0, (
+            f"inference-gateway service not found in namespace {namespace}"
+        )
         gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
         gateway_pf.start()
         time.sleep(2)

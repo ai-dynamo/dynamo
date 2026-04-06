@@ -313,9 +313,9 @@ class GMSWorker(Worker):
             else:
                 # Normal case: KV cache was allocated via GMS, reconnect + reallocate + remap
                 kv_cache_manager = get_gms_client_memory_manager("kv_cache")
-                assert (
-                    kv_cache_manager is not None
-                ), "GMS KV cache client is not initialized"
+                assert kv_cache_manager is not None, (
+                    "GMS KV cache client is not initialized"
+                )
                 assert kv_cache_manager.is_unmapped, "GMS KV cache is not unmapped"
                 kv_cache_manager.connect(RequestedLockType.RW)
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")

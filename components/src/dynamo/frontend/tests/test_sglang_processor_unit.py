@@ -9,7 +9,6 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
-
 import pytest
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
@@ -587,9 +586,9 @@ class TestPreprocessChatRequest:
             exclude_tools_when_tool_choice_none=False,
         )
         # With flag off, both should have similar token counts (tools in template)
-        assert len(with_none.prompt_token_ids) == len(
-            with_auto.prompt_token_ids
-        ), "tool_choice=none with flag off should keep tools in template"
+        assert len(with_none.prompt_token_ids) == len(with_auto.prompt_token_ids), (
+            "tool_choice=none with flag off should keep tools in template"
+        )
 
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""

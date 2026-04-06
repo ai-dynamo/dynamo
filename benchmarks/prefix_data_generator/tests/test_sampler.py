@@ -34,9 +34,9 @@ def test_empirical_sampler_distribution():
 
     # Verify each number (1, 2, 3) appears between 300 and 400 times
     for value in [1, 2, 3]:
-        assert (
-            300 <= counts[value] <= 400
-        ), f"Value {value} appeared {counts[value]} times, expected 300-400 times"
+        assert 300 <= counts[value] <= 400, (
+            f"Value {value} appeared {counts[value]} times, expected 300-400 times"
+        )
 
     # Verify no other values appear in the samples
     assert set(counts.keys()) == {

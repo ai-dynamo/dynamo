@@ -33,9 +33,7 @@ def install_graceful_shutdown(
     """
     deferred_handlers: DefaultDict[
         int, list[tuple[SignalCallback, tuple[Any, ...]]]
-    ] = defaultdict(
-        list
-    )  # type: ignore[assignment]
+    ] = defaultdict(list)  # type: ignore[assignment]
 
     shutdown_started = False
     shutdown_signum: int | None = None

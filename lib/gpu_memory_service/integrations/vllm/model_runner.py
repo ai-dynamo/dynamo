@@ -92,12 +92,12 @@ class GMSShadowModelRunner(GPUModelRunner):
         dying engine's abort() releases the lock and frees memory before we
         can connect.
         """
-        assert hasattr(
-            self, "_shadow_kv_cache_config"
-        ), "_shadow_kv_cache_config not set — was enter_shadow_init() called?"
-        assert hasattr(
-            self, "_shadow_kernel_block_sizes"
-        ), "_shadow_kernel_block_sizes not set — was enter_shadow_init() called?"
+        assert hasattr(self, "_shadow_kv_cache_config"), (
+            "_shadow_kv_cache_config not set — was enter_shadow_init() called?"
+        )
+        assert hasattr(self, "_shadow_kernel_block_sizes"), (
+            "_shadow_kernel_block_sizes not set — was enter_shadow_init() called?"
+        )
 
         config = self._shadow_kv_cache_config
 

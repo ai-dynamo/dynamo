@@ -328,9 +328,9 @@ class Publisher:
 
         # Needed by the events and metrics publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
-        self.kv_event_publishers: Optional[
-            Dict[int, KvEventPublisher]
-        ] = None  # One per attention_dp_rank
+        self.kv_event_publishers: Optional[Dict[int, KvEventPublisher]] = (
+            None  # One per attention_dp_rank
+        )
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None

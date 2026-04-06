@@ -174,8 +174,7 @@ def resolve_worker_info(
             logger.info(f"Using model name from config: {model_name}")
         else:
             raise ValueError(
-                "Could not determine model name. "
-                "Please set model_name in the config."
+                "Could not determine model name. Please set model_name in the config."
             )
 
     prefill_info.model_name = model_name

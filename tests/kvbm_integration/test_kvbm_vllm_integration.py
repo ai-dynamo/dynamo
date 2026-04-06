@@ -205,7 +205,7 @@ def assumes(
 
 
 def _assert_interface(
-    checks: list[tuple[Any, str] | tuple[Any, str, dict[str, Any]]]
+    checks: list[tuple[Any, str] | tuple[Any, str, dict[str, Any]]],
 ) -> None:
     """Run assumes() for each (obj, attr) or (obj, attr, kwargs); pytest.fail if any fail."""
     errors = []

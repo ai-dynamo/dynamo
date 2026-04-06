@@ -168,9 +168,9 @@ class PrefillNpz(NpzFile):
         for col in self.COLUMNS:
             # each row should include all the pre_swept_configs
             if col not in self.data.keys():
-                assert (
-                    configs is not None and col in configs
-                ), f"Column {col} not found in pre_swept_configs: {configs}"
+                assert configs is not None and col in configs, (
+                    f"Column {col} not found in pre_swept_configs: {configs}"
+                )
                 self.data[col] = np.array([configs[col]])
                 updated = True
         if updated:
@@ -203,9 +203,9 @@ class DecodeNpz(NpzFile):
         updated = False
         for col in self.COLUMNS:
             if col not in self.data.keys():
-                assert (
-                    configs is not None and col in configs
-                ), f"Column {col} not found in pre_swept_configs: {configs}"
+                assert configs is not None and col in configs, (
+                    f"Column {col} not found in pre_swept_configs: {configs}"
+                )
                 self.data[col] = np.array([configs[col]])
                 updated = True
         if updated:
@@ -233,7 +233,7 @@ def merge_raw_data(raw_data_npz_path, configs, mode):
         raise ValueError(f"Invalid mode: {mode}")
 
     # merge the npz file
-    merged_npz_path = f'pre_swept_results/{configs["gpu_type"]}/{configs["framework"]}/{configs["model"]}/{mode}.npz'
+    merged_npz_path = f"pre_swept_results/{configs['gpu_type']}/{configs['framework']}/{configs['model']}/{mode}.npz"
     os.makedirs(os.path.dirname(merged_npz_path), exist_ok=True)
     if not os.path.exists(merged_npz_path):
         # copy the raw data npz file to the merged npz file and add one dimension.

@@ -69,13 +69,13 @@ class RequestHandlerConfig:
     publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
     encode_client: Optional[Client] = None
-    multimodal_processor: Optional[
-        MultimodalRequestProcessor
-    ] = None  # for multimodal support
+    multimodal_processor: Optional[MultimodalRequestProcessor] = (
+        None  # for multimodal support
+    )
     connector: Optional[Connector] = None
-    runtime: Optional[
-        DistributedRuntime
-    ] = None  # DistributedRuntime reference for graceful shutdown
+    runtime: Optional[DistributedRuntime] = (
+        None  # DistributedRuntime reference for graceful shutdown
+    )
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None

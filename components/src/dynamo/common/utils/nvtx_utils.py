@@ -31,6 +31,7 @@ objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
 or domain cache lookups on the hot path.
 """
+
 import functools
 import inspect
 import os

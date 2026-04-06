@@ -33,9 +33,9 @@ class NvCreateAudioSpeechRequest(BaseModel):
     voice: Optional[str] = None
     """Voice/speaker name (e.g., 'vivian', 'ryan', 'aiden')."""
 
-    response_format: Optional[
-        Literal["wav", "pcm", "flac", "mp3", "aac", "opus"]
-    ] = "wav"
+    response_format: Optional[Literal["wav", "pcm", "flac", "mp3", "aac", "opus"]] = (
+        "wav"
+    )
     """Output format."""
 
     speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)

@@ -280,7 +280,7 @@ def _evaluate_state_from_json_payloads(payload: Mapping[str, Any]) -> dict[str, 
 
 
 def _evaluate_agg_state_from_json_payloads(
-    payload: Mapping[str, Any]
+    payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     return _evaluate_agg_state(
         state=payload["state"],

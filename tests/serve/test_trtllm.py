@@ -45,9 +45,9 @@ class VideoGenerationPayload(BasePayload):
             f"Video generation not completed. Status: {result.get('status')}, "
             f"Error: {result.get('error', 'none')}"
         )
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert "data" in result, (
+            f"Missing 'data' in response. Keys: {list(result.keys())}"
+        )
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
         if "url" in entry:
@@ -437,9 +437,9 @@ def test_deployment(
     """
     Test dynamo deployments with different configurations.
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
         trtllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port

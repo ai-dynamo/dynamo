@@ -121,13 +121,13 @@ class ChatPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert (
-            "choices" in result
-        ), f"Missing 'choices' in response. Response keys: {list(result.keys())}"
+        assert "choices" in result, (
+            f"Missing 'choices' in response. Response keys: {list(result.keys())}"
+        )
         assert len(result["choices"]) > 0, "Empty choices in response"
-        assert (
-            "message" in result["choices"][0]
-        ), f"Missing 'message' in first choice. Choice keys: {list(result['choices'][0].keys())}"
+        assert "message" in result["choices"][0], (
+            f"Missing 'message' in first choice. Choice keys: {list(result['choices'][0].keys())}"
+        )
 
         # Check for content in all possible fields where parsers might put output:
         # 1. content - standard message content
@@ -188,44 +188,44 @@ class ChatPayloadWithLogprobs(ChatPayload):
                 for item in content_logprobs:
                     assert "token" in item, "Missing 'token' in logprobs content"
                     assert "logprob" in item, "Missing 'logprob' in logprobs content"
-                    assert (
-                        "top_logprobs" in item
-                    ), "Missing 'top_logprobs' in logprobs content"
+                    assert "top_logprobs" in item, (
+                        "Missing 'top_logprobs' in logprobs content"
+                    )
 
                     # Sanity check: logprob should be valid (not nan/inf/positive)
                     logprob_val = item["logprob"]
                     assert not math.isnan(logprob_val), "logprob is NaN"
                     assert not math.isinf(logprob_val), "logprob is infinite"
-                    assert (
-                        logprob_val <= 0
-                    ), f"logprob should be <= 0, got {logprob_val}"
+                    assert logprob_val <= 0, (
+                        f"logprob should be <= 0, got {logprob_val}"
+                    )
 
                     # Validate bytes field is populated for the selected token
                     assert "bytes" in item, "Missing 'bytes' in logprobs content item"
                     token_str = item["token"]
                     if token_str:
-                        assert (
-                            item["bytes"] is not None
-                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
-                        assert isinstance(
-                            item["bytes"], list
-                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+                        assert item["bytes"] is not None, (
+                            f"'bytes' should be populated for non-empty token {token_str!r}"
+                        )
+                        assert isinstance(item["bytes"], list), (
+                            f"'bytes' should be a list, got {type(item['bytes'])}"
+                        )
 
                     # Validate top_logprobs entries have token, logprob, and bytes
                     for top_lp in item["top_logprobs"]:
-                        assert (
-                            "token" in top_lp
-                        ), "Missing 'token' in top_logprobs entry"
-                        assert (
-                            "logprob" in top_lp
-                        ), "Missing 'logprob' in top_logprobs entry"
-                        assert (
-                            "bytes" in top_lp
-                        ), "Missing 'bytes' in top_logprobs entry"
+                        assert "token" in top_lp, (
+                            "Missing 'token' in top_logprobs entry"
+                        )
+                        assert "logprob" in top_lp, (
+                            "Missing 'logprob' in top_logprobs entry"
+                        )
+                        assert "bytes" in top_lp, (
+                            "Missing 'bytes' in top_logprobs entry"
+                        )
                         if top_lp["token"]:
-                            assert (
-                                top_lp["bytes"] is not None
-                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            assert top_lp["bytes"] is not None, (
+                                f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            )
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
@@ -269,9 +269,9 @@ class ToolCallingChatPayload(ChatPayload):
         # If expected tool name is provided, validate it
         if self.expected_tool_name:
             tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
-            assert (
-                self.expected_tool_name in tool_names
-            ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
+            assert self.expected_tool_name in tool_names, (
+                f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
+            )
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
 
 
@@ -483,31 +483,31 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
 
         logprobs_data = choice["logprobs"]
         if logprobs_data is not None:
-            assert (
-                "token_logprobs" in logprobs_data
-            ), "Missing 'token_logprobs' in logprobs"
+            assert "token_logprobs" in logprobs_data, (
+                "Missing 'token_logprobs' in logprobs"
+            )
             assert "tokens" in logprobs_data, "Missing 'tokens' in logprobs"
 
             token_logprobs = logprobs_data["token_logprobs"]
             tokens = logprobs_data["tokens"]
 
             if token_logprobs:
-                assert len(token_logprobs) == len(
-                    tokens
-                ), "Mismatch between token_logprobs and tokens length"
+                assert len(token_logprobs) == len(tokens), (
+                    "Mismatch between token_logprobs and tokens length"
+                )
 
                 # Sanity check: each logprob should be valid (not nan/inf/positive)
                 for i, logprob_val in enumerate(token_logprobs):
                     if logprob_val is not None:  # First token can be None
-                        assert not math.isnan(
-                            logprob_val
-                        ), f"logprob at index {i} is NaN"
-                        assert not math.isinf(
-                            logprob_val
-                        ), f"logprob at index {i} is infinite"
-                        assert (
-                            logprob_val <= 0
-                        ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+                        assert not math.isnan(logprob_val), (
+                            f"logprob at index {i} is NaN"
+                        )
+                        assert not math.isinf(logprob_val), (
+                            f"logprob at index {i} is infinite"
+                        )
+                        assert logprob_val <= 0, (
+                            f"logprob at index {i} should be <= 0, got {logprob_val}"
+                        )
 
                 # Validate top_logprobs entries have token, logprob, and bytes when present
                 top_logprobs_list = logprobs_data.get("top_logprobs", [])
@@ -515,19 +515,19 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                     if not token_top_lps:
                         continue
                     for top_lp in token_top_lps:
-                        assert (
-                            "token" in top_lp
-                        ), f"Missing 'token' in top_logprobs[{i}] entry"
-                        assert (
-                            "logprob" in top_lp
-                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
-                        assert (
-                            "bytes" in top_lp
-                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
+                        assert "token" in top_lp, (
+                            f"Missing 'token' in top_logprobs[{i}] entry"
+                        )
+                        assert "logprob" in top_lp, (
+                            f"Missing 'logprob' in top_logprobs[{i}] entry"
+                        )
+                        assert "bytes" in top_lp, (
+                            f"Missing 'bytes' in top_logprobs[{i}] entry"
+                        )
                         if top_lp["token"]:
-                            assert (
-                                top_lp["bytes"] is not None
-                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            assert top_lp["bytes"] is not None, (
+                                f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            )
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
@@ -551,32 +551,32 @@ class ResponsesPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert (
-            result.get("object") == "response"
-        ), f"Expected object='response', got {result.get('object')}"
-        assert result.get("id", "").startswith(
-            "resp_"
-        ), f"Expected id to start with 'resp_', got {result.get('id')}"
-        assert (
-            result.get("status") == "completed"
-        ), f"Expected status='completed', got {result.get('status')}"
+        assert result.get("object") == "response", (
+            f"Expected object='response', got {result.get('object')}"
+        )
+        assert result.get("id", "").startswith("resp_"), (
+            f"Expected id to start with 'resp_', got {result.get('id')}"
+        )
+        assert result.get("status") == "completed", (
+            f"Expected status='completed', got {result.get('status')}"
+        )
 
         output = result.get("output", [])
         assert len(output) > 0, "Response output is empty"
 
         msg = output[0]
-        assert (
-            msg.get("type") == "message"
-        ), f"Expected output[0].type='message', got {msg.get('type')}"
-        assert (
-            msg.get("role") == "assistant"
-        ), f"Expected role='assistant', got {msg.get('role')}"
+        assert msg.get("type") == "message", (
+            f"Expected output[0].type='message', got {msg.get('type')}"
+        )
+        assert msg.get("role") == "assistant", (
+            f"Expected role='assistant', got {msg.get('role')}"
+        )
 
         content_parts = msg.get("content", [])
         assert len(content_parts) > 0, "Message content is empty"
-        assert (
-            content_parts[0].get("type") == "output_text"
-        ), f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
+        assert content_parts[0].get("type") == "output_text", (
+            f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
+        )
 
         return content_parts[0].get("text", "")
 
@@ -619,23 +619,23 @@ class ResponsesStreamPayload(BasePayload):
 
         # Validate lifecycle event ordering
         assert len(event_types) >= 2, f"Too few events: {event_types}"
-        assert (
-            event_types[0] == "response.created"
-        ), f"First event should be response.created, got {event_types[0]}"
-        assert (
-            event_types[1] == "response.in_progress"
-        ), f"Second event should be response.in_progress, got {event_types[1]}"
+        assert event_types[0] == "response.created", (
+            f"First event should be response.created, got {event_types[0]}"
+        )
+        assert event_types[1] == "response.in_progress", (
+            f"Second event should be response.in_progress, got {event_types[1]}"
+        )
 
         non_done = [e for e in event_types if e != "done"]
-        assert (
-            non_done[-1] == "response.completed"
-        ), f"Last real event should be response.completed, got {non_done[-1]}"
+        assert non_done[-1] == "response.completed", (
+            f"Last real event should be response.completed, got {non_done[-1]}"
+        )
 
         # Validate text content events
         assert "response.output_item.added" in event_types, "Missing output_item.added"
-        assert (
-            "response.content_part.added" in event_types
-        ), "Missing content_part.added"
+        assert "response.content_part.added" in event_types, (
+            "Missing content_part.added"
+        )
         assert "response.output_text.delta" in event_types, "Missing output_text.delta"
         assert "response.output_text.done" in event_types, "Missing output_text.done"
         assert "response.content_part.done" in event_types, "Missing content_part.done"
@@ -644,13 +644,13 @@ class ResponsesStreamPayload(BasePayload):
         # Verify text deltas concatenate to the final text
         deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
         done_events = [e for e in events if e[0] == "response.output_text.done"]
-        assert (
-            len(done_events) == 1
-        ), f"Expected 1 output_text.done, got {len(done_events)}"
+        assert len(done_events) == 1, (
+            f"Expected 1 output_text.done, got {len(done_events)}"
+        )
         full_text = "".join(deltas)
-        assert (
-            done_events[0][1]["text"] == full_text
-        ), "Concatenated deltas don't match output_text.done text"
+        assert done_events[0][1]["text"] == full_text, (
+            "Concatenated deltas don't match output_text.done text"
+        )
 
         return full_text
 
@@ -670,15 +670,15 @@ class AnthropicMessagesPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert (
-            result.get("type") == "message"
-        ), f"Expected type='message', got {result.get('type')}"
-        assert result.get("id", "").startswith(
-            "msg_"
-        ), f"Expected id to start with 'msg_', got {result.get('id')}"
-        assert (
-            result.get("role") == "assistant"
-        ), f"Expected role='assistant', got {result.get('role')}"
+        assert result.get("type") == "message", (
+            f"Expected type='message', got {result.get('type')}"
+        )
+        assert result.get("id", "").startswith("msg_"), (
+            f"Expected id to start with 'msg_', got {result.get('id')}"
+        )
+        assert result.get("role") == "assistant", (
+            f"Expected role='assistant', got {result.get('role')}"
+        )
         assert result.get("stop_reason") in (
             "end_turn",
             "max_tokens",
@@ -688,9 +688,9 @@ class AnthropicMessagesPayload(BasePayload):
 
         content = result.get("content", [])
         assert len(content) > 0, "Response content is empty"
-        assert (
-            content[0].get("type") == "text"
-        ), f"Expected content[0].type='text', got {content[0].get('type')}"
+        assert content[0].get("type") == "text", (
+            f"Expected content[0].type='text', got {content[0].get('type')}"
+        )
 
         usage = result.get("usage", {})
         assert "input_tokens" in usage, "Missing input_tokens in usage"
@@ -734,20 +734,20 @@ class AnthropicMessagesStreamPayload(BasePayload):
 
         # Validate lifecycle event ordering
         assert len(event_types) >= 3, f"Too few events: {event_types}"
-        assert (
-            event_types[0] == "message_start"
-        ), f"First event should be message_start, got {event_types[0]}"
-        assert (
-            event_types[-1] == "message_stop"
-        ), f"Last event should be message_stop, got {event_types[-1]}"
+        assert event_types[0] == "message_start", (
+            f"First event should be message_start, got {event_types[0]}"
+        )
+        assert event_types[-1] == "message_stop", (
+            f"Last event should be message_stop, got {event_types[-1]}"
+        )
 
         # Validate message_start structure
         msg_start = events[0][1]
         assert msg_start.get("type") == "message_start", "message_start missing type"
         message = msg_start.get("message", {})
-        assert message.get("id", "").startswith(
-            "msg_"
-        ), "message id should start with msg_"
+        assert message.get("id", "").startswith("msg_"), (
+            "message id should start with msg_"
+        )
         assert message.get("role") == "assistant", "message role should be assistant"
 
         # Validate required event types
@@ -758,9 +758,9 @@ class AnthropicMessagesStreamPayload(BasePayload):
 
         # Validate message_delta has stop_reason
         delta_events = [e for e in events if e[0] == "message_delta"]
-        assert (
-            len(delta_events) == 1
-        ), f"Expected 1 message_delta, got {len(delta_events)}"
+        assert len(delta_events) == 1, (
+            f"Expected 1 message_delta, got {len(delta_events)}"
+        )
         delta_body = delta_events[0][1].get("delta", {})
         assert delta_body.get("stop_reason") in (
             "end_turn",
@@ -797,9 +797,9 @@ class EmbeddingPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
         assert "object" in result, "Missing 'object' in response"
-        assert (
-            result["object"] == "list"
-        ), f"Expected object='list', got {result['object']}"
+        assert result["object"] == "list", (
+            f"Expected object='list', got {result['object']}"
+        )
         assert "data" in result, "Missing 'data' in response"
         assert len(result["data"]) > 0, "Empty data in response"
 
@@ -807,13 +807,13 @@ class EmbeddingPayload(BasePayload):
         embeddings = []
         for item in result["data"]:
             assert "object" in item, "Missing 'object' in embedding item"
-            assert (
-                item["object"] == "embedding"
-            ), f"Expected object='embedding', got {item['object']}"
+            assert item["object"] == "embedding", (
+                f"Expected object='embedding', got {item['object']}"
+            )
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
+            assert isinstance(item["embedding"], list), (
+                "Embedding should be a list of floats"
+            )
             assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
             embeddings.append(item["embedding"])
 

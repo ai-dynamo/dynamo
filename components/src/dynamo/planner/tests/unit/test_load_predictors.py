@@ -161,9 +161,9 @@ class TestProphetPredictorTimestamp:
         )
         buggy_next_ts = predictor.start_date + timedelta(seconds=predictor.curr_step)
 
-        assert (
-            expected_next_ts != buggy_next_ts
-        ), "Sanity check: the two timestamps must differ"
+        assert expected_next_ts != buggy_next_ts, (
+            "Sanity check: the two timestamps must differ"
+        )
 
         captured_future_df: list[pd.DataFrame] = []
 
@@ -401,9 +401,9 @@ class TestProphetPredictorMultipleStepSizes:
             predictor.predict_next()
 
         actual_ts = captured[0]["ds"].iloc[0]
-        assert (
-            actual_ts == expected_next_ts
-        ), f"step_size={step_size}: expected {expected_next_ts}, got {actual_ts}"
+        assert actual_ts == expected_next_ts, (
+            f"step_size={step_size}: expected {expected_next_ts}, got {actual_ts}"
+        )
 
 
 # ---------------------------------------------------------------------------

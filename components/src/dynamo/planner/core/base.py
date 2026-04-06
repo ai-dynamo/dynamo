@@ -475,9 +475,9 @@ class BasePlanner:
             )
 
         # Prometheus returns seconds, convert to milliseconds
-        assert (
-            self.model_name is not None
-        ), "model_name must be set before observing traffic stats"
+        assert self.model_name is not None, (
+            "model_name must be set before observing traffic stats"
+        )
 
         interval_str = f"{self.config.throughput_adjustment_interval}s"
         self.last_metrics.ttft = (

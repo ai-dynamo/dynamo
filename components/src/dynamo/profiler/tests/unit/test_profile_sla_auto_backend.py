@@ -26,12 +26,12 @@ def test_autoscale_sim_resolves_auto_to_default() -> None:
 
     src = inspect.getsource(_run_autoscale_sim)
     # The function must guard against "auto" before TaskConfig is constructed.
-    assert (
-        'backend == "auto"' in src
-    ), "_run_autoscale_sim must resolve backend='auto' before constructing TaskConfig"
-    assert (
-        "_DEFAULT_NAIVE_BACKEND" in src
-    ), "_run_autoscale_sim must fall back to _DEFAULT_NAIVE_BACKEND when backend='auto'"
+    assert 'backend == "auto"' in src, (
+        "_run_autoscale_sim must resolve backend='auto' before constructing TaskConfig"
+    )
+    assert "_DEFAULT_NAIVE_BACKEND" in src, (
+        "_run_autoscale_sim must fall back to _DEFAULT_NAIVE_BACKEND when backend='auto'"
+    )
 
 
 def test_autoscale_sim_returns_resolved_backend() -> None:
@@ -43,9 +43,9 @@ def test_autoscale_sim_returns_resolved_backend() -> None:
     from dynamo.profiler.rapid import _run_autoscale_sim
 
     src = inspect.getsource(_run_autoscale_sim)
-    assert (
-        '"resolved_backend"' in src
-    ), "_run_autoscale_sim must return 'resolved_backend' in its result dict"
+    assert '"resolved_backend"' in src, (
+        "_run_autoscale_sim must return 'resolved_backend' in its result dict"
+    )
 
 
 def test_naive_fallback_resolves_auto_to_default() -> None:
@@ -60,9 +60,9 @@ def test_naive_fallback_resolves_auto_to_default() -> None:
     from dynamo.profiler.rapid import _run_naive_fallback
 
     src = inspect.getsource(_run_naive_fallback)
-    assert (
-        'backend == "auto"' in src
-    ), "_run_naive_fallback must resolve backend='auto' before calling AIC helpers"
+    assert 'backend == "auto"' in src, (
+        "_run_naive_fallback must resolve backend='auto' before calling AIC helpers"
+    )
     assert "_DEFAULT_NAIVE_BACKEND" in src
 
 
@@ -78,9 +78,9 @@ def test_default_sim_returns_resolved_backend() -> None:
     from dynamo.profiler.rapid import _run_default_sim
 
     src = inspect.getsource(_run_default_sim)
-    assert (
-        '"resolved_backend"' in src
-    ), "_run_default_sim must return 'resolved_backend' in its result dict"
+    assert '"resolved_backend"' in src, (
+        "_run_default_sim must return 'resolved_backend' in its result dict"
+    )
 
 
 def test_default_naive_backend_is_concrete() -> None:

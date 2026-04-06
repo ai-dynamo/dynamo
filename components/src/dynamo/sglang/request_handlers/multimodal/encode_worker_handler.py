@@ -102,18 +102,18 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
             # These are likely the individual special tokens for Qwen2.5-VL
             image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-            assert isinstance(
-                image_pad_id, int
-            ), f"Expected int token id, got {type(image_pad_id)}"
+            assert isinstance(image_pad_id, int), (
+                f"Expected int token id, got {type(image_pad_id)}"
+            )
 
             # Use the image_pad token as the main image token
             self.image_token_id: int = image_pad_id
         else:
             # Fallback for other models
             token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
-            assert isinstance(
-                token_id, int
-            ), f"Expected int token id, got {type(token_id)}"
+            assert isinstance(token_id, int), (
+                f"Expected int token id, got {type(token_id)}"
+            )
             self.image_token_id = token_id
 
         self.min_workers = 1

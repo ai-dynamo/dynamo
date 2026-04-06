@@ -242,9 +242,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 # MediaOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
                 # squeeze the batch dim to get (T, H, W, C) for MP4 encoding.
                 video = output.video
-                assert (
-                    video.ndim == 5 and video.shape[0] == 1
-                ), f"Expected video shape (1, T, H, W, C), got {video.shape}"
+                assert video.ndim == 5 and video.shape[0] == 1, (
+                    f"Expected video shape (1, T, H, W, C), got {video.shape}"
+                )
                 frames_np = video[0].cpu().numpy()
                 logger.info(
                     f"Request {request_id}: encoding video output "

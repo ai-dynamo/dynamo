@@ -43,8 +43,7 @@ class TokenizerProtocol(Protocol):
         token_ids: List[int],
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = True,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 class MultimodalRequestProcessor:
@@ -93,7 +92,7 @@ class MultimodalRequestProcessor:
                     data = response.read(self.max_file_size_bytes + 1)
                     if len(data) > self.max_file_size_bytes:
                         raise RuntimeError(
-                            f"File size exceeds limit: {len(data) // (1024*1024)}MB > "
+                            f"File size exceeds limit: {len(data) // (1024 * 1024)}MB > "
                             f"{self.max_file_size_mb}MB "
                         )
                     tensor_stream = BytesIO(data)
@@ -135,8 +134,8 @@ class MultimodalRequestProcessor:
                     file_size = resolved_path.stat().st_size
                     if file_size > self.max_file_size_bytes:
                         raise RuntimeError(
-                            f"File size ({file_size // (1024*1024)}MB) exceeds "
-                            f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
+                            f"File size ({file_size // (1024 * 1024)}MB) exceeds "
+                            f"maximum allowed size ({self.max_file_size_bytes // (1024 * 1024)}MB)"
                         )
                 return torch.load(resolved_path, map_location="cpu", weights_only=True)
             except Exception as e:

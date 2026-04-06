@@ -123,9 +123,9 @@ def register_engine_metrics_callback(
         # Add model labels if model_name is provided
         if model_name:
             auto_labels[labels.MODEL] = model_name  # "model" (OpenAI standard)
-            auto_labels[
-                labels.MODEL_NAME
-            ] = model_name  # "model_name" (engine-native compatibility)
+            auto_labels[labels.MODEL_NAME] = (
+                model_name  # "model_name" (engine-native compatibility)
+            )
 
         # Validate that user didn't provide conflicting auto-labels
         # Warn but don't error - custom labels have lower precedence than auto-labels

@@ -138,6 +138,6 @@ def test_request_parameters(
         for key, expected_value in request_params.items():
             assert key in resp_params, f"Parameter '{key}' not echoed"
             actual = resp_params[key]
-            assert (
-                actual == expected_value
-            ), f"{key}: expected {expected_value}, got {actual}"
+            assert actual == expected_value, (
+                f"{key}: expected {expected_value}, got {actual}"
+            )

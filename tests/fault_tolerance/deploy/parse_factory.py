@@ -92,8 +92,7 @@ def detect_result_type(log_dir: str) -> Optional[str]:
     else:
         # No clear indicators
         logging.warning(
-            f"Unable to detect result type in {log_dir}. "
-            f"No client result files found."
+            f"Unable to detect result type in {log_dir}. No client result files found."
         )
         return None
 

@@ -282,7 +282,7 @@ def _record_to_state(record: Mapping[str, float | int]) -> DenseReplayState:
 
 
 def _record_to_agg_state(
-    record: Mapping[str, float | int | str]
+    record: Mapping[str, float | int | str],
 ) -> DenseAggReplayState:
     return DenseAggReplayState(
         tp=int(record["tp"]),

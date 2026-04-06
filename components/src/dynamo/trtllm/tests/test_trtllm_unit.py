@@ -180,11 +180,15 @@ async def test_init_llm_worker_creates_multimodal_processor():
     assert config.modality == Modality.MULTIMODAL
 
     # Mock everything init_llm_worker touches before MultimodalRequestProcessor.
-    with mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"), mock.patch(
-        "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
-    ), mock.patch(
-        "dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor",
-        side_effect=MultimodalProcessorInstantiated,
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor",
+            side_effect=MultimodalProcessorInstantiated,
+        ),
     ):
         with pytest.raises(MultimodalProcessorInstantiated):
             await init_llm_worker(

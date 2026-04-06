@@ -443,9 +443,9 @@ class MockerProcess:
                         ),
                     }
                     if replay_base is not None:
-                        payload[
-                            "replay_endpoint"
-                        ] = f"tcp://127.0.0.1:{replay_base + dp_rank}"
+                        payload["replay_endpoint"] = (
+                            f"tcp://127.0.0.1:{replay_base + dp_rank}"
+                        )
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
                             body = await resp.text()
@@ -457,8 +457,7 @@ class MockerProcess:
             self.worker_id_to_zmq_ports[new_worker_id] = zmq_addresses
 
             logger.info(
-                f"Mocker {i}: worker_id={new_worker_id}, "
-                f"zmq_addresses={zmq_addresses}"
+                f"Mocker {i}: worker_id={new_worker_id}, zmq_addresses={zmq_addresses}"
             )
 
         await wait_for_indexer_workers_active(

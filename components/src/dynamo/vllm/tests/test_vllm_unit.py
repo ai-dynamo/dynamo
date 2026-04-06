@@ -22,6 +22,7 @@ from dynamo.vllm.args import (
     ensure_side_channel_host,
     get_host_ip,
     parse_args,
+    update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
@@ -721,3 +722,94 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+# ---------------------------------------------------------------------------
+# update_engine_config_with_dynamo: runner default override tests (issue #7670)
+# ---------------------------------------------------------------------------
+
+
+def _make_dynamo_config_stub():
+    """Minimal dynamo config stub for update_engine_config_with_dynamo tests."""
+    from dynamo.vllm.constants import DisaggregationMode
+
+    stub = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        multimodal_worker=False,
+        multimodal_decode_worker=False,
+        benchmark_mode=None,
+        use_kv_events=False,
+        connector=[],
+    )
+    return stub
+
+
+def _make_engine_config_stub(runner=None):
+    """Minimal engine config stub with the fields touched by update_engine_config_with_dynamo."""
+    stub = SimpleNamespace(
+        runner=runner,
+        enable_prefix_caching=None,
+        skip_tokenizer_init=None,
+        enable_log_requests=None,
+        disable_log_stats=None,
+        kv_events_config=None,
+        kv_transfer_config=None,
+        block_size=None,
+        scheduler_cls=None,
+        load_format=None,
+    )
+    return stub
+
+
+class TestRunnerDefaultNotOverridden:
+    """Tests that update_engine_config_with_dynamo does not clobber user-specified --runner."""
+
+    def test_runner_defaults_to_generate_when_not_specified(self):
+        """When runner is None (not user-specified), it should be set to 'generate'."""
+        dynamo_cfg = _make_dynamo_config_stub()
+        engine_cfg = _make_engine_config_stub(runner=None)
+
+        with (
+            patch("dynamo.vllm.args.create_kv_events_config", return_value=None),
+            patch("dynamo.vllm.args._uses_nixl_connector", return_value=False),
+            patch("dynamo.vllm.args.envs") as mock_envs,
+        ):
+            mock_envs.is_set.return_value = False
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "generate"
+
+    def test_runner_embed_is_preserved(self):
+        """When runner='embed' (user-specified), it must NOT be overwritten with 'generate'."""
+        dynamo_cfg = _make_dynamo_config_stub()
+        engine_cfg = _make_engine_config_stub(runner="embed")
+
+        with (
+            patch("dynamo.vllm.args.create_kv_events_config", return_value=None),
+            patch("dynamo.vllm.args._uses_nixl_connector", return_value=False),
+            patch("dynamo.vllm.args.envs") as mock_envs,
+        ):
+            mock_envs.is_set.return_value = False
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "embed", (
+            f"Expected runner='embed' to be preserved, but got runner='{engine_cfg.runner}'. "
+            "update_engine_config_with_dynamo is unconditionally overriding --runner."
+        )
+
+    def test_runner_pooling_is_preserved(self):
+        """When runner='pooling' (user-specified), it must NOT be overwritten."""
+        dynamo_cfg = _make_dynamo_config_stub()
+        engine_cfg = _make_engine_config_stub(runner="pooling")
+
+        with (
+            patch("dynamo.vllm.args.create_kv_events_config", return_value=None),
+            patch("dynamo.vllm.args._uses_nixl_connector", return_value=False),
+            patch("dynamo.vllm.args.envs") as mock_envs,
+        ):
+            mock_envs.is_set.return_value = False
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "pooling", (
+            f"Expected runner='pooling' to be preserved, but got runner='{engine_cfg.runner}'."
+        )

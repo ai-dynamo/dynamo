@@ -46,9 +46,10 @@ class TestGetFs:
 
     def test_s3_url_protocol(self):
         """Test s3:// URL extracts correct protocol and bucket path."""
-        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, patch(
-            "dynamo.common.storage.DirFileSystem"
-        ) as mock_dirfs:
+        with (
+            patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec,
+            patch("dynamo.common.storage.DirFileSystem") as mock_dirfs,
+        ):
             mock_inner_fs = MagicMock(protocol="s3")
             mock_fsspec.return_value = mock_inner_fs
             get_fs("s3://my-bucket/prefix")
@@ -59,9 +60,10 @@ class TestGetFs:
 
     def test_gs_url_protocol(self):
         """Test gs:// URL extracts correct protocol and path."""
-        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, patch(
-            "dynamo.common.storage.DirFileSystem"
-        ) as mock_dirfs:
+        with (
+            patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec,
+            patch("dynamo.common.storage.DirFileSystem") as mock_dirfs,
+        ):
             mock_inner_fs = MagicMock(protocol="gs")
             mock_fsspec.return_value = mock_inner_fs
             get_fs("gs://my-gcs-bucket/data")

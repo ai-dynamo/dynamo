@@ -87,12 +87,12 @@ class Synthesizer:
         self.osl_multiplier = float(osl_multiplier)
 
         # assert correct arg bounds
-        assert (
-            isinstance(self.num_copies, int) and self.num_copies >= 1
-        ), "num_copies must be an integer greater than or equal to 1"
-        assert (
-            isinstance(self.speedup_ratio, float) and self.speedup_ratio > 0
-        ), "speedup_ratio must be a positive float"
+        assert isinstance(self.num_copies, int) and self.num_copies >= 1, (
+            "num_copies must be an integer greater than or equal to 1"
+        )
+        assert isinstance(self.speedup_ratio, float) and self.speedup_ratio > 0, (
+            "speedup_ratio must be a positive float"
+        )
         assert (
             isinstance(self.prefix_len_multiplier, float)
             and self.prefix_len_multiplier > 0

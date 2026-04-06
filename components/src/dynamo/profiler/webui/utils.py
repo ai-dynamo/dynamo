@@ -201,18 +201,18 @@ def generate_config_data(
 
     # Set SLA targets
     data[PlotType.PREFILL]["chart"]["target_line"]["value"] = args.ttft
-    data[PlotType.PREFILL]["chart"]["target_line"][
-        "label"
-    ] = f"Target TTFT: {args.ttft} ms"
+    data[PlotType.PREFILL]["chart"]["target_line"]["label"] = (
+        f"Target TTFT: {args.ttft} ms"
+    )
 
     data[PlotType.DECODE]["chart"]["target_line"]["value"] = args.itl
-    data[PlotType.DECODE]["chart"]["target_line"][
-        "label"
-    ] = f"Target ITL: {args.itl} ms"
+    data[PlotType.DECODE]["chart"]["target_line"]["label"] = (
+        f"Target ITL: {args.itl} ms"
+    )
 
-    data[PlotType.COST]["chart"][
-        "title"
-    ] = f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
+    data[PlotType.COST]["chart"]["title"] = (
+        f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
+    )
 
     # Populate data sections
     populate_prefill_data(data, prefill_data, args)

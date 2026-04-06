@@ -42,9 +42,9 @@ def run_serve_deployment(
     logger = logging.getLogger(request.node.name)
     logger.info("Starting %s test_deployment", config.name)
 
-    assert (
-        config.request_payloads is not None and len(config.request_payloads) > 0
-    ), "request_payloads must be provided on EngineConfig"
+    assert config.request_payloads is not None and len(config.request_payloads) > 0, (
+        "request_payloads must be provided on EngineConfig"
+    )
 
     logger.info("Using model: %s", config.model)
     logger.info("Script: %s", config.script_name)

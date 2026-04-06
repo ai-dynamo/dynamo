@@ -85,5 +85,5 @@ async def test_hello_world(example_dir, server_process):
     expected_lines = ["Hello world!", "Hello sun!", "Hello moon!", "Hello star!"]
     for expected_line in expected_lines:
         assert expected_line in lines, (
-            f"Expected line '{expected_line}' not found in output.\n" f"Lines: {lines}"
+            f"Expected line '{expected_line}' not found in output.\nLines: {lines}"
         )

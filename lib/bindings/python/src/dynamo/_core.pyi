@@ -125,7 +125,6 @@ class DistributedRuntime:
         """
         ...
 
-
 class Endpoint:
     """
     An Endpoint is a single API endpoint
@@ -133,7 +132,13 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
+    async def serve_endpoint(
+        self,
+        handler: RequestHandler,
+        graceful_shutdown: bool = True,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+        health_check_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -217,50 +222,49 @@ class Client:
         ...
 
     async def random(
-            self,
-            request: JsonLike,
-            annotated: bool | None = True,
-            context: Context | None = None,
-        ) -> AsyncIterator[JsonLike]:
+        self,
+        request: JsonLike,
+        annotated: bool | None = True,
+        context: Context | None = None,
+    ) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
         """
         ...
 
     async def round_robin(
-            self,
-            request: JsonLike,
-            annotated: bool | None = True,
-            context: Context | None = None,
-        ) -> AsyncIterator[JsonLike]:
+        self,
+        request: JsonLike,
+        annotated: bool | None = True,
+        context: Context | None = None,
+    ) -> AsyncIterator[JsonLike]:
         """
         Pick the next instance of the endpoint in a round-robin fashion
         """
         ...
 
     async def direct(
-            self,
-            request: JsonLike,
-            instance_id: int,
-            annotated: bool | None = True,
-            context: Context | None = None,
-        ) -> AsyncIterator[JsonLike]:
+        self,
+        request: JsonLike,
+        instance_id: int,
+        annotated: bool | None = True,
+        context: Context | None = None,
+    ) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
         """
         ...
 
     async def generate(
-            self,
-            request: JsonLike,
-            annotated: bool | None = True,
-            context: Context | None = None,
-        ) -> AsyncIterator[JsonLike]:
+        self,
+        request: JsonLike,
+        annotated: bool | None = True,
+        context: Context | None = None,
+    ) -> AsyncIterator[JsonLike]:
         """
         Generate a response from the endpoint
         """
         ...
-
 
 class ModelCardInstanceId:
     """
@@ -272,7 +276,6 @@ class ModelCardInstanceId:
         Triple of namespace, component and endpoint this worker is serving.
         """
         ...
-
 
 def compute_block_hash_for_seq(
     tokens: List[int],
@@ -490,7 +493,6 @@ class ModelRuntimeConfig:
     bootstrap_port: int | None
 
     def __init__(self) -> None: ...
-
     def set_engine_specific(self, key: str, value: Any) -> None:
         """Set an engine-specific runtime configuration value"""
         ...
@@ -500,10 +502,10 @@ class ModelRuntimeConfig:
         ...
 
     def set_disaggregated_endpoint(
-            self,
-            bootstrap_host: str | None = None,
-            bootstrap_port: int | None = None,
-        ) -> None:
+        self,
+        bootstrap_host: str | None = None,
+        bootstrap_port: int | None = None,
+    ) -> None:
         """Set the disaggregated endpoint for the model"""
         ...
 
@@ -640,7 +642,10 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
+        self,
+        token_ids: List[int],
+        lora_name: Optional[str] = None,
+        is_eagle: Optional[bool] = None,
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -688,7 +693,10 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_name: Optional[str] = None, is_eagle: Optional[bool] = None
+        self,
+        token_ids: List[int],
+        lora_name: Optional[str] = None,
+        is_eagle: Optional[bool] = None,
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -726,7 +734,6 @@ class ApproxKvIndexer:
             dp_rank: The data parallel rank (default: 0)
         """
         ...
-
 
 class KvEventPublisher:
     """
@@ -809,7 +816,6 @@ class KvEventPublisher:
         """
         ...
 
-
 class FpmEventRelay:
     """
     Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
@@ -835,7 +841,6 @@ class FpmEventRelay:
     def shutdown(self) -> None:
         """Shut down the relay task."""
         ...
-
 
 class FpmEventSubscriber:
     """
@@ -912,7 +917,6 @@ class FpmEventSubscriber:
         """Shut down the subscriber (all background tasks)."""
         ...
 
-
 class HttpService:
     """
     A HTTP service for dynamo applications.
@@ -951,8 +955,6 @@ class PythonAsyncEngine:
     def __init__(self, generator: Any, event_loop: Any) -> None:
         """Wrap a Python generator and event loop for use with Dynamo services."""
         ...
-
-
 
 class HttpAsyncEngine:
     """
@@ -1099,13 +1101,14 @@ class KserveGrpcService:
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
+
     Text: ModelInput
     Tokens: ModelInput
     Tensor: ModelInput
 
-
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
+
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
@@ -1115,15 +1118,14 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
 
-    def __or__(self, other: ModelType) -> ModelType:
-        ...
-
+    def __or__(self, other: ModelType) -> ModelType: ...
     def supports_chat(self) -> bool:
         """Return True if this model type supports chat."""
         ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
+
     RoundRobin: "RouterMode"
     Random: "RouterMode"
     PowerOfTwoChoices: "RouterMode"
@@ -1134,6 +1136,7 @@ class RouterMode:
 
 class RouterConfig:
     """How to route the request"""
+
     router_mode: RouterMode
     kv_router_config: KvRouterConfig
 
@@ -1218,19 +1221,13 @@ class KvRouterConfig:
         ...
 
     @staticmethod
-    def from_json(config_json: str) -> "KvRouterConfig":
-        ...
-
+    def from_json(config_json: str) -> "KvRouterConfig": ...
     def dump_json(self) -> str: ...
-
     def copy(self) -> "KvRouterConfig": ...
-
     @property
     def overlap_score_weight(self) -> float: ...
-
     @overlap_score_weight.setter
     def overlap_score_weight(self, value: float) -> None: ...
-
     def with_overrides(
         self,
         overlap_score_weight: Optional[float] = None,
@@ -1242,8 +1239,7 @@ class ReasoningConfig:
         start_thinking_token_id: int,
         end_thinking_token_id: int,
         thinking_ratio: float,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 class SglangArgs:
     def __init__(
@@ -1254,8 +1250,7 @@ class SglangArgs:
         chunked_prefill_size: Optional[int] = None,
         clip_max_new_tokens: Optional[int] = None,
         schedule_conservativeness: Optional[float] = None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 class MockEngineArgs:
     def __init__(
@@ -1288,87 +1283,57 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
-    ) -> None:
-        ...
-
+    ) -> None: ...
     @staticmethod
-    def from_json(config_json: str) -> "MockEngineArgs":
-        ...
-
+    def from_json(config_json: str) -> "MockEngineArgs": ...
     def copy(self) -> "MockEngineArgs": ...
-
     def dump_json(self) -> str: ...
-
     @property
     def block_size(self) -> int: ...
-
     @property
     def num_gpu_blocks(self) -> int: ...
-
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
-
     @property
     def max_num_seqs(self) -> Optional[int]: ...
-
     @property
     def max_num_batched_tokens(self) -> Optional[int]: ...
-
     @property
     def enable_prefix_caching(self) -> bool: ...
-
     @enable_prefix_caching.setter
     def enable_prefix_caching(self, value: bool) -> None: ...
-
     @property
     def enable_local_indexer(self) -> bool: ...
-
     @property
     def dp_size(self) -> int: ...
-
     @property
     def bootstrap_port(self) -> Optional[int]: ...
-
     @property
     def aic_backend(self) -> Optional[str]: ...
-
     @aic_backend.setter
     def aic_backend(self, value: Optional[str]) -> None: ...
-
     @property
     def aic_system(self) -> Optional[str]: ...
-
     @aic_system.setter
     def aic_system(self, value: Optional[str]) -> None: ...
-
     @property
     def aic_backend_version(self) -> Optional[str]: ...
-
     @aic_backend_version.setter
     def aic_backend_version(self, value: Optional[str]) -> None: ...
-
     @property
     def aic_tp_size(self) -> Optional[int]: ...
-
     @aic_tp_size.setter
     def aic_tp_size(self, value: Optional[int]) -> None: ...
-
     @property
     def aic_model_path(self) -> Optional[str]: ...
-
     @aic_model_path.setter
     def aic_model_path(self, value: Optional[str]) -> None: ...
-
     @property
     def worker_type(self) -> str: ...
-
     @worker_type.setter
     def worker_type(self, value: str) -> None: ...
-
     def is_prefill(self) -> bool: ...
-
     def is_decode(self) -> bool: ...
-
     def with_overrides(
         self,
         bootstrap_port: Optional[int] = None,
@@ -1439,17 +1404,14 @@ class LoRADownloader:
     def get_cache_path(self, cache_key: str) -> str: ...
     def is_cached(self, cache_key: str) -> bool: ...
     def validate_cached(self, cache_key: str) -> bool: ...
-
     @staticmethod
     def uri_to_cache_key(uri: str) -> str: ...
-
 
 class MediaDecoder:
     """Media decoder for image and video preprocessing."""
 
     def __init__(self) -> None: ...
     def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
-
 
 class MediaFetcher:
     """Media fetcher for loading remote image/video URLs."""
@@ -1476,13 +1438,18 @@ unregister_llm = unregister_model
 
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
+
     ...
 
-async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
+async def make_engine(
+    distributed_runtime: DistributedRuntime, args: EntrypointArgs
+) -> EngineConfig:
     """Make an engine matching the args"""
     ...
 
-async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
+async def run_input(
+    runtime: DistributedRuntime, input: str, engine_config: EngineConfig
+) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
@@ -1534,7 +1501,13 @@ class Layer:
 
     ...
 
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+    def __dlpack__(
+        self,
+        stream: Optional[Any] = None,
+        max_version: Optional[Any] = None,
+        dl_device: Optional[Any] = None,
+        copy: Optional[bool] = None,
+    ) -> Any:
         """
         Get a dlpack capsule of the layer
         """
@@ -1565,7 +1538,7 @@ class Block:
         """
         ...
 
-    def __iter__(self) -> 'Block':
+    def __iter__(self) -> "Block":
         """
         Get an iterator over the layers
         """
@@ -1583,7 +1556,13 @@ class Block:
         """
         ...
 
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+    def __dlpack__(
+        self,
+        stream: Optional[Any] = None,
+        max_version: Optional[Any] = None,
+        dl_device: Optional[Any] = None,
+        copy: Optional[bool] = None,
+    ) -> Any:
         """
         Get a dlpack capsule of the block
         Exception raised if the block is not contiguous
@@ -1615,7 +1594,7 @@ class BlockList:
         """
         ...
 
-    def __iter__(self) -> 'BlockList':
+    def __iter__(self) -> "BlockList":
         """
         Get an iterator over the blocks
         """
@@ -1647,7 +1626,7 @@ class BlockManager:
         dtype: Optional[str] = None,
         host_num_blocks: Optional[int] = None,
         device_num_blocks: Optional[int] = None,
-        device_id: int = 0
+        device_id: int = 0,
     ) -> None:
         """
         Create a `BlockManager` object
@@ -1742,8 +1721,7 @@ class KvbmRequest:
     A request for KV cache
     """
 
-    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
-        ...
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None: ...
 
 class KvRouter:
     """
@@ -1940,6 +1918,7 @@ class KvRouter:
 
 class EngineType:
     """Engine type for Dynamo workers"""
+
     Echo: "EngineType"
     Dynamic: "EngineType"
     Mocker: "EngineType"
@@ -2009,6 +1988,7 @@ class PlannerDecision:
             -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
     Call VirtualConnectorClient.complete(event) when action is completed.
     """
+
     num_prefill_workers: int
     num_decode_workers: int
     ...
@@ -2016,9 +1996,14 @@ class PlannerDecision:
 class VirtualConnectorCoordinator:
     """Internal planner virtual connector component"""
 
-    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
-        ...
-
+    def __init__(
+        self,
+        runtime: DistributedRuntime,
+        dynamo_namespace: str,
+        check_interval_secs: int,
+        max_wait_time_secs: int,
+        max_retries: int,
+    ) -> None: ...
     async def async_init(self) -> None:
         """Call this before using the object"""
         ...
@@ -2027,28 +2012,20 @@ class VirtualConnectorCoordinator:
         """Get the current values. Most for test / debug."""
         ...
 
-    async def update_scaling_decision(self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None:
-        ...
-
-    async def wait_for_scaling_completion(self) -> None:
-        ...
+    async def update_scaling_decision(
+        self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None
+    ) -> None: ...
+    async def wait_for_scaling_completion(self) -> None: ...
 
 class VirtualConnectorClient:
     """How a client discovers planner requests and marks them complete"""
 
-    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None:
-        ...
-
-    async def get(self) -> PlannerDecision:
-        ...
-
-    async def complete(self, decision: PlannerDecision) -> None:
-        ...
-
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None: ...
+    async def get(self) -> PlannerDecision: ...
+    async def complete(self, decision: PlannerDecision) -> None: ...
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
-
 
 # =============================================================================
 # Dynamo Exception Types

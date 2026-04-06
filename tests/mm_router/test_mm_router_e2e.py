@@ -581,9 +581,9 @@ def test_trtllm_mm_overlap_diff_images_less_than_same(
     overlap_probe, total_probe, segment_probe = _send_request_get_overlap(
         frontend_port, router_proc, probe_payload, "probe_different_images_req1"
     )
-    assert (
-        total_probe > 0
-    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    assert total_probe > 0, (
+        f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    )
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-images total blocks to stay near baseline, "
         f"got different={total_probe}, baseline={total_baseline}"
@@ -643,9 +643,9 @@ def test_trtllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     overlap_probe, total_probe, segment_probe = _send_request_get_overlap(
         frontend_port, router_proc, probe_payload, "probe_same_images_prompt_b_req1"
     )
-    assert (
-        total_probe > 0
-    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    assert total_probe > 0, (
+        f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    )
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-prompt total blocks to stay near baseline, "
         f"got different_prompt={total_probe}, baseline={total_baseline}"

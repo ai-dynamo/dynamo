@@ -114,7 +114,7 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None
+    multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
@@ -1655,9 +1655,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     priority=priority,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
-                        tok["completion_usage"][
-                            "prompt_tokens_details"
-                        ] = prefill_prompt_tokens_details
+                        tok["completion_usage"]["prompt_tokens_details"] = (
+                            prefill_prompt_tokens_details
+                        )
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

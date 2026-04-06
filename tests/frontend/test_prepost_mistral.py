@@ -653,9 +653,9 @@ def test_mistral_tool_call(processor):
 
     # -- [TOOL_CALLS] markup should not appear in content -------------------
     all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
-    assert (
-        "[TOOL_CALLS]" not in all_content
-    ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
+    assert "[TOOL_CALLS]" not in all_content, (
+        f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
+    )
 
     # -- finish reason ------------------------------------------------------
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
@@ -709,9 +709,9 @@ def test_mistral_tool_call_interval_20(
 
     # -- [TOOL_CALLS] markup should not appear in content -------------------
     all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
-    assert (
-        "[TOOL_CALLS]" not in all_content
-    ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
+    assert "[TOOL_CALLS]" not in all_content, (
+        f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
+    )
 
     # -- finish reason ------------------------------------------------------
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]

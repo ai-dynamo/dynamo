@@ -96,9 +96,9 @@ def verify_response_worker_ids(
     logger.info(f"Response {key}s: {worker_ids}")
 
     # All responses should have the key
-    assert all(
-        wid is not None for wid in worker_ids
-    ), f"Expected all {len(response_worker_ids)} responses to have {key}, got: {worker_ids}"
+    assert all(wid is not None for wid in worker_ids), (
+        f"Expected all {len(response_worker_ids)} responses to have {key}, got: {worker_ids}"
+    )
 
     # All values should be the same (due to prefix reuse routing)
     unique_ids = set(worker_ids)
@@ -124,12 +124,12 @@ def verify_response_timing(timing_info: dict[str, Any]) -> None:
     total_time_ms = timing_info.get("total_time_ms")
 
     assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
-    assert (
-        total_time_ms is not None and total_time_ms > 0
-    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
-    assert (
-        total_time_ms >= ttft_ms
-    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    assert total_time_ms is not None and total_time_ms > 0, (
+        f"Expected total_time_ms > 0, got: {total_time_ms}"
+    )
+    assert total_time_ms >= ttft_ms, (
+        f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    )
     logger.info(
         f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
@@ -458,9 +458,9 @@ async def check_nats_consumers(namespace: str, expected_count: Optional[int] = N
             )
 
         if expected_count is not None:
-            assert (
-                len(consumer_names) == expected_count
-            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
+            assert len(consumer_names) == expected_count, (
+                f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
+            )
             logger.info(f"✓ Verified {expected_count} durable consumers exist")
 
         return consumer_names
@@ -517,9 +517,9 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
 
         logger.info(f"Completed all requests: {successful} successful, {failed} failed")
 
-    assert (
-        successful == num_requests
-    ), f"Expected {num_requests} successful requests, got {successful}"
+    assert successful == num_requests, (
+        f"Expected {num_requests} successful requests, got {successful}"
+    )
     logger.info(f"All {num_requests} requests completed successfully")
 
 

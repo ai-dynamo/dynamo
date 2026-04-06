@@ -138,12 +138,12 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     print(f"Response 1: {response_1}")
 
     metrics = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
-    assert (
-        metrics["kvbm_offload_blocks_d2h"] > 0
-    ), "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
-    assert (
-        metrics["kvbm_onboard_blocks_h2d"] == 0
-    ), f"Phase 1: Expected 0 onboarded blocks, got {metrics['kvbm_onboard_blocks_h2d']}"
+    assert metrics["kvbm_offload_blocks_d2h"] > 0, (
+        "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
+    )
+    assert metrics["kvbm_onboard_blocks_h2d"] == 0, (
+        f"Phase 1: Expected 0 onboarded blocks, got {metrics['kvbm_onboard_blocks_h2d']}"
+    )
     print(f"✓ Phase 1: {metrics['kvbm_offload_blocks_d2h']} blocks offloaded")
 
     # Phase 2: Reset GPU cache
@@ -158,9 +158,9 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     print(f"Response 2: {response_2}")
 
     metrics = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
-    assert (
-        metrics["kvbm_onboard_blocks_h2d"] > 0
-    ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache reset."
+    assert metrics["kvbm_onboard_blocks_h2d"] > 0, (
+        "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache reset."
+    )
     print(f"✓ Phase 3: {metrics['kvbm_onboard_blocks_h2d']} blocks onboarded from CPU")
 
     # Verify determinism
@@ -212,9 +212,9 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
         f"Phase 1: Expected >= {MIN_OFFLOAD_BLOCKS} blocks offloaded, "
         f"got {metrics_p1['kvbm_offload_blocks_d2h']}"
     )
-    assert (
-        metrics_p1["kvbm_onboard_blocks_h2d"] == 0
-    ), f"Phase 1: Expected 0 onboarded, got {metrics_p1['kvbm_onboard_blocks_h2d']}"
+    assert metrics_p1["kvbm_onboard_blocks_h2d"] == 0, (
+        f"Phase 1: Expected 0 onboarded, got {metrics_p1['kvbm_onboard_blocks_h2d']}"
+    )
     print(f"✓ Phase 1: {metrics_p1['kvbm_offload_blocks_d2h']} blocks offloaded")
 
     # Phase 2: Second request may evict first from GPU
@@ -242,9 +242,9 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
     metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
-    assert (
-        metrics_p3["kvbm_onboard_blocks_h2d"] > 0
-    ), "Phase 3: No blocks onboarded. Expected CPU→GPU retrieval after eviction."
+    assert metrics_p3["kvbm_onboard_blocks_h2d"] > 0, (
+        "Phase 3: No blocks onboarded. Expected CPU→GPU retrieval after eviction."
+    )
     print(f"✓ Phase 3: {metrics_p3['kvbm_onboard_blocks_h2d']} blocks onboarded")
     print("✓ Eviction mechanics verified: offload → eviction → onboard")
 

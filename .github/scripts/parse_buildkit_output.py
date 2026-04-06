@@ -48,13 +48,13 @@ def parse_sccache_json_from_log(
             cleaned_json = "\n".join(cleaned_lines)
 
             if debug:
-                print(f"DEBUG: Parsing JSON block {i+1}", file=sys.stderr)
+                print(f"DEBUG: Parsing JSON block {i + 1}", file=sys.stderr)
 
             # Parse JSON
             section_data = json.loads(cleaned_json)
 
             # Extract key metrics into flat structure
-            section_name = section_data.get("section", f"section_{i+1}")
+            section_name = section_data.get("section", f"section_{i + 1}")
             timestamp = section_data.get("timestamp", "")
             native_stats = section_data.get("sccache_stats", {})
 
@@ -129,10 +129,10 @@ def parse_sccache_json_from_log(
 
         except json.JSONDecodeError as e:
             if debug:
-                print(f"DEBUG: JSON parse error in block {i+1}: {e}", file=sys.stderr)
+                print(f"DEBUG: JSON parse error in block {i + 1}: {e}", file=sys.stderr)
         except Exception as e:
             if debug:
-                print(f"DEBUG: Error parsing block {i+1}: {e}", file=sys.stderr)
+                print(f"DEBUG: Error parsing block {i + 1}: {e}", file=sys.stderr)
 
     return sccache_sections
 

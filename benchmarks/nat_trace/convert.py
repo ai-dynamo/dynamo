@@ -343,7 +343,7 @@ def print_statistics(mooncake_data: list):
 
     turns_per_session = [len(turns) for turns in sessions.values()]
     print(
-        f"Turns per session: min={min(turns_per_session)}, max={max(turns_per_session)}, avg={sum(turns_per_session)/len(turns_per_session):.1f}"
+        f"Turns per session: min={min(turns_per_session)}, max={max(turns_per_session)}, avg={sum(turns_per_session) / len(turns_per_session):.1f}"
     )
 
     print(f"Total LLM calls: {len(mooncake_data)}")
@@ -355,19 +355,19 @@ def print_statistics(mooncake_data: list):
     print("\nInput Length (prompt_tokens):")
     print(f"  Min: {min(input_lengths)}")
     print(f"  Max: {max(input_lengths)}")
-    print(f"  Avg: {sum(input_lengths)/len(input_lengths):.1f}")
+    print(f"  Avg: {sum(input_lengths) / len(input_lengths):.1f}")
 
     print("\nOutput Length (completion_tokens):")
     print(f"  Min: {min(output_lengths)}")
     print(f"  Max: {max(output_lengths)}")
-    print(f"  Avg: {sum(output_lengths)/len(output_lengths):.1f}")
+    print(f"  Avg: {sum(output_lengths) / len(output_lengths):.1f}")
 
     # Hash statistics
     hash_lengths = [len(e["hash_ids"]) for e in mooncake_data]
     print("\nHash IDs per entry:")
     print(f"  Min: {min(hash_lengths)}")
     print(f"  Max: {max(hash_lengths)}")
-    print(f"  Avg: {sum(hash_lengths)/len(hash_lengths):.1f}")
+    print(f"  Avg: {sum(hash_lengths) / len(hash_lengths):.1f}")
 
     print("=" * 60)
 

@@ -21,6 +21,7 @@ Markdown renderers the first occurrence wins, meaning v1beta1 links resolve to t
 v1alpha1 section. This script prepends "v1beta1 " to the affected headings in the
 v1beta1 section and updates all intra-section links to match the new anchors.
 """
+
 import re
 import sys
 

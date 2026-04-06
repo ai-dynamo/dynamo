@@ -188,7 +188,7 @@ def test_smoke(request, runtime_services):
             response = send_completion_request(
                 prompt=PROMPT, max_tokens=100, timeout=20
             )
-            assert (
-                response.ok
-            ), f"Expected successful status, got {response.status_code}"
+            assert response.ok, (
+                f"Expected successful status, got {response.status_code}"
+            )
             logger.info(f"Completion request succeeded: {response.status_code}")
