@@ -80,7 +80,7 @@ jobs:
         uses: ./.github/actions/compliance-scan
         with:
           image: ${{ steps.calculate-target-tag.outputs.runtime_image }}
-          artifact_name: compliance-${{ inputs.target_tag_plain }}-${{ matrix.platform }}
+          artifact_name: compliance-${{ inputs.target_tag_plain }}-${{ matrix.cuda_version }}-${{ matrix.platform }}
           arch: ${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
