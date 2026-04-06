@@ -1636,7 +1636,6 @@ mod strip_tests {
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
         assert_eq!(messages, serde_json::json!([]));
     }
-
 }
 
 #[cfg(test)]
