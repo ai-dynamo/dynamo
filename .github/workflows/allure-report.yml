@@ -47,8 +47,8 @@ jobs:
             echo "workflow_label=${WORKFLOW_NAME}" >> $GITHUB_OUTPUT
             case "$WORKFLOW_NAME" in
               *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
-              *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
-              *"Release"*) echo "subdir=release" >> $GITHUB_OUTPUT ;;
+              *"Nightly"*)    echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+              *"Release"*)    echo "subdir=release" >> $GITHUB_OUTPUT ;;
               *)
                 echo "::error::Unknown workflow name: '${WORKFLOW_NAME}'"
                 echo "::error::If this is a new workflow, update: (1) this case statement, (2) allurerc.mjs plugin filters, (3) the allure-all unified dashboard config."

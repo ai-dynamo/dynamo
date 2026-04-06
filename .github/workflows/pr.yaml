@@ -434,7 +434,7 @@ jobs:
     uses: ./.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}
-      subdir: pre-merge
+      subdir: pr
       workflow_label: PR
     permissions:
       contents: write
