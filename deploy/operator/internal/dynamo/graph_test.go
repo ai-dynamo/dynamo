@@ -2258,7 +2258,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName:     "worker-wkr",
 									Replicas:     2,
-									MinAvailable: ptr.To(int32(1)),
+									MinAvailable: ptr.To(int32(2)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -3256,7 +3256,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName:     "worker-wkr",
 									Replicas:     2,
-									MinAvailable: ptr.To(int32(1)),
+									MinAvailable: ptr.To(int32(2)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),

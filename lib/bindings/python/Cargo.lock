@@ -1609,7 +1609,6 @@ dependencies = [
  "futures-util",
  "galil-seiferas",
  "hf-hub",
- "humantime",
  "image",
  "json-five",
  "memfile",

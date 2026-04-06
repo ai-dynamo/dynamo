@@ -45,7 +45,6 @@ pub struct PreparedEngine {
     pub service_name: String,
     pub engine: OpenAIChatCompletionsStreamingEngine,
     pub inspect_template: bool,
-    pub card: Option<ModelDeploymentCard>,
     pub request_template: Option<RequestTemplate>,
 }
 
@@ -85,16 +84,6 @@ async fn wait_for_min_initial_workers(
                     client.endpoint.id()
                 )
             })?;
-    }
-}
-
-impl PreparedEngine {
-    pub fn has_tokenizer(&self) -> bool {
-        if let Some(card) = self.card.as_ref() {
-            card.has_tokenizer()
-        } else {
-            false
-        }
     }
 }
 
@@ -151,7 +140,6 @@ pub async fn prepare_engine(
                 service_name: model_service_name,
                 engine,
                 inspect_template: false,
-                card: None,
                 request_template: local_model.request_template(),
             })
         }
@@ -164,7 +152,6 @@ pub async fn prepare_engine(
                 engine,
                 inspect_template: false,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
         EngineConfig::InProcessTokens {
@@ -185,7 +172,6 @@ pub async fn prepare_engine(
                 engine: pipeline,
                 inspect_template: true,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
     }

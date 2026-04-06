@@ -60,6 +60,9 @@ class AicSession:
         model_path: str,
         tp_size: int,
         backend_version: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
+        attention_dp_size: int | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
@@ -78,7 +81,12 @@ class AicSession:
                 f"Supported versions for this system/backend: {supported_versions}"
             )
 
-        model_config = aic["config"].ModelConfig(tp_size=tp_size)
+        model_config = aic["config"].ModelConfig(
+            tp_size=tp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            attention_dp_size=attention_dp_size or 1,
+        )
         model = aic["get_model"](
             model_path=model_path,
             model_config=model_config,
@@ -168,6 +176,18 @@ def create_session(
     model_path: str,
     tp_size: int,
     backend_version: str | None = None,
+    moe_tp_size: int | None = None,
+    moe_ep_size: int | None = None,
+    attention_dp_size: int | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
-    return AicSession(backend_name, system, model_path, tp_size, backend_version)
+    return AicSession(
+        backend_name,
+        system,
+        model_path,
+        tp_size,
+        backend_version,
+        moe_tp_size,
+        moe_ep_size,
+        attention_dp_size,
+    )
