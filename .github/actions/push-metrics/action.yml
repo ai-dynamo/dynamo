@@ -67,7 +67,12 @@ runs:
         SCRIPT_DIR="${REPO_ROOT}/deploy/metrics"
         export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-        python3 -m pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null || true
+        # Install deps — try multiple methods for different runner environments
+        python3 -m pip install --quiet --break-system-packages opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null \
+          || python3 -m pip install --quiet --user opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null \
+          || python3 -m pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null \
+          || pip install --quiet opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http 2>/dev/null \
+          || echo "Warning: could not install opentelemetry packages"
 
         python3 "${SCRIPT_DIR}/cicd_push.py" \
           ${OTLP_ENDPOINT:+--otlp-endpoint "$OTLP_ENDPOINT"} \
