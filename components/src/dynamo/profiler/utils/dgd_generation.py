@@ -154,6 +154,10 @@ def assemble_final_config(
     else:
         base = dgd_config
 
+    backend = getattr(dgdr, "backend", None) or (dgdr or {}).get("backend", "vllm")
+    backend_str = backend.value if hasattr(backend, "value") else str(backend)
+    base.setdefault("spec", {})["backendFramework"] = backend_str
+
     # Steps 2-3: layer optional features, collecting ConfigMaps
     config_maps: list[dict] = []
 
