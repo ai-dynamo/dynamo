@@ -27,6 +27,11 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      run_sanity_check:
+        description: 'Whether to run sanity check on the runtime image before executing tests'
+        required: false
+        type: boolean
+        default: true
       run_cpu_only_tests:
         description: 'Whether to run CPU-only tests'
         required: false
@@ -119,6 +124,7 @@ jobs:
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
       - name: Run Sanity Check on Runtime Image
+        if: ${{ inputs.run_sanity_check }}
         shell: bash
         run: |
           echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"

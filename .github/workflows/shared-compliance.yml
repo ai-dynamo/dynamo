@@ -48,7 +48,7 @@ jobs:
     runs-on: prod-builder-v3
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
-    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}    
+    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -84,4 +84,4 @@ jobs:
           arch: ${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          cuda_version: ${{ inputs.cuda_version }}
+          cuda_version: ${{ matrix.cuda_version }}
