@@ -110,7 +110,7 @@ jobs:
     runs-on: prod-builder-v3
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
-    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ inputs.platform }}
+    name: multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
