@@ -184,7 +184,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
+      platform: '["linux/amd64", "linux/arm64"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -198,7 +198,7 @@ jobs:
       framework: sglang
       target: runtime
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
+      platform: '["linux/amd64", "linux/arm64"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -212,7 +212,7 @@ jobs:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
+      platform: '["linux/amd64", "linux/arm64"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
