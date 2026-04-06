@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
 from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
@@ -1260,6 +1260,7 @@ def _test_router_decisions_disagg(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     durable_kv_events: bool = False,
+    router_aic_config: Optional[dict[str, Any]] = None,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1282,6 +1283,7 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for frontend KV routing.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -1297,6 +1299,7 @@ def _test_router_decisions_disagg(
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
+        router_aic_config=router_aic_config,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
@@ -1479,6 +1482,7 @@ def _test_router_decisions(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    router_aic_config: Optional[dict[str, Any]] = None,
 ):
     """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
 
@@ -1503,6 +1507,7 @@ def _test_router_decisions(
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix/tiebreak logic
@@ -1524,12 +1529,22 @@ def _test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            router_track_prefill_tokens=True,
+            router_prefill_load_model=(
+                "aic" if router_aic_config is not None else "none"
+            ),
+        )
+        aic_perf_config = (
+            AicPerfConfig(**router_aic_config)
+            if router_aic_config is not None
+            else None
         )
         with min_initial_workers_env(expected_num_instances):
             kv_router = KvRouter(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
+                aic_perf_config=aic_perf_config,
             )
 
         # Wait for workers to be ready and get their instance IDs
