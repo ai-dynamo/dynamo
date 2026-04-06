@@ -498,7 +498,6 @@ impl OpenAIPreprocessor {
                 formatted_prompt.as_deref(),
             );
             builder.multi_modal_data(Some(media_map));
-            builder.inline_media_stripped(true);
             builder.extra_args(Some(extra_args));
         }
 
