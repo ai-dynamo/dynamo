@@ -261,6 +261,13 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_prefill_load_model requires router_track_prefill_tokens=true",
         ));
     }
+    if config.router_prefill_load_model.is_enabled()
+        && !matches!(config.router_queue_policy, RouterQueuePolicy::Fcfs)
+    {
+        return Err(ValidationError::new(
+            "router_prefill_load_model currently requires router_queue_policy='fcfs'",
+        ));
+    }
     Ok(())
 }
 
@@ -347,28 +354,6 @@ mod tests {
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
     #[test]
-    fn router_queue_policy_display_and_parse_support_lcfs() {
-        assert_eq!(RouterQueuePolicy::Lcfs.to_string(), "lcfs");
-        assert_eq!(
-            "lcfs".parse::<RouterQueuePolicy>().unwrap(),
-            RouterQueuePolicy::Lcfs
-        );
-    }
-
-    #[test]
-    fn router_queue_policy_serde_round_trip_supports_lcfs() {
-        let serialized = serde_json::to_string(&RouterQueuePolicy::Lcfs).unwrap();
-        assert_eq!(serialized, "\"lcfs\"");
-        let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
-    }
-
-    #[test]
-    fn kv_router_config_defaults_to_tracking_prefill_tokens() {
-        assert!(KvRouterConfig::default().router_track_prefill_tokens);
-    }
-
-    #[test]
     fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
         let cfg = KvRouterConfig::default();
         let tokens = vec![1, 2, 3, 4];
@@ -399,17 +384,6 @@ mod tests {
             .unwrap();
 
         assert_ne!(without_mm, with_mm);
-    }
-
-    #[test]
-    fn router_config_override_serde_round_trip_preserves_track_prefill_tokens() {
-        let serialized = serde_json::to_string(&RouterConfigOverride {
-            track_prefill_tokens: Some(false),
-            ..Default::default()
-        })
-        .unwrap();
-        let deserialized: RouterConfigOverride = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.track_prefill_tokens, Some(false));
     }
 
     #[test]

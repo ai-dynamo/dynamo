@@ -333,7 +333,7 @@ impl AggRuntime {
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
             if let Some(router) = self.router.as_mut() {
-                admissions = router.on_request_completed(signal.uuid)?.admissions;
+                admissions = router.on_request_completed(signal.uuid, self.now_ms)?.admissions;
                 #[cfg(test)]
                 {
                     self.stats.router_freed_count += 1;
@@ -367,7 +367,7 @@ impl AggRuntime {
             })?
             .prefill_completed = true;
         if let Some(router) = self.router.as_mut() {
-            admissions = router.on_prefill_completed(signal.uuid)?.admissions;
+            admissions = router.on_prefill_completed(signal.uuid, self.now_ms)?.admissions;
             #[cfg(test)]
             {
                 self.stats.prefill_marked_count += 1;
@@ -558,7 +558,7 @@ impl AggRuntime {
             router: self
                 .router
                 .as_ref()
-                .map(OfflineReplayRouter::debug_snapshot),
+                .map(|router| router.debug_snapshot(self.now_ms)),
         }
     }
 }

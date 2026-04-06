@@ -409,7 +409,9 @@ impl DisaggRuntime {
         if self.prefill_router.is_some() {
             let prefill_complete_admissions = {
                 let prefill_router = self.prefill_router.as_mut().expect("router checked above");
-                prefill_router.on_prefill_completed(signal.uuid)?.admissions
+                prefill_router
+                    .on_prefill_completed(signal.uuid, self.now_ms)?
+                    .admissions
             };
             #[cfg(test)]
             {
@@ -423,7 +425,9 @@ impl DisaggRuntime {
 
             let admissions = {
                 let prefill_router = self.prefill_router.as_mut().expect("router checked above");
-                prefill_router.on_request_completed(signal.uuid)?.admissions
+                prefill_router
+                    .on_request_completed(signal.uuid, self.now_ms)?
+                    .admissions
             };
             #[cfg(test)]
             {
@@ -446,7 +450,9 @@ impl DisaggRuntime {
         }
 
         let admissions = if let Some(decode_router) = self.decode_router.as_mut() {
-            let admissions = decode_router.on_request_completed(signal.uuid)?.admissions;
+            let admissions = decode_router
+                .on_request_completed(signal.uuid, self.now_ms)?
+                .admissions;
             #[cfg(test)]
             {
                 self.stats.decode_router_freed_count += 1;

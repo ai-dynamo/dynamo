@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
@@ -194,17 +195,18 @@ where
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.slots.add_request(req)
+        self.slots.add_request(req, Instant::now())
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.mark_prefill_completed(&request_id.to_string())?;
+        self.slots
+            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
         self.queue.update().await;
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string())?;
+        self.slots.free(&request_id.to_string(), Instant::now())?;
         self.queue.update().await;
         Ok(())
     }
@@ -233,6 +235,7 @@ where
         overlaps: OverlapScores,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
+        let decay_now = Instant::now();
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -240,6 +243,7 @@ where
                 isl_tokens,
                 overlaps,
                 track_prefill_tokens,
+                decay_now,
             );
 
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
@@ -410,7 +414,7 @@ mod tests {
 
         assert_eq!(
             slots
-                .active_tokens()
+                .active_tokens(Instant::now())
                 .get(&WorkerWithDpRank::new(0, 0))
                 .copied(),
             Some(0)
@@ -537,8 +541,12 @@ mod tests {
         let token_seq = vec![11, 22, 33, 44];
         let overlaps = OverlapScores::default();
 
-        let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, overlaps.clone());
+        let (decode_blocks, prefill_tokens) = slots.potential_blocks_and_tokens(
+            Some(&token_seq),
+            128,
+            overlaps.clone(),
+            Instant::now(),
+        );
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
