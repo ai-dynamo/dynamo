@@ -664,10 +664,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if not path:
             return {"status": "error", "message": "Missing 'path' in body"}
         try:
-            # Use vLLM's collective RPC to load weights on all DP ranks
+            # Use vLLM's built-in reload_weights via collective RPC.
+            # This calls Worker.reload_weights() -> GPUModelRunner.reload_weights()
+            # which handles loading safetensors from a directory using vLLM's
+            # model loader with proper layerwise reload.
             await self.engine_client.collective_rpc(
-                "update_weights_from_path",
-                args=(path,),
+                "reload_weights",
+                kwargs={"weights_path": path},
             )
             self._weight_version = version
             logger.info(f"[RL] Weights loaded from {path} (version={version})")

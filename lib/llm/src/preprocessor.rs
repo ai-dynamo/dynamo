@@ -529,23 +529,21 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    // need ownership for the builder, so clone.
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                }
+                            // Use token_data when provided (TITO / EPP / RL),
+                            // regardless of backend_instance_id.
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) = token_data {
+                                tracing::trace!(
+                                    "Using provided token_data: {} ids (backend_instance_id={has_backend_instance_id})",
+                                    tokens.len()
+                                );
+                                (tokens.clone(), has_backend_instance_id)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
                             } else {
-                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
