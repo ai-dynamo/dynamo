@@ -189,6 +189,14 @@ jobs:
             git checkout --orphan gh-pages
           fi
 
+          # One-time cleanup: remove old path layout from before allure/ prefix migration
+          for old_dir in allure-all pre-merge pre-merge-v2 post-merge post-merge-v2 nightly nightly-v2 release release-v2; do
+            if [ -d "$old_dir" ]; then
+              echo "Removing legacy directory: $old_dir"
+              rm -rf "$old_dir"
+            fi
+          done
+
           # Deploy Allure 3 report (primary)
           mkdir -p "allure/${SUBDIR}"
           rm -rf "allure/${SUBDIR}/"*
