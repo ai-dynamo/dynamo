@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Local GPU and CPU Test Flow
+name: Shared Local GPU and CPU Test
 
 on:
   workflow_call:
     inputs:
-      framework:
-        description: 'Framework name (vllm, sglang, trtllm)'
+      test_suite_name:
+        description: 'Test suite name (vllm, sglang, trtllm)'
         required: true
         type: string
       amd_runner:
@@ -78,8 +78,6 @@ jobs:
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
-    env:
-      FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -144,7 +142,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -157,7 +155,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}

@@ -111,12 +111,12 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Tester
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -124,7 +124,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Install Python dependencies for operator codegen
         shell: bash
         working-directory: ./deploy/operator
@@ -141,7 +141,7 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         env:
-          NO_CACHE_FLAG: ''
+          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-operator"
@@ -161,6 +161,7 @@ jobs:
           docker buildx build --push ${NO_CACHE_FLAG} \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-context snapshot=../snapshot \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -229,13 +230,6 @@ jobs:
       platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
-      ##############################
-    #   run_cpu_only_tests: true
-    #   cpu_only_test_markers: 'pre_merge and planner and gpu_0'
-    #   cpu_only_test_timeout_minutes: 30
-    #   run_single_gpu_tests: false
-    #   run_multi_gpu_tests: false
-    #   copy_to_acr: false
     secrets: inherit
 
   # ============================================================================
@@ -248,7 +242,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: vllm
+      test_suite_name: vllm
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -265,7 +259,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: vllm
+      test_suite_name: vllm
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -280,7 +274,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: sglang
+      test_suite_name: sglang
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -296,7 +290,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: sglang
+      test_suite_name: sglang
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -311,7 +305,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: trtllm
+      test_suite_name: trtllm
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -327,13 +321,86 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      framework: trtllm
+      test_suite_name: trtllm
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+  
+  planner-test:
+    name: planner Test
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: planner
+      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COMPLIANCE PIPELINES
+  # ============================================================================
+
+  vllm-compliance:
+    name: vllm Image Compliance
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: vllm
+      target: runtime
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  sglang-compliance:
+    name: sglang Image Compliance
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: sglang
+      target: runtime
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  trtllm-compliance:
+    name: trtllm Image Compliance
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: trtllm
+      target: runtime
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  planner-compliance:
+    name: planner Image Compliance
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: planner
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]'
     secrets: inherit
 
   # ============================================================================
@@ -350,10 +417,9 @@ jobs:
       (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
-      framework: vllm
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
 
@@ -367,10 +433,9 @@ jobs:
       (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
-      framework: sglang
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.  
       copy_timeout_minutes: 10
     secrets: inherit
 
@@ -384,10 +449,9 @@ jobs:
       (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
-      framework: trtllm
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.  
       copy_timeout_minutes: 10
     secrets: inherit
 

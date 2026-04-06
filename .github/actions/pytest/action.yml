@@ -8,8 +8,8 @@ inputs:
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
-  framework:
-    description: 'Framework name for test metrics'
+  test_suite_name:
+    description: 'Test suite name for test metrics'
     required: false
     default: 'unknown'
   test_type:
@@ -283,7 +283,7 @@ runs:
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
           # Rename XML file to unique name
-          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
@@ -306,6 +306,6 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
