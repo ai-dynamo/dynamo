@@ -1517,6 +1517,7 @@ def run_mocker_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
+    trace_block_size: int = 512,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...

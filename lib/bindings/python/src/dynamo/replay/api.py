@@ -22,6 +22,7 @@ def run_trace_replay(
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
+    trace_block_size=512,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -37,6 +38,7 @@ def run_trace_replay(
         replay_mode=replay_mode,
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
+        trace_block_size=trace_block_size,
     )
 
 

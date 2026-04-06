@@ -475,7 +475,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -492,6 +492,7 @@ pub fn run_mocker_trace_replay(
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
+    trace_block_size: usize,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -523,6 +524,7 @@ pub fn run_mocker_trace_replay(
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
+                            trace_block_size,
                             max_in_flight,
                             num_workers,
                             router_mode,
@@ -534,6 +536,7 @@ pub fn run_mocker_trace_replay(
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
+                            trace_block_size,
                             num_workers,
                             arrival_speedup_ratio,
                             router_mode,
@@ -545,6 +548,7 @@ pub fn run_mocker_trace_replay(
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
+                            trace_block_size,
                             max_in_flight,
                             num_workers,
                             router_mode,
@@ -556,6 +560,7 @@ pub fn run_mocker_trace_replay(
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
+                            trace_block_size,
                             num_workers,
                             arrival_speedup_ratio,
                             router_mode,
@@ -575,6 +580,7 @@ pub fn run_mocker_trace_replay(
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         &trace_file,
+                        trace_block_size,
                         max_in_flight,
                         router_mode,
                     )
@@ -585,6 +591,7 @@ pub fn run_mocker_trace_replay(
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         &trace_file,
+                        trace_block_size,
                         arrival_speedup_ratio,
                         router_mode,
                     )

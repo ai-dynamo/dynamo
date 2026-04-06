@@ -139,7 +139,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}' \
     --report-json /tmp/replay-report.json
 ```
@@ -183,6 +184,11 @@ first turn uses `timestamp`/`created_time`; later turns can use `delay` or `dela
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
 {"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 ```
+
+For trace-file replay, `--trace-block-size` controls how many tokens each `hash_id` represents in
+the dataset, while engine `block_size` still controls the replay engine and router hashing. Public
+Mooncake/toolagent traces use `--trace-block-size 512`; engine `block_size` can still stay at `64`
+to match the live runtime configuration.
 
 The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
 report JSON to disk.
@@ -304,7 +310,8 @@ python -m dynamo.replay /path/to/trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
     --aic-backend vllm \
     --aic-system h200_sxm \

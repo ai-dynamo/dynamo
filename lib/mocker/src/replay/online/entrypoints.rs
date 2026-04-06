@@ -142,12 +142,13 @@ pub(crate) fn simulate_trace_workload(
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     let (report, _) = run_live_workload_runtime(
         args,
         router_config,
         prefill_load_estimator,
-        trace.into_trace_driver()?,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Trace,
@@ -166,12 +167,13 @@ pub(crate) fn simulate_concurrency_workload(
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     let (report, _) = run_live_workload_runtime(
         args,
         router_config,
         prefill_load_estimator,
-        trace.into_concurrency_driver()?,
+        trace.into_concurrency_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
@@ -230,12 +232,13 @@ pub(super) fn simulate_trace_workload_with_stats(
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         args,
         None,
         None,
-        trace.into_trace_driver()?,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Trace,
@@ -252,12 +255,13 @@ pub(super) fn simulate_concurrency_workload_with_stats(
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         args,
         None,
         None,
-        trace.into_concurrency_driver()?,
+        trace.into_concurrency_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },

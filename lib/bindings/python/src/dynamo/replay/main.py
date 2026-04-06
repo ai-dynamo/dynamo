@@ -141,6 +141,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
+        "--trace-block-size",
+        type=int,
+        default=512,
+        help="tokens represented by each hash_id in the trace file; only used for file replay",
+    )
+    parser.add_argument(
         "--report-json",
         help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
     )
@@ -194,6 +200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
+            trace_block_size=args.trace_block_size,
         )
     else:
         report = run_synthetic_trace_replay(

@@ -37,8 +37,10 @@ pub(crate) fn generate_trace_worker_artifacts(
     args: MockEngineArgs,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let mut worker = ReplayWorkerCore::new_with_kv_capture(args, WorkerId::default());
-    let mut driver = trace.into_trace_driver()?;
+    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     let mut collector = TraceCollector::default();
     let mut artifacts = ReplayWorkerArtifacts::default();
     let mut current_time_ms = 0.0;
@@ -246,7 +248,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     trace: Trace,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
-    let driver = WorkloadDriver::new_trace(trace)?;
+    let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
@@ -267,7 +269,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
-    let driver = WorkloadDriver::new_concurrency(trace)?;
+    let driver = WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size)?;
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
@@ -312,9 +314,13 @@ pub(crate) fn simulate_trace_workload_single(
     trace: Trace,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let collector =
-        SingleRuntime::new_workload(args, trace.into_trace_driver()?, SingleReplayMode::Trace)
-            .run()?;
+    let engine_block_size = args.block_size;
+    let collector = SingleRuntime::new_workload(
+        args,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
+        SingleReplayMode::Trace,
+    )
+    .run()?;
     Ok(collector.finish())
 }
 
@@ -324,9 +330,10 @@ pub(crate) fn simulate_concurrency_workload_single(
     max_in_flight: usize,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let collector = SingleRuntime::new_workload(
         args,
-        trace.into_concurrency_driver()?,
+        trace.into_concurrency_driver_with_block_size(engine_block_size)?,
         SingleReplayMode::Concurrency { max_in_flight },
     )
     .run()?;
@@ -394,7 +401,7 @@ pub(crate) fn simulate_trace_workload_multi(
         &args,
         router_config,
         prefill_load_estimator,
-        trace.into_trace_driver()?,
+        trace.into_trace_driver_with_block_size(args.block_size)?,
         num_workers,
         AggReplayMode::Trace,
         router_mode,
@@ -417,7 +424,7 @@ pub(crate) fn simulate_concurrency_workload_multi(
         &args,
         router_config,
         prefill_load_estimator,
-        trace.into_concurrency_driver()?,
+        trace.into_concurrency_driver_with_block_size(args.block_size)?,
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
         router_mode,
@@ -458,9 +465,12 @@ pub(super) fn run_trace_workload_single_collect(
     args: MockEngineArgs,
     trace: Trace,
 ) -> TraceCollector {
+    let engine_block_size = args.block_size;
     SingleRuntime::new_workload(
         args,
-        trace.into_trace_driver().unwrap(),
+        trace
+            .into_trace_driver_with_block_size(engine_block_size)
+            .unwrap(),
         SingleReplayMode::Trace,
     )
     .run()
@@ -473,9 +483,12 @@ pub(super) fn run_concurrency_workload_single_collect(
     trace: Trace,
     max_in_flight: usize,
 ) -> TraceCollector {
+    let engine_block_size = args.block_size;
     SingleRuntime::new_workload(
         args,
-        trace.into_concurrency_driver().unwrap(),
+        trace
+            .into_concurrency_driver_with_block_size(engine_block_size)
+            .unwrap(),
         SingleReplayMode::Concurrency { max_in_flight },
     )
     .run()
@@ -537,7 +550,9 @@ pub(super) fn run_trace_workload_multi_collect_with_stats(
         args,
         None,
         None,
-        trace.into_trace_driver().unwrap(),
+        trace
+            .into_trace_driver_with_block_size(args.block_size)
+            .unwrap(),
         num_workers,
         AggReplayMode::Trace,
         router_mode,
@@ -559,7 +574,9 @@ pub(super) fn run_concurrency_workload_multi_collect_with_stats(
         args,
         None,
         None,
-        trace.into_concurrency_driver().unwrap(),
+        trace
+            .into_concurrency_driver_with_block_size(args.block_size)
+            .unwrap(),
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
         router_mode,
@@ -623,7 +640,9 @@ pub(super) fn run_trace_workload_collect(
         config,
         router_config,
         None,
-        trace.into_trace_driver().unwrap(),
+        trace
+            .into_trace_driver_with_block_size(config.prefill_args.block_size)
+            .unwrap(),
         DisaggReplayMode::Trace,
         router_mode,
     )
@@ -644,7 +663,9 @@ pub(super) fn run_concurrency_workload_collect(
         config,
         router_config,
         None,
-        trace.into_concurrency_driver().unwrap(),
+        trace
+            .into_concurrency_driver_with_block_size(config.prefill_args.block_size)
+            .unwrap(),
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )

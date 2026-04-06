@@ -31,6 +31,7 @@ pub fn generate_trace_worker_artifacts_offline(
 pub fn simulate_trace_file(
     args: MockEngineArgs,
     trace_path: &Path,
+    trace_block_size: usize,
     num_workers: usize,
     arrival_speedup_ratio: f64,
 ) -> Result<TraceSimulationReport> {
@@ -39,24 +40,27 @@ pub fn simulate_trace_file(
         None,
         None,
         trace_path,
+        trace_block_size,
         num_workers,
         arrival_speedup_ratio,
         ReplayRouterMode::RoundRobin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
-    let trace = Trace::from_mooncake(trace_path, args.block_size)?
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     let started_at = Instant::now();
@@ -76,12 +80,13 @@ pub fn simulate_trace_file_disagg_with_router_mode(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
-    let trace = Trace::from_mooncake(trace_path, config.prefill_args.block_size)?
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     let started_at = Instant::now();
@@ -98,6 +103,7 @@ pub fn simulate_trace_file_disagg_with_router_mode(
 pub fn simulate_trace_live_file(
     args: MockEngineArgs,
     trace_path: &Path,
+    trace_block_size: usize,
     num_workers: usize,
     arrival_speedup_ratio: f64,
 ) -> Result<TraceSimulationReport> {
@@ -106,24 +112,27 @@ pub fn simulate_trace_live_file(
         None,
         None,
         trace_path,
+        trace_block_size,
         num_workers,
         arrival_speedup_ratio,
         ReplayRouterMode::RoundRobin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
-    let trace = Trace::from_mooncake(trace_path, args.block_size)?
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     online::simulate_trace_workload(
@@ -253,6 +262,7 @@ pub fn simulate_trace_live_requests_with_router_mode(
 pub fn simulate_concurrency_file(
     args: MockEngineArgs,
     trace_path: &Path,
+    trace_block_size: usize,
     max_in_flight: usize,
     num_workers: usize,
 ) -> Result<TraceSimulationReport> {
@@ -261,24 +271,27 @@ pub fn simulate_concurrency_file(
         None,
         None,
         trace_path,
+        trace_block_size,
         max_in_flight,
         num_workers,
         ReplayRouterMode::RoundRobin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
-    let trace = Trace::from_mooncake(trace_path, args.block_size)?;
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?;
     let started_at = Instant::now();
     let report = simulate_concurrency_workload_with_router_mode(
         args,
@@ -297,12 +310,13 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
-    let trace = Trace::from_mooncake(trace_path, config.prefill_args.block_size)?;
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?;
     let started_at = Instant::now();
     let report = simulate_concurrency_workload_disagg_with_router_mode(
         config,
@@ -318,6 +332,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
 pub fn simulate_concurrency_live_file(
     args: MockEngineArgs,
     trace_path: &Path,
+    trace_block_size: usize,
     max_in_flight: usize,
     num_workers: usize,
 ) -> Result<TraceSimulationReport> {
@@ -326,24 +341,27 @@ pub fn simulate_concurrency_live_file(
         None,
         None,
         trace_path,
+        trace_block_size,
         max_in_flight,
         num_workers,
         ReplayRouterMode::RoundRobin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_file_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
+    trace_block_size: usize,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
-    let trace = Trace::from_mooncake(trace_path, args.block_size)?;
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?;
     online::simulate_concurrency_workload(
         args,
         router_config,
