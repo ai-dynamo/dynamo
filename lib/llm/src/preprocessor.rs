@@ -1845,18 +1845,36 @@ mod tests {
 
         // (parser, effort, expected_key, expected_value, description)
         // expected_key = None means the call should leave args unchanged.
-        let cases: Vec<(
-            Option<&str>,
-            Option<ReasoningEffort>,
-            Option<&str>,
-            Option<bool>,
-            &str,
-        )> = vec![
+        let cases = [
             // No effort → args unchanged regardless of parser
-            (Some("basic"), None, None, None, "basic + no effort → args unchanged"),
-            (Some("kimi_k25"), None, None, None, "kimi_k25 + no effort → args unchanged"),
-            (Some("deepseek_r1"), None, None, None, "deepseek_r1 + no effort → args unchanged"),
-            (None, None, None, None, "no parser + no effort → args unchanged"),
+            (
+                Some("basic"),
+                None,
+                None,
+                None,
+                "basic + no effort → args unchanged",
+            ),
+            (
+                Some("kimi_k25"),
+                None,
+                None,
+                None,
+                "kimi_k25 + no effort → args unchanged",
+            ),
+            (
+                Some("deepseek_r1"),
+                None,
+                None,
+                None,
+                "deepseek_r1 + no effort → args unchanged",
+            ),
+            (
+                None,
+                None,
+                None,
+                None,
+                "no parser + no effort → args unchanged",
+            ),
             // ReasoningEffort::None → explicitly disables reasoning
             (
                 Some("basic"),
@@ -1935,7 +1953,10 @@ mod tests {
             );
             match (expected_key, expected_value) {
                 (None, _) => {
-                    assert!(args.is_none(), "FAILED (args should stay unchanged): {desc}");
+                    assert!(
+                        args.is_none(),
+                        "FAILED (args should stay unchanged): {desc}"
+                    );
                 }
                 (Some(key), Some(val)) => {
                     let map = args.as_ref().unwrap_or_else(|| {
