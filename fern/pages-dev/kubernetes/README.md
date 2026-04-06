@@ -64,10 +64,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 **For Shared/Multi-Tenant Clusters:**
 
-If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
-```bash
---set dynamo-operator.namespaceRestriction.enabled=true
-```
+> **DEPRECATED:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead.
 
 For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](installation-guide.md)**.
 
