@@ -201,8 +201,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
-        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
-        containing only new tokens since the last output. We pass these through directly.
+        SGLang sends cumulative output_ids (all tokens generated so far). We
+        slice off only the new tokens each iteration to yield disjoint deltas
+        to the frontend. This avoids forcing SGLang's incremental streaming
+        mode which causes tokenizer_manager backpressure at high concurrency.
 
         Args:
             stream_source: Async generator from engine.async_generate.
@@ -211,6 +213,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
+        num_output_tokens_so_far = 0
+
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -234,17 +238,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         finish_reason["type"]
                     )
 
-                # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # Empty, non-final chunks can happen during scheduler idle ticks.
-                # Keep waiting for the next chunk unless cancellation was requested.
+                # Empty, non-final chunks can happen during scheduler idle
+                # ticks or KV cache retractions. Keep waiting for the next
+                # chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
                     if context.is_stopped():
                         break
                     continue
 
-                # Pass through disjoint token segments directly
-                out["token_ids"] = output_ids
+                # Slice new tokens from cumulative output_ids
+                out["token_ids"] = output_ids[num_output_tokens_so_far:]
+                num_output_tokens_so_far = len(output_ids)
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
                     # Base64-encode tensor bytes to match sglang's output format.

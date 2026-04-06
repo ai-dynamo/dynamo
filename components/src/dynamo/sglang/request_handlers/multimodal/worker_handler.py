@@ -142,23 +142,24 @@ class StreamProcessor:
     async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
         """Process SGLang stream output.
 
-        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
-        containing only new tokens since the last output. We pass these through directly.
+        SGLang sends cumulative output_ids. We slice off only the new tokens
+        each iteration to yield disjoint deltas.
         """
+        num_output_tokens_so_far = 0
         try:
             async for res in stream_source:
                 try:
-                    # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output_ids = res.get("output_ids", [])
                     finish_reason = res.get("meta_info", {}).get("finish_reason")
 
-                    # Empty, non-final chunks can happen during scheduler idle ticks.
-                    # Keep waiting for the next chunk.
                     if not output_ids and not finish_reason:
                         continue
 
+                    new_tokens = output_ids[num_output_tokens_so_far:]
+                    num_output_tokens_so_far = len(output_ids)
+
                     output = {
-                        "token_ids": output_ids,
+                        "token_ids": new_tokens,
                         "text": res.get("text", ""),
                         "finished": False,
                     }

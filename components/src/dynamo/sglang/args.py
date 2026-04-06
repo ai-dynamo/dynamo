@@ -24,7 +24,6 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -374,11 +373,29 @@ async def parse_args(args: list[str]) -> Config:
             "values are always higher priority at the API layer."
         )
 
-    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. Modern SGLang gates this
-    # behavior behind incremental_streaming_output, while older releases used
-    # stream_output.
-    enable_disjoint_streaming_output(server_args)
+    # Do NOT force incremental_streaming_output (or the old stream_output).
+    # When enabled, SGLang's tokenizer_manager must yield every streaming chunk
+    # individually (no coalescing), which creates backpressure under high
+    # concurrency and causes ~2x throughput regression in disaggregated PD
+    # serving. Instead, leave SGLang in its default cumulative mode and slice
+    # new tokens in the decode handler.
+    #
+    # Tradeoff: cumulative slicing (output_ids[prev:]) has O(n) copy cost per
+    # chunk that grows with output length, which hurts at very long OSLs. The
+    # incremental mode avoids this copy but its tokenizer_manager backpressure
+    # under high concurrency is far more damaging to throughput. If SGLang
+    # upstream fixes the backpressure issue, we should revisit re-enabling
+    # incremental mode.
+    # See: https://github.com/sgl-project/sglang/issues/22095
+    if getattr(server_args, "incremental_streaming_output", False) or getattr(
+        server_args, "stream_output", False
+    ):
+        raise ValueError(
+            "--incremental-streaming-output (or --stream-output) is not supported "
+            "by Dynamo's SGLang handlers, which expect cumulative output_ids. "
+            "Dynamo slices new tokens from cumulative output in the decode handler. "
+            "Please remove the --incremental-streaming-output flag."
+        )
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
