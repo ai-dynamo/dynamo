@@ -135,7 +135,7 @@ jobs:
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             TAG_BUILDER+="-efa"
           fi
-          PLAIN_TAG=${TAG_BUILDER}
+          TARGET_TAG_PLAIN=${TAG_BUILDER}
           if [ "${{ matrix.cuda_version }}" != "" ]; then
             CUDA_VERSION="${{ matrix.cuda_version }}"
             CUDA_MAJOR=${CUDA_VERSION%%.*}
@@ -146,9 +146,9 @@ jobs:
 
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
-          echo "plain_tag=${PLAIN_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "test_image_uri=${TEST_IMAGE_URI}" >> $GIHUB_OUTPUT
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
