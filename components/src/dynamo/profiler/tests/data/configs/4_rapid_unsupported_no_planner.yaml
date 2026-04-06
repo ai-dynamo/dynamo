@@ -3,7 +3,7 @@
 
 # Case 4: AIC unsupported model, rapid, without planner
 # l40s + vllm has no disagg support in AIC
-model: "Qwen/Qwen3-32B"
+model: "Qwen/Qwen2.5-0.5B"
 backend: vllm
 image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:

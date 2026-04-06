@@ -13,9 +13,19 @@ use super::validate::{
     validate_offline_disagg_replay_args, validate_offline_replay_args,
     validate_online_concurrency_args, validate_online_replay_args,
 };
-use super::{OfflineDisaggReplayConfig, ReplayRouterMode, TraceSimulationReport};
+use super::{
+    OfflineDisaggReplayConfig, ReplayRouterMode, ReplayWorkerArtifacts, TraceSimulationReport,
+};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::Trace;
+
+pub fn generate_trace_worker_artifacts_offline(
+    args: MockEngineArgs,
+    trace: Trace,
+) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    crate::replay::offline::generate_trace_worker_artifacts(args, trace)
+}
 
 pub fn simulate_trace_file(
     args: MockEngineArgs,

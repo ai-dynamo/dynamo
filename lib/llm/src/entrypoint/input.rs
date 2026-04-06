@@ -10,11 +10,9 @@
 use std::{
     fmt,
     io::{IsTerminal as _, Read as _},
-    path::PathBuf,
     str::FromStr,
 };
 
-pub mod batch;
 mod common;
 pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 pub mod endpoint;
@@ -23,8 +21,6 @@ pub mod http;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
-
-const BATCH_PREFIX: &str = "batch:";
 
 /// The various ways of connecting prompts to an engine
 #[derive(PartialEq)]
@@ -40,9 +36,6 @@ pub enum Input {
 
     /// Pull requests from a namespace/component/endpoint path.
     Endpoint(String),
-
-    /// Batch mode. Run all the prompts, write the outputs, exit.
-    Batch(PathBuf),
 
     // Run an KServe compatible gRPC server
     Grpc,
@@ -68,10 +61,6 @@ impl TryFrom<&str> for Input {
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 Ok(Input::Endpoint(endpoint_path.to_string()))
             }
-            batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
-                let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
-                Ok(Input::Batch(PathBuf::from(path)))
-            }
             e => Err(anyhow::anyhow!("Invalid in= option '{e}'")),
         }
     }
@@ -85,7 +74,6 @@ impl fmt::Display for Input {
             Input::Text => "text",
             Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
-            Input::Batch(path) => &path.display().to_string(),
         };
         write!(f, "{s}")
     }
@@ -135,9 +123,6 @@ pub async fn run_input(
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
             text::run(drt, Some(prompt), engine_config).await?;
-        }
-        Input::Batch(path) => {
-            batch::run(drt, path, engine_config).await?;
         }
         Input::Endpoint(path) => {
             endpoint::run(drt, path, engine_config).await?;

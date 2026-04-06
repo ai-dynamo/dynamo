@@ -233,34 +233,6 @@ dynamo-operator:
     # -- Path written by worker when model is loaded and ready for checkpointing
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
 
-    # Storage configuration
-    # These settings tell the operator where to find checkpoint storage
-    # Must match the configuration in the snapshot chart
-    storage:
-      # -- Storage backend type: pvc, s3, or oci
-      type: pvc
-
-      # PVC storage configuration (used when type=pvc)
-      pvc:
-        # -- Name of the PVC created by the snapshot chart
-        pvcName: "snapshot-pvc"
-        # -- Base path within the PVC for storing checkpoints
-        basePath: "/checkpoints"
-
-      # S3 storage configuration (used when type=s3)
-      s3:
-        # -- S3 URI in format: s3://[endpoint/]bucket/prefix
-        uri: ""
-        # -- Reference to a secret containing AWS credentials
-        credentialsSecretRef: ""
-
-      # OCI registry storage configuration (used when type=oci)
-      oci:
-        # -- OCI URI in format: oci://registry/repository
-        uri: ""
-        # -- Reference to a docker config secret for registry authentication
-        credentialsSecretRef: ""
-
 # Grove component - distributed inference orchestration
 # Installation is controlled by global.grove.install above.
 grove:
