@@ -8,7 +8,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -822,6 +822,118 @@ vllm_configs = {
         ],
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Generalized multimodal model coverage (Phase 1: agg topology, image only)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MultimodalModelProfile:
+    """Describes a multimodal model's test-relevant properties.
+
+    Used by make_multimodal_configs() to generate VLLMConfig entries for each
+    supported topology, decoupling model identity from test wiring.
+    """
+
+    name: str  # HuggingFace model ID
+    short_name: str  # kebab-case slug for config key (e.g. "gemma3-4b")
+    supported_topologies: set[str]  # {"agg"}, {"agg", "e_pd", "epd"}, etc.
+    image_expected_response: list[str]  # keywords from the standard image prompt
+    gpu_marker: str  # "gpu_1" or "gpu_2"
+    timeout_s: int  # pytest timeout (5× profiled first-response, min 120)
+    extra_vllm_args: list[str] = field(default_factory=list)
+    marks: list[Any] = field(default_factory=list)
+
+
+TOPOLOGY_SCRIPTS: dict[str, str] = {
+    "agg": "agg_multimodal.sh",
+    "e_pd": "disagg_multimodal_e_pd.sh",
+    "epd": "disagg_multimodal_epd.sh",
+}
+
+_GPU_MARKERS = {
+    "gpu_1": pytest.mark.gpu_1,
+    "gpu_2": pytest.mark.gpu_2,
+}
+
+
+def make_multimodal_configs(
+    profile: MultimodalModelProfile,
+) -> dict[str, VLLMConfig]:
+    """Generate VLLMConfig entries for each topology in *profile*.supported_topologies."""
+
+    configs: dict[str, VLLMConfig] = {}
+    gpu_mark = _GPU_MARKERS[profile.gpu_marker]
+
+    for topo in sorted(profile.supported_topologies):
+        script = TOPOLOGY_SCRIPTS[topo]
+        script_args = ["--model", profile.name] + profile.extra_vllm_args
+        if topo in ("e_pd", "epd"):
+            script_args.append("--single-gpu")
+
+        marks: list[Any] = [
+            gpu_mark,
+            pytest.mark.timeout(profile.timeout_s),
+            pytest.mark.post_merge,
+            *profile.marks,
+        ]
+
+        payloads = [
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? "
+                        "Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=profile.image_expected_response,
+                temperature=0.0,
+                max_tokens=100,
+            ),
+        ]
+
+        config_key = f"mm_{topo}_{profile.short_name}"
+        configs[config_key] = VLLMConfig(
+            name=config_key,
+            directory=vllm_dir,
+            script_name=script,
+            marks=marks,
+            model=profile.name,
+            script_args=script_args,
+            request_payloads=payloads,
+        )
+
+    return configs
+
+
+# Phase 1 model profiles — each must pass the onboarding gate before merge.
+MULTIMODAL_MODEL_PROFILES: list[MultimodalModelProfile] = [
+    MultimodalModelProfile(
+        name="google/gemma-3-4b-it",
+        short_name="gemma3-4b",
+        supported_topologies={"agg"},
+        image_expected_response=["green"],
+        gpu_marker="gpu_1",
+        timeout_s=360,
+        extra_vllm_args=["--dtype", "bfloat16", "--max-model-len", "4096"],
+    ),
+]
+
+for _profile in MULTIMODAL_MODEL_PROFILES:
+    _generated = make_multimodal_configs(_profile)
+    for _key in _generated:
+        assert (
+            _key not in vllm_configs
+        ), f"generated config key {_key!r} collides with existing"
+    vllm_configs.update(_generated)
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
