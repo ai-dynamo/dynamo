@@ -57,6 +57,66 @@ def _make_cm_name(prefix: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def add_checkpoint_to_config(dgdr, config_dict: dict) -> None:
+    """Inject checkpoint config into every decode service in the DGD.
+
+    Always injects checkpoint in Auto mode — the operator creates a DynamoCheckpoint
+    CR on first cold start and restores from it on subsequent scale-ups.  If no
+    snapshot-agent is running the operator falls back to cold start silently.
+
+    Identity fields (model, backend, TP size, max_model_len) are inferred from the
+    DGDR and service args — no manual configuration is required.
+    """
+    model = getattr(dgdr, "model", None) or (dgdr or {}).get("model", "")
+    backend = getattr(dgdr, "backend", None) or (dgdr or {}).get("backend", "vllm")
+    # str(BackendType.Vllm) returns "BackendType.Vllm" in Python 3.11+ due to enum
+    # __str__ changes; use .value to always get the raw string (e.g. "vllm").
+    backend_str = backend.value if hasattr(backend, "value") else str(backend)
+
+    services: dict = config_dict.get("spec", {}).get("services", {})
+    for svc_name, svc_spec in services.items():
+        if svc_spec is None:
+            continue
+        sub_type = svc_spec.get("subComponentType", "")
+        if sub_type != "decode":
+            continue
+
+        # Infer identity fields from the service's args.
+        args: list = (
+            svc_spec.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+        )
+        tp_size = 1
+        max_model_len = None
+        for i, arg in enumerate(args):
+            if arg == "--tensor-parallel-size" and i + 1 < len(args):
+                try:
+                    tp_size = int(args[i + 1])
+                except ValueError:
+                    pass
+            elif arg == "--max-model-len" and i + 1 < len(args):
+                try:
+                    max_model_len = int(args[i + 1])
+                except ValueError:
+                    pass
+
+        identity: dict = {
+            "model": model,
+            "backendFramework": backend_str,
+            "tensorParallelSize": tp_size,
+        }
+        if max_model_len is not None:
+            identity["maxModelLen"] = max_model_len
+
+        svc_spec["checkpoint"] = {
+            "enabled": True,
+            "mode": "Auto",
+            "identity": identity,
+        }
+        logger.info(
+            f"Checkpoint enabled on service {svc_name!r} (mode=Auto, tp={tp_size})"
+        )
+
+
 def assemble_final_config(
     dgdr,
     ops: ProfilerOperationalConfig,
@@ -70,6 +130,9 @@ def assemble_final_config(
     2. **Planner** — inject the Planner service + planner-config ConfigMap.
     3. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-throughput is enabled.
+    4. **Checkpoint** — always inject checkpoint config (mode=Auto) into decode
+       services.  The operator falls back to cold start if no snapshot-agent is
+       running, so this is safe unconditionally.
     """
     if not dgd_config:
         return dgd_config
@@ -78,10 +141,7 @@ def assemble_final_config(
     planner = is_planner_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
-    if not mocker and not planner:
-        return dgd_config
-
-    # Save picked config for auditing
+    # Save picked config for auditing whenever we mutate it.
     dgd_config_path = f"{ops.output_dir}/picked_dgd_config.yaml"
     with open(dgd_config_path, "w") as f:
         yaml.safe_dump(dgd_config, f, sort_keys=False)
@@ -93,7 +153,7 @@ def assemble_final_config(
     else:
         base = dgd_config
 
-    # Steps 2-3: layer features, collecting ConfigMaps
+    # Steps 2-3: layer optional features, collecting ConfigMaps
     config_maps: list[dict] = []
 
     if planner:
@@ -110,6 +170,9 @@ def assemble_final_config(
         profile_cm = add_profile_data_to_config(base, output_dir, mocker_enabled=mocker)
         if profile_cm:
             config_maps.append(profile_cm)
+
+    # Step 4: always inject checkpoint (Auto mode, falls back to cold start if unsupported).
+    add_checkpoint_to_config(dgdr, base)
 
     if config_maps:
         return config_maps + [base]

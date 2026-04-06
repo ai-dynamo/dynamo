@@ -252,6 +252,33 @@ def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> lis
         return []
 
 
+async def cleanup_remaining_deployments(deployment_clients, namespace: str) -> None:
+    """Clean up any remaining tracked deployments, handling errors gracefully."""
+    if not deployment_clients:
+        logger.info("No deployments to clean up")
+        return
+
+    logger.info(f"Cleaning up {len(deployment_clients)} remaining deployments...")
+    for deployment_client in deployment_clients:
+        try:
+            logger.info(
+                f"Attempting to delete deployment {deployment_client.deployment_name}..."
+            )
+            await deployment_client.delete_deployment()
+            logger.info(
+                f"Successfully deleted deployment {deployment_client.deployment_name}"
+            )
+        except Exception as e:
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.info(
+                    f"Deployment {deployment_client.deployment_name} was already deleted"
+                )
+            else:
+                logger.error(
+                    f"Failed to delete deployment {deployment_client.deployment_name}: {e}"
+                )
+
+
 def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
     """Add tolerations to every service's extraPodSpec in a DGD config dict.
 
