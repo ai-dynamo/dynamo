@@ -2255,14 +2255,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									"nvidia.com/annotation1": "annotation1",
 									"nvidia.com/annotation2": "annotation2",
 								},
-							Spec: grovev1alpha1.PodCliqueSpec{
-								RoleName:     "worker-wkr",
-								Replicas:     2,
-								MinAvailable: ptr.To(int32(2)),
-								// StartsAfter: []string{"worker-ldr"},
-								PodSpec: corev1.PodSpec{
-									RestartPolicy:                 corev1.RestartPolicyAlways,
-									TerminationGracePeriodSeconds: ptr.To(int64(60)),
+								Spec: grovev1alpha1.PodCliqueSpec{
+									RoleName:     "worker-wkr",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(2)),
+									// StartsAfter: []string{"worker-ldr"},
+									PodSpec: corev1.PodSpec{
+										RestartPolicy:                 corev1.RestartPolicyAlways,
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
 											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
 										},
@@ -3253,13 +3253,13 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									"nvidia.com/annotation1": "annotation1",
 									"nvidia.com/annotation2": "annotation2",
 								},
-							Spec: grovev1alpha1.PodCliqueSpec{
-								RoleName:     "worker-wkr",
-								Replicas:     2,
-								MinAvailable: ptr.To(int32(2)),
-								// StartsAfter: []string{"worker-ldr"},
-								PodSpec: corev1.PodSpec{
-									TerminationGracePeriodSeconds: ptr.To(int64(60)),
+								Spec: grovev1alpha1.PodCliqueSpec{
+									RoleName:     "worker-wkr",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(2)),
+									// StartsAfter: []string{"worker-ldr"},
+									PodSpec: corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
 											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
 										},
