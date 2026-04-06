@@ -63,6 +63,28 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    let (status_code, status, message) = if state.is_cancelled() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "Service is shutting down".to_string(),
+        )
+    } else if let Some(error) = state.initial_discovery_error() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            format!("Initial model discovery failed: {error}"),
+        )
+    } else if !state.initial_discovery_complete() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "Initial model discovery in progress".to_string(),
+        )
+    } else {
+        (StatusCode::OK, "healthy", "Service is healthy".to_string())
+    };
+
     let instances = match list_all_instances(state.discovery()).await {
         Ok(instances) => instances,
         Err(err) => {
@@ -77,9 +99,12 @@ async fn health_handler(
     endpoints.sort();
     endpoints.dedup();
     (
-        StatusCode::OK,
+        status_code,
         Json(json!({
-            "status": "healthy",
+            "status": status,
+            "message": message,
+            "initial_discovery_complete": state.initial_discovery_complete(),
+            "initial_discovery_error": state.initial_discovery_error(),
             "endpoints": endpoints,
             "instances": instances
         })),

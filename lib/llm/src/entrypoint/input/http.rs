@@ -171,6 +171,9 @@ async fn run_watcher(
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> anyhow::Result<()> {
+    let startup_state = http_service.state_clone();
+    startup_state.mark_initial_discovery_pending();
+
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
@@ -201,9 +204,37 @@ async fn run_watcher(
         }
     });
 
+    let (startup_tx, startup_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+
+    let startup_state_for_completion = startup_state.clone();
+    let _startup_task = tokio::spawn(async move {
+        match startup_rx.await {
+            Ok(Ok(())) => {
+                tracing::info!("Initial model discovery completed successfully");
+                startup_state_for_completion.mark_initial_discovery_complete();
+            }
+            Ok(Err(err)) => {
+                tracing::error!(error = %err, "Initial model discovery failed");
+                startup_state_for_completion.mark_initial_discovery_failed(err.to_string());
+            }
+            Err(_) => {
+                let message = "Initial model discovery task exited before signaling readiness";
+                tracing::error!(message);
+                startup_state_for_completion.mark_initial_discovery_failed(message);
+            }
+        }
+    });
+
+    let startup_state_for_watcher = startup_state.clone();
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(discovery_stream, namespace_filter).await;
+        if let Err(err) = watch_obj
+            .watch(discovery_stream, namespace_filter, Some(startup_tx))
+            .await
+        {
+            tracing::error!(error = %err, "Model discovery watcher stopped");
+            startup_state_for_watcher.mark_initial_discovery_failed(err.to_string());
+        }
     });
 
     Ok(())

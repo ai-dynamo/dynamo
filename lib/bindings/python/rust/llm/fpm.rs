@@ -560,9 +560,12 @@ impl FpmEventSubscriber {
                                     if removed > 0 {
                                         tracing::info!(
                                             "FPM tracker: removed {removed} entries for \
-                                             worker_id={removed_id} (MDC removed)"
+                                            worker_id={removed_id} (MDC removed)"
                                         );
                                     }
+                                }
+                                Some(Ok(DiscoveryEvent::InitialSyncComplete)) => {
+                                    tracing::debug!("FPM tracker: initial discovery sync completed");
                                 }
                                 Some(Err(e)) => {
                                     tracing::warn!("FPM tracker: discovery error: {e}");

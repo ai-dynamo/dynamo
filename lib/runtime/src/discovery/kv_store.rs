@@ -582,6 +582,7 @@ impl Discovery for KVStoreDiscovery {
                         );
                         Some(DiscoveryEvent::Removed(id))
                     }
+                    kv::WatchEvent::InitialSyncComplete => Some(DiscoveryEvent::InitialSyncComplete),
                 };
 
                 if let Some(event) = discovery_event {
@@ -706,6 +707,10 @@ mod tests {
             };
             client_clone.register(spec).await.unwrap();
         });
+
+        // The watch should explicitly signal that the initial snapshot is complete.
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event, DiscoveryEvent::InitialSyncComplete);
 
         // Wait for the added event
         let event = stream.next().await.unwrap().unwrap();

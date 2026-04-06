@@ -158,6 +158,9 @@ impl DynamicSubscriber {
                             tracing::warn!(instance_id = %id_str, "No active endpoint found for removed stream instance");
                         }
                     }
+                    Ok(DiscoveryEvent::InitialSyncComplete) => {
+                        tracing::debug!("Dynamic subscriber initial discovery sync completed");
+                    }
                     Err(e) => {
                         tracing::error!(error = %e, "Discovery watch error");
                         break;

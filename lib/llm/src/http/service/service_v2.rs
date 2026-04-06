@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use parking_lot::RwLock;
 
 use super::Metrics;
 use super::RouteDoc;
@@ -59,6 +60,8 @@ pub struct State {
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
+    initial_discovery_complete: AtomicBool,
+    initial_discovery_error: RwLock<Option<String>>,
     cancel_token: CancellationToken,
 }
 
@@ -140,6 +143,8 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
+            initial_discovery_complete: AtomicBool::new(true),
+            initial_discovery_error: RwLock::new(None),
             cancel_token,
         }
     }
@@ -169,6 +174,36 @@ impl State {
     /// Get the cancellation token
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    pub fn mark_initial_discovery_pending(&self) {
+        *self.initial_discovery_error.write() = None;
+        self.initial_discovery_complete
+            .store(false, Ordering::Release);
+    }
+
+    pub fn mark_initial_discovery_complete(&self) {
+        *self.initial_discovery_error.write() = None;
+        self.initial_discovery_complete
+            .store(true, Ordering::Release);
+    }
+
+    pub fn mark_initial_discovery_failed(&self, error: impl Into<String>) {
+        *self.initial_discovery_error.write() = Some(error.into());
+        self.initial_discovery_complete
+            .store(false, Ordering::Release);
+    }
+
+    pub fn initial_discovery_complete(&self) -> bool {
+        self.initial_discovery_complete.load(Ordering::Acquire)
+    }
+
+    pub fn initial_discovery_error(&self) -> Option<String> {
+        self.initial_discovery_error.read().clone()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.initial_discovery_complete()
     }
 
     // TODO
