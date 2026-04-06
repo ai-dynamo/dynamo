@@ -34,9 +34,13 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Data parallel rank for the request
+    /// Data parallel rank for the decode worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
 
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.
@@ -57,10 +61,6 @@ pub struct RoutingHints {
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
-
-    /// TTL in seconds for cache control pinning. None = no pinning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_ttl: Option<u64>,
 
     /// Worker IDs provided externally and not discovered by the router.
     /// When set, only workers in this set are considered during scoring.

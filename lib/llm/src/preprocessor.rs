@@ -312,9 +312,6 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
 
-        // Extract cache_control TTL from either nvext or top-level field
-        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
-
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -324,7 +321,8 @@ impl OpenAIPreprocessor {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
-                dp_rank: None, // dp_rank is set later in the pipeline
+                dp_rank: nvext.dp_rank,
+                prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| {
                     h.priority
@@ -333,16 +331,13 @@ impl OpenAIPreprocessor {
                 }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
-                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() || cache_control_ttl.is_some() {
-            // Ensure routing hints exist when we have LoRA or cache_control,
-            // even when nvext is absent (e.g. Anthropic endpoint requests).
+        } else if lora_name.is_some() {
+            // Ensure routing hints exist when we have LoRA.
             builder.routing(Some(RoutingHints {
                 lora_name,
-                cache_control_ttl,
                 ..Default::default()
             }));
         }
@@ -1114,14 +1109,35 @@ impl OpenAIPreprocessor {
         }
 
         // Configure jail based on tool_choice
+        //
+        // When a tool_call_parser is configured, always use marker-based mode
+        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
+        // Immediate JSON mode is only a fallback for required/named when no
+        // parser exists (the model is expected to emit raw JSON in that case).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                // Immediate jail mode for named tool choice
-                builder = builder.tool_choice_named(named.function.name.clone());
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    // Also install a named-tool filter so that if the model emits
+                    // the wrong tool, the parsed call is rejected before emission.
+                    builder = builder
+                        .tool_call_parser(parser)
+                        .named_tool_filter(named.function.name.clone());
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_named(named.function.name.clone());
+                }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
-                // Immediate jail mode for required tool choice
-                builder = builder.tool_choice_required();
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    builder = builder.tool_call_parser(parser);
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_required();
+                }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
             | Some(ChatCompletionToolChoiceOption::None)

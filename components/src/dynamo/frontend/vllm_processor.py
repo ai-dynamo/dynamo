@@ -37,7 +37,7 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import random_uuid
+from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,23 @@ class VllmProcessor:
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
+
+        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
+        # The Rust HTTP layer accepts None/missing, so normalize before validation.
+        messages = request.get("messages") or []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    img_url = part.get("image_url")
+                    if isinstance(img_url, dict) and img_url.get("detail") is None:
+                        img_url["detail"] = "auto"
 
         pre = await preprocess_chat_request(
             request,
@@ -251,6 +268,11 @@ class VllmProcessor:
             "annotations": [],
         }
 
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data = extract_mm_urls(request.get("messages") or [])
+        if mm_data:
+            dynamo_preproc["multi_modal_data"] = mm_data
+
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
             request_for_sampling=request_for_sampling,
@@ -290,6 +312,7 @@ class VllmProcessor:
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
                 )
             else:
                 dynamo_stream = await self.router.generate(
