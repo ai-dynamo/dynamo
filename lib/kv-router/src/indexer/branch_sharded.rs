@@ -167,7 +167,7 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// each conversation extends the hash with its own unique blocks (positions
     /// 15 and 16) and thereby receives a distinct, balanced shard assignment.
     ///
-    /// # CRTC chain note
+    /// # CRTC chain / lookup notes
     ///
     /// When a continuation's finalized FNV routes it to a different shard than its
     /// parent, the CRTC on the new shard will not find the parent and will drop the
@@ -175,6 +175,13 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// shard ("shallow chain replay"), which is left as a future improvement.  For
     /// now the routing table is correct — `find_matches` routes to the right shard —
     /// but the underlying CRTC may have no data there until replay is implemented.
+    ///
+    /// Separately, `find_matches` hashes only the available prefix
+    /// (`min(prefix_depth, len)`). A query shorter than `prefix_depth` therefore
+    /// probes with a shorter key than a root `Stored` event that first established
+    /// the branch with `>= prefix_depth` blocks. With `prefix_depth > 1`, that can
+    /// cause false early-miss returns for short queries unless shorter-prefix keys
+    /// are also recorded or reads fall back to a broader lookup.
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
