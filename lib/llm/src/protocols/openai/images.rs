@@ -14,7 +14,7 @@ pub use nvext::{NvExt, NvExtProvider};
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateImageRequest {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateImageRequest,
+    pub inner: dynamo_protocols::types::CreateImageRequest,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -28,13 +28,13 @@ pub struct NvCreateImageRequest {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvImagesResponse {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::ImagesResponse,
+    pub inner: dynamo_protocols::types::ImagesResponse,
 }
 
 impl NvImagesResponse {
     pub fn empty() -> Self {
         Self {
-            inner: dynamo_async_openai::types::ImagesResponse {
+            inner: dynamo_protocols::types::ImagesResponse {
                 created: 0,
                 data: vec![],
             },

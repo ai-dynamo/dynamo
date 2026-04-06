@@ -61,7 +61,8 @@ BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 PLANNER_PROFILE_DATA_DIR = (
-    Path(__file__).resolve().parents[1] / "planner/profiling_results/H200_TP1P_TP1D"
+    Path(__file__).resolve().parents[2]
+    / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
 
 
@@ -202,7 +203,7 @@ class MockerProcess:
     """Manages mocker engine instances with shared tokio runtime via --num-workers.
 
     When standalone_indexer=True, launches mockers one-by-one (each as --num-workers 1)
-    and runs a standalone HTTP KV indexer binary alongside them. Call launch_mockers_with_indexer()
+    and runs a standalone HTTP KV indexer binary alongside them. Call launch_workers_with_indexer()
     in async context to start mockers and register their ZMQ ports with the indexer.
     """
 
@@ -281,7 +282,7 @@ class MockerProcess:
             self._standalone_indexer_port = indexer_ports[0]
             self._standalone_indexer_b_port = indexer_ports[1]
             request.addfinalizer(lambda: deallocate_ports(indexer_ports))
-            # Don't build a single mocker command — we'll launch per-mocker in launch_mockers_with_indexer
+            # Don't build a single mocker command — we'll launch per-worker in launch_workers_with_indexer
             self._process = None
         else:
             command = _build_mocker_command(
@@ -346,14 +347,14 @@ class MockerProcess:
                 f"Starting standalone indexer on port {self._standalone_indexer_port}"
             )
             self._indexer_process.__enter__()
-            # Don't start mocker processes yet — launch_mockers_with_indexer will do it
+            # Don't start mocker processes yet — launch_workers_with_indexer will do it
         else:
             logger.info(f"Starting mocker process with {self.num_workers} worker(s)")
             self._process.__enter__()
         return self
 
-    async def launch_mockers_with_indexer(self, endpoint):
-        """Launch mockers one-by-one and register each with the standalone indexer.
+    async def launch_workers_with_indexer(self, endpoint):
+        """Launch workers one-by-one and register each with the standalone indexer.
 
         For each mocker:
         1. Launch a mocker process with --num-workers 1
@@ -652,7 +653,7 @@ class DisaggMockerProcess:
             self._bootstrap_ports = []
 
 
-@pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
+@pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
 @pytest.mark.parametrize(
     "router_mode,durable_kv_events,mocker_args_override",
     [

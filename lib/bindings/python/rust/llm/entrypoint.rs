@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
@@ -58,7 +58,7 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -77,7 +77,6 @@ impl KvRouterConfig {
         router_prune_target_ratio: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
-        router_enable_cache_control: bool,
         router_queue_policy: &str,
         remote_indexer_component: Option<String>,
     ) -> Self {
@@ -99,7 +98,6 @@ impl KvRouterConfig {
                 router_prune_target_ratio,
                 router_queue_threshold,
                 router_event_threads,
-                router_enable_cache_control,
                 skip_initial_worker_wait: false,
                 router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
                     panic!("invalid router_queue_policy: {router_queue_policy:?}")
@@ -114,6 +112,45 @@ impl KvRouterConfig {
         serde_json::from_str::<RsKvRouterConfig>(config_json)
             .map(|inner| KvRouterConfig { inner })
             .map_err(|e| PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}")))
+    }
+
+    fn dump_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner)
+            .map_err(|e| PyException::new_err(format!("Failed to serialize KvRouterConfig: {e}")))
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn overlap_score_weight(&self) -> f64 {
+        self.inner.overlap_score_weight
+    }
+
+    #[setter]
+    fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err(
+                "overlap_score_weight must be non-negative",
+            ));
+        }
+        self.inner.overlap_score_weight = value;
+        Ok(())
+    }
+
+    #[pyo3(signature = (overlap_score_weight=None))]
+    fn with_overrides(&self, overlap_score_weight: Option<f64>) -> PyResult<Self> {
+        let mut inner = self.inner.clone();
+        if let Some(weight) = overlap_score_weight {
+            if weight < 0.0 {
+                return Err(PyValueError::new_err(
+                    "overlap_score_weight must be non-negative",
+                ));
+            }
+            inner.overlap_score_weight = weight;
+        }
+        Ok(Self { inner })
     }
 }
 
@@ -463,8 +500,21 @@ async fn select_engine(
                     .unwrap_or_else(|| local_model.card().source_path());
                 let backend_version = mocker_args.aic_backend_version.as_deref();
                 let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                let moe_tp_size = mocker_args.aic_moe_tp_size;
+                let moe_ep_size = mocker_args.aic_moe_ep_size;
+                let attention_dp_size = mocker_args.aic_attention_dp_size;
                 match Python::with_gil(|py| {
-                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                    create_aic_callback(
+                        py,
+                        &backend,
+                        system,
+                        model_name,
+                        tp_size,
+                        backend_version,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                    )
                 }) {
                     Ok(callback) => {
                         tracing::info!(
