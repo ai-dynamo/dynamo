@@ -268,7 +268,11 @@ impl OfflineReplayRouter {
         Ok(RouterEffects::default())
     }
 
-    pub(crate) fn on_prefill_completed(&mut self, uuid: Uuid, now_ms: f64) -> Result<RouterEffects> {
+    pub(crate) fn on_prefill_completed(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
         self.slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
@@ -282,7 +286,11 @@ impl OfflineReplayRouter {
         })
     }
 
-    pub(crate) fn on_request_completed(&mut self, uuid: Uuid, now_ms: f64) -> Result<RouterEffects> {
+    pub(crate) fn on_request_completed(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
         self.slots
             .free(&uuid.to_string(), decay_now)
@@ -445,17 +453,20 @@ impl OfflineReplayRouter {
         );
 
         self.slots
-            .add_request(SequenceRequest {
-                request_id,
-                token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
-                track_prefill_tokens: request.track_prefill_tokens,
-                expected_output_tokens: request.expected_output_tokens,
-                prefill_load_hint,
-                worker: selection.worker,
-                lora_name: None,
-            }, decay_now)
+            .add_request(
+                SequenceRequest {
+                    request_id,
+                    token_sequence: request.token_seq,
+                    isl: request.isl_tokens,
+                    overlap: selection.overlap_blocks,
+                    track_prefill_tokens: request.track_prefill_tokens,
+                    expected_output_tokens: request.expected_output_tokens,
+                    prefill_load_hint,
+                    worker: selection.worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
             .map_err(anyhow::Error::from)?;
 
         Ok(worker_idx)
@@ -481,18 +492,18 @@ impl OfflineReplayRouter {
 
     fn all_workers_busy(&self, threshold: f64, decay_now: Instant) -> bool {
         let mut checked_any = false;
-        let any_worker_not_busy = self
-            .slots
-            .any_worker_matches_active_tokens(decay_now, |worker, tokens| {
-                let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
-                    return false;
-                };
-                checked_any = true;
-                let max_batched = config
-                    .max_num_batched_tokens()
-                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-                (tokens as f64) <= threshold * (max_batched as f64)
-            });
+        let any_worker_not_busy =
+            self.slots
+                .any_worker_matches_active_tokens(decay_now, |worker, tokens| {
+                    let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
+                        return false;
+                    };
+                    checked_any = true;
+                    let max_batched = config
+                        .max_num_batched_tokens()
+                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                    (tokens as f64) <= threshold * (max_batched as f64)
+                });
 
         checked_any && !any_worker_not_busy
     }
