@@ -618,34 +618,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Pause the engine: drain in-flight requests, keep model loaded.
 
         Called by RL admin coordinator before weight updates.
-        Unlike sleep(), does NOT unregister from discovery or release GPU memory.
+        Uses engine_client.pause_generation() directly -- does NOT sleep
+        (no GPU memory release) and does NOT unregister from discovery.
         """
         body = body or {}
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
-                return {"status": "ok", "message": "Already paused"}
-            try:
-                await self._quiesce_controller.quiesce(level=0)
-                logger.info("[RL] Engine paused (generation quiesced)")
-                return {"status": "ok", "message": "Engine paused"}
-            except Exception as e:
-                logger.error(f"[RL] Failed to pause: {e}")
-                return {"status": "error", "message": str(e)}
+        try:
+            await self.engine_client.pause_generation()
+            logger.info("[RL] Engine paused (generation quiesced)")
+            return {"status": "ok", "message": "Engine paused"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to pause: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def resume_generation(self, body: dict) -> dict:
         """Resume the engine after a weight update."""
         body = body or {}
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
-                return {"status": "ok", "message": "Already running"}
-            try:
-                await self._quiesce_controller.resume()
-                self._quiesce_controller.mark_resumed()
-                logger.info("[RL] Engine resumed")
-                return {"status": "ok", "message": "Engine resumed"}
-            except Exception as e:
-                logger.error(f"[RL] Failed to resume: {e}")
-                return {"status": "error", "message": str(e)}
+        try:
+            await self.engine_client.resume_generation()
+            logger.info("[RL] Engine resumed")
+            return {"status": "ok", "message": "Engine resumed"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to resume: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def flush_cache(self, body: dict) -> dict:
         """Invalidate prefix/KV cache. Called after weight updates."""

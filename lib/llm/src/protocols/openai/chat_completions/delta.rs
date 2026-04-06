@@ -449,6 +449,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 timing: timing_info,
                 token_ids: token_ids.clone(),
                 routed_experts,
+                completion_token_ids: None,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
