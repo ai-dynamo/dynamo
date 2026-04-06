@@ -3,6 +3,8 @@
 
 # Test-only dependencies — installed in test and dev containers, NOT in runtime.
 
+# For deploy/utils async file IO used by deploy tests and profiler deployment helpers
+aiofiles<=25.1.0
 # For MinIO/S3 operations in LoRA tests (replaces AWS CLI dependency)
 boto3==1.42.4
 boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
@@ -12,7 +14,6 @@ filelock==3.25.1
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
-matplotlib==3.10.7
 matplotlib-stubs
 mistral-common>=1.10.0
 mypy==1.18.2

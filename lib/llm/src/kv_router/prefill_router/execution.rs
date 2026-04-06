@@ -40,7 +40,11 @@ impl PrefillRouter {
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
-            let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
+            let dp_rank = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.prefill_dp_rank.or(r.dp_rank))
+                .unwrap_or(0);
             tracing::debug!(
                 worker_id = id,
                 dp_rank = dp_rank,
@@ -308,6 +312,11 @@ impl PrefillRouter {
     /// Check if disaggregated mode is currently active (prefill router activated)
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
+    }
+
+    /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
+    pub fn enforce_disagg(&self) -> bool {
+        self.enforce_disagg
     }
 }
 

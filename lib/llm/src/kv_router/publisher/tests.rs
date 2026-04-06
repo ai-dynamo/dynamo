@@ -13,8 +13,6 @@ use std::future::Future;
 #[allow(unused_imports)]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
-#[allow(unused_imports)]
-use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
 #[cfg(test)]
 mod test_event_processing {
@@ -430,11 +428,11 @@ mod test_event_processing {
 #[cfg(test)]
 mod tests_startup_helpers {
     use super::*;
+    use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
     use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface};
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
-    use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
     // Type alias to resolve clippy::type_complexity warning
     type PublishedEvents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -828,13 +826,20 @@ mod tests_startup_helpers {
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
-        // ZMQ TCP endpoint using localhost with fixed port
-        let endpoint = "tcp://127.0.0.1:15555";
+        // ZMQ TCP endpoint using localhost with an ephemeral port
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
         let topic = "".to_string(); // subscribe to all
 
         // Publisher side - set up first
-        let mut pub_socket = PubSocket::new();
-        pub_socket.bind(endpoint).await.unwrap();
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
 
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
@@ -873,16 +878,13 @@ mod tests_startup_helpers {
         let payload = Bytes::from(rmps::to_vec(&batch).unwrap());
 
         let frames = vec![
-            Bytes::from(""),
-            Bytes::from(seq.to_be_bytes().to_vec()),
-            payload.clone(),
+            Bytes::from("").to_vec(),
+            Bytes::from(seq.to_be_bytes().to_vec()).to_vec(),
+            payload.clone().to_vec(),
         ];
 
-        // Create a proper multipart message
-        let msg = ZmqMessage::try_from(frames).expect("Failed to create ZmqMessage");
-
         // Send the multipart message
-        pub_socket.send(msg).await.unwrap();
+        send_multipart(&pub_socket, frames).await.unwrap();
 
         // Wait for message to be received
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -905,6 +907,75 @@ mod tests_startup_helpers {
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_start_zmq_listener_connects_before_publisher_bind() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
+        let topic = String::new();
+        let token = dynamo_runtime::CancellationToken::new();
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
+        let listener_handle = tokio::spawn({
+            let token = token.clone();
+            let endpoint = endpoint.clone();
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id)
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events: vec![RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(64)],
+                parent_block_hash: None,
+                token_ids: vec![4, 5, 6, 7],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+            }],
+            data_parallel_rank: Some(0),
+        };
+        let payload = rmps::to_vec(&batch).unwrap();
+
+        for _ in 0..5 {
+            send_multipart(
+                &pub_socket,
+                vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for listener event")
+            .expect("listener channel closed")
+            .event;
+
+        let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = event.data else {
+            panic!("expected KvCacheStoreData");
+        };
+        assert_eq!(blocks[0].block_hash.0, 64);
+
+        token.cancel();
+        let _ = listener_handle.await;
+    }
+
+    fn reserve_open_port() -> std::net::TcpListener {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
     }
 
     //--------------------------------------------------------------------
@@ -1117,55 +1188,6 @@ mod tests_startup_helpers {
         );
 
         token.cancel();
-    }
-}
-
-#[cfg(test)]
-mod test_exponential_backoff {
-    use super::*;
-
-    #[test]
-    fn test_backoff_calculation_progression() {
-        // Test the exponential progression
-        assert_eq!(calculate_backoff_ms(0), 10); // 10 * 2^0 = 10
-        assert_eq!(calculate_backoff_ms(1), 20); // 10 * 2^1 = 20
-        assert_eq!(calculate_backoff_ms(2), 40); // 10 * 2^2 = 40
-        assert_eq!(calculate_backoff_ms(3), 80); // 10 * 2^3 = 80
-        assert_eq!(calculate_backoff_ms(4), 160); // 10 * 2^4 = 160
-        assert_eq!(calculate_backoff_ms(5), 320); // 10 * 2^5 = 320
-        assert_eq!(calculate_backoff_ms(6), 640); // 10 * 2^6 = 640
-        assert_eq!(calculate_backoff_ms(7), 1280); // 10 * 2^7 = 1280
-        assert_eq!(calculate_backoff_ms(8), 2560); // 10 * 2^8 = 2560
-    }
-
-    #[test]
-    fn test_backoff_caps_at_max_exponent() {
-        // After MAX_BACKOFF_EXPONENT, should stay at 2^8 = 2560ms
-        assert_eq!(calculate_backoff_ms(8), 2560);
-        assert_eq!(calculate_backoff_ms(9), 2560); // Same as 8
-        assert_eq!(calculate_backoff_ms(100), 2560); // Same as 8
-    }
-
-    #[test]
-    fn test_backoff_never_exceeds_max() {
-        // Even if we somehow had a huge exponent, never exceed MAX_BACKOFF_MS
-        for i in 0..20 {
-            assert!(calculate_backoff_ms(i) <= MAX_BACKOFF_MS);
-        }
-    }
-
-    #[test]
-    #[expect(clippy::assertions_on_constants)]
-    fn test_backoff_constants_are_sane() {
-        // Verify our constants make sense together
-        assert!(INITIAL_BACKOFF_MS > 0);
-        assert!(MAX_BACKOFF_MS > INITIAL_BACKOFF_MS);
-        assert!(MAX_BACKOFF_EXPONENT <= 10); // Prevent crazy exponents
-        assert!(MAX_CONSECUTIVE_ERRORS > 0);
-
-        // Max calculated value should be less than MAX_BACKOFF_MS
-        let max_calculated = INITIAL_BACKOFF_MS * 2_u64.pow(MAX_BACKOFF_EXPONENT);
-        assert!(max_calculated <= MAX_BACKOFF_MS);
     }
 }
 

@@ -341,13 +341,25 @@ fn convert_param_value(
         return Value::String(param_value);
     }
 
-    // Get the type from schema
-    let param_type = param_config
-        .get(param_name)
+    // Get the type from schema.
+    // If a parameter uses "anyOf"/"oneOf" instead of a direct "type", there is no
+    // top-level "type" key. Treat it as "object" so the value goes through JSON
+    // parsing rather than being returned as a double-encoded string.
+    let param_schema = param_config.get(param_name);
+    let param_type = param_schema
         .and_then(|v| v.get("type"))
         .and_then(|t| t.as_str())
-        .unwrap_or("string")
-        .to_lowercase();
+        .map(|t| t.to_lowercase())
+        .unwrap_or_else(|| {
+            if param_schema
+                .map(|v| v.get("anyOf").is_some() || v.get("oneOf").is_some())
+                .unwrap_or(false)
+            {
+                "object".to_string()
+            } else {
+                "string".to_string()
+            }
+        });
 
     // The follow `match` block follows this rough pattern for each block:
     // 1. Match `param_type` against predefined string representations of each type,
@@ -922,6 +934,60 @@ rust programming
         assert_eq!(args["float_param"], "not_a_float");
         // bool_param with invalid value defaults to false
         assert_eq!(args["bool_param"], false);
+    }
+
+    #[test]
+    fn test_anyof_param_parsed_as_object_not_string() {
+        // When a tool parameter uses "anyOf" instead of a direct "type", the value
+        // should be JSON-parsed (treated as object), not double-encoded as a string.
+        // Regression test for: https://github.com/vllm-project/vllm/pull/36032
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "required": ["location"],
+                "properties": {
+                    "location": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "lat": {"type": "number"},
+                                    "lon": {"type": "number"}
+                                },
+                                "required": ["lat", "lon"]
+                            }
+                        ]
+                    }
+                }
+            })),
+        }];
+
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=location>
+{"city": "Paris"}
+</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, _) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        // Must be a proper object, not a double-encoded string like "{\"city\": \"Paris\"}"
+        assert!(
+            args["location"].is_object(),
+            "Expected location to be an object, got: {}",
+            args["location"]
+        );
+        assert_eq!(args["location"]["city"], "Paris");
     }
 
     #[test]

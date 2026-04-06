@@ -33,6 +33,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -46,6 +47,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -353,6 +355,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(
         self,
         runtime,
@@ -388,6 +392,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
+        self.video_loader = VideoLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
@@ -412,6 +419,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Without encode worker, the embedding will be generated internally by vLLM.
         if encode_worker_client is None:
             return None
+        logger.warning(
+            "Separate multimodal encode-worker routing only applies to image_url "
+            "inputs. video_url inputs are not sent to the encode worker and will "
+            "be processed on the prefill/PD worker instead."
+        )
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
         #    which can request remote encode and handle the transfer of embeddings
@@ -610,7 +622,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -642,13 +654,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -656,7 +670,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -670,7 +684,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):
@@ -679,6 +693,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}
+
+    async def get_perf_metrics(self, request=None):
+        """Return self-benchmark FPM results, or an error dict if none."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
 
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
@@ -1165,8 +1187,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         mm_map = request["multi_modal_data"]
 
-        # [gluo NOTE] If embedding loader is configured, currently we unconditionally
-        # fetch from the embedding loader.
+        vllm_mm_data = {}
+
+        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
+        # Still continue below so mixed image+video requests can attach `video`.
         if self.embedding_loader is not None:
             # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
             # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
@@ -1185,23 +1209,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.debug(
                     f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
                 )
-                return vllm_mm_data if vllm_mm_data else None
 
-        # Fallback that the vLLM engine will perform encoding internally.
-        vllm_mm_data = {}
-        # Process image_url entries
-        images = await self.image_loader.load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []),
-        )
+        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
+        if "image" not in vllm_mm_data and image_mm_items:
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+            )
 
-        if images:
-            # vLLM expects single image or list
-            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
 
-        # Handle video_url entries (future expansion)
-        if VIDEO_URL_KEY in mm_map:
-            logger.warning("Video multimodal data not yet supported in standard worker")
+        video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
+        if video_mm_items:
+            videos = await self.video_loader.load_video_batch(video_mm_items)
+
+            if videos:
+                # vLLM expects single video or list
+                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                logger.debug(
+                    f"Extracted {len(videos)} video(s) for multimodal processing"
+                )
 
         return vllm_mm_data if vllm_mm_data else None
 

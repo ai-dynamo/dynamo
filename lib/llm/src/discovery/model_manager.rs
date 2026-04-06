@@ -4,7 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{config::KvRouterConfig, protocols::WorkerId};
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -24,6 +24,7 @@ use crate::{
     types::{
         generic::tensor::TensorStreamingEngine,
         openai::{
+            audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
@@ -290,6 +291,16 @@ impl ModelManager {
             .get_videos_engine()
     }
 
+    pub fn get_audios_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_audios_engine()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -456,6 +467,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_audios_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIAudiosStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_audios_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_audios_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.audios_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -536,6 +568,7 @@ impl ModelManager {
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
@@ -572,6 +605,7 @@ impl ModelManager {
             kv_cache_block_size,
             selector,
             kv_router_config,
+            prefill_load_estimator,
             worker_type,
             model_name,
             is_eagle,
