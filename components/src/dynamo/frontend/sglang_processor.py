@@ -35,7 +35,7 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, random_uuid, worker_warmup
+from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def _build_dynamo_preproc(
     elif top_logprobs not in (None, 0):
         logprobs_val = top_logprobs
 
-    return {
+    preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
         "stop_conditions": {
@@ -203,6 +203,13 @@ def _build_dynamo_preproc(
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
     }
+
+    # Forward multimodal URLs so the backend handler can load the media.
+    mm_data = extract_mm_urls(request.get("messages", []))
+    if mm_data:
+        preproc["multi_modal_data"] = mm_data
+
+    return preproc
 
 
 class SglangProcessor:
@@ -403,6 +410,7 @@ class SglangProcessor:
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
                 )
             else:
                 dynamo_stream = await self.router.generate(

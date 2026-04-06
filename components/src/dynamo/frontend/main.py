@@ -29,6 +29,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
@@ -301,6 +302,9 @@ async def async_main():
             runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

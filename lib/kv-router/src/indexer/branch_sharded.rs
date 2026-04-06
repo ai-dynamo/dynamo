@@ -510,7 +510,11 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                     if blocks.is_empty() {
                         continue;
                     }
-                    self.shard_block_counts[shard_idx].fetch_sub(blocks.len(), Ordering::Relaxed);
+                    self.shard_block_counts[shard_idx]
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                            Some(count.saturating_sub(blocks.len()))
+                        })
+                        .ok();
                     let shard_event = RouterEvent {
                         worker_id: event.worker_id,
                         storage_tier: event.storage_tier,

@@ -80,11 +80,6 @@ enum IndexerArgs {
         /// keys, while depth=2 gives a much larger set of distinguishable branches.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
-
-        /// Number of OS threads per shard dedicated to find_matches (read isolation).
-        /// 0 (default): reads run inline on the calling tokio thread.
-        #[clap(long, default_value = "0")]
-        num_read_threads_per_shard: usize,
     },
 }
 
@@ -125,7 +120,6 @@ impl IndexerArgs {
                 num_shards,
                 num_event_workers_per_shard,
                 prefix_depth,
-                num_read_threads_per_shard: _,
             } => {
                 let shards = (0..num_shards)
                     .map(|_| {
@@ -179,12 +173,15 @@ impl IndexerArgs {
             "concurrent-radix-tree-compressed" => IndexerArgs::ConcurrentRadixTreeCompressed {
                 num_event_workers: nw,
             },
-            "branch-sharded-crtc" => IndexerArgs::BranchShardedCrtc {
-                num_shards: 2,
-                num_event_workers_per_shard: nw,
-                prefix_depth: 2,
-                num_read_threads_per_shard: 0,
-            },
+            "branch-sharded-crtc" => {
+                let num_shards = 2;
+                let total_workers = nw.max(1);
+                IndexerArgs::BranchShardedCrtc {
+                    num_shards,
+                    num_event_workers_per_shard: total_workers.div_ceil(num_shards),
+                    prefix_depth: 2,
+                }
+            }
             _ => anyhow::bail!(
                 "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
                  nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, \
@@ -209,13 +206,13 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed.
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map, concurrent-radix-tree).
-    /// Ignored by radix-tree and radix-tree-sharded.
+    /// indexers that use a thread pool; branch-sharded-crtc divides this total
+    /// budget evenly across shards. Ignored by radix-tree and radix-tree-sharded.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
 
@@ -393,7 +390,7 @@ fn plot_shard_metrics(rows: &[ShardSampleRow], svg_path: &str) -> anyhow::Result
     shard_indices.sort_unstable();
     shard_indices.dedup();
 
-    let max_elapsed = rows.iter().map(|r| r.elapsed_ms).max().unwrap_or(1);
+    let max_elapsed = rows.iter().map(|r| r.elapsed_ms).max().unwrap_or(0).max(1);
     let max_workers = rows
         .iter()
         .map(|r| r.snapshot.worker_count)
@@ -631,13 +628,15 @@ async fn run_benchmark(
                         latencies.push(start.elapsed().as_nanos() as u64);
                         idx = (idx + 1) % pool.len();
                     }
-                    latencies
+                    (latencies.len(), latencies)
                 }));
             }
         }
     }
 
     let mut latencies = Vec::new();
+    let mut fm_ops = 0usize;
+    let mut fm_latencies = Vec::new();
 
     for task in tasks {
         latencies.extend(task.await??);
@@ -646,10 +645,13 @@ async fn run_benchmark(
     // Signal concurrent find_matches callers to stop and collect their latencies.
     fm_stop.store(true, Ordering::Relaxed);
     for task in fm_tasks {
-        if let Ok(fm_latencies) = task.await {
-            latencies.extend(fm_latencies);
+        if let Ok((task_ops, task_latencies)) = task.await {
+            fm_ops += task_ops;
+            fm_latencies.extend(task_latencies);
         }
     }
+
+    let _ = indexer.flush().await;
 
     if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
@@ -713,6 +715,12 @@ async fn run_benchmark(
     } else {
         latencies[latencies.len() * 99 / 100] as f32 / 1000.0
     };
+    fm_latencies.sort_unstable();
+    let fm_latency_p99_us = if fm_latencies.is_empty() {
+        0.0
+    } else {
+        fm_latencies[fm_latencies.len() * 99 / 100] as f32 / 1000.0
+    };
 
     println!(
         "Offered Ops Throughput: {} ops/s | Achieved: {} ops/s (requests + events)",
@@ -722,7 +730,13 @@ async fn run_benchmark(
         "Offered Block Throughput: {} block ops/s | Achieved: {} block ops/s",
         offered_block_throughput as u64, block_throughput as u64,
     );
-    println!("Latency p99: {}us", latency_p99_us);
+    println!("Replay request latency p99: {}us", latency_p99_us);
+    if fm_ops > 0 {
+        println!(
+            "Concurrent find_matches stress: {} ops, p99 {}us",
+            fm_ops, fm_latency_p99_us
+        );
+    }
 
     Ok(BenchmarkResults {
         offered_ops_throughput,
