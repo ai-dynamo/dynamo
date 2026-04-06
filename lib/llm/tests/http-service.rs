@@ -24,7 +24,6 @@ use dynamo_llm::{
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
-    engine::AsyncEngineContext,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -573,34 +572,6 @@ async fn wait_for_service_ready(port: u16) {
             Err(e) => panic!("Service failed to start within timeout: {}", e),
         }
     }
-}
-
-async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
-    let port = get_random_port().await;
-    let service = HttpService::builder()
-        .enable_chat_endpoints(true)
-        .enable_cmpl_endpoints(true)
-        .port(port)
-        .build()
-        .unwrap();
-    let manager = service.model_manager();
-
-    let counter = Arc::new(CounterEngine {});
-    let failure = Arc::new(AlwaysFailEngine {});
-
-    let card = ModelDeploymentCard::with_name_only("foo");
-    manager
-        .add_chat_completions_model("foo", card.mdcsum(), counter.clone())
-        .unwrap();
-    let card = ModelDeploymentCard::with_name_only("bar");
-    manager
-        .add_chat_completions_model("bar", card.mdcsum(), failure.clone())
-        .unwrap();
-    manager
-        .add_completions_model("bar", card.mdcsum(), failure.clone())
-        .unwrap();
-
-    (service, counter, failure, port)
 }
 
 // NOTE: BYOT (Bring Your Own Type) client tests were removed during the
