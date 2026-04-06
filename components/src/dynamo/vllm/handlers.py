@@ -610,6 +610,86 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    # ── RL weight lifecycle engine routes ──────────────────────────────
+    # Signatures kept compatible with SGLang's merged #6094 routes so
+    # a single admin coordinator can talk to either backend.
+
+    async def pause_generation(self, body: dict) -> dict:
+        """Pause the engine: drain in-flight requests, keep model loaded.
+
+        Called by RL admin coordinator before weight updates.
+        Unlike sleep(), does NOT unregister from discovery or release GPU memory.
+        """
+        body = body or {}
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Already paused"}
+            try:
+                await self._quiesce_controller.quiesce(level=0)
+                logger.info("[RL] Engine paused (generation quiesced)")
+                return {"status": "ok", "message": "Engine paused"}
+            except Exception as e:
+                logger.error(f"[RL] Failed to pause: {e}")
+                return {"status": "error", "message": str(e)}
+
+    async def resume_generation(self, body: dict) -> dict:
+        """Resume the engine after a weight update."""
+        body = body or {}
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Already running"}
+            try:
+                await self._quiesce_controller.resume()
+                self._quiesce_controller.mark_resumed()
+                logger.info("[RL] Engine resumed")
+                return {"status": "ok", "message": "Engine resumed"}
+            except Exception as e:
+                logger.error(f"[RL] Failed to resume: {e}")
+                return {"status": "error", "message": str(e)}
+
+    async def flush_cache(self, body: dict) -> dict:
+        """Invalidate prefix/KV cache. Called after weight updates."""
+        body = body or {}
+        try:
+            await self.engine_client.reset_prefix_cache()
+            logger.info("[RL] Prefix cache flushed")
+            return {"status": "ok", "message": "Cache flushed"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to flush cache: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_weights_from_path(self, body: dict) -> dict:
+        """Load weights from a filesystem path (safetensors/torch checkpoint).
+
+        Expects body: {"path": "/path/to/weights", "version": "step_N"}
+        The caller is responsible for pausing/resuming around this call.
+        """
+        body = body or {}
+        path = body.get("path")
+        version = body.get("version", "unknown")
+        if not path:
+            return {"status": "error", "message": "Missing 'path' in body"}
+        try:
+            # Use vLLM's collective RPC to load weights on all DP ranks
+            await self.engine_client.collective_rpc(
+                "update_weights_from_path",
+                args=(path,),
+            )
+            self._weight_version = version
+            logger.info(f"[RL] Weights loaded from {path} (version={version})")
+            return {
+                "status": "ok",
+                "message": f"Weights loaded from {path}",
+                "version": version,
+            }
+        except Exception as e:
+            logger.error(f"[RL] Failed to load weights from {path}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def get_weight_version(self, body: dict) -> dict:
+        """Return the current weight version tag."""
+        return {"version": getattr(self, "_weight_version", "initial")}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError

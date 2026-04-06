@@ -361,6 +361,32 @@ class VllmProcessor:
                 for output in vllm_out.request_outputs[0].outputs:
                     choice = post.process_output(output)
                     if choice:
+                        # ── RL logprobs injection ──────────────────────
+                        # The vLLM worker sends log_probs/top_logprobs in
+                        # the engine_response dict.  Since we can't easily
+                        # construct LogprobsLists for EngineCoreOutput, we
+                        # inject them directly into the choice here.
+                        worker_log_probs = engine_response.get("log_probs")
+                        worker_top_logprobs = engine_response.get("top_logprobs")
+                        if worker_log_probs is not None and choice.get("logprobs") is None:
+                            oai_logprobs_content = []
+                            new_tids = engine_response.get("token_ids", [])
+                            for i, lp in enumerate(worker_log_probs):
+                                entry: dict = {"logprob": lp}
+                                # Add token string if we have top_logprobs
+                                if worker_top_logprobs and i < len(worker_top_logprobs):
+                                    tops = worker_top_logprobs[i]
+                                    entry["top_logprobs"] = tops
+                                    # Find the selected token in tops
+                                    if i < len(new_tids):
+                                        entry["token"] = str(new_tids[i])
+                                        for tp in tops:
+                                            if tp.get("token_id") == new_tids[i]:
+                                                entry["token"] = tp.get("token", str(new_tids[i]))
+                                                break
+                                oai_logprobs_content.append(entry)
+                            choice["logprobs"] = {"content": oai_logprobs_content}
+
                         choices.append(choice)
 
                 if choices:
@@ -373,6 +399,11 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+
+                    # ── RL: pass output token IDs for nvext.completion_token_ids ──
+                    new_token_ids = engine_response.get("token_ids", [])
+                    if new_token_ids:
+                        dynamo_out["_completion_token_ids"] = new_token_ids
 
                     yield dynamo_out
         finally:

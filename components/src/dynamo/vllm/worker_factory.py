@@ -321,8 +321,16 @@ class WorkerFactory:
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        # RL weight lifecycle routes (parity with SGLang #6094)
+        runtime.register_engine_route("pause_generation", handler.pause_generation)
+        runtime.register_engine_route("resume_generation", handler.resume_generation)
+        runtime.register_engine_route("flush_cache", handler.flush_cache)
+        runtime.register_engine_route("update_weights_from_path", handler.update_weights_from_path)
+        runtime.register_engine_route("get_weight_version", handler.get_weight_version)
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
+            "pause_generation, resume_generation, flush_cache, "
+            "update_weights_from_path, get_weight_version"
         )
 
         # Parse endpoint types from --endpoint-types flag
@@ -545,8 +553,16 @@ class WorkerFactory:
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        # RL weight lifecycle routes (parity with SGLang #6094)
+        runtime.register_engine_route("pause_generation", handler.pause_generation)
+        runtime.register_engine_route("resume_generation", handler.resume_generation)
+        runtime.register_engine_route("flush_cache", handler.flush_cache)
+        runtime.register_engine_route("update_weights_from_path", handler.update_weights_from_path)
+        runtime.register_engine_route("get_weight_version", handler.get_weight_version)
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
+            "pause_generation, resume_generation, flush_cache, "
+            "update_weights_from_path, get_weight_version"
         )
 
         # Wait for self-benchmark to complete before registering.
