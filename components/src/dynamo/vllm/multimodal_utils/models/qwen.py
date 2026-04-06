@@ -179,4 +179,5 @@ def build_qwen_embedding_params(
         if grid_thw is not None:
             embedding_params["image_grid_thw"] = grid_thw
             embedding_params["embeddings_shape"] = embeddings_shape
+    # TODO(DIS-1679): handle np.ndarray from --frontend-decoding NIXL path
     return embedding_params if embedding_params else None
