@@ -29,6 +29,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+# Use an isolated namespace by default to avoid stale discovery/model-card
+# collisions from previous disaggregated runs (which can route directly to dit).
+if [ -z "${DYN_NAMESPACE:-}" ]; then
+    export DYN_NAMESPACE="dynamo-omni-glm-$(date +%s)"
+fi
+echo "Namespace:   ${DYN_NAMESPACE}"
 print_launch_banner --no-curl "Disaggregated GLM-Image (2-stage, 2 GPUs)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s http://localhost:${HTTP_PORT}/v1/images/generations \\

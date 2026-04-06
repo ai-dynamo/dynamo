@@ -116,8 +116,8 @@ async def test_stage_connector_refs_input_path():
     )
     assert engine.received_prompt == fetched_prompt
     assert len(chunks) == 1
-    assert chunks[0]["stage_connector_refs"][1] == {"name": "ref1", "size": 10}
-    assert chunks[0]["stage_connector_refs"][0] == {"name": "ref0", "size": 5}
+    assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1", "size": 10}
+    assert chunks[0]["stage_connector_refs"]["0"] == {"name": "ref0", "size": 5}
     assert chunks[0]["original_prompt"] == {"prompt": "hello"}
 
 
@@ -173,7 +173,7 @@ async def test_stage_connector_refs_with_processor():
     assert processor_calls[0]["stage_list"][0].engine_outputs == [fetched_output]
     assert processor_calls[0]["original_prompts"] == [{"prompt": "hi", "height": 480}]
     assert engine.received_prompt == processed_prompt
-    assert chunks[0]["stage_connector_refs"][1] == {"name": "ref1"}
+    assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
 
 
 @pytest.mark.asyncio

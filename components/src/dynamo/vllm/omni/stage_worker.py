@@ -8,12 +8,12 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, cast
 
 import yaml
 
 from dynamo import prometheus_names
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -79,6 +79,16 @@ class OmniStageWorker:
         # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
 
+        logger.info(
+            "Stage %d: generate() called for %s — stage_connector_refs=%s engine_inputs=%s",
+            self.stage_id,
+            request_id,
+            {k: type(v).__name__ for k, v in stage_connector_refs.items()}
+            if stage_connector_refs
+            else "{}",
+            type(req.engine_inputs).__name__ if req.engine_inputs is not None else None,
+        )
+
         # --- Resolve engine inputs ---
         if stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
@@ -134,32 +144,92 @@ class OmniStageWorker:
             yield {"error": str(e), "finished": True}
             return
 
+        logger.info(
+            "Stage %d: engine done for %s — last_result type=%s",
+            self.stage_id,
+            request_id,
+            type(last_result).__name__,
+        )
+
         # --- Write output ---
         if not self.final_output:
-            # Inter-stage: write engine output to connector; accumulate ref in stage_connector_refs.
-            connector = self.connectors.get(
-                _connector_key(self.stage_id, self.stage_id + 1)
+            from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
+            connector = self.connectors.get((from_s, to_s))
+            logger.info(
+                "Stage %d: connector for edge (%s→%s): %s | all keys=%s",
+                self.stage_id,
+                from_s,
+                to_s,
+                type(connector).__name__ if connector else None,
+                list(self.connectors.keys()),
             )
             if connector is not None:
-                from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
-                ok, _, metadata = connector.put(  # type: ignore[arg-type]
-                    from_s, to_s, request_id, {"engine_inputs": last_result}
+                logger.info(
+                    "Stage %d: calling connector.put() for %s",
+                    self.stage_id,
+                    request_id,
+                )
+                try:
+                    ok, _, metadata = connector.put(  # type: ignore[arg-type]
+                        from_s, to_s, request_id, last_result
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Stage %d: connector.put() raised %s: %s",
+                        self.stage_id,
+                        type(e).__name__,
+                        e,
+                        exc_info=True,
+                    )
+                    yield {"error": f"connector.put() raised: {e}", "finished": True}
+                    return
+                logger.info(
+                    "Stage %d: connector.put() returned ok=%s metadata=%s",
+                    self.stage_id,
+                    ok,
+                    metadata,
                 )
                 if not ok:
                     yield {"error": "connector.put() failed", "finished": True}
                     return
-                yield {
+                response = {
                     "original_prompt": original_prompt,
                     "stage_connector_refs": {
-                        **stage_connector_refs,
-                        self.stage_id: metadata,
+                        **{str(k): v for k, v in stage_connector_refs.items()},
+                        str(self.stage_id): metadata,
                     },
                     "finished": True,
                 }
+                logger.info(
+                    "Stage %d: yielding response — original_prompt type=%s, refs=%s",
+                    self.stage_id,
+                    type(original_prompt).__name__,
+                    {
+                        k: type(v).__name__
+                        for k, v in response["stage_connector_refs"].items()
+                    },
+                )
+                yield response
+                logger.info(
+                    "Stage %d: yield returned (downstream consumed chunk)",
+                    self.stage_id,
+                )
                 return
+            logger.warning(
+                "Stage %d: no connector found for edge (%s→%s), falling through to SHM",
+                self.stage_id,
+                from_s,
+                to_s,
+            )
 
         # Final stage → router: write to SHM (no YAML edge for this leg).
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
+        logger.info(
+            "Stage %d: wrote final output to SHM %s for %s",
+            self.stage_id,
+            shm_meta,
+            request_id,
+        )
         yield {"shm_meta": shm_meta, "finished": True}
 
     def _fetch_stage_inputs(
@@ -171,6 +241,12 @@ class OmniStageWorker:
         Returns _Proxy objects in engine_input_source order, or None on any error.
         """
         sources = self._engine_input_source or sorted(stage_connector_refs.keys())
+        logger.info(
+            "Stage %d: _fetch_stage_inputs sources=%s refs_keys=%s",
+            self.stage_id,
+            sources,
+            list(stage_connector_refs.keys()),
+        )
         stage_list = []
         for stage_k in sources:
             if (meta_k := stage_connector_refs.get(stage_k)) is None:
@@ -190,13 +266,29 @@ class OmniStageWorker:
                     self.stage_id,
                 )
                 return None
+            logger.info(
+                "Stage %d: connector.get() from stage %s with meta_k=%s",
+                self.stage_id,
+                stage_k,
+                meta_k,
+            )
             try:
                 payload = connector.get(
                     str(stage_k), str(self.stage_id), request_id, metadata=meta_k
                 )
             except Exception as e:
-                logger.error("Stage %d: connector.get() failed: %s", self.stage_id, e)
+                logger.error(
+                    "Stage %d: connector.get() failed: %s",
+                    self.stage_id,
+                    e,
+                    exc_info=True,
+                )
                 return None
+            logger.info(
+                "Stage %d: connector.get() returned payload type=%s",
+                self.stage_id,
+                type(payload).__name__,
+            )
             payload_data = payload[0] if isinstance(payload, tuple) else payload
             if not payload_data:
                 logger.error(
@@ -227,7 +319,6 @@ async def init_omni_stage(
     from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
     from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 
-    from dynamo.common.utils.output_modalities import get_output_modalities
     from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 
     assert config.stage_id is not None  # dispatch in main.py guarantees this
@@ -263,21 +354,11 @@ async def init_omni_stage(
     setup_metrics_collection(config, generate_endpoint, logger)
 
     if not getattr(config.engine_args, "data_parallel_rank", 0):
-        model_type = get_output_modalities(config.output_modalities, config.model)
-        if model_type is None:
-            final_output_type = getattr(my_config, "final_output_type", "text")
-            model_type = _resolve_model_type(final_output_type)
-
-        await register_model(
-            ModelInput.Text,
-            model_type,
+        logger.info(
+            "Stage %d: serving internal stage endpoint '%s' (not registering model)",
+            stage_id,
             generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=getattr(config.engine_args, "block_size", None),
         )
-        logger.info("Stage %d: registered endpoint '%s'", stage_id, generate_endpoint)
-
         health_check_payload = (
             await VllmOmniHealthCheckPayload.create(engine)  # type: ignore[arg-type]
         ).to_dict()
@@ -328,16 +409,17 @@ def _build_default_sampling_params(stage_config: Any) -> list | None:
         params = OmegaConf.to_container(defaults, resolve=True)
     else:
         params = dict(defaults)
+    params_dict = cast(dict[str, Any], params)
 
     stage_type = getattr(stage_config, "stage_type", "llm")
     if stage_type == "diffusion":
         from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
-        return [OmniDiffusionSamplingParams(**params)]
+        return [OmniDiffusionSamplingParams(**params_dict)]
 
     from vllm.sampling_params import SamplingParams
 
-    return [SamplingParams(**params)]
+    return [SamplingParams(**params_dict)]
 
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:

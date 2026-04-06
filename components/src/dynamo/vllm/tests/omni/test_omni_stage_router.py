@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for OmniStageRouter request isolation."""
+"""Unit tests for OmniStageRouter."""
 
 import asyncio
 from types import SimpleNamespace
@@ -39,20 +39,6 @@ class _StageClient:
         return _gen()
 
 
-class _CleanupConnector:
-    def __init__(self, ok=True):
-        self.ok = ok
-        self.cleanup_calls = []
-        self.put_calls = []
-
-    def put(self, from_stage, to_stage, put_key, data):
-        self.put_calls.append((from_stage, to_stage, put_key, data))
-        return self.ok, 0, {}
-
-    def cleanup(self, request_id):
-        self.cleanup_calls.append(request_id)
-
-
 def _make_stage_cfg(stage_id: int):
     return SimpleNamespace(
         stage_id=stage_id,
@@ -60,109 +46,112 @@ def _make_stage_cfg(stage_id: int):
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="Tests old router design — rewrite in issue-004 (opaque router)"
-)
-async def test_generate_uses_request_local_proxies():
-    """Concurrent requests should not leak proxy engine_outputs across requests."""
-    event_stage1_b_seen = asyncio.Event()
-    stage2_inputs_by_request = {}
-
-    async def stage0_handler(request):
-        return {"shm_meta": {"value": f"{request['request_id']}-s0"}}
-
-    async def stage1_handler(request):
-        request_id = request["request_id"]
-        if request_id == "req-A":
-            await event_stage1_b_seen.wait()
-        else:
-            event_stage1_b_seen.set()
-        return {"shm_meta": {"value": f"{request_id}-s1"}}
-
-    async def stage2_handler(request):
-        request_id = request["request_id"]
-        stage2_inputs_by_request[request_id] = request["engine_inputs"]
-        return {"shm_meta": {"value": f"{request_id}-s2"}}
-
+def _make_router(stage_configs, stage_clients, formatter=None):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
     router.config = SimpleNamespace(output_modalities=None)
-    router.stage_configs = [
-        _make_stage_cfg(0),
-        _make_stage_cfg(1),
-        SimpleNamespace(
-            stage_id=2,
-            engine_args=SimpleNamespace(model_stage="stage2"),
-            engine_input_source=[0, 1],
-            requires_multimodal_data=False,
+    router.stage_configs = stage_configs
+    router.stage_clients = stage_clients
+    router._formatter = formatter or AsyncMock()
+    return router
+
+
+def _patched_generate(router, request, request_id="req-1", request_type="chat"):
+    return (
+        patch.object(
+            stage_router,
+            "_parse_engine_inputs",
+            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
         ),
-    ]
-    router.processors = {
-        2: lambda proxies, engine_input_source, requests, requires_mm: [
-            proxies[idx].engine_outputs for idx in engine_input_source
-        ]
-    }
-    router.stage_clients = {
-        "stage0": _StageClient(stage0_handler),
-        "stage1": _StageClient(stage1_handler),
-        "stage2": _StageClient(stage2_handler),
-    }
-    router.connectors = {}
+        patch(
+            "dynamo.common.utils.output_modalities.parse_request_type",
+            return_value=(None, request_type),
+        ),
+        patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
+    )
+
+
+# ── issue-004: opaque router ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_stage_connector_refs_opaquely():
+    """Router must pass stage_connector_refs from stage output to next stage unchanged."""
+    stage1_received = {}
+
+    async def stage0_handler(request):
+        return {
+            "original_prompt": {"prompt": "hi"},
+            "stage_connector_refs": {"0": {"shm_name": "abc", "size": 42}},
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        stage1_received.update(request)
+        return {"shm_meta": {"x": 1}, "finished": True}
+
     mock_formatter = AsyncMock()
     mock_formatter.format.return_value = {"finished": True}
-    router._formatter = mock_formatter
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
 
-    async def run_one():
-        return [chunk async for chunk in router.generate({"prompt": "x"}, context=None)]
-
-    with patch.object(
-        stage_router, "_shm_deserialize", side_effect=lambda meta: meta["value"]
-    ):
+    p1, p2, p3 = _patched_generate(router, {"prompt": "x"})
+    with p1, p2, p3:
         with patch.object(
-            stage_router,
-            "_parse_engine_inputs",
-            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
+            stage_router, "_shm_deserialize", return_value=SimpleNamespace()
         ):
-            with patch(
-                "dynamo.common.utils.output_modalities.parse_request_type",
-                return_value=(None, "chat"),
-            ):
-                with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
-                    side_effect=["req-A", "req-B"],
-                ):
-                    await asyncio.gather(run_one(), run_one())
+            [c async for c in router.generate({"prompt": "x"}, None)]
 
-    # engine_outputs is wrapped in a list to match monolithic orchestrator format
-    assert stage2_inputs_by_request["req-A"] == [["req-A-s0"], ["req-A-s1"]]
-    assert stage2_inputs_by_request["req-B"] == [["req-B-s0"], ["req-B-s1"]]
+    # Router must forward stage_connector_refs and original_prompt verbatim — never inspect them.
+    assert stage1_received["stage_connector_refs"] == {
+        "0": {"shm_name": "abc", "size": 42}
+    }
+    assert stage1_received["original_prompt"] == {"prompt": "hi"}
+    assert stage1_received["request_id"] == "req-1"
+    # 'finished' must be stripped — it is a router signal, not a stage protocol field.
+    assert "finished" not in stage1_received
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="Tests old router design — rewrite in issue-004 (opaque router)"
-)
-async def test_generate_cleans_connectors_when_connector_put_fails():
-    connector = _CleanupConnector(ok=False)
+async def test_generate_concurrent_requests_have_independent_connector_refs():
+    """Concurrent requests must carry independent stage_connector_refs (no cross-leakage)."""
+    stage1_refs_by_request: dict = {}
+    event = asyncio.Event()
 
     async def stage0_handler(request):
-        return {"shm_meta": {"value": "stage0-output"}}
+        rid = request["request_id"]
+        return {
+            "original_prompt": {"prompt": "x"},
+            "stage_connector_refs": {"0": f"ref-for-{rid}"},
+            "finished": True,
+        }
 
     async def stage1_handler(request):
-        return {"shm_meta": {"value": "unexpected"}}
+        rid = request["request_id"]
+        if rid == "req-A":
+            await event.wait()
+        else:
+            event.set()
+        stage1_refs_by_request[rid] = request.get("stage_connector_refs")
+        return {"shm_meta": {"x": 1}, "finished": True}
 
-    router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=None)
-    router.stage_configs = [_make_stage_cfg(0), _make_stage_cfg(1)]
-    router.processors = {}
-    router.stage_clients = {
-        "stage0": _StageClient(stage0_handler),
-        "stage1": _StageClient(stage1_handler),
-    }
-    router.connectors = {("0", "1"): connector}
-    router._formatter = AsyncMock()
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
 
-    with patch.object(stage_router, "_shm_deserialize", return_value="decoded"):
+    async def run_one(request_id):
         with patch.object(
             stage_router,
             "_parse_engine_inputs",
@@ -173,67 +162,49 @@ async def test_generate_cleans_connectors_when_connector_put_fails():
                 return_value=(None, "chat"),
             ):
                 with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
-                    return_value="req-put-fail",
+                    "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id
                 ):
-                    chunks = [
-                        chunk
-                        async for chunk in router.generate(
-                            {"prompt": "x"}, context=None
-                        )
-                    ]
+                    with patch.object(
+                        stage_router, "_shm_deserialize", return_value=SimpleNamespace()
+                    ):
+                        return [c async for c in router.generate({"prompt": "x"}, None)]
 
-    assert chunks == [{"error": "connector.put() failed", "finished": True}]
-    assert connector.cleanup_calls == ["req-put-fail"]
+    await asyncio.gather(run_one("req-A"), run_one("req-B"))
+
+    assert stage1_refs_by_request["req-A"] == {"0": "ref-for-req-A"}
+    assert stage1_refs_by_request["req-B"] == {"0": "ref-for-req-B"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="Tests old router design — rewrite in issue-004 (opaque router)"
-)
-async def test_generate_cleans_connectors_when_stage_returns_error():
-    connector = _CleanupConnector(ok=True)
+async def test_generate_stage_error_stops_pipeline():
+    """Error from any stage must immediately stop the pipeline; later stages must not run."""
+    stage1_called = False
 
     async def stage0_handler(request):
-        return {"shm_meta": {"value": "stage0-output"}}
+        return {"error": "thinker exploded", "finished": True}
 
     async def stage1_handler(request):
-        return {"error": "stage exploded", "finished": True}
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
 
-    router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=None)
-    router.stage_configs = [_make_stage_cfg(0), _make_stage_cfg(1)]
-    router.processors = {}
-    router.stage_clients = {
-        "stage0": _StageClient(stage0_handler),
-        "stage1": _StageClient(stage1_handler),
-    }
-    router.connectors = {("0", "1"): connector}
-    router._formatter = AsyncMock()
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+    )
 
-    with patch.object(stage_router, "_shm_deserialize", return_value="decoded"):
-        with patch.object(
-            stage_router,
-            "_parse_engine_inputs",
-            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
-        ):
-            with patch(
-                "dynamo.common.utils.output_modalities.parse_request_type",
-                return_value=(None, "chat"),
-            ):
-                with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
-                    return_value="req-stage-error",
-                ):
-                    chunks = [
-                        chunk
-                        async for chunk in router.generate(
-                            {"prompt": "x"}, context=None
-                        )
-                    ]
+    p1, p2, p3 = _patched_generate(router, {"prompt": "x"})
+    with p1, p2, p3:
+        chunks = [c async for c in router.generate({"prompt": "x"}, None)]
 
-    assert chunks == [{"error": "stage exploded", "finished": True}]
-    assert connector.cleanup_calls == ["req-stage-error"]
+    assert chunks == [{"error": "thinker exploded", "finished": True}]
+    assert not stage1_called
+
+
+# ── existing tests (formatting + error paths) ────────────
 
 
 @pytest.mark.asyncio
@@ -246,13 +217,11 @@ async def test_generate_delegates_formatting_to_output_formatter():
     async def stage0_handler(request):
         return {"shm_meta": {"some": "meta"}, "finished": True}
 
-    router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=None)
-    router.stage_configs = [_make_stage_cfg(0)]
-    router.processors = {}
-    router.stage_clients = {"stage0": _StageClient(stage0_handler)}
-    router.connectors = {}
-    router._formatter = mock_formatter
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=mock_formatter,
+    )
 
     request = {"prompt": "x", "response_format": "b64_json"}
     with patch.object(stage_router, "_shm_deserialize", return_value=fake_result):
@@ -266,8 +235,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
                 return_value=(None, "image_generation"),
             ):
                 with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4",
-                    return_value="req-fmt",
+                    "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
                 ):
                     chunks = [c async for c in router.generate(request, context=None)]
 
@@ -287,12 +255,10 @@ async def test_generate_yields_error_when_no_shm_meta():
     async def stage0_handler(request):
         return {"finished": True}
 
-    router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=None)
-    router.stage_configs = [_make_stage_cfg(0)]
-    router.processors = {}
-    router.stage_clients = {"stage0": _StageClient(stage0_handler)}
-    router.connectors = {}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+    )
 
     with patch.object(
         stage_router,
@@ -334,9 +300,7 @@ class TestParseEngineInputsOriginalPrompt:
         }
         result = _parse_engine_inputs(request, RequestType.VIDEO_GENERATION, config)
 
-        # engine_inputs = just the text prompt for the engine
         assert result["engine_inputs"]["prompt"] == "a dog running"
-        # original_prompt = richer dict with geometry/params for processors (ar2diffusion etc.)
         op = result["original_prompt"]
         assert op["prompt"] == "a dog running"
         assert op["height"] == 480

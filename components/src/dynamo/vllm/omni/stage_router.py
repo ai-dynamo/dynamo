@@ -19,6 +19,7 @@ from dynamo.vllm.omni.types import OmniInterStageRequest, StageOutput
 logger = logging.getLogger(__name__)
 
 
+# TODO: Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
 def _build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read.
 
@@ -188,6 +189,7 @@ class OmniStageRouter:
         # --- Call each stage in order ---
         raw: Dict[str, Any] = {}
         for i, stage_cfg in enumerate(self.stage_configs):
+            logger.info("Router: calling stage %d", i)
             model_stage = getattr(stage_cfg.engine_args, "model_stage", f"stage{i}")
             client = self.stage_clients.get(model_stage)
             if client is None:
@@ -207,6 +209,9 @@ class OmniStageRouter:
                     "engine_inputs": engine_inputs["engine_inputs"],
                 }
             else:
+                logger.info(
+                    "Router: stage %d received keys=%s", i - 1, list(raw.keys())
+                )
                 # Subsequent stages: validate + filter to known protocol fields only.
                 # StageOutput drops unknown keys; router never inspects stage_connector_refs.
                 stage_request = StageOutput.model_validate(raw).to_next_stage_request(
@@ -214,6 +219,9 @@ class OmniStageRouter:
                 )
 
             raw = {}
+            logger.info(
+                "Router: stage %d request keys=%s", i, list(stage_request.keys())
+            )
             async for chunk in await client.round_robin(stage_request):
                 data = chunk.data()
                 if isinstance(data, (str, bytes)):
