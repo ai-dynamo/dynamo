@@ -110,7 +110,7 @@ jobs:
     runs-on: prod-builder-v3
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
-    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ inputs.platform }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
@@ -163,7 +163,7 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
-          arch: ${{ matrix.platform }}
+          arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           fresh_builder: ${{ inputs.fresh_builder }}
       - name: Calculate extra tags
@@ -195,7 +195,7 @@ jobs:
           echo "image_uri: ${{ steps.calculate-target-tag.outputs.image_uri }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: ${{ inputs.target }}"
-          echo "platform: ${{ matrix.platform }}"
+          echo "platform: ${{ inputs.platform }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
@@ -219,7 +219,7 @@ jobs:
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
-              --platform=${{ matrix.platform }} \
+              --platform=${{ inputs.platform }} \
               ${CUDA_FLAG} \
               ${MAKE_EFA_FLAG} \
               --show-result \
@@ -231,7 +231,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          platform: ${{ matrix.platform }}
+          platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
@@ -251,7 +251,7 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
-          arch: ${{ matrix.platform }}
+          arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }}
@@ -285,7 +285,7 @@ jobs:
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
-            --platform ${{ matrix.platform }} \
+            --platform ${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
             ${CACHE_ARGS} \
