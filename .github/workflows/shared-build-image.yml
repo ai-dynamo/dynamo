@@ -42,6 +42,11 @@ on:
         required: false
         type: boolean
         default: false
+      fresh_builder:
+        description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
+        required: false
+        type: boolean
+        default: false
       push_image:
         description: 'Push image to registry'
         required: false
@@ -95,9 +100,6 @@ on:
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
-      test_tag_plain:
-        description: 'Plain test image tag prefix'
-        value: ${{ jobs.build.outputs.test_tag_plain }}
 
 jobs:
   build:
@@ -107,17 +109,15 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     runs-on: prod-builder-v3
-    name: cuda${{ matrix.cuda_version }}, ${{ matrix.platform }}
+    # cuda_version not empty -- name: cuda12, linux/amd64
+    # cuda_version empty -- name: cpu, linux/amd64
+    name: ${{ inputs.cuda_version == '' && 'cpu' || format('cuda{0}', inputs.cuda_version) }}, ${{ matrix.platform }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -130,51 +130,55 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          EFA_SUFFIX=""
+          TAG_BUILDER=${{ inputs.framework }}-${{ inputs.target }}
           if [ "${{ inputs.make_efa }}" == "true" ]; then
-            EFA_SUFFIX="-efa"
+            TAG_BUILDER+="-efa"
           fi
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}"
-          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}-test"
-          DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ matrix.platform }}"
-          TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ matrix.platform }}"
-          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          PLAIN_TAG=${TAG_BUILDER}
+          if [ "${{ inputs.cuda_version }}" != "" ]; then
+            CUDA_VERSION="${{ inputs.cuda_version }}"
+            CUDA_MAJOR=${CUDA_VERSION%%.*}
+            TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+          fi
+          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}
+          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}-test
+
+          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
+          TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+          echo "plain_tag=${PLAIN_TAG}" >> $GITHUB_OUTPUT
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
-          echo "test_tag_plain=${TEST_TAG_PLAIN}" >> $GITHUB_OUTPUT
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+      - name: Calculate Builder Flavor
+        id: calculate-builder-flavor
+        shell: bash
+        run: |
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+            echo "builder_flavor=general" >> $GITHUB_OUTPUT
+          else
+            echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
+          fi
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ inputs.builder_name }}
-          flavor: ${{ inputs.framework }}
-          arch: linux/${{ matrix.platform }}
+          flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
+          arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
-      - name: Calculate extra tags with platform suffix
+          fresh_builder: ${{ inputs.fresh_builder }}
+      - name: Calculate extra tags
         id: extra-tags
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          CUDA_VERSION: ${{ matrix.cuda_version }}
         run: |
-          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
-          ACR_REGISTRY="${{ secrets.AZURE_ACR_HOSTNAME }}"
           RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ matrix.platform }}"$'\n'
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
-          fi
-          if [ "${{ inputs.build_only }}" == "true" ]; then
-            BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
-            RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ matrix.platform }}"$'\n'
-            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ matrix.platform }}"$'\n'
-            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ matrix.platform }}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -184,17 +188,18 @@ jobs:
             echo "tags=" >> $GITHUB_OUTPUT
           fi
       - name: Print Build Container inputs
+        shell: bash
         run: |
           echo "=== Build Container Inputs ==="
-          echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
+          echo "image_uri: ${{ steps.calculate-target-tag.outputs.image_uri }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: ${{ inputs.target }}"
-          echo "platform: ${{ matrix.platform }}"
-          echo "cuda_version: ${{ matrix.cuda_version }}"
+          echo "platform: ${{ inputs.platform }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
           echo "no_load: ${{ inputs.no_load }}"
+          echo "build_timeout_minutes: ${{ inputs.build_timeout_minutes }}"
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -203,26 +208,32 @@ jobs:
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             MAKE_EFA_FLAG="--make-efa"
           fi
+          # If CUDA version is empty, use empty arg to fallback to default (eg. for planner)
+          if [ "${{ inputs.cuda_version }}" == "" ]; then
+            CUDA_FLAG=""
+          else
+            CUDA_FLAG="--cuda-version=${{ matrix.cuda_version }}"
+          fi
+
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
-              --platform=linux/${{ matrix.platform }} \
-              --cuda-version=${{ matrix.cuda_version }} \
+              --platform=${{ inputs.platform }} \
+              ${CUDA_FLAG} \
               ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
       - name: Build and Push Image
         id: build-image
-        timeout-minutes: ${{ inputs.build_timeout_minutes }}
         uses: ./.github/actions/docker-remote-build
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          platform: linux/${{ matrix.platform }}
+          platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -232,14 +243,23 @@ jobs:
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
+            ${{ inputs.extra_build_args }}
+      - name: Refresh BuildKit builder
+        if: ${{ inputs.target != 'dev' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }}
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
-          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-${{ matrix.platform }}-cache"
+          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.plain_tag }}"
+          CACHE_TAG="test-${PLAIN_TAG}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
           CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -255,19 +275,25 @@ jobs:
             PUSH_ARGS="--load"
           fi
 
+          NO_CACHE_ARG=""
+          if [ "${{ inputs.no_cache }}" == "true" ]; then
+            NO_CACHE_ARG="--no-cache"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
-            --platform linux/${{ matrix.platform }} \
+            ${NO_CACHE_ARG} \
+            --platform ${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
             ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
-        if: ${{ inputs.push_image && inputs.show_summary }}
+        if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
         run: |
-          echo "### 🐳 ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 ${{ inputs.framework }}-${{ steps.calculate-target-tag.outputs.plain_tag }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
