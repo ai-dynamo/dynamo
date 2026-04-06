@@ -99,6 +99,12 @@ pub struct RequestTracker {
     /// decode phase's attempt is silently ignored, preserving the real TTFT.
     first_token_time: OnceLock<Instant>,
 
+    /// When the decode worker produced its first token (set once via OnceLock).
+    /// Separate from `first_token_time` because in disaggregated serving, the prefill
+    /// phase locks `first_token_time` first. This field captures the decode phase's
+    /// first token for KV transfer latency estimation (`decode_first_token - prefill_complete`).
+    decode_first_token_time: OnceLock<Instant>,
+
     /// When the request finished. Mutex allows the last router phase to
     /// record the final finish time.
     request_finish_time: Mutex<Option<Instant>>,
@@ -187,6 +193,7 @@ impl RequestTracker {
             request_received_epoch_ms: epoch_ms,
             prefill_start_time: OnceLock::new(),
             first_token_time: OnceLock::new(),
+            decode_first_token_time: OnceLock::new(),
             request_finish_time: Mutex::new(None),
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
@@ -217,6 +224,12 @@ impl RequestTracker {
 
     pub fn record_first_token(&self) {
         let _ = self.first_token_time.set(Instant::now());
+    }
+
+    /// Record when the decode worker produced its first token.
+    /// Used for KV transfer latency estimation in disaggregated serving.
+    pub fn record_decode_first_token(&self) {
+        let _ = self.decode_first_token_time.set(Instant::now());
     }
 
     pub fn record_finish(&self) {
@@ -419,13 +432,13 @@ impl RequestTracker {
     }
 
     /// Upper-bound estimation of KV cache transfer latency in seconds.
-    /// Computed as `first_token_time - prefill_complete_time`, which captures:
+    /// Computed as `decode_first_token_time - prefill_complete_time`, which captures:
     /// router dispatch overhead + network + KV transfer (NIXL) + one decode forward pass.
     /// Works for all disaggregated paths (original and bootstrap).
     /// Returns None if either timestamp was not recorded.
     pub fn kv_transfer_estimated_latency_secs(&self) -> Option<f64> {
         let complete = *self.prefill_complete_time.get()?;
-        let first_tok = *self.first_token_time.get()?;
+        let first_tok = *self.decode_first_token_time.get()?;
         Some(first_tok.saturating_duration_since(complete).as_secs_f64())
     }
 
@@ -769,7 +782,7 @@ mod tests {
 
         tracker.record_prefill_complete();
         thread::sleep(Duration::from_millis(10));
-        tracker.record_first_token();
+        tracker.record_decode_first_token();
 
         let latency = tracker.kv_transfer_estimated_latency_secs().unwrap();
         assert!(
@@ -784,14 +797,14 @@ mod tests {
         tracker.record_prefill_complete();
         assert!(
             tracker.kv_transfer_estimated_latency_secs().is_none(),
-            "Should return None when first_token_time is not set"
+            "Should return None when decode_first_token_time is not set"
         );
     }
 
     #[test]
     fn test_kv_transfer_estimated_latency_none_without_prefill_complete() {
         let tracker = RequestTracker::new();
-        tracker.record_first_token();
+        tracker.record_decode_first_token();
         assert!(
             tracker.kv_transfer_estimated_latency_secs().is_none(),
             "Should return None when prefill_complete_time is not set"
@@ -812,7 +825,7 @@ mod tests {
         let tracker = RequestTracker::new();
         tracker.record_prefill_complete();
         thread::sleep(Duration::from_millis(10));
-        tracker.record_first_token();
+        tracker.record_decode_first_token();
 
         let info = tracker.get_timing_info();
         let latency_ms = info
@@ -835,6 +848,87 @@ mod tests {
         );
     }
 
+    /// Reproduces the original bug where kv_transfer_estimated_latency was always 0.
+    ///
+    /// The bug: in disaggregated serving, both `record_first_token()` and
+    /// `record_prefill_complete()` were called during the prefill phase with
+    /// ~nanoseconds between them, and the latency was computed as
+    /// `first_token_time - prefill_complete_time`. Since `first_token_time`
+    /// was set *before* `prefill_complete_time`, `saturating_duration_since`
+    /// clamped the negative duration to zero.
+    ///
+    /// The fix: use a separate `decode_first_token_time` field that is only
+    /// recorded during the Decode phase, giving a meaningful time gap.
+    #[test]
+    fn test_kv_transfer_latency_bug_prefill_timestamps_are_zero() {
+        let tracker = RequestTracker::new();
+
+        // Simulate the buggy prefill-phase sequence:
+        // 1. RequestGuard::on_item() calls record_first_token() during prefill
+        tracker.record_first_token();
+        // 2. execute_prefill() calls record_prefill_complete() immediately after
+        tracker.record_prefill_complete();
+
+        // The OLD computation (first_token_time - prefill_complete_time) would be 0
+        // because first_token_time < prefill_complete_time chronologically,
+        // and saturating_duration_since clamps to zero.
+        let first_tok = *tracker.first_token_time.get().unwrap();
+        let complete = *tracker.prefill_complete_time.get().unwrap();
+        let old_latency = first_tok.saturating_duration_since(complete).as_secs_f64();
+        assert_eq!(
+            old_latency, 0.0,
+            "Old computation should produce exactly 0.0 (the bug), got {old_latency}"
+        );
+
+        // The FIXED computation uses decode_first_token_time which hasn't been set
+        // yet, so it correctly returns None (no decode phase has run).
+        assert!(
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
+            "Fixed metric should be None when decode hasn't started"
+        );
+
+        // Now simulate the decode phase producing its first token after a delay.
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_first_token();
+
+        // The FIXED computation (decode_first_token_time - prefill_complete_time)
+        // captures the actual KV transfer + decode startup latency.
+        let fixed_latency = tracker.kv_transfer_estimated_latency_secs().unwrap();
+        assert!(
+            fixed_latency >= 0.005,
+            "Fixed latency should be >= 5ms (actual KV transfer time), got {fixed_latency}"
+        );
+    }
+
+    /// Verifies that the decode phase's record_first_token() is rejected by OnceLock
+    /// (since prefill already set it), but record_decode_first_token() succeeds.
+    #[test]
+    fn test_decode_first_token_not_blocked_by_prefill_oncelock() {
+        let tracker = RequestTracker::new();
+
+        // Prefill phase sets first_token_time
+        tracker.record_first_token();
+        let prefill_first_tok = *tracker.first_token_time.get().unwrap();
+
+        thread::sleep(Duration::from_millis(5));
+
+        // Decode phase: record_first_token() is rejected (OnceLock already set)
+        tracker.record_first_token();
+        let still_prefill_tok = *tracker.first_token_time.get().unwrap();
+        assert_eq!(
+            prefill_first_tok, still_prefill_tok,
+            "first_token_time should be unchanged (OnceLock rejected decode's write)"
+        );
+
+        // But record_decode_first_token() succeeds on its own OnceLock
+        tracker.record_decode_first_token();
+        let decode_tok = *tracker.decode_first_token_time.get().unwrap();
+        assert!(
+            decode_tok > prefill_first_tok,
+            "decode_first_token_time should be later than first_token_time"
+        );
+    }
+
     #[test]
     fn test_timing_info_kv_transfer_estimated_latency_serialization() {
         let tracker = RequestTracker::new();
@@ -849,7 +943,7 @@ mod tests {
         // When set, it should appear
         let tracker2 = RequestTracker::new();
         tracker2.record_prefill_complete();
-        tracker2.record_first_token();
+        tracker2.record_decode_first_token();
         let info2 = tracker2.get_timing_info();
         let json2 = serde_json::to_string(&info2).unwrap();
         assert!(
