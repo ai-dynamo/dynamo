@@ -261,4 +261,11 @@ impl WorkloadDriver {
                 .iter()
                 .all(|session| session.next_turn_index >= session.turns.len())
     }
+
+    pub fn total_turns(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|session| session.turns.len())
+            .sum()
+    }
 }

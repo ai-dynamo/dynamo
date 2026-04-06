@@ -5,6 +5,7 @@
 use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_worker_completion, push_worker_completion,
 };
@@ -68,6 +69,7 @@ pub(super) struct AggRuntime {
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
     router: Option<OfflineReplayRouter>,
+    progress: ReplayProgress,
     stats: AggRuntimeStats,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -126,6 +128,7 @@ impl AggRuntime {
         router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
+        let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
             ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
@@ -160,6 +163,7 @@ impl AggRuntime {
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
             router,
+            progress,
             #[cfg(test)]
             stats: AggRuntimeStats::default(),
             #[cfg(not(test))]
@@ -347,6 +351,7 @@ impl AggRuntime {
             })?;
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
+            self.progress.inc_completed();
             self.dispatch_router_admissions(admissions)?;
             return Ok(());
         }
@@ -507,6 +512,7 @@ impl AggRuntime {
             self.drain_current_timestamp()?;
         }
 
+        self.progress.finish();
         Ok((self.collector, self.stats))
     }
 

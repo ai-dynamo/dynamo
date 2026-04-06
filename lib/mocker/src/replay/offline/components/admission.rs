@@ -157,4 +157,11 @@ impl AdmissionQueue {
     pub(crate) fn is_workload(&self) -> bool {
         matches!(self.source, AdmissionSource::Workload(_))
     }
+
+    pub(in crate::replay::offline) fn total_requests(&self) -> usize {
+        match &self.source {
+            AdmissionSource::Requests(pending) => pending.len(),
+            AdmissionSource::Workload(driver) => driver.total_turns(),
+        }
+    }
 }

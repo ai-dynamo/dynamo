@@ -14,6 +14,7 @@ use super::components::{
     ScheduledWorkerCompletion, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_decode_handoff, pop_ready_worker_completion,
     push_decode_handoff, push_worker_completion,
@@ -71,6 +72,7 @@ pub(super) struct DisaggRuntime {
     requests: HashMap<Uuid, DisaggRequestState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
+    progress: ReplayProgress,
     stats: DisaggRuntimeStats,
 }
 
@@ -119,6 +121,7 @@ impl DisaggRuntime {
         admission: AdmissionQueue,
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
+        let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
         let (prefill_router, decode_router) = match router_mode {
             ReplayRouterMode::RoundRobin => (None, None),
             ReplayRouterMode::KvRouter => {
@@ -183,6 +186,7 @@ impl DisaggRuntime {
             requests: HashMap::new(),
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
+            progress,
             #[cfg(test)]
             stats: DisaggRuntimeStats::default(),
             #[cfg(not(test))]
@@ -467,6 +471,7 @@ impl DisaggRuntime {
         self.record_router_pending();
         self.admission
             .on_request_completed(signal.uuid, self.now_ms)?;
+        self.progress.inc_completed();
         #[cfg(test)]
         if self.admission.is_workload() {
             self.stats
@@ -694,6 +699,7 @@ impl DisaggRuntime {
             self.drain_current_timestamp()?;
         }
 
+        self.progress.finish();
         self.finish_test_stats();
         Ok((self.collector, self.stats))
     }
