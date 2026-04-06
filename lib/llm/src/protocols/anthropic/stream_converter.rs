@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use axum::response::sse::Event;
-use dynamo_async_openai::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 use uuid::Uuid;
 
 use super::types::{
@@ -136,17 +136,15 @@ impl AnthropicStreamConverter {
             // Track finish reason
             if let Some(ref fr) = choice.finish_reason {
                 self.stop_reason = Some(match fr {
-                    dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_async_openai::types::FinishReason::Length => {
-                        AnthropicStopReason::MaxTokens
-                    }
-                    dynamo_async_openai::types::FinishReason::ToolCalls => {
+                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
+                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
+                    dynamo_protocols::types::FinishReason::ToolCalls => {
                         AnthropicStopReason::ToolUse
                     }
-                    dynamo_async_openai::types::FinishReason::ContentFilter => {
+                    dynamo_protocols::types::FinishReason::ContentFilter => {
                         AnthropicStopReason::EndTurn
                     }
-                    dynamo_async_openai::types::FinishReason::FunctionCall => {
+                    dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
                     }
                 });
@@ -478,17 +476,15 @@ impl AnthropicStreamConverter {
 
             if let Some(ref fr) = choice.finish_reason {
                 self.stop_reason = Some(match fr {
-                    dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_async_openai::types::FinishReason::Length => {
-                        AnthropicStopReason::MaxTokens
-                    }
-                    dynamo_async_openai::types::FinishReason::ToolCalls => {
+                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
+                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
+                    dynamo_protocols::types::FinishReason::ToolCalls => {
                         AnthropicStopReason::ToolUse
                     }
-                    dynamo_async_openai::types::FinishReason::ContentFilter => {
+                    dynamo_protocols::types::FinishReason::ContentFilter => {
                         AnthropicStopReason::EndTurn
                     }
-                    dynamo_async_openai::types::FinishReason::FunctionCall => {
+                    dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
                     }
                 });
@@ -734,7 +730,7 @@ impl AnthropicStreamConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
     };
@@ -742,7 +738,7 @@ mod tests {
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
                     index: 0,
@@ -777,7 +773,7 @@ mod tests {
     ) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
                     index: 0,
@@ -932,7 +928,7 @@ mod tests {
     fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "chat-1".into(),
                 choices: vec![ChatChoiceStream {
                     index: 0,

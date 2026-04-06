@@ -6,13 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_async_openai::types::{
-    ChatCompletionMessageContent, ChatCompletionToolChoiceOption, FinishReason,
-};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
+use dynamo_protocols::types::{
+    ChatCompletionMessageContent, ChatCompletionToolChoiceOption, FinishReason,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
@@ -88,7 +88,7 @@ struct MergedToolCall {
 impl MergedToolCall {
     fn merge_from(
         &mut self,
-        tool_call: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+        tool_call: &dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
     ) {
         if self.id.is_none() {
             self.id = tool_call.id.clone();
@@ -149,7 +149,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
         parse_fixture(&fixture_path("stream_interval_20.jsonl"));
 
     // Mirror tests/frontend/test_prepost.py::request_for_sampling
-    let tools: Vec<dynamo_async_openai::types::ChatCompletionTool> =
+    let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
         serde_json::from_value(serde_json::json!([
             {
                 "type": "function",
