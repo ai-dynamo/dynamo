@@ -266,9 +266,12 @@ func main() {
 
 		banner := strings.Repeat("=", 80)
 		setupLog.Error(nil, banner)
-		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated and will be removed in a future release.")
-		setupLog.Error(nil, "The operator is running in namespace-restricted mode for namespace: "+restrictedNamespace)
-		setupLog.Error(nil, "Please migrate to cluster-wide mode by removing the namespaceRestriction configuration.")
+		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated "+
+			"and will be removed in a future release.")
+		setupLog.Error(nil, "The operator is running in namespace-restricted mode",
+			"namespace", restrictedNamespace)
+		setupLog.Error(nil, "Please migrate to cluster-wide mode "+
+			"by removing the namespaceRestriction configuration.")
 		setupLog.Error(nil, banner)
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
