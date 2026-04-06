@@ -111,13 +111,15 @@ jobs:
     runs-on: prod-builder-v3
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
-    name: ${{ inputs.cuda_version == '' && 'cpu' || format('cuda{0}', inputs.cuda_version) }}, ${{ matrix.platform }}
+    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:

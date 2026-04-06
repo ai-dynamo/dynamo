@@ -76,7 +76,7 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: cuda${{ matrix.cuda_version }}, ${{ matrix.platform }}
+    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
