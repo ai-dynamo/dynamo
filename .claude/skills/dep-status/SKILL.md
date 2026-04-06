@@ -17,7 +17,7 @@ summary.
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
-  --search "label:dep:draft,dep:under-review,dep:approved,dep:implementing" \
+  --search 'label:"dep:draft","dep:under-review","dep:approved","dep:implementing"' \
   --json number,title,labels,assignees,createdAt,updatedAt
 ```
 
@@ -39,7 +39,7 @@ gh issue list --repo ai-dynamo/dynamo \
 
 4. **Format as a summary table**:
 
-```
+```text
 | # | Title | Status | Area | PIC | Updated |
 |---|-------|--------|------|-----|---------|
 | 42 | DEP: KV router scheduling | dep:under-review | router | @pic | 2026-03-28 |
@@ -49,7 +49,7 @@ gh issue list --repo ai-dynamo/dynamo \
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
-  --search "DEP <keyword> label:dep:draft,dep:under-review,dep:approved,dep:implementing,dep:done" \
+  --search 'DEP <keyword> label:"dep:draft","dep:under-review","dep:approved","dep:implementing","dep:done"' \
   --json number,title,labels,state
 ```
 
@@ -58,7 +58,7 @@ gh issue list --repo ai-dynamo/dynamo \
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
   --state closed \
-  --search "label:dep:done,dep:deferred,dep:rejected,dep:replaced" \
+  --search 'label:"dep:done","dep:deferred","dep:rejected","dep:replaced"' \
   --json number,title,labels,assignees,closedAt
 ```
 

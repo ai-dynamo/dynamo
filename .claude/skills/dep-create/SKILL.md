@@ -40,7 +40,7 @@ for work already merged.
 4. **Decide template**: full or lightweight.
    Use lightweight if only Summary, Motivation, and Proposal are needed.
 
-5. **Create the issue**:
+5. **Create the issue** (full DEP):
 
 ```bash
 gh issue create \
@@ -59,13 +59,35 @@ gh issue create \
 <proposal>
 
 ## Alternate Solutions
-<alternates or omit for lightweight>
+<alternates>
 
 ## Requirements
-<requirements or omit for lightweight>
+<requirements>
 
 ## References
-<references or omit for lightweight>
+<references — include internal doc link here>
+EOF
+)"
+```
+
+   **For lightweight DEP**, use:
+
+```bash
+gh issue create \
+  --repo ai-dynamo/dynamo \
+  --title "DEP (light): <short descriptive title>" \
+  --label "dep:draft" \
+  --label "dep:lightweight" \
+  --label "<area>" \
+  --body "$(cat <<'EOF'
+## Summary
+<summary>
+
+## Motivation
+<motivation>
+
+## Proposal
+<proposal>
 EOF
 )"
 ```
