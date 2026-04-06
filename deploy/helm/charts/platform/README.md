@@ -162,13 +162,6 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | dynamo-operator.checkpoint.readyForCheckpointFilePath | string | `"/tmp/ready-for-checkpoint"` | Path written by worker when model is loaded and ready for checkpointing |
-| dynamo-operator.checkpoint.storage.type | string | `"pvc"` | Storage backend type: pvc, s3, or oci |
-| dynamo-operator.checkpoint.storage.pvc.pvcName | string | `"snapshot-pvc"` | Name of the PVC created by the snapshot chart |
-| dynamo-operator.checkpoint.storage.pvc.basePath | string | `"/checkpoints"` | Base path within the PVC for storing checkpoints |
-| dynamo-operator.checkpoint.storage.s3.uri | string | `""` | S3 URI in format: s3://[endpoint/]bucket/prefix |
-| dynamo-operator.checkpoint.storage.s3.credentialsSecretRef | string | `""` | Reference to a secret containing AWS credentials |
-| dynamo-operator.checkpoint.storage.oci.uri | string | `""` | OCI URI in format: oci://registry/repository |
-| dynamo-operator.checkpoint.storage.oci.credentialsSecretRef | string | `""` | Reference to a docker config secret for registry authentication |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |

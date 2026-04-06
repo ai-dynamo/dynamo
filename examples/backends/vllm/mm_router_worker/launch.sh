@@ -20,8 +20,16 @@ MODEL="${MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
 NAMESPACE="${NAMESPACE:-dynamo}"
 HTTP_PORT="${HTTP_PORT:-8000}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block size
-GPU_MEMORY_UTILIZATION="${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-${GPU_MEMORY_UTILIZATION:-0.85}}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+
+# KV cache override for parallel-safe GPU memory control
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+else
+    GPU_MEM_ARGS="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
+fi
 
 NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
@@ -121,7 +129,7 @@ env "${COMMON_ENV[@]}" \
         --enable-multimodal \
         --block-size "${BLOCK_SIZE}" \
         --enforce-eager \
-        --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+        $GPU_MEM_ARGS \
         --max-model-len "${MAX_MODEL_LEN}" \
         --served-model-name "${MODEL}__internal" \
         ${VLLM_EXTRA_ARGS} &

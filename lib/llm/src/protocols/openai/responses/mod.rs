@@ -3,7 +3,7 @@
 
 pub mod stream_converter;
 
-use dynamo_async_openai::types::responses::{
+use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
     InputParam, InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
@@ -11,7 +11,7 @@ use dynamo_async_openai::types::responses::{
     ServiceTier, Status, Summary, SummaryPart, TextResponseFormatConfiguration, Tool,
     ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
@@ -38,7 +38,7 @@ use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::responses::CreateResponse,
+    pub inner: dynamo_protocols::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -48,7 +48,7 @@ pub struct NvCreateResponse {
 pub struct NvResponse {
     /// Flattened Response fields.
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::responses::Response,
+    pub inner: dynamo_protocols::types::responses::Response,
 
     /// NVIDIA extension field for response metadata (worker IDs, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,12 +144,12 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
 fn convert_image_detail(
-    detail: &dynamo_async_openai::types::responses::ImageDetail,
+    detail: &dynamo_protocols::types::responses::ImageDetail,
 ) -> ChatImageDetail {
     match detail {
-        dynamo_async_openai::types::responses::ImageDetail::Auto => ChatImageDetail::Auto,
-        dynamo_async_openai::types::responses::ImageDetail::Low => ChatImageDetail::Low,
-        dynamo_async_openai::types::responses::ImageDetail::High => ChatImageDetail::High,
+        dynamo_protocols::types::responses::ImageDetail::Auto => ChatImageDetail::Auto,
+        dynamo_protocols::types::responses::ImageDetail::Low => ChatImageDetail::Low,
+        dynamo_protocols::types::responses::ImageDetail::High => ChatImageDetail::High,
     }
 }
 
@@ -316,7 +316,7 @@ fn convert_input_items_to_messages(
                             tool_calls: Some(vec![ChatCompletionMessageToolCall {
                                 id: fc.call_id.clone(),
                                 r#type: ChatCompletionToolType::Function,
-                                function: dynamo_async_openai::types::FunctionCall {
+                                function: dynamo_protocols::types::FunctionCall {
                                     name: fc.name.clone(),
                                     arguments: fc.arguments.clone(),
                                 },
@@ -349,10 +349,10 @@ fn convert_input_items_to_messages(
             InputItem::EasyMessage(easy) => {
                 // Handle easy input messages based on role
                 let content_text = match &easy.content {
-                    dynamo_async_openai::types::responses::EasyInputContent::Text(text) => {
+                    dynamo_protocols::types::responses::EasyInputContent::Text(text) => {
                         text.clone()
                     }
-                    dynamo_async_openai::types::responses::EasyInputContent::ContentList(parts) => {
+                    dynamo_protocols::types::responses::EasyInputContent::ContentList(parts) => {
                         convert_input_content_to_text(parts)
                     }
                 };
@@ -695,6 +695,7 @@ fn make_function_call(name: String, arguments: String) -> OutputItem {
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
+    api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
@@ -736,10 +737,8 @@ pub fn chat_completion_to_response(
         // Handle text content -- also parse <tool_call> blocks from models
         // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(text)) => {
-                Some(text)
-            }
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(text)) => Some(text),
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
                 tracing::warn!(
                     "Multimodal content in responses API not yet supported, using placeholder"
                 );
@@ -814,7 +813,10 @@ pub fn chat_completion_to_response(
         presence_penalty: Some(0.0),
         // Echo actual request values, falling back to spec defaults.
         // store: false because this branch does not persist responses.
-        store: params.store.or(Some(false)),
+        store: api_context
+            .map(|ctx| ctx.store)
+            .or(params.store)
+            .or(Some(false)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
@@ -841,7 +843,7 @@ pub fn chat_completion_to_response(
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
         max_tool_calls: None,
-        previous_response_id: None,
+        previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
         prompt_cache_key: None,
         prompt_cache_retention: None,
@@ -876,12 +878,12 @@ pub fn chat_completion_to_response(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_async_openai::types::responses::{
+    use dynamo_protocols::types::responses::{
         CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
         FunctionToolCall, ImageDetail, InputContent, InputImageContent, InputItem, InputMessage,
         InputParam, InputRole, InputTextContent, Item, MessageItem, Tool,
     };
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     };
 
@@ -1163,19 +1165,17 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
-                choices: vec![dynamo_async_openai::types::ChatChoice {
+                choices: vec![dynamo_protocols::types::ChatChoice {
                     index: 0,
-                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                        content: Some(
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                "This is a reply".to_string(),
-                            ),
-                        ),
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "This is a reply".to_string(),
+                        )),
                         refusal: None,
                         tool_calls: None,
-                        role: dynamo_async_openai::types::Role::Assistant,
+                        role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
                         reasoning_content: None,
@@ -1194,7 +1194,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
@@ -1220,22 +1221,22 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
-                choices: vec![dynamo_async_openai::types::ChatChoice {
+                choices: vec![dynamo_protocols::types::ChatChoice {
                     index: 0,
-                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
                         content: None,
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCall {
                             id: "call_abc".into(),
                             r#type: ChatCompletionToolType::Function,
-                            function: dynamo_async_openai::types::FunctionCall {
+                            function: dynamo_protocols::types::FunctionCall {
                                 name: "get_weather".into(),
                                 arguments: r#"{"location":"SF"}"#.into(),
                             },
                         }]),
-                        role: dynamo_async_openai::types::Role::Assistant,
+                        role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
                         reasoning_content: None,
@@ -1254,7 +1255,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
             OutputItem::FunctionCall(fc) => {
@@ -1329,8 +1331,8 @@ thinking
 
     #[test]
     fn test_reasoning_effort_mapped_to_chat_completion() {
-        use dynamo_async_openai::types::ReasoningEffort;
-        use dynamo_async_openai::types::responses::Reasoning;
+        use dynamo_protocols::types::ReasoningEffort;
+        use dynamo_protocols::types::responses::Reasoning;
 
         let mut req = make_response_with_input("think hard");
         req.inner.reasoning = Some(Reasoning {
@@ -1351,8 +1353,8 @@ thinking
 
     #[test]
     fn test_text_format_json_object_mapped() {
-        use dynamo_async_openai::types::ResponseFormat;
-        use dynamo_async_openai::types::responses::{
+        use dynamo_protocols::types::ResponseFormat;
+        use dynamo_protocols::types::responses::{
             ResponseTextParam, TextResponseFormatConfiguration,
         };
 
@@ -1368,10 +1370,10 @@ thinking
 
     #[test]
     fn test_text_format_json_schema_mapped() {
-        use dynamo_async_openai::types::responses::{
+        use dynamo_protocols::types::responses::{
             ResponseTextParam, TextResponseFormatConfiguration,
         };
-        use dynamo_async_openai::types::{ResponseFormat, ResponseFormatJsonSchema};
+        use dynamo_protocols::types::{ResponseFormat, ResponseFormatJsonSchema};
 
         let schema = ResponseFormatJsonSchema {
             name: "city".into(),
@@ -1396,7 +1398,7 @@ thinking
 
     #[test]
     fn test_text_format_plain_text_leaves_response_format_none() {
-        use dynamo_async_openai::types::responses::{
+        use dynamo_protocols::types::responses::{
             ResponseTextParam, TextResponseFormatConfiguration,
         };
 
@@ -1412,8 +1414,8 @@ thinking
 
     #[test]
     fn test_service_tier_mapped_to_chat_completion() {
-        use dynamo_async_openai::types::ServiceTier as ChatServiceTier;
-        use dynamo_async_openai::types::responses::ServiceTier as RespServiceTier;
+        use dynamo_protocols::types::ServiceTier as ChatServiceTier;
+        use dynamo_protocols::types::responses::ServiceTier as RespServiceTier;
 
         let mut req = make_response_with_input("priority");
         req.inner.service_tier = Some(RespServiceTier::Priority);
@@ -1424,8 +1426,8 @@ thinking
 
     #[test]
     fn test_response_echoes_reasoning() {
-        use dynamo_async_openai::types::ReasoningEffort;
-        use dynamo_async_openai::types::responses::Reasoning;
+        use dynamo_protocols::types::ReasoningEffort;
+        use dynamo_protocols::types::responses::Reasoning;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1436,7 +1438,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
                 id: "test".into(),
@@ -1449,14 +1451,14 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
         assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
     }
 
     #[test]
     fn test_response_echoes_text_format() {
-        use dynamo_async_openai::types::responses::{
+        use dynamo_protocols::types::responses::{
             ResponseTextParam, TextResponseFormatConfiguration,
         };
 
@@ -1469,7 +1471,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
                 id: "test".into(),
@@ -1482,14 +1484,14 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let text = resp.inner.text.unwrap();
         assert_eq!(text.format, TextResponseFormatConfiguration::JsonObject);
     }
 
     #[test]
     fn test_response_echoes_service_tier() {
-        use dynamo_async_openai::types::responses::ServiceTier;
+        use dynamo_protocols::types::responses::ServiceTier;
 
         let params = ResponseParams {
             service_tier: Some(ServiceTier::Flex),
@@ -1497,7 +1499,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
                 id: "test".into(),
@@ -1510,13 +1512,13 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
     }
 
     #[test]
     fn test_output_message_deserializes_without_id_and_status() {
-        use dynamo_async_openai::types::responses::{InputItem, Item, MessageItem};
+        use dynamo_protocols::types::responses::{InputItem, Item, MessageItem};
 
         let json = serde_json::json!({
             "role": "assistant",
@@ -1538,7 +1540,7 @@ thinking
 
     #[test]
     fn test_output_message_with_id_and_status_still_works() {
-        use dynamo_async_openai::types::responses::{InputItem, Item, MessageItem, OutputStatus};
+        use dynamo_protocols::types::responses::{InputItem, Item, MessageItem, OutputStatus};
 
         let json = serde_json::json!({
             "role": "assistant",
@@ -1561,17 +1563,17 @@ thinking
     // ── PR2: include filtering + truncation echo-back tests ──
 
     fn make_chat_resp_with_text(text: &str) -> NvCreateChatCompletionResponse {
-        use dynamo_async_openai::types::{
+        use dynamo_protocols::types::{
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![ChatChoice {
                     index: 0,
                     #[allow(deprecated)]
                     message: ChatCompletionResponseMessage {
                         content: Some(ChatCompletionMessageContent::Text(text.into())),
-                        role: dynamo_async_openai::types::Role::Assistant,
+                        role: dynamo_protocols::types::Role::Assistant,
                         tool_calls: None,
                         refusal: None,
                         reasoning_content: None,
@@ -1598,7 +1600,7 @@ thinking
     fn test_include_logprobs_stripped_by_default() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
 
         for item in &resp.inner.output {
             if let OutputItem::Message(msg) = item {
@@ -1616,14 +1618,14 @@ thinking
 
     #[test]
     fn test_include_logprobs_kept_when_requested() {
-        use dynamo_async_openai::types::responses::IncludeEnum;
+        use dynamo_protocols::types::responses::IncludeEnum;
 
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams {
             include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
 
         let mut found_text = false;
         for item in &resp.inner.output {
@@ -1644,14 +1646,14 @@ thinking
 
     #[test]
     fn test_truncation_auto_echoed_back() {
-        use dynamo_async_openai::types::responses::Truncation;
+        use dynamo_protocols::types::responses::Truncation;
 
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams {
             truncation: Some(Truncation::Auto),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Auto));
     }
 
@@ -1659,7 +1661,7 @@ thinking
     fn test_truncation_defaults_to_disabled() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 }

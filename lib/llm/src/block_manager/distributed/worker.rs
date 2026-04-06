@@ -3,10 +3,10 @@
 
 use super::*;
 
+use super::zmq::*;
 use async_trait::async_trait;
 use transfer::*;
 use utils::*;
-use zmq::*;
 
 use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
@@ -165,7 +165,7 @@ async fn perform_allocation_and_build_handler(
     };
     // disk
     let disk_blocks = if leader_meta.num_disk_blocks > 0 {
-        let disk_allocator = Arc::new(DiskAllocator);
+        let disk_allocator = Arc::new(DiskAllocator::from_env()?);
         let disk_layout = layout_builder
             .num_blocks(leader_meta.num_disk_blocks)
             .build()?
