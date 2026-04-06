@@ -287,7 +287,7 @@ jobs:
             ${NO_CACHE_ARG} \
             --platform ${{ inputs.platform }} \
             -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
             ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
