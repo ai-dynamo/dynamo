@@ -88,11 +88,21 @@ impl LoadThresholdConfig {
 }
 
 /// Worker load monitoring state per dp_rank
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct DecodeBusyLatchState {
     latched_busy: bool,
     kv_used_blocks_cleared: bool,
     active_decode_blocks_cleared: bool,
+}
+
+impl Default for DecodeBusyLatchState {
+    fn default() -> Self {
+        Self {
+            latched_busy: false,
+            kv_used_blocks_cleared: true,
+            active_decode_blocks_cleared: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -840,6 +850,66 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_clears_with_only_kv_used_blocks_signal() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_clears_with_only_active_decode_blocks_signal() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(90),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
             },
             0.6,
         );
