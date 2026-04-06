@@ -174,6 +174,35 @@ def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
+def requests_agg_only(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when overrides request a single aggregate worker deployment.
+
+    The aggregate benchmark path disables planner scaling and supplies a single
+    worker override in ``overrides.dgd.spec.services``. The profiler uses this
+    to force the aggregated RAPID pick instead of selecting a disaggregated
+    configuration on its own.
+    """
+    if is_planner_enabled(dgdr):
+        return False
+    if dgdr.overrides is None or not isinstance(dgdr.overrides.dgd, dict):
+        return False
+
+    services = dgdr.overrides.dgd.get("spec", {}).get("services", {})
+    if not isinstance(services, dict) or not services:
+        return False
+
+    worker_services = 0
+    for svc_spec in services.values():
+        if not isinstance(svc_spec, dict):
+            continue
+        if svc_spec.get("subComponentType") == "prefill":
+            return False
+        if svc_spec.get("componentType") == "worker":
+            worker_services += 1
+
+    return worker_services == 1
+
+
 def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when the DGDR spec has mocker explicitly enabled."""
     return (

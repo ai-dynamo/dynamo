@@ -75,11 +75,18 @@ def add_checkpoint_to_config(dgdr, config_dict: dict) -> None:
     backend_str = backend.value if hasattr(backend, "value") else str(backend)
 
     services: dict = config_dict.get("spec", {}).get("services", {})
+    has_prefill_service = any(
+        isinstance(svc_spec, dict) and svc_spec.get("subComponentType") == "prefill"
+        for svc_spec in services.values()
+    )
     for svc_name, svc_spec in services.items():
         if svc_spec is None:
             continue
         sub_type = svc_spec.get("subComponentType", "")
-        if sub_type != "decode":
+        is_aggregate_worker = (
+            svc_spec.get("componentType") == "worker" and not has_prefill_service
+        )
+        if sub_type != "decode" and not is_aggregate_worker:
             continue
 
         # Infer identity fields from the service's args.

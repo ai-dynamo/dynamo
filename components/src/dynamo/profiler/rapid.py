@@ -29,6 +29,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
+    requests_agg_only,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,26 @@ def _run_default_sim(
         top_n=5,
         **load_kwargs,
     )
+
+    if requests_agg_only(dgdr):
+        agg_key = next(
+            (
+                key
+                for key, value in best_configs.items()
+                if "disagg" not in key and "agg" in key and not value.empty
+            ),
+            None,
+        )
+        if agg_key:
+            logger.info(
+                "Aggregate-only DGD override detected — forcing aggregated pick '%s'.",
+                agg_key,
+            )
+            chosen = agg_key
+        else:
+            logger.warning(
+                "Aggregate-only DGD override detected but RAPID did not return an aggregated candidate."
+            )
 
     # When interpolation data is needed (mocker or throughput-scaling), a
     # disaggregated config is required.  If AIC picked an aggregated config,
