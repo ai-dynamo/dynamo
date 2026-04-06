@@ -33,14 +33,12 @@ async-openai = { version = "0.34", default-features = false, features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 derive_builder = { workspace = true }
-base64 = "0.22.1"
 
 # Type support
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-bytes = { workspace = true }
 futures = { workspace = true }
 
 
