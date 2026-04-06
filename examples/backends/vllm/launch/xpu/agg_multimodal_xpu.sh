@@ -71,7 +71,7 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+GPU_MEM_FRACTION=$(build_vllm_gpu_mem_args --model "$MODEL_NAME" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)

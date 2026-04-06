@@ -52,7 +52,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 export DYN_REQUEST_PLANE=$REQUEST_PLANE
 echo "Using request plane mode: $REQUEST_PLANE"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+GPU_MEM_FRACTION=$(build_vllm_gpu_mem_args --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving + Request Planes (1 GPU)" "$MODEL" "$HTTP_PORT"
