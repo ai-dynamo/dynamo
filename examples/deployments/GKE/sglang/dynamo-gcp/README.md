@@ -46,9 +46,7 @@ flowchart TB
 | `dgd-disagg-1p1d.yaml` | DynamoGraphDeployment | Disaggregated 1P1D: Frontend + Prefill + Decode, NIXL/RoCE, EAGLE spec decode — FP8 |
 | `nvfp4/sglang-dsv31-aggregated-nvfp4.yaml` | DynamoGraphDeployment | Aggregated with [DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4) (FP4 quantized) |
 | `nvfp4/sglang-disagg-dsv31-nvfp4-1p1d-roce.yaml` | DynamoGraphDeployment | Disaggregated 1P1D with DeepSeek-V3.1-NVFP4 (FP4), NIXL/RoCE, EAGLE spec decode |
-| `perf-pod.yaml` | Pod | Long-lived pod with aiperf for benchmarking |
-| `roce-test/nccl-test-2node.yaml` | MPIJob | *(Optional)* 2-node NCCL all_reduce test to validate RDMA/RoCE |
-| `roce-test/install-mpi-operator.sh` | Script | *(Optional)* Installs Kubeflow training-operator for MPIJob support |
+| [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md) | Full deployment | **NVFP4 + GAIE**: Agg & disagg with GKE Inference Gateway, EPP, routing policies, benchmark script ([own README](dsv31-nvfp4-gaie/README.md)) |
 
 ---
 
@@ -179,6 +177,8 @@ kubectl delete dynamographdeployment sglang-disagg-1p1d-roce -n dynamo-system
 
 NVIDIA provides a pre-quantized FP4 checkpoint of DeepSeek-V3.1 at [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4). This reduces the per-parameter precision from 8 bits to 4 bits, cutting disk size and GPU memory requirements by ~1.6x while maintaining competitive accuracy. The configs for this variant live under the `nvfp4/` folder.
 
+> **GAIE variant**: For NVFP4 deployments fronted by the **GKE Inference Gateway** (with EPP, HTTPRoute, health-check/backend policies, and benchmark tooling), see [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md).
+
 Key differences from the FP8 configs:
 - Model path: `nvidia/DeepSeek-V3.1-NVFP4` (instead of `deepseek-ai/DeepSeek-V3.1`)
 - Quantization flags: `--quantization modelopt_fp4`, `--moe-runner-backend flashinfer_trtllm`, `--attention-backend trtllm_mla`
@@ -222,74 +222,6 @@ kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
 kubectl delete dynamographdeployment sglang-disagg-dsv31-nvfp4-1p1d-roce -n dynamo-system
 ```
 
----
-
-## Benchmarking with aiperf
-
-### Deploy the Perf Pod
-
-```bash
-kubectl apply -f perf-pod.yaml -n dynamo-system
-
-# Wait for it to be ready (installs aiperf on startup)
-kubectl wait --for=condition=Ready pod/perf-agg-disagg-fp8 -n dynamo-system --timeout=300s
-kubectl exec -it perf-agg-disagg-fp8 -n dynamo-system -- bash
-```
-
-### Run aiperf at C=10
-
-Inside the perf pod, the following env vars are pre-set: `ENDPOINT_AGG`, `ENDPOINT_DISAGG`, `TARGET_MODEL`, `TOKENIZER_PATH`, `ISL=1000`, `OSL=250`.
-
-**Aggregated:**
-
-```bash
-aiperf profile \
-  --url "http://$ENDPOINT_AGG" \
-  --artifact-dir "$ROOT_ARTIFACT_DIR/perf-agg-fp8/concurrency_10" \
-  --model "$TARGET_MODEL" \
-  --tokenizer "$TOKENIZER_PATH" \
-  --endpoint-type chat \
-  --endpoint /v1/chat/completions \
-  --streaming \
-  --synthetic-input-tokens-mean $ISL --synthetic-input-tokens-stddev 0 \
-  --output-tokens-mean $OSL --output-tokens-stddev 0 \
-  --extra-inputs "max_tokens:$OSL" \
-  --extra-inputs "min_tokens:$OSL" \
-  --extra-inputs "ignore_eos:true" \
-  --extra-inputs "repetition_penalty:1.0" \
-  --extra-inputs "temperature:0.0" \
-  --concurrency 10 \
-  --request-count 100 \
-  --warmup-request-count 10 \
-  --num-dataset-entries 12800 \
-  --random-seed 100 \
-  --workers-max 10 \
-  --record-processors 32 \
-  --request-timeout-seconds 21600 \
-  --no-server-metrics \
-  --ui simple
-```
-
-**Disaggregated:**
-
-```bash
-aiperf profile \
-  --url "http://$ENDPOINT_DISAGG" \
-  --artifact-dir "$ROOT_ARTIFACT_DIR/perf-disagg-fp8-roce/concurrency_10" \
-  ... # same flags as above
-```
-
-### Changing Concurrency
-
-To run at higher concurrency, change `--concurrency` and scale `--request-count` and `--warmup-request-count` proportionally:
-
-| Concurrency | `--concurrency` | `--request-count` | `--warmup-request-count` | `--workers-max` |
-|---|---|---|---|---|
-| C=10 | 10 | 100 | 10 | 10 |
-| C=50 | 50 | 500 | 50 | 50 |
-| C=100 | 100 | 1000 | 100 | 100 |
-
-Update the `--artifact-dir` to reflect the concurrency level (e.g., `concurrency_50`).
 
 ---
 
@@ -327,50 +259,8 @@ These are set in the disagg DGD and tuned for GKE B200 nodes with RoCE networkin
 ## References
 
 - [Dynamo](https://github.com/ai-dynamo/dynamo)
-- [GAIE variant (with Inference Gateway)](../gaie/README.md)
-- [NCCL Test Run Steps](../NCCL-TEST-RUN-STEPS.md)
-- [KAI Scheduler + RDMA Notes](../NOTES-multinode-kai-scheduler.md)
+- [GAIE variant — FP8 (with Inference Gateway)](../gaie/README.md)
+- [GAIE variant — NVFP4 (with Inference Gateway)](dsv31-nvfp4-gaie/README.md)
 - [GPU Recipes - Dynamo Disaggregated Serving](https://github.com/AI-Hypercomputer/gpu-recipes/blob/main/inference/a4x/disaggregated-serving/dynamo/README.md)
 - [nvidia/DeepSeek-V3.1-NVFP4 on HuggingFace](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)
 
----
-
-## Appendix: Networking Checkpoint (Optional)
-
-> This section is **optional**. Use it to validate multi-node RDMA/RoCE before deploying disaggregated workloads. It is not needed for aggregated (single-node) deployments.
-
-### Install MPI Operator (once per cluster)
-
-```bash
-kubectl apply -k "github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=v1.7.0"
-kubectl get crd mpijobs.kubeflow.org   # verify CRD exists
-```
-
-### Run the 2-node NCCL Test
-
-```bash
-kubectl apply -f roce-test/nccl-test-2node.yaml -n dynamo-system
-
-# Watch pods
-kubectl get pods -n dynamo-system -l training.kubeflow.org/job-name=nccltest-b200-2node -w
-
-# Check results (wait for launcher to complete)
-kubectl logs job/nccltest-b200-2node-launcher -n dynamo-system
-```
-
-**What to look for in the logs:**
-
-- `NCCL INFO Using network IB` -- confirms IB/RoCE transport (not TCP fallback)
-- `NCCL INFO Channel ... connected to peer` -- nodes found each other via RDMA
-- `all_reduce_perf` results with bus bandwidth >100 GB/s across 16 GPUs
-
-**If it fails** (completion errors, timeout):
-
-- Verify RDMA network profile is attached to the node pool
-- Check `NCCL_IB_TIMEOUT` / `NCCL_IB_RETRY_CNT` values (increase if seeing vendor errors)
-- See [NCCL-TEST-RUN-STEPS.md](../NCCL-TEST-RUN-STEPS.md) for detailed troubleshooting
-
-```bash
-# Clean up
-kubectl delete mpijob nccltest-b200-2node -n dynamo-system
-```

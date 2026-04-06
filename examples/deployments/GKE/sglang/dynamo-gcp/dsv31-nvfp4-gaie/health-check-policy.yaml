@@ -1,0 +1,43 @@
+# HealthCheckPolicy — GKE LB health checks for InferencePool endpoint Services.
+# Update targetRef.name if pool Services are recreated (hash suffix changes):
+#   kubectl get svc -n dynamo-system | grep -E 'nvfp4-agg-gaie-pool-ips|nvfp4-disagg-gaie-pool-ips'
+#
+# Deploy: kubectl apply -f health-check-policy.yaml -n dynamo-system
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: sglang-nvfp4-agg-gaie-health-check
+  namespace: dynamo-system
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /health
+    logConfig:
+      enabled: true
+  targetRef:
+    group: ""
+    kind: Service
+    name: sglang-dsv31-nvfp4-agg-gaie-pool-ips-e00ef715
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: sglang-nvfp4-disagg-gaie-health-check
+  namespace: dynamo-system
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /health
+    logConfig:
+      enabled: true
+  targetRef:
+    group: ""
+    kind: Service
+    name: sglang-dsv31-nvfp4-disagg-gaie-pool-ips-c01ab801

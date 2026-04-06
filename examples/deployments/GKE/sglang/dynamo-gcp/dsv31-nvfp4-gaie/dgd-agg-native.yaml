@@ -1,10 +1,9 @@
-# Aggregated SGLang deployment using nvidia/DeepSeek-V3.1-NVFP4 (same layout as sglang-dsv31-aggregated).
-# Model must be on PVC (loaded via model-load-deepseek-v31-nvfp4).
-# Deploy: kubectl apply -f sglang-dsv31-aggregated-nvfp4.yaml -n dynamo-system
+# NVFP4 Native Aggregated — sglang-runtime:1.0.0, tracing, KV routing
+# Deploy: kubectl apply -f dgd-agg-native.yaml -n dynamo-system
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-dsv31-aggregated-nvfp4
+  name: sglang-dsv31-nvfp4-agg-native
   namespace: dynamo-system
   annotations:
     nvidia.com/enable-grove: "false"
@@ -19,6 +18,30 @@ spec:
     value: INIT,ENV
   - name: NCCL_SHIMNET_GUEST_CONFIG_CHECKER_DISABLE
     value: "1"
+  - name: NCCL_CUMEM_ENABLE
+    value: "0"
+  - name: NCCL_NVLS_ENABLE
+    value: "0"
+  - name: NCCL_MNNVL_ENABLE
+    value: "1"
+  - name: MC_FORCE_MNNVL
+    value: "1"
+  - name: DYN_SKIP_SGLANG_LOG_FORMATTING
+    value: "1"
+  - name: SGLANG_ENABLE_SPEC_V2
+    value: "1"
+  - name: SGLANG_ENABLE_JIT_DEEPGEMM
+    value: "true"
+  - name: SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK
+    value: "1"
+  - name: DYN_LOGGING_JSONL
+    value: "true"
+  - name: OTEL_EXPORT_ENABLED
+    value: "true"
+  - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    value: "http://otel-collector.dynamo-system.svc.cluster.local:4317"
+  - name: OTEL_SERVICE_NAME
+    value: "dynamo-worker-nvfp4-agg-native"
   pvcs:
   - create: false
     name: deepseek-v31-model-rwx
@@ -32,17 +55,14 @@ spec:
         initContainers:
         - name: fix-permissions
           image: busybox
-          command:
-          - sh
-          - -c
-          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          command: ["sh", "-c", "mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache"]
           securityContext:
             runAsUser: 0
           volumeMounts:
           - name: deepseek-v31-model-rwx
             mountPath: /opt/model-cache
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
           readinessProbe:
             httpGet:
               path: /health
@@ -72,21 +92,16 @@ spec:
         initContainers:
         - name: fix-permissions
           image: busybox
-          command:
-          - sh
-          - -c
-          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          command: ["sh", "-c", "mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache"]
           securityContext:
             runAsUser: 0
           volumeMounts:
           - name: deepseek-v31-model-rwx
             mountPath: /opt/model-cache
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
           workingDir: /workspace/examples/backends/sglang
-          command:
-          - /bin/sh
-          - -c
+          command: ["/bin/sh", "-c"]
           args:
           - |
             sleep $((RANDOM % 30))
@@ -109,7 +124,8 @@ spec:
               --skip-tokenizer-init \
               --host 0.0.0.0 \
               --mem-fraction-static 0.85 \
-              --max-running-requests 24
+              --max-running-requests 24 \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
           env:
           - name: SGLANG_MOE_NVFP4_DISPATCH
             value: "1"

@@ -1,0 +1,51 @@
+# Unified HTTPRoute — GAIE aggregated + NVFP4 GAIE disaggregated via Inference Gateway (EPP).
+# Native benchmarks: hit worker frontends directly (no x-pool), e.g.
+#   disagg: http://sglang-dsv31-nvfp4-disagg-native-frontend.dynamo-system.svc.cluster.local:8000
+#
+# Verify InferencePool names after DGD apply:
+#   kubectl get inferencepool -n dynamo-system
+#
+# Deploy: kubectl apply -f httproute.yaml -n dynamo-system
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sglang-dsv31-nvfp4-route
+  namespace: dynamo-system
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: dynamo-system
+  rules:
+  # 1. GAIE Aggregated — EPP KV-aware scoring
+  - matches:
+    - headers:
+      - name: x-pool
+        type: Exact
+        value: gaie-agg
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: sglang-dsv31-nvfp4-agg-gaie-pool
+
+  # 2. GAIE Disaggregated NVFP4 — EPP prefill/decode scoring
+  - matches:
+    - headers:
+      - name: x-pool
+        type: Exact
+        value: gaie-disagg-nvfp4
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: sglang-dsv31-nvfp4-disagg-gaie-pool
+
+  # Default fallback → GAIE agg
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: sglang-dsv31-nvfp4-agg-gaie-pool
