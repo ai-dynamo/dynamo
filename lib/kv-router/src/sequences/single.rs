@@ -236,55 +236,28 @@ impl ActiveSequences {
             .map(|request_id| (request_id, now));
     }
 
-    fn oldest_prefill_request_id(&self) -> Option<&RequestId> {
-        self.anchored_prefill
-            .as_ref()
-            .map(|(request_id, _)| request_id)
-    }
-
-    fn remaining_prefill_tokens_at(&self, request_id: &RequestId, now: Instant) -> usize {
-        let Some(prefill) = self
-            .requests
-            .get(request_id)
-            .and_then(|state| state.prefill)
-        else {
-            return 0;
-        };
-
-        let Some(expected_prefill_duration) = prefill.expected_prefill_duration else {
-            return prefill.initial_effective_prefill_tokens;
-        };
-
-        if expected_prefill_duration.is_zero() {
-            return 0;
-        }
-
-        let Some((anchored_request_id, oldest_since)) = self.anchored_prefill.as_ref() else {
-            return prefill.initial_effective_prefill_tokens;
-        };
-        if anchored_request_id != request_id {
-            return prefill.initial_effective_prefill_tokens;
-        }
-
-        let elapsed = now.saturating_duration_since(*oldest_since);
-        let remaining_fraction = (1.0
-            - (elapsed.as_secs_f64() / expected_prefill_duration.as_secs_f64()))
-        .clamp(0.0, 1.0);
-
-        ((prefill.initial_effective_prefill_tokens as f64) * remaining_fraction).ceil() as usize
-    }
-
     fn active_prefill_tokens_at(&self, now: Instant) -> usize {
-        let Some(oldest_request_id) = self.oldest_prefill_request_id() else {
+        let Some((oldest_request_id, oldest_since)) = self.anchored_prefill.as_ref() else {
             return 0;
         };
-        let oldest_full = self
+        let prefill = self
             .requests
             .get(oldest_request_id)
             .and_then(|state| state.prefill)
-            .map(|prefill| prefill.initial_effective_prefill_tokens)
             .expect("prefill_order front missing prefill load");
-        let oldest_remaining = self.remaining_prefill_tokens_at(oldest_request_id, now);
+        let oldest_full = prefill.initial_effective_prefill_tokens;
+        let oldest_remaining = match prefill.expected_prefill_duration {
+            None => oldest_full,
+            Some(expected_prefill_duration) if expected_prefill_duration.is_zero() => 0,
+            Some(expected_prefill_duration) => {
+                let elapsed = now.saturating_duration_since(*oldest_since);
+                let remaining_fraction = (1.0
+                    - (elapsed.as_secs_f64() / expected_prefill_duration.as_secs_f64()))
+                .clamp(0.0, 1.0);
+
+                ((oldest_full as f64) * remaining_fraction).ceil() as usize
+            }
+        };
 
         self.prefill_full_tokens_sum
             .checked_sub(oldest_full)
@@ -391,11 +364,7 @@ impl ActiveSequences {
             },
         );
 
-        if let Some(prefill) = self
-            .requests
-            .get(&request_id)
-            .and_then(|state| state.prefill)
-        {
+        if let Some(prefill) = prefill {
             self.insert_prefill_load(&request_id, prefill);
         }
 
