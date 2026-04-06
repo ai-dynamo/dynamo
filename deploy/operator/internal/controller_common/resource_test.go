@@ -644,6 +644,62 @@ func TestCopySpec(t *testing.T) {
 	g.Expect(dst).To(gomega.Equal(expected))
 }
 
+func TestCopySpec_SpeclessResource(t *testing.T) {
+	// ServiceAccounts have no spec field. CopySpec should be a no-op, not an error.
+	// Use a non-zero dst to prove existing state is preserved.
+	autoMount := true
+	src := corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sa",
+			Namespace: "default",
+		},
+	}
+	dst := corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sa",
+			Namespace: "default",
+		},
+		AutomountServiceAccountToken: &autoMount,
+	}
+	expected := dst
+
+	err := CopySpec(&src, &dst)
+
+	g := gomega.NewGomegaWithT(t)
+	g.Expect(err).To(gomega.BeNil())
+	g.Expect(dst).To(gomega.Equal(expected))
+}
+
+func TestGetSpecHash_SpeclessResource(t *testing.T) {
+	// ServiceAccounts have no spec field. GetSpecHash should return a stable hash, not an error.
+	// sha256("{}") — the hash of an empty JSON object.
+	const expectedEmptyHash = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+
+	sa := corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sa",
+			Namespace: "default",
+		},
+	}
+
+	hash, err := GetSpecHash(&sa)
+
+	g := gomega.NewGomegaWithT(t)
+	g.Expect(err).To(gomega.BeNil())
+	g.Expect(hash).To(gomega.Equal(expectedEmptyHash))
+
+	// Different spec-less objects should produce the same hash
+	sa2 := corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-sa",
+			Namespace: "kube-system",
+		},
+	}
+	hash2, err := GetSpecHash(&sa2)
+	g.Expect(err).To(gomega.BeNil())
+	g.Expect(hash2).To(gomega.Equal(expectedEmptyHash))
+}
+
 func TestGetResourcesConfig(t *testing.T) {
 	tests := []struct {
 		name             string
