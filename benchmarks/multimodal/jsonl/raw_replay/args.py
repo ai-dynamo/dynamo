@@ -59,6 +59,14 @@ def parse_args(description: str = "") -> argparse.Namespace:
         help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
     )
     parser.add_argument(
+        "--wrap-sys-to-user",
+        action="store_true",
+        default=False,
+        help="For turns after the first, prepend the system prompt into the user "
+        "message instead of emitting a separate system message. Use this when "
+        "the target model's chat template ignores system roles outside index 0.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=DEFAULT_SEED,

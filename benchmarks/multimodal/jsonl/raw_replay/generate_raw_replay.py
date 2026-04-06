@@ -72,16 +72,14 @@ def build_conversation(
     config: dict[str, Any],
     rng: random.Random,
     image_pools: dict[tuple[int, int], list[str]],
+    wrap_sys_to_user: bool = False,
 ) -> list[dict[str, Any]]:
     model = config["defaults"]["model"]
     accumulated: list[dict[str, Any]] = []
     lines: list[dict[str, Any]] = []
 
-    for phase in config["phases"]:
-        system_msg = {
-            "role": "system",
-            "content": generate_filler(rng, phase["system_tokens"]),
-        }
+    for turn_idx, phase in enumerate(config["phases"]):
+        system_text = generate_filler(rng, phase["system_tokens"])
 
         images: list[str] = []
         imgs = phase.get("images")
@@ -91,14 +89,25 @@ def build_conversation(
             images = pool[: imgs["count"]]
             del pool[: imgs["count"]]
 
-        user_msg = {
-            "role": "user",
-            "content": _build_user_content(
-                generate_filler(rng, phase["user_tokens"]), images
-            ),
-        }
+        user_text = generate_filler(rng, phase["user_tokens"])
 
-        turn_messages = accumulated + [system_msg, user_msg]
+        if wrap_sys_to_user and turn_idx > 0:
+            user_text = system_text + "\n" + user_text
+            user_msg = {
+                "role": "user",
+                "content": _build_user_content(user_text, images),
+            }
+            turn_messages = accumulated + [user_msg]
+        else:
+            system_msg = {
+                "role": "system",
+                "content": system_text,
+            }
+            user_msg = {
+                "role": "user",
+                "content": _build_user_content(user_text, images),
+            }
+            turn_messages = accumulated + [system_msg, user_msg]
         payload = {
             "messages": turn_messages,
             "max_tokens": phase["max_output_tokens"],
@@ -162,7 +171,7 @@ def main() -> None:
 
     total_bytes = 0
     for i in range(args.num_conversations):
-        lines = build_conversation(config, rng, image_pools)
+        lines = build_conversation(config, rng, image_pools, args.wrap_sys_to_user)
         path = args.output_dir / f"session_{i + 1:06d}.jsonl"
         total_bytes += write_conversation(path, lines)
 
