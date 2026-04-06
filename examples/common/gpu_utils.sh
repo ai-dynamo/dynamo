@@ -40,7 +40,12 @@ build_vllm_gpu_mem_args() {
     local workers_per_gpu=1
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --workers-per-gpu) workers_per_gpu="$2"; shift 2 ;;
+            --workers-per-gpu)
+                if [[ -z "${2:-}" || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "build_vllm_gpu_mem_args: --workers-per-gpu requires a positive integer" >&2
+                    return 1
+                fi
+                workers_per_gpu="$2"; shift 2 ;;
             *) echo "build_vllm_gpu_mem_args: unknown option '$1'" >&2; return 1 ;;
         esac
     done
@@ -204,6 +209,25 @@ _gpu_utils_self_test() {
         build_sglang_gpu_mem_args)
     _assert "sglang ignores kv bytes" "" "$result"
 
+    # --- build_vllm_gpu_mem_args validation ---
+
+    echo ""
+    echo "=== vLLM: --workers-per-gpu 0 rejected ==="
+    (build_vllm_gpu_mem_args --workers-per-gpu 0 2>/dev/null)
+    _assert "zero rejected" "1" "$?"
+
+    echo ""
+    echo "=== vLLM: --workers-per-gpu missing value rejected ==="
+    (build_vllm_gpu_mem_args --workers-per-gpu 2>/dev/null)
+    _assert "missing value rejected" "1" "$?"
+
+    echo ""
+    echo "=== vLLM: --workers-per-gpu abc rejected ==="
+    (build_vllm_gpu_mem_args --workers-per-gpu abc 2>/dev/null)
+    _assert "non-numeric rejected" "1" "$?"
+
+    # --- build_trtllm_override_args_with_mem ---
+
     echo ""
     echo "=== trtllm: token cap env ==="
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=4096 \
@@ -243,7 +267,6 @@ _gpu_utils_self_test() {
     echo "=== trtllm: no GPU override, but pass through existing JSON ==="
     result=$(build_trtllm_override_args_with_mem --merge-with-json '{"return_perf_metrics": true}')
     _assert "trtllm passthrough" '{"return_perf_metrics": true}' "$result"
-
 
     echo ""
     echo "=========================================="
