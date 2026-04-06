@@ -71,9 +71,12 @@ pub mod traits {
     /// buffer without resorting to hardcoded replacement-character string checks.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum DecodeResult {
-        /// All bytes decoded to valid UTF-8 -- no trailing incomplete sequences.
+        /// No trailing incomplete multi-byte sequences (text does not end with U+FFFD).
+        /// Note: the string may still contain *interior* U+FFFD characters from
+        /// mid-stream invalid byte sequences; only trailing status is tracked here.
         Complete(String),
-        /// The decoded string has incomplete trailing multi-byte bytes (ends with U+FFFD).
+        /// The decoded string ends with U+FFFD, indicating incomplete trailing
+        /// multi-byte bytes that may be completed by subsequent tokens.
         Partial(String),
     }
 
@@ -107,10 +110,11 @@ pub mod traits {
         }
     }
 
-    /// Implementations **must** use lossy UTF-8 conversion (e.g. `String::from_utf8_lossy`)
-    /// so that partial multi-byte sequences produce U+FFFD (`\u{FFFD}`) rather than returning `Err`.
-    /// `DecodeStream::step()` relies on `DecodeResult::Partial` to detect incomplete
-    /// sequences and buffer tokens until the full character arrives.
+    /// Implementations must ensure that partial multi-byte sequences produce U+FFFD
+    /// (`\u{FFFD}`) in the output rather than returning `Err`. This is commonly achieved
+    /// via `String::from_utf8_lossy` (tiktoken) or library-internal byte-fallback handling
+    /// (HuggingFace). `DecodeStream::step()` relies on `DecodeResult::Partial` to detect
+    /// incomplete sequences and buffer tokens until the full character arrives.
     pub trait Decoder: Send + Sync {
         fn decode(
             &self,
