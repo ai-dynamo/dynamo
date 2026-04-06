@@ -18,19 +18,29 @@ for work already merged.
 
 ### Create a New DEP
 
-1. **Gather required fields** from the user (prompt if missing):
+1. **Ask for source material**: Prompt the user for a Google Doc,
+   Confluence page, or other NVIDIA-internal document that contains
+   the background, customer context, or detailed requirements. Read
+   it using the appropriate tool (gdocs, Confluence MCP, WebFetch).
+   Include the link in the issue's References section — the document
+   is only accessible to NVIDIA employees and serves as the record
+   for customer-specific context that cannot appear in the public
+   issue prose.
+
+2. **Gather required fields** from the user and source doc (prompt
+   if missing):
    - **Summary**: One-paragraph description of the proposal
    - **Motivation**: Why this change is needed
    - **Proposal**: Detailed description of the proposed change
 
-2. **Determine the area label** based on proposal content. Area labels
+3. **Determine the area label** based on proposal content. Area labels
    are bare names (e.g., `frontend`, `router`, `backend-vllm`) that
    correspond to CODEOWNERS teams.
 
-3. **Decide template**: full or lightweight.
+4. **Decide template**: full or lightweight.
    Use lightweight if only Summary, Motivation, and Proposal are needed.
 
-4. **Create the issue**:
+5. **Create the issue**:
 
 ```bash
 gh issue create \
@@ -60,7 +70,7 @@ EOF
 )"
 ```
 
-5. **Report** the created issue number and URL to the user.
+6. **Report** the created issue number and URL to the user.
 
 ### Add an Implementation Plan
 
@@ -94,3 +104,9 @@ or `dep:done` and reference the existing PRs.
   sections.
 - For plan revisions, post a new comment with a changelog at the top.
   Do not edit the original — preserve the timeline.
+- **Customer name stripping**: Before creating or updating a DEP,
+  scan the summary, motivation, proposal, and all other fields for
+  specific customer names, company names, or partner names. Replace
+  them with generic references (e.g., "a customer", "a cloud
+  partner", "an enterprise user"). DEPs are public — no customer
+  names should appear in issue bodies, comments, or plans.

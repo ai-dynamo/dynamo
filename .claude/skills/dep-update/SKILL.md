@@ -1,14 +1,15 @@
-# Skill: Triage, Review, and Approve DEPs
+# Skill: Update DEP Lifecycle
 
 ## Purpose
 
-Triage incoming DEPs, review specs, and post approvals. Covers the
-PIC workflow from initial assignment through final approval.
+Update DEP status through its lifecycle — triage, review, approve,
+defer, or close. Covers the PIC workflow from initial assignment
+through final approval.
 
 ## When to Use
 
 When triaging DEP issues, reviewing a DEP as PIC or reviewer,
-or approving a DEP that is under review.
+approving a DEP that is under review, or updating DEP status.
 
 ## Workflow
 
