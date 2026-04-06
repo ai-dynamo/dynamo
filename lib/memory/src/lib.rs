@@ -27,6 +27,10 @@ pub mod pool;
 pub mod prelude;
 
 mod device;
+#[cfg(feature = "level-zero")]
+mod xpu_device;
+#[cfg(feature = "level-zero")]
+mod ze_host;
 #[cfg(target_os = "linux")]
 mod disk;
 mod external;
@@ -39,6 +43,10 @@ mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
+#[cfg(feature = "level-zero")]
+pub use xpu_device::XpuDeviceStorage;
+#[cfg(feature = "level-zero")]
+pub use ze_host::ZeHostStorage;
 #[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
@@ -47,6 +55,8 @@ pub use numa::{NumaNode, is_numa_disabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
+#[cfg(feature = "level-zero")]
+pub use pool::{ZeMemPool, ZeMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 
@@ -121,6 +131,9 @@ pub enum StorageKind {
     // #[cfg(feature = "cuda")]
     Device(u32),
 
+    /// Intel XPU (Level Zero) device memory with device ID
+    XpuDevice(u32),
+
     /// Disk-backed memory (mmap)
     Disk(u64),
 }
@@ -152,6 +165,24 @@ impl StorageKind {
     /// Returns true if this is disk-backed memory.
     pub fn is_disk(&self) -> bool {
         matches!(self, StorageKind::Disk(_))
+    }
+
+    /// Returns the XPU (Level Zero) device index if this is XPU device memory.
+    pub fn xpu_device_index(&self) -> Option<u32> {
+        match self {
+            StorageKind::XpuDevice(idx) => Some(*idx),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is Intel XPU (Level Zero) device memory.
+    pub fn is_xpu(&self) -> bool {
+        matches!(self, StorageKind::XpuDevice(_))
+    }
+
+    /// Returns true if this is any GPU device memory (CUDA or XPU).
+    pub fn is_gpu(&self) -> bool {
+        matches!(self, StorageKind::Device(_) | StorageKind::XpuDevice(_))
     }
 }
 

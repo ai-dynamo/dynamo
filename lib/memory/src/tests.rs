@@ -90,6 +90,53 @@ fn test_storage_kind_is_disk() {
     assert!(!StorageKind::Device(0).is_disk());
 }
 
+// ========== XpuDevice StorageKind tests ==========
+
+#[test]
+fn test_storage_kind_xpu_device_index() {
+    assert_eq!(StorageKind::XpuDevice(5).xpu_device_index(), Some(5));
+    assert_eq!(StorageKind::XpuDevice(0).xpu_device_index(), Some(0));
+    assert_eq!(StorageKind::System.xpu_device_index(), None);
+    assert_eq!(StorageKind::Pinned.xpu_device_index(), None);
+    assert_eq!(StorageKind::Device(0).xpu_device_index(), None);
+    assert_eq!(StorageKind::Disk(1).xpu_device_index(), None);
+}
+
+#[test]
+fn test_storage_kind_is_xpu() {
+    assert!(StorageKind::XpuDevice(0).is_xpu());
+    assert!(StorageKind::XpuDevice(3).is_xpu());
+    assert!(!StorageKind::System.is_xpu());
+    assert!(!StorageKind::Pinned.is_xpu());
+    assert!(!StorageKind::Device(0).is_xpu());
+    assert!(!StorageKind::Disk(1).is_xpu());
+}
+
+#[test]
+fn test_storage_kind_is_gpu() {
+    // is_gpu() should return true for both CUDA and XPU devices
+    assert!(StorageKind::Device(0).is_gpu());
+    assert!(StorageKind::Device(3).is_gpu());
+    assert!(StorageKind::XpuDevice(0).is_gpu());
+    assert!(StorageKind::XpuDevice(7).is_gpu());
+    assert!(!StorageKind::System.is_gpu());
+    assert!(!StorageKind::Pinned.is_gpu());
+    assert!(!StorageKind::Disk(1).is_gpu());
+}
+
+#[test]
+fn test_storage_kind_cuda_device_index_xpu_device() {
+    // XPU device should not have a CUDA device index
+    let kind = StorageKind::XpuDevice(2);
+    assert_eq!(kind.cuda_device_index(), None);
+}
+
+#[test]
+fn test_storage_kind_is_cuda_excludes_xpu() {
+    // is_cuda() should NOT include XPU devices
+    assert!(!StorageKind::XpuDevice(0).is_cuda());
+}
+
 // ========== Buffer tests ==========
 
 #[test]

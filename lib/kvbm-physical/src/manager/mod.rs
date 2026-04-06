@@ -246,40 +246,36 @@ impl TransferManager {
             (src, dst)
         }; // Lock released here
 
-        let (
-            layer_range,
-            nixl_write_notification,
-            bounce_buffer,
-            cuda_stream,
-            src_kv_layout,
-            dst_kv_layout,
-        ) = options.dissolve();
-
         let mut internal_options = TransferOptionsInternal::builder();
 
-        if let Some(range) = layer_range {
+        if let Some(range) = options.layer_range {
             internal_options = internal_options.layer_range(range);
         }
 
-        if let Some(notification) = nixl_write_notification {
+        if let Some(notification) = options.nixl_write_notification {
             internal_options = internal_options.nixl_write_notification(notification);
         }
 
-        if let Some(bounce) = bounce_buffer {
+        if let Some(bounce) = options.bounce_buffer {
             let (handle, block_ids) = bounce.into_parts();
             let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
             internal_options = internal_options.bounce_buffer(bounce_buffer);
         }
 
-        if let Some(stream) = cuda_stream {
+        if let Some(stream) = options.cuda_stream {
             internal_options = internal_options.cuda_stream(stream);
         }
 
-        if let Some(layout) = src_kv_layout {
+        #[cfg(feature = "level-zero")]
+        if let Some(cmdlist) = options.ze_cmdlist {
+            internal_options = internal_options.ze_cmdlist(cmdlist);
+        }
+
+        if let Some(layout) = options.src_kv_layout {
             internal_options = internal_options.src_kv_layout(layout);
         }
 
-        if let Some(layout) = dst_kv_layout {
+        if let Some(layout) = options.dst_kv_layout {
             internal_options = internal_options.dst_kv_layout(layout);
         }
 
@@ -534,7 +530,7 @@ impl LayoutRegistry {
             // Only export host and device layouts
             if matches!(
                 location,
-                StorageKind::System | StorageKind::Device(_) | StorageKind::Pinned
+                StorageKind::System | StorageKind::Device(_) | StorageKind::XpuDevice(_) | StorageKind::Pinned
             ) {
                 let serialized = local_layout
                     .layout()

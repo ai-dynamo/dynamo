@@ -6,6 +6,8 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+#[cfg(feature = "level-zero")]
+mod ze;
 
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
@@ -14,6 +16,8 @@ use crate::block_manager::v2::physical::transfer::{
     StorageKind, context::TransferCompleteNotification,
 };
 use anyhow::Result;
+#[cfg(feature = "level-zero")]
+use syclrc::level_zero::ze::safe::ZeImmediateCmdList;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +61,8 @@ pub fn execute_transfer(
             dst_block_ids,
             options.layer_range,
             strategy,
+            #[cfg(feature = "level-zero")]
+            options.ze_cmdlist,
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -78,6 +84,7 @@ pub fn execute_transfer(
 }
 
 /// Execute a direct single-hop transfer.
+#[allow(clippy::too_many_arguments)]
 fn execute_direct_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -85,6 +92,7 @@ fn execute_direct_transfer(
     dst_block_ids: &[usize],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
+    #[cfg(feature = "level-zero")] ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     match strategy {
@@ -121,6 +129,29 @@ fn execute_direct_transfer(
 
             builder.execute(ctx)
         }
+        #[cfg(feature = "level-zero")]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => ze::execute_ze_transfer(
+            src,
+            dst,
+            src_block_ids,
+            dst_block_ids,
+            layer_range,
+            strategy,
+            ze_cmdlist,
+            ctx,
+        ),
+        #[cfg(not(feature = "level-zero"))]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => {
+            Err(anyhow::anyhow!(
+                "ZeAsync transfer requires the level-zero feature, src={:?}, dst={:?}",
+                src.location(),
+                dst.location()
+            ))
+        }
         TransferStrategy::Invalid => Err(anyhow::anyhow!(
             "Invalid transfer strategy for src={:?}, dst={:?}",
             src.location(),
@@ -151,6 +182,8 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         layer_range.clone(),
         first_strategy,
+        #[cfg(feature = "level-zero")]
+        None, // Two-hop transfers don't support caller-provided cmdlists
         ctx,
     )?
     .await?;
@@ -162,6 +195,8 @@ async fn execute_two_hop_transfer_chunk(
         dst_block_ids,
         layer_range.clone(),
         second_strategy,
+        #[cfg(feature = "level-zero")]
+        None, // Two-hop transfers don't support caller-provided cmdlists
         ctx,
     )?
     .await?;

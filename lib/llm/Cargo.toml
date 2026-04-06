@@ -24,6 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
+level-zero = ["dynamo-memory/level-zero", "dep:syclrc", "dep:kvbm-kernels", "kvbm-kernels?/level-zero"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
@@ -49,6 +50,8 @@ required-features = ["kv-router-stress"]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
+syclrc = { path = "../../../zxue2_syclrc", optional = true }
+kvbm-kernels = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
@@ -202,3 +205,8 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
+
+[[bin]]
+name = "bench_xpu_transfer_v2"
+path = "bin/bench_xpu_transfer_v2.rs"
+required-features = ["block-manager-bench", "level-zero"]

@@ -78,7 +78,7 @@ impl NixlAgent {
             }
         }
 
-        if available_backends.is_empty() {
+        if available_backends.is_empty() && !backends.is_empty() {
             anyhow::bail!("Failed to initialize any NIXL backends from {:?}", backends);
         }
 

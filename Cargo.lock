@@ -1940,6 +1940,7 @@ dependencies = [
  "indicatif 0.18.4",
  "insta",
  "json-five",
+ "kvbm-kernels",
  "lazy_static",
  "memfile",
  "minijinja",
@@ -1967,6 +1968,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "strum",
+ "syclrc",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -2003,6 +2005,7 @@ dependencies = [
  "offset-allocator",
  "serde",
  "serde_json",
+ "syclrc",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -3905,8 +3908,10 @@ dependencies = [
  "clap 4.6.0",
  "cudarc",
  "half 2.7.1",
+ "libloading 0.8.9",
  "ndarray 0.17.2",
  "rand 0.9.2",
+ "syclrc",
 ]
 
 [[package]]
@@ -3947,6 +3952,7 @@ dependencies = [
  "anyhow",
  "bincode 2.0.1",
  "blake3",
+ "clap 4.6.0",
  "cudarc",
  "derive-getters",
  "derive_builder",
@@ -3958,6 +3964,7 @@ dependencies = [
  "rstest 0.26.1",
  "serde",
  "serde_json",
+ "syclrc",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7387,6 +7394,13 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "syclrc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "syn"
