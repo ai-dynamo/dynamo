@@ -2,14 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import datetime
+import json
 import logging
+import math
+import os
+import threading
 import time
+from http.server import ThreadingHTTPServer
 from typing import TYPE_CHECKING, Optional, Union
 
-from prometheus_client import start_http_server
+from prometheus_client.exposition import MetricsHandler
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.defaults import ScalingMode, SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -40,6 +46,35 @@ ConnectorType = Union[GlobalPlannerConnector, KubernetesConnector, VirtualConnec
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+# Module-level advisory status state (updated by BasePlanner, read by HTTP handler)
+_advisory_status_state: dict = {}
+
+
+class _PlannerHTTPHandler(MetricsHandler):
+    """HTTP handler: /metrics for Prometheus, /advisory/status for advisory state."""
+
+    def do_GET(self):
+        if self.path == "/advisory/status":
+            body = json.dumps(_advisory_status_state).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            super().do_GET()
+
+    def log_message(self, format, *args):
+        pass  # Suppress access log noise
+
+
+def _start_planner_http_server(port: int) -> None:
+    """Start the Planner HTTP server (Prometheus metrics + /advisory/status)."""
+    server = ThreadingHTTPServer(("", port), _PlannerHTTPHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    logger.info(f"Started Planner HTTP server on port {port}")
 
 
 class BasePlanner:
@@ -72,7 +107,7 @@ class BasePlanner:
             self.namespace = config.namespace
             self.connector: ConnectorType
 
-            if not config.no_operation:
+            if config.effective_scaling_mode != ScalingMode.NOOP:
                 # Initialize connector based on environment
                 if config.environment == "global-planner":
                     assert config.global_planner_namespace is not None
@@ -204,15 +239,33 @@ class BasePlanner:
             else:
                 self.prometheus_metrics = prometheus_metrics
 
-            # Start Prometheus HTTP server if port is specified
+            # Start Planner HTTP server if port is specified
             if start_prometheus_server and self.prometheus_port != 0:
                 try:
-                    start_http_server(self.prometheus_port)
-                    logger.info(
-                        f"Started Prometheus metrics server on port {self.prometheus_port}"
-                    )
+                    _start_planner_http_server(self.prometheus_port)
                 except Exception as e:
-                    logger.error(f"Failed to start Prometheus metrics server: {e}")
+                    logger.error(f"Failed to start Planner HTTP server: {e}")
+
+            # Startup self-check log
+            if start_prometheus_server:
+                port_source = (
+                    "env PLANNER_PROMETHEUS_PORT"
+                    if os.environ.get("PLANNER_PROMETHEUS_PORT")
+                    else "config"
+                )
+                file_output_status = (
+                    f"enabled → {config.log_dir}/advisory_history.jsonl"
+                    if config.advisory_file_output and config.log_dir
+                    else "disabled"
+                )
+                logger.info(
+                    "[ADVISORY] Self-check:\n"
+                    f"  - Scaling mode: {config.effective_scaling_mode.value}\n"
+                    f"  - Metrics server: port {self.prometheus_port} (source: {port_source})\n"
+                    f"  - Metrics endpoint: /metrics (15 advisory metrics registered)\n"
+                    f"  - Advisory status endpoint: /advisory/status\n"
+                    f"  - Advisory file output: {file_output_status}"
+                )
         else:
             self.prometheus_port = 0
             self.prometheus_metrics = prometheus_metrics
@@ -262,7 +315,7 @@ class BasePlanner:
             require_decode=require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
+            no_operation=self.config.effective_scaling_mode == ScalingMode.NOOP,
         )
         # model_name is resolved and written into both WorkerInfo objects
         self.model_name = (
@@ -281,7 +334,9 @@ class BasePlanner:
         require_prefill = self.component_type == SubComponentType.PREFILL
         require_decode = self.component_type == SubComponentType.DECODE
 
-        if not self.dryrun and not self.config.no_operation:
+        if not self.dryrun and not (
+            self.config.effective_scaling_mode == ScalingMode.NOOP
+        ):
             defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
             logger.info("Validating deployment...")
@@ -635,7 +690,7 @@ class BasePlanner:
         )
 
     async def _apply_scaling(self, desired_replicas: int) -> None:
-        if self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.ACTIVE:
             return
         target_replicas = [
             TargetReplica(
@@ -648,7 +703,7 @@ class BasePlanner:
 
     async def _apply_scaling_blocking(self, desired_replicas: int) -> None:
         """Apply scaling without blocking so the loop continues observing metrics."""
-        if self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.ACTIVE:
             return
         target_replicas = [
             TargetReplica(
@@ -812,6 +867,254 @@ class BasePlanner:
         """Load-based scaling decision. Override in subclasses."""
         raise NotImplementedError
 
+    # -------------------------------------------------------------------------
+    # Advisory Engine methods (active + advisory modes)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_gauge_set(gauge, value) -> None:
+        """NaN/None-safe Prometheus gauge write."""
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            gauge.set(float("nan"))
+        else:
+            gauge.set(value)
+
+    def _emit_advisory_metrics(
+        self,
+        recommended_p: int,
+        recommended_d: int,
+        source: str,
+    ) -> None:
+        """Emit advisory metrics (Layer 1 + 2 + JSONL).
+
+        source: "throughput" or "load"
+        """
+        if self.prometheus_metrics is None or self.prometheus_port == 0:
+            return
+
+        # Metrics validity gate
+        if not self.shared_state.last_metrics.is_valid():
+            logger.info(
+                "[ADVISORY] Skipping advisory output: "
+                "metrics contain None/NaN (no active traffic or Prometheus unreachable)"
+            )
+            return
+
+        # Non-negative guard
+        recommended_p = max(0, recommended_p)
+        recommended_d = max(0, recommended_d)
+
+        current_p = self.shared_state.num_p_workers
+        current_d = self.shared_state.num_d_workers
+        delta_p = recommended_p - current_p
+        delta_d = recommended_d - current_d
+
+        # Anomaly detection
+        threshold = self.config.advisory_anomaly_threshold
+        if abs(delta_p) > threshold or abs(delta_d) > threshold:
+            logger.warning(
+                f"[ADVISORY] Unusually large delta: delta_p={delta_p}, delta_d={delta_d} "
+                f"(threshold={threshold}). Possible metrics jump or configuration error."
+            )
+
+        # Determine aggregate action and reason code
+        if delta_p > 0 or delta_d > 0:
+            action = 1
+            reason_code = 1 if source == "throughput" else 3
+        elif delta_p < 0 or delta_d < 0:
+            action = -1
+            reason_code = 2 if source == "throughput" else 4
+        else:
+            action = 0
+            reason_code = 6
+
+        m = self.prometheus_metrics
+        # Update counters
+        if action == 1:
+            m.advisory_scaleup_total.inc()
+        elif action == -1:
+            m.advisory_scaledown_total.inc()
+        else:
+            m.advisory_hold_total.inc()
+
+        # Update gauges
+        m.advisory_recommended_p.set(recommended_p)
+        m.advisory_recommended_d.set(recommended_d)
+        m.advisory_current_p.set(current_p)
+        m.advisory_current_d.set(current_d)
+        m.advisory_delta_p.set(delta_p)
+        m.advisory_delta_d.set(delta_d)
+        m.advisory_scaling_action.set(action)
+        m.advisory_action_reason.set(reason_code)
+
+        # SLA estimation (Layer 3)
+        sla = self._estimate_sla_with_replicas(recommended_p, recommended_d)
+        self._safe_gauge_set(m.advisory_est_ttft, sla.get("est_ttft"))
+        self._safe_gauge_set(m.advisory_est_itl, sla.get("est_itl"))
+        est_ttft = sla.get("est_ttft")
+        est_itl = sla.get("est_itl")
+        self._safe_gauge_set(
+            m.advisory_ttft_headroom,
+            self.config.ttft - est_ttft if est_ttft is not None else None,
+        )
+        self._safe_gauge_set(
+            m.advisory_itl_headroom,
+            self.config.itl - est_itl if est_itl is not None else None,
+        )
+
+        action_str = {1: "scale_up", 0: "hold", -1: "scale_down"}[action]
+
+        # Update HTTP advisory status snapshot
+        _advisory_status_state.update(
+            {
+                "scaling_mode": self.config.effective_scaling_mode.value,
+                "last_update": datetime.datetime.utcnow().isoformat() + "Z",
+                "current": {"prefill": current_p, "decode": current_d},
+                "recommended": {"prefill": recommended_p, "decode": recommended_d},
+                "delta": {"prefill": delta_p, "decode": delta_d},
+                "action": action_str,
+                "reason": source,
+                "sla_estimation": {
+                    "est_ttft_ms": est_ttft,
+                    "est_itl_ms": est_itl,
+                    "ttft_headroom_ms": (
+                        self.config.ttft - est_ttft if est_ttft is not None else None
+                    ),
+                    "itl_headroom_ms": (
+                        self.config.itl - est_itl if est_itl is not None else None
+                    ),
+                },
+            }
+        )
+
+        # Structured logs for active + advisory modes (Layer 2)
+        if self.config.effective_scaling_mode in (
+            ScalingMode.ACTIVE,
+            ScalingMode.ADVISORY,
+        ):
+            path = self._build_path_recommendation(
+                current_p, current_d, recommended_p, recommended_d
+            )
+            log_data = {
+                "event": "advisory_recommendation",
+                "scaling_mode": self.config.effective_scaling_mode.value,
+                "source": source,
+                "action": action_str,
+                "current": {"prefill": current_p, "decode": current_d},
+                "recommended_final": {
+                    "prefill": recommended_p,
+                    "decode": recommended_d,
+                },
+                "path": path,
+                "est_ttft_ms": est_ttft,
+                "est_itl_ms": est_itl,
+                "ttft_headroom_ms": (
+                    self.config.ttft - est_ttft if est_ttft is not None else None
+                ),
+                "itl_headroom_ms": (
+                    self.config.itl - est_itl if est_itl is not None else None
+                ),
+                "note": (
+                    "Estimation based on profiling data; "
+                    "actual values may differ due to runtime conditions"
+                ),
+            }
+            logger.info("[ADVISORY] Recommendation", extra=log_data)
+
+            if self.config.advisory_file_output:
+                self._write_advisory_jsonl(
+                    {
+                        "ts": int(time.time()),
+                        "mode": self.config.effective_scaling_mode.value,
+                        "action": action_str,
+                        "source": source,
+                        "current": {"p": current_p, "d": current_d},
+                        "recommended": {"p": recommended_p, "d": recommended_d},
+                        "est_ttft": est_ttft,
+                        "est_itl": est_itl,
+                        "reason_code": reason_code,
+                    }
+                )
+
+    def _estimate_sla_with_replicas(self, num_p: int, num_d: int) -> dict:
+        """Estimate TTFT and ITL for the given replica counts using profiling data."""
+        if not self.enable_throughput:
+            if self.prometheus_metrics and self.prometheus_port != 0:
+                self._safe_gauge_set(
+                    self.prometheus_metrics.advisory_est_ttft, float("nan")
+                )
+                self._safe_gauge_set(
+                    self.prometheus_metrics.advisory_est_itl, float("nan")
+                )
+                self._safe_gauge_set(
+                    self.prometheus_metrics.advisory_ttft_headroom, float("nan")
+                )
+                self._safe_gauge_set(
+                    self.prometheus_metrics.advisory_itl_headroom, float("nan")
+                )
+            logger.info(
+                "[ADVISORY] SLA estimation unavailable: "
+                "throughput scaling disabled (no profiling data)"
+            )
+            return {"est_ttft": None, "est_itl": None}
+
+        try:
+            isl = self.shared_state.last_metrics.isl or 3000.0
+            osl = self.shared_state.last_metrics.osl or 150.0
+
+            est_ttft = None
+            if num_p > 0 and hasattr(self, "prefill_interpolator"):
+                est_ttft = float(self.prefill_interpolator.interpolate_ttft(isl))
+
+            est_itl = None
+            if num_d > 0 and hasattr(self, "decode_interpolator"):
+                _, est_itl_raw, _ = (
+                    self.decode_interpolator.find_best_throughput_per_gpu(
+                        self.config.itl, osl
+                    )
+                )
+                est_itl = float(est_itl_raw)
+
+            logger.debug(
+                f"[ADVISORY] SLA estimate with P={num_p} D={num_d}: "
+                f"TTFT={est_ttft}ms ITL={est_itl}ms"
+            )
+            return {"est_ttft": est_ttft, "est_itl": est_itl}
+        except Exception as e:
+            logger.warning(f"[ADVISORY] SLA estimation failed: {e}")
+            return {"est_ttft": None, "est_itl": None}
+
+    def _build_path_recommendation(
+        self, current_p: int, current_d: int, target_p: int, target_d: int
+    ) -> list:
+        """Build incremental path from current to target replicas."""
+        path = [f"{current_p}P{current_d}D"]
+        max_step = self.config.advisory_max_step_size
+        p, d = current_p, current_d
+        while p != target_p or d != target_d:
+            step_p = min(max_step, abs(target_p - p)) * (1 if target_p > p else -1)
+            step_d = min(max_step, abs(target_d - d)) * (1 if target_d > d else -1)
+            p += step_p
+            d += step_d
+            if p != target_p or d != target_d:
+                path.append(f"{p}P{d}D (observe 1 interval)")
+            else:
+                path.append(f"{p}P{d}D")
+        return path
+
+    def _write_advisory_jsonl(self, data: dict) -> None:
+        """Append one JSON line to the advisory JSONL file."""
+        if not self.config.log_dir:
+            return
+
+        os.makedirs(self.config.log_dir, exist_ok=True)
+        filepath = os.path.join(self.config.log_dir, "advisory_history.jsonl")
+        try:
+            with open(filepath, "a") as f:
+                f.write(json.dumps(data) + "\n")
+        except Exception as e:
+            logger.warning(f"[ADVISORY] Failed to write advisory JSONL: {e}")
+
     async def _throughput_loop(
         self, require_prefill: bool, require_decode: bool
     ) -> None:
@@ -848,6 +1151,23 @@ class BasePlanner:
                         # Throughput-only: apply scaling directly
                         desired_replicas = self.apply_component_budget(desired_replicas)
                         self.update_predicted_replicas_metric(desired_replicas)
+                        # Emit advisory metrics (active + advisory modes)
+                        if self.config.effective_scaling_mode in (
+                            ScalingMode.ACTIVE,
+                            ScalingMode.ADVISORY,
+                        ):
+                            if self.component_type == SubComponentType.PREFILL:
+                                self._emit_advisory_metrics(
+                                    desired_replicas,
+                                    self.shared_state.num_d_workers,
+                                    "throughput",
+                                )
+                            else:
+                                self._emit_advisory_metrics(
+                                    self.shared_state.num_p_workers,
+                                    desired_replicas,
+                                    "throughput",
+                                )
                         # Throughput planner does not needs blocking scaling because it monitors
                         # and predicts the load, not relying on the current status of the engine.
                         await self._apply_scaling(desired_replicas)
@@ -914,8 +1234,26 @@ class BasePlanner:
                     desired_replicas = max(desired_replicas, lower_bound)
                 desired_replicas = self.apply_component_budget(desired_replicas)
                 self.update_predicted_replicas_metric(desired_replicas)
-                pending_desired = desired_replicas
-                await self._apply_scaling_blocking(desired_replicas)
+                # Emit advisory metrics (active + advisory modes)
+                if self.config.effective_scaling_mode in (
+                    ScalingMode.ACTIVE,
+                    ScalingMode.ADVISORY,
+                ):
+                    if self.component_type == SubComponentType.PREFILL:
+                        self._emit_advisory_metrics(
+                            desired_replicas,
+                            self.shared_state.num_d_workers,
+                            "load",
+                        )
+                    else:
+                        self._emit_advisory_metrics(
+                            self.shared_state.num_p_workers,
+                            desired_replicas,
+                            "load",
+                        )
+                if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
+                    pending_desired = desired_replicas
+                    await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
         """Main scaling loop. Call _async_init() before this."""

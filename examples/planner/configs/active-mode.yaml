@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Planner Active Mode Configuration
+#
+# In active mode, the Planner executes scaling decisions automatically.
+# It also emits advisory Prometheus metrics alongside every scaling action,
+# providing full decision traceability for post-incident review.
+#
+# Migrate from advisory mode by changing scaling_mode: advisory → active.
+# All other settings remain identical.
+#
+# How to use as a Kubernetes ConfigMap:
+#   kubectl create configmap planner-config \
+#     --from-file=config.yaml=active-mode.yaml \
+#     -n <your-namespace>
+
+scaling_mode: active
+backend: vllm
+mode: disagg
+
+# Scaling algorithm settings
+enable_throughput_scaling: true
+enable_load_scaling: false
+ttft: 2000       # TTFT SLA target in milliseconds
+itl: 50          # ITL SLA target in milliseconds
+no_correction: true
+load_predictor: constant

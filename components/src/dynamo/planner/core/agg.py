@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.defaults import ScalingMode, SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ class AggPlanner:
     async def _async_init(self):
         defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             connector = getattr(self.planner, "connector", None)
             if connector and hasattr(connector, "_async_init"):
                 await connector._async_init()
@@ -215,7 +215,16 @@ class AggPlanner:
             ):
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
-            if not self.config.no_operation:
+            # Emit advisory metrics (active + advisory modes)
+            # Note: prefill=0 because agg mode has no separate prefill workers;
+            # aggregated engines handle both prefill and decode.
+            if self.config.effective_scaling_mode in (
+                ScalingMode.ACTIVE,
+                ScalingMode.ADVISORY,
+            ):
+                self.planner._emit_advisory_metrics(0, desired, "load")
+
+            if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                 pending_desired = desired
                 target_replicas = [
                     TargetReplica(

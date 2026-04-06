@@ -6,7 +6,7 @@ import logging
 import time
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.defaults import ScalingMode, SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import BasePlanner
 from dynamo.planner.core.budget import _apply_global_gpu_budget, _initialize_gpu_counts
@@ -54,7 +54,7 @@ class DisaggPlanner:
         # and share WorkerInfo between the two sub-planners.
         defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
-        if not self.config.no_operation:
+        if self.config.effective_scaling_mode != ScalingMode.NOOP:
             # Connector init (prefill/decode share the same connector)
             connector = getattr(self.prefill_planner, "connector", None)
             if connector and hasattr(connector, "_async_init"):
@@ -156,7 +156,16 @@ class DisaggPlanner:
                     self.prefill_planner.update_predicted_replicas_metric(next_num_p)
                     self.decode_planner.update_predicted_replicas_metric(next_num_d)
 
-                    if not self.config.no_operation:
+                    # Emit advisory metrics (active + advisory modes)
+                    if self.config.effective_scaling_mode in (
+                        ScalingMode.ACTIVE,
+                        ScalingMode.ADVISORY,
+                    ):
+                        self.prefill_planner._emit_advisory_metrics(
+                            next_num_p, next_num_d, "throughput"
+                        )
+
+                    if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                         target_replicas = [
                             TargetReplica(
                                 sub_component_type=SubComponentType.PREFILL,
@@ -241,7 +250,14 @@ class DisaggPlanner:
             self.prefill_planner.update_predicted_replicas_metric(final_p)
             self.decode_planner.update_predicted_replicas_metric(final_d)
 
-            if not self.config.no_operation:
+            # Emit advisory metrics (active + advisory modes)
+            if self.config.effective_scaling_mode in (
+                ScalingMode.ACTIVE,
+                ScalingMode.ADVISORY,
+            ):
+                self.prefill_planner._emit_advisory_metrics(final_p, final_d, "load")
+
+            if self.config.effective_scaling_mode == ScalingMode.ACTIVE:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.PREFILL,
