@@ -1,14 +1,15 @@
-# Skill: Check DEP Issue Status
+# Skill: Check DEP Status
 
 ## Purpose
 
 List DEP issues with their current status, area, PIC, and approval
-state. Provides a quick overview for triage or status checks.
+state. Find related DEPs for a given topic or component.
 
 ## When to Use
 
 When the user wants to see the status of one or more DEPs, check what's
-pending review, or get a triage summary.
+pending review, find DEPs related to a component, or get a triage
+summary.
 
 ## Workflow
 
@@ -24,7 +25,7 @@ gh issue list --repo ai-dynamo/dynamo \
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
-  --label "area/<area>" \
+  --label "<area>" \
   --json number,title,labels,assignees
 ```
 
@@ -41,10 +42,18 @@ gh issue list --repo ai-dynamo/dynamo \
 ```
 | # | Title | Status | Area | PIC | Updated |
 |---|-------|--------|------|-----|---------|
-| 42 | DEP: KV router scheduling | dep:under-review | area/router | @pic | 2026-03-28 |
+| 42 | DEP: KV router scheduling | dep:under-review | router | @pic | 2026-03-28 |
 ```
 
-5. **Include closed DEPs** if requested:
+5. **Find related DEPs** by searching issue titles and bodies:
+
+```bash
+gh issue list --repo ai-dynamo/dynamo \
+  --search "DEP <keyword> label:dep:draft,dep:under-review,dep:approved,dep:implementing,dep:done" \
+  --json number,title,labels,state
+```
+
+6. **Include closed DEPs** if requested:
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo \
@@ -58,3 +67,4 @@ gh issue list --repo ai-dynamo/dynamo \
 - For a full triage view, include both open and recently closed DEPs.
 - Cross-reference with `dep:lightweight` label to distinguish full vs.
   lightweight DEPs.
+- Area labels are bare names (e.g., `frontend`, `router`) — no prefix.

@@ -3,6 +3,33 @@ description: Propose a new feature, architecture change, or process improvement
 title: "DEP: "
 labels: ["dep:draft"]
 body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Primary area this DEP affects (determines PIC assignment)
+      options:
+        - external-api
+        - frontend
+        - router
+        - backend-vllm
+        - backend-trtllm
+        - backend-sglang
+        - kv-memory
+        - multimodal
+        - planner
+        - core-platform
+        - observability
+        - fault-tolerance
+        - gateway
+        - devops
+        - docs
+        - process
+        - k8s
+        - dgdr
+        - xpu
+    validations:
+      required: true
   - type: textarea
     id: summary
     attributes:
