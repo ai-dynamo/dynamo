@@ -256,7 +256,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be > 0."
+                "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
+                "queueing sensitivity (queue as soon as any tokens are active)."
             ),
             arg_type=float,
         )
