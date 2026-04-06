@@ -18,7 +18,6 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 - ✅ **Shared certificate infrastructure** - All webhook types use the same TLS certificates
 - ✅ **Automatic certificate generation and rotation** - Built-in cert-controller, no manual management required
 - ✅ **cert-manager integration** - Optional integration for custom PKI or organizational certificate policies
-- ✅ **Multi-operator support** - Lease-based coordination for cluster-wide and namespace-restricted deployments (namespace-restricted mode is **deprecated**)
 - ✅ **Immutability enforcement** - Critical fields protected via CEL validation rules
 
 ### Current Webhook Types
