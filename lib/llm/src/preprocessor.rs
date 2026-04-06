@@ -1191,6 +1191,35 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Override chat_template_args based on reasoning_effort
+    fn apply_reasoning_overrides_to_template_args(
+        reasoning_parser: Option<&str>,
+        reasoning_effort: Option<&dynamo_protocols::types::ReasoningEffort>,
+        chat_template_args: &mut Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) {
+        let enable_thinking: Option<bool> = match reasoning_effort {
+            None => None,
+            Some(dynamo_protocols::types::ReasoningEffort::None) => Some(false),
+            _ => Some(true),
+        };
+        let Some(enabled) = enable_thinking else {
+            return;
+        };
+        let args = chat_template_args.get_or_insert_with(std::collections::HashMap::new);
+        match reasoning_parser {
+            Some("kimi_k25") | Some("deepseek_r1") => {
+                args.insert("thinking".to_string(), serde_json::Value::Bool(enabled));
+            }
+            _ => {
+                // Generic fallback: most templates use enable_thinking
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
+            }
+        }
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
@@ -1353,6 +1382,13 @@ impl
 
         // Set stream=true for internal processing (after audit capture)
         request.inner.stream = Some(true);
+
+        // Override chat_template_args based on reasoning_effort
+        Self::apply_reasoning_overrides_to_template_args(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.inner.reasoning_effort.as_ref(),
+            &mut request.chat_template_args,
+        );
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -1799,6 +1835,138 @@ mod tests {
                 OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
                 expected,
                 "FAILED: {desc}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_reasoning_overrides_to_template_args() {
+        use dynamo_protocols::types::ReasoningEffort;
+
+        // (parser, effort, expected_key, expected_value, description)
+        // expected_key = None means the call should leave args unchanged.
+        let cases: Vec<(
+            Option<&str>,
+            Option<ReasoningEffort>,
+            Option<&str>,
+            Option<bool>,
+            &str,
+        )> = vec![
+            // No effort → args unchanged regardless of parser
+            (Some("basic"), None, None, None, "basic + no effort → args unchanged"),
+            (Some("kimi_k25"), None, None, None, "kimi_k25 + no effort → args unchanged"),
+            (Some("deepseek_r1"), None, None, None, "deepseek_r1 + no effort → args unchanged"),
+            (None, None, None, None, "no parser + no effort → args unchanged"),
+            // ReasoningEffort::None → explicitly disables reasoning
+            (
+                Some("basic"),
+                Some(ReasoningEffort::None),
+                Some("enable_thinking"),
+                Some(false),
+                "basic + None → enable_thinking=false",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(ReasoningEffort::None),
+                Some("thinking"),
+                Some(false),
+                "kimi_k25 + None → thinking=false",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(ReasoningEffort::None),
+                Some("thinking"),
+                Some(false),
+                "deepseek_r1 + None → thinking=false",
+            ),
+            (
+                None,
+                Some(ReasoningEffort::None),
+                Some("enable_thinking"),
+                Some(false),
+                "no parser + None → enable_thinking=false",
+            ),
+            // Generic / unknown parsers → "enable_thinking" = true
+            (
+                Some("basic"),
+                Some(ReasoningEffort::Minimal),
+                Some("enable_thinking"),
+                Some(true),
+                "basic + Minimal → enable_thinking=true",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(ReasoningEffort::Low),
+                Some("enable_thinking"),
+                Some(true),
+                "nemotron_nano + Low → enable_thinking=true",
+            ),
+            (
+                None,
+                Some(ReasoningEffort::Medium),
+                Some("enable_thinking"),
+                Some(true),
+                "no parser + Medium → enable_thinking=true",
+            ),
+            // kimi_k25 → "thinking" = true
+            (
+                Some("kimi_k25"),
+                Some(ReasoningEffort::High),
+                Some("thinking"),
+                Some(true),
+                "kimi_k25 + High → thinking=true",
+            ),
+            // deepseek_r1 → "thinking" = true
+            (
+                Some("deepseek_r1"),
+                Some(ReasoningEffort::High),
+                Some("thinking"),
+                Some(true),
+                "deepseek_r1 + High → thinking=true",
+            ),
+        ];
+
+        for (parser, effort, expected_key, expected_value, desc) in &cases {
+            let mut args = None;
+            OpenAIPreprocessor::apply_reasoning_overrides_to_template_args(
+                *parser,
+                effort.as_ref(),
+                &mut args,
+            );
+            match (expected_key, expected_value) {
+                (None, _) => {
+                    assert!(args.is_none(), "FAILED (args should stay unchanged): {desc}");
+                }
+                (Some(key), Some(val)) => {
+                    let map = args.as_ref().unwrap_or_else(|| {
+                        panic!("FAILED (args should be Some): {desc}");
+                    });
+                    assert_eq!(
+                        map.get(*key),
+                        Some(&serde_json::Value::Bool(*val)),
+                        "FAILED: {desc}",
+                    );
+                }
+                _ => unreachable!("bad test case: {desc}"),
+            }
+        }
+
+        // Separate check: pre-existing keys are preserved when args is already Some
+        {
+            let mut args = Some(std::collections::HashMap::from([(
+                "custom".to_string(),
+                serde_json::Value::String("keep_me".to_string()),
+            )]));
+            OpenAIPreprocessor::apply_reasoning_overrides_to_template_args(
+                Some("basic"),
+                Some(&ReasoningEffort::High),
+                &mut args,
+            );
+            let map = args.as_ref().unwrap();
+            assert_eq!(
+                map.get("custom"),
+                Some(&serde_json::Value::String("keep_me".to_string())),
+                "pre-existing keys must survive",
             );
         }
     }
