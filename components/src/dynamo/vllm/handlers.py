@@ -33,6 +33,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -40,11 +41,13 @@ from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     lora_name_to_id,
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -352,6 +355,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(
         self,
         runtime,
@@ -385,6 +390,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks_guard = threading.Lock()
 
         self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.video_loader = VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
@@ -494,6 +502,80 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to sleep engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale the elastic expert-parallelism data-parallel size live.
+
+        Args:
+            body: Dict with required 'new_data_parallel_size' key (int).
+                Example::
+
+                    {"new_data_parallel_size": 4}
+
+        The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
+        already reserved by the pod, then hot-swap the expert routing table.
+        No pod restart is needed.
+        """
+        body = body or {}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+
+        logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
+        try:
+            # TODO(upstream-vllm): remove this patch once vLLM fixes
+            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+            # instead of ray.util.state.list_nodes().
+            #
+            # Patch ray.util.state.list_nodes to use the GCS API instead of the
+            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+            # installs ray core only (not ray[default]), so the dashboard HTTP server
+            # starts in --minimal mode with the HTTP server disabled. vLLM's
+            # add_dp_placement_groups calls list_nodes() which requires that HTTP
+            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+            # API server".
+            #
+            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+            # needed) and returns the same information. Imported lazily so ray is not
+            # required at module load time (absent in non-elastic-EP deployments).
+            #
+            # Format mapping:
+            #   list_nodes() → objects with .node_ip and .node_id
+            #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            _ray_util_state.list_nodes = lambda **kw: [
+                _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+            ]
+
+            await self.engine_client.scale_elastic_ep(new_dp_size)
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
@@ -535,7 +617,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -567,13 +649,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -581,7 +665,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -595,7 +679,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):
@@ -604,6 +688,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}
+
+    async def get_perf_metrics(self, request=None):
+        """Return self-benchmark FPM results, or an error dict if none."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
 
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
@@ -776,6 +868,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 "lora_id": lora_id,
                             }
 
+                            runtime_config = ModelRuntimeConfig()
+                            runtime_config.tool_call_parser = (
+                                self.config.dyn_tool_call_parser
+                            )
+                            runtime_config.reasoning_parser = (
+                                self.config.dyn_reasoning_parser
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
@@ -783,6 +883,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
+                                runtime_config=runtime_config,
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
@@ -1081,8 +1182,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         mm_map = request["multi_modal_data"]
 
-        # [gluo NOTE] If embedding loader is configured, currently we unconditionally
-        # fetch from the embedding loader.
+        vllm_mm_data = {}
+
+        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
+        # Still continue below so mixed image+video requests can attach `video`.
         if self.embedding_loader is not None:
             # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
             # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
@@ -1101,23 +1204,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.debug(
                     f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
                 )
-                return vllm_mm_data if vllm_mm_data else None
 
-        # Fallback that the vLLM engine will perform encoding internally.
-        vllm_mm_data = {}
-        # Process image_url entries
-        images = await self.image_loader.load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []),
-        )
+        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
+        if "image" not in vllm_mm_data and image_mm_items:
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+            )
 
-        if images:
-            # vLLM expects single image or list
-            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
 
-        # Handle video_url entries (future expansion)
-        if VIDEO_URL_KEY in mm_map:
-            logger.warning("Video multimodal data not yet supported in standard worker")
+        video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
+        if video_mm_items:
+            videos = await self.video_loader.load_video_batch(video_mm_items)
+
+            if videos:
+                # vLLM expects single video or list
+                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                logger.debug(
+                    f"Extracted {len(videos)} video(s) for multimodal processing"
+                )
 
         return vllm_mm_data if vllm_mm_data else None
 

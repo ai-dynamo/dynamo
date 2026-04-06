@@ -80,6 +80,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -1041,7 +1042,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
-	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+	if r.Config.Checkpoint.Enabled &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint != nil &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
@@ -1053,6 +1056,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
+	}
+	if r.Config.Checkpoint.Enabled {
+		if err := checkpoint.InjectCheckpointIntoPodSpec(
+			ctx,
+			r.Client,
+			opt.dynamoComponentDeployment.Namespace,
+			podSpec,
+			checkpointInfo,
+		); err != nil {
+			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+		}
 	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)

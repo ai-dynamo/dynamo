@@ -6,7 +6,6 @@ name: Allure Test Report
 on:
   workflow_run:
     workflows:
-      - 'PR'
       - 'Post-Merge CI Pipeline'
       - 'Nightly CI Pipeline'
       - 'Release Pipeline'
@@ -49,7 +48,6 @@ jobs:
             WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
             echo "workflow_label=${WORKFLOW_NAME}" >> $GITHUB_OUTPUT
             case "$WORKFLOW_NAME" in
-              "PR") echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
               *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
               *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
               *"Release"*) echo "subdir=release" >> $GITHUB_OUTPUT ;;
@@ -251,7 +249,15 @@ jobs:
             echo "No changes to deploy"
           else
             git commit -m "Deploy Allure reports for ${SUBDIR} (run ${{ github.run_id }})"
-            git push origin gh-pages
+            # Retry push with rebase to handle concurrent gh-pages updates
+            for i in 1 2 3; do
+              if git push origin gh-pages; then
+                break
+              fi
+              echo "Push failed, retrying with rebase (attempt $i/3)..."
+              git fetch origin gh-pages
+              git rebase origin/gh-pages
+            done
           fi
 
       - name: Print report URLs

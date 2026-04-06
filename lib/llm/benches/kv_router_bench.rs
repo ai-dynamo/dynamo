@@ -40,6 +40,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::{
     ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter,
 };
+use dynamo_mocker::loadgen::RouterSequence;
 
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
@@ -532,52 +533,44 @@ impl PrefixData {
 }
 
 /// Pre-generated sequence data for benchmarking
-#[derive(Clone)]
-struct SequenceData {
+type SequenceData = RouterSequence;
+
+fn sequence_from_request_content(
+    content: &str,
     worker_id: WorkerId,
-    local_hashes: Vec<LocalBlockHash>,
-    external_hashes: Vec<ExternalSequenceBlockHash>,
+    kv_block_size: u32,
+    tokenizer: &Tokenizer,
+    prompt_renderer: Option<&PromptRenderer>,
+) -> Result<SequenceData> {
+    let (local_hashes, external_hashes) =
+        compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
+
+    Ok(SequenceData {
+        worker_id,
+        local_hashes,
+        external_hashes,
+    })
 }
 
-impl SequenceData {
-    /// Create a sequence from the exact request content.
-    fn from_request_content(
-        content: &str,
-        worker_id: WorkerId,
-        kv_block_size: u32,
-        tokenizer: &Tokenizer,
-        prompt_renderer: Option<&PromptRenderer>,
-    ) -> Result<Self> {
-        let (local_hashes, external_hashes) =
-            compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
-
-        Ok(Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        })
-    }
-
-    fn to_router_event(&self, event_id: u64) -> RouterEvent {
-        let kv_event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: self
-                    .local_hashes
-                    .iter()
-                    .zip(self.external_hashes.iter())
-                    .map(|(local, ext)| KvCacheStoredBlockData {
-                        block_hash: *ext,
-                        tokens_hash: *local,
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        };
-        RouterEvent::new(self.worker_id, kv_event)
-    }
+fn sequence_to_router_event(sequence: &SequenceData, event_id: u64) -> RouterEvent {
+    let kv_event = KvCacheEvent {
+        event_id,
+        data: KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            blocks: sequence
+                .local_hashes
+                .iter()
+                .zip(sequence.external_hashes.iter())
+                .map(|(local, ext)| KvCacheStoredBlockData {
+                    block_hash: *ext,
+                    tokens_hash: *local,
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }),
+        dp_rank: 0,
+    };
+    RouterEvent::new(sequence.worker_id, kv_event)
 }
 
 /// Response from the frontend's /health endpoint
@@ -692,7 +685,7 @@ fn generate_sequences_for_requests(
                 num_prefix_prompts,
                 seed,
             );
-            let seq = SequenceData::from_request_content(
+            let seq = sequence_from_request_content(
                 &content,
                 worker_id,
                 kv_block_size,
@@ -749,7 +742,7 @@ async fn build_tree_via_nats(
     };
 
     for (event_id, seq) in sequences.iter().enumerate() {
-        let event = seq.to_router_event(event_id as u64);
+        let event = sequence_to_router_event(seq, event_id as u64);
         let data = encode_event_with_envelope(&event, KV_EVENT_SUBJECT)?;
         nats_client
             .publish(subject.clone(), data.into())
@@ -1165,7 +1158,7 @@ async fn publish_events_at_rate(
 
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
-        let event = seq.to_router_event(event_id);
+        let event = sequence_to_router_event(seq, event_id);
 
         match encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
             Ok(data) => {
@@ -1411,7 +1404,8 @@ async fn main() -> Result<()> {
         if let Some(contents) = contents {
             match serde_json::from_str::<ChatTemplate>(&contents) {
                 Ok(chat_template) => {
-                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[])) {
+                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[]), true)
+                    {
                         Ok(formatter) => {
                             println!(
                                 "  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)"
