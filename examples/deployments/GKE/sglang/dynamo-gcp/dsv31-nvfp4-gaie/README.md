@@ -7,6 +7,73 @@ NVIDIA AI Dynamo platform with GAIE EPP scheduling, routed through the GKE Infer
 
 ## Architecture
 
+### Aggregated GAIE (single node, 8 GPUs)
+
+All prefill and decode on the same 8-GPU worker. The GKE Inference Gateway routes requests through the Dynamo EPP for KV-cache-aware endpoint selection.
+
+```mermaid
+flowchart TB
+    Client["Client / aiperf<br/>POST /v1/chat/completions"]
+
+    Client -->|"HTTP :80"| GW["GKE Inference Gateway<br/>(gke-l7-rilb, Envoy L7 ILB)<br/>Backend timeout: 600s"]
+
+    GW -->|"x-pool: gaie-agg<br/>OR default /"| HR["HTTPRoute (agg)"]
+
+    HR -->|"backendRef"| IP["InferencePool v1 (agg)<br/>selector: worker pods<br/>targetPort: 8000"]
+
+    IP <-->|"ext_proc gRPC"| EPP["Dynamo EPP<br/>DYN_ENFORCE_DISAGG=false<br/><br/>Plugins:<br/>1. disagg-profile-handler<br/>2. label-filter (decode)<br/>3. dyn-decode-scorer<br/>4. max-score-picker<br/><br/>Sets: x-worker-instance-id"]
+
+    IP -->|"x-worker-instance-id<br/>to selected pod"| SC
+
+    subgraph POD["Agg Worker Pod (8x B200)"]
+        SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
+        WK["SGLang Worker<br/>DeepSeek-V3.1-NVFP4<br/>TP=8, EP=8<br/>NVFP4 + JIT DeepGEMM"]
+        SC -->|"direct route"| WK
+    end
+
+    WK -->|"SSE stream"| SC
+    SC -->|"tokens"| GW
+    GW -->|"SSE response"| Client
+```
+
+### Disaggregated GAIE (1P1D, 2 nodes, 16 GPUs)
+
+Prefill and decode on separate GPU pools. The EPP routes prefill and decode requests independently. KV cache transfers between nodes over NIXL/RoCE RDMA.
+
+```mermaid
+flowchart TB
+    Client["Client / aiperf<br/>POST /v1/chat/completions"]
+
+    Client -->|"HTTP :80"| GW["GKE Inference Gateway<br/>(gke-l7-rilb, Envoy L7 ILB)<br/>Backend timeout: 600s"]
+
+    GW -->|"x-pool: gaie-disagg-nvfp4"| HR["HTTPRoute (disagg)"]
+
+    HR -->|"backendRef"| IP["InferencePool v1 (disagg)<br/>selector: prefill+decode pods<br/>targetPort: 8000"]
+
+    IP <-->|"ext_proc gRPC"| EPP["Dynamo EPP<br/>DYN_ENFORCE_DISAGG=true<br/><br/>Prefill profile:<br/>  prefill-filter → dyn-prefill-scorer → picker<br/>Decode profile:<br/>  decode-filter → dyn-decode-scorer → picker<br/><br/>Sets: x-worker-instance-id<br/>+ x-prefill-instance-id"]
+
+    IP -->|"x-prefill-instance-id<br/>to prefill pod"| PF_SC
+
+    subgraph PF_POD["Prefill Pod — Node 1 (8x B200)"]
+        PF_SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
+        PF_WK["Prefill Worker<br/>--disaggregation-mode prefill<br/>TP=8, DP=8, EP=8, DP-attention<br/>NVFP4 · Chunked prefill: 32K"]
+        PF_SC -->|"direct route"| PF_WK
+    end
+
+    subgraph DC_POD["Decode Pod — Node 2 (8x B200)"]
+        DC_SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
+        DC_WK["Decode Worker<br/>--disaggregation-mode decode<br/>TP=8, DP=8, EP=8, DP-attention<br/>NVFP4 · EAGLE: steps=2, topk=1, draft=3"]
+        DC_SC -->|"direct route"| DC_WK
+    end
+
+    PF_WK ===|"KV-cache transfer<br/>NIXL over 8x RoCE RDMA<br/>GPUDirect"| DC_WK
+
+    DC_WK -->|"SSE stream"| DC_SC
+    DC_SC -->|"tokens"| GW
+    GW -->|"SSE response"| Client
+```
+
+### Component Summary
 
 | Component | Nodes | GPUs    | Role                                                             |
 | --------- | ----- | ------- | ---------------------------------------------------------------- |
@@ -14,9 +81,8 @@ NVIDIA AI Dynamo platform with GAIE EPP scheduling, routed through the GKE Infer
 | Decode    | 1     | 8x B200 | Token generation (DP=8, EP=8, TP=8) + EAGLE speculative decoding |
 | EPP       | 1     | —       | Endpoint Picker (disagg-aware prefill/decode scoring)            |
 
-
-**Total: 16 GPUs across 2 nodes**, interconnected via 8x RoCE RDMA interfaces (mlx5_0..mlx5_7)
-for KV cache transfer using NIXL.
+**Disagg total: 16 GPUs across 2 nodes**, interconnected via 8x RoCE RDMA interfaces (mlx5_0..mlx5_7)
+for KV cache transfer using NIXL. **Agg total: 8 GPUs on 1 node.**
 
 ### Key Optimizations
 
@@ -170,7 +236,7 @@ The repo includes **`benchmark-aiperf.sh`** — same flags as below, with **`CON
 From the `perf-gaie-fp8` pod (or any pod with `aiperf`):
 
 ```bash
-GATEWAY_IP=192.168.0.75   # kubectl get gateway inference-gateway -n dynamo-system -o jsonpath='{.status.addresses[0].value}'
+GATEWAY_IP=""  # kubectl get gateway inference-gateway -n dynamo-system -o jsonpath='{.status.addresses[0].value}'
 
 aiperf profile \
   --url "http://${GATEWAY_IP}" \
@@ -190,45 +256,4 @@ aiperf profile \
   --record-processors 16
 ```
 
-### Disaggregated GAIE Results (2026-04-05, ISL=1000, OSL=250, 16 GPUs — 1P+1D)
-
-| Concurrency | Output TPS | Req/s | TPOT p50 (ms) | TPOT avg (ms) | TPS/User p50 | TPS/User avg | TTFT p50 (ms) | ITL p50 (ms) | TPS/GPU |
-|:-----------:|:----------:|:-----:|:-------------:|:-------------:|:------------:|:------------:|:-------------:|:------------:|:-------:|
-| 10          | 855        | 3.42  | 9.67          | 9.71          | 103.42       | 103.16       | 378           | 9.67         | 53.5    |
-| 100         | 5,271      | 21.08 | 13.45         | 14.28         | 74.34        | 71.73        | 996           | 13.45        | 329.4   |
-| 200         | 7,938      | 31.75 | 16.04         | 16.48         | 62.35        | 62.05        | 1,301         | 16.04        | 496.2   |
-| 500         | 10,935     | 43.74 | 19.28         | 19.20         | 51.87        | 52.86        | 4,714         | 19.28        | 683.4   |
-
-### Aggregated GAIE Results (2026-04-05, ISL=1000, OSL=250, 8 GPUs — 1 node)
-
-| Concurrency | Output TPS | Req/s | TPOT p50 (ms) | TPOT avg (ms) | TPS/User p50 | TPS/User avg | TTFT p50 (ms) | ITL p50 (ms) | TPS/GPU | Errors |
-|:-----------:|:----------:|:-----:|:-------------:|:-------------:|:------------:|:------------:|:-------------:|:------------:|:-------:|:------:|
-| 10          | 1,051      | 4.20  | 7.98          | 7.99          | 125.28       | 125.15       | 293           | 7.98         | 131.4   | 0      |
-| 100         | 1,985      | 7.94  | 11.49         | 11.35         | 87.07        | 88.26        | 9,161         | 11.49        | 248.1   | 0      |
-| 200         | 2,005      | 8.02  | 11.48         | 11.21         | 87.12        | 89.43        | 20,610        | 11.48        | 250.6   | 0      |
-| 500*        | 1,996      | 8.02  | 11.49         | 11.27         | 87.00        | 88.99        | 13,367        | 11.49        | 249.4   | 260    |
-
-> *C=500 agg: 260/500 requests failed with `ClientPayloadError` (transfer encoding). Only 240 completed.
-> The agg deployment has `--max-running-requests 24` — it saturates and queues heavily beyond C=10.
-
-### Head-to-Head Comparison (Disagg vs Agg)
-
-| Metric                    | C=10 Disagg | C=10 Agg | C=100 Disagg | C=100 Agg | C=200 Disagg | C=200 Agg | C=500 Disagg | C=500 Agg* |
-|:--------------------------|:-----------:|:--------:|:------------:|:---------:|:------------:|:---------:|:------------:|:----------:|
-| **Output TPS**            | 855         | 1,051    | 5,271        | 1,985     | 7,938        | 2,005     | 10,935       | 1,996      |
-| **TPOT p50 (ms)**         | 9.67        | 7.98     | 13.45        | 11.49     | 16.04        | 11.48     | 19.28        | 11.49      |
-| **TPS/User p50**          | 103.42      | 125.28   | 74.34        | 87.07     | 62.35        | 87.12     | 51.87        | 87.00      |
-| **TTFT p50 (ms)**         | 378         | 293      | 996          | 9,161     | 1,301        | 20,610    | 4,714        | 13,367     |
-| **TPS/GPU**               | 53.5        | 131.4    | 329.4        | 248.1     | 496.2        | 250.6     | 683.4        | 249.4      |
-| **Req/s**                 | 3.42        | 4.20     | 21.08        | 7.94      | 31.75        | 8.02      | 43.74        | 8.02       |
-| **Errors**                | 0           | 0        | 0            | 0         | 0            | 0         | 0            | 260        |
-
-### Key Takeaways
-
-1. **At low concurrency (C=10), agg wins on per-user latency**: 7.98ms TPOT vs 9.67ms, 125 TPS/user vs 103 — and higher TPS/GPU (131 vs 54) since all 8 GPUs serve both prefill+decode
-2. **Disagg dominates at scale (C>=100)**: 5.5x higher total throughput at C=500 (10,935 vs 1,996 tok/s) while agg plateaus at ~2,000 tok/s
-3. **TTFT is dramatically better for disagg under load**: 996ms vs 9,161ms at C=100 — the dedicated prefill node keeps TTFT low while agg queues everything behind `max-running-requests=24`
-4. **TPS/GPU crossover at ~C=50**: Disagg surpasses agg TPS/GPU efficiency between C=10 and C=100
-5. **Agg breaks at C=500**: 52% error rate from connection failures — the single-node agg cannot absorb 500 concurrent streams
-6. **Disagg TPOT degrades gracefully**: 9.67ms -> 19.28ms (2x) from C=10 to C=500, while agg stays flat at ~11.5ms but only because it queues most requests (huge TTFT)
 
