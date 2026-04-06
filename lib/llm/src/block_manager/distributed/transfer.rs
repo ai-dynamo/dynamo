@@ -3,10 +3,10 @@
 
 use super::*;
 
+use super::zmq::*;
 use futures::future::try_join_all;
 use nixl_sys::NixlDescriptor;
 use utils::*;
-use zmq::*;
 
 use BlockTransferPool::*;
 
@@ -19,7 +19,7 @@ use crate::block_manager::{
         transfer::{TransferContext, WriteTo, WriteToStrategy},
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
-    offload::MAX_TRANSFER_BATCH_SIZE,
+    offload::max_transfer_batch_size,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
 };
 
@@ -40,7 +40,7 @@ pub struct ConnectorTransferBatcher {
 impl ConnectorTransferBatcher {
     pub fn new() -> Self {
         Self {
-            max_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_batch_size: max_transfer_batch_size(),
         }
     }
 

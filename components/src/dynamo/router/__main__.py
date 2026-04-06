@@ -109,23 +109,23 @@ class StandaloneRouterHandler:
         }
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request
+            preprocessed_request  # type: ignore[arg-type]
         ):
             # Wrap worker output into LLMEngineOutput format
             # Worker should return dict with at minimum kv_transfer_params in extra_args
             llm_engine_output = {
-                "token_ids": worker_output.get("token_ids", []),
-                "tokens": worker_output.get("tokens"),
-                "text": worker_output.get("text"),
-                "cum_log_probs": worker_output.get("cum_log_probs"),
-                "log_probs": worker_output.get("log_probs"),
-                "top_logprobs": worker_output.get("top_logprobs"),
-                "finish_reason": worker_output.get("finish_reason"),
-                "stop_reason": worker_output.get("stop_reason"),
-                "index": worker_output.get("index"),
-                "disaggregated_params": worker_output.get("disaggregated_params"),
-                "extra_args": worker_output.get("extra_args"),
-                "completion_usage": worker_output.get("completion_usage"),
+                "token_ids": worker_output.get("token_ids", []),  # type: ignore[attr-defined]
+                "tokens": worker_output.get("tokens"),  # type: ignore[attr-defined]
+                "text": worker_output.get("text"),  # type: ignore[attr-defined]
+                "cum_log_probs": worker_output.get("cum_log_probs"),  # type: ignore[attr-defined]
+                "log_probs": worker_output.get("log_probs"),  # type: ignore[attr-defined]
+                "top_logprobs": worker_output.get("top_logprobs"),  # type: ignore[attr-defined]
+                "finish_reason": worker_output.get("finish_reason"),  # type: ignore[attr-defined]
+                "stop_reason": worker_output.get("stop_reason"),  # type: ignore[attr-defined]
+                "index": worker_output.get("index"),  # type: ignore[attr-defined]
+                "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
+                "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
+                "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
             }
             yield llm_engine_output
 
@@ -171,6 +171,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_active_blocks={config.router_track_active_blocks}, "
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
+        f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
         f"router_ttl_secs={config.router_ttl_secs}, "
         f"router_max_tree_size={config.router_max_tree_size}, "
         f"router_prune_target_ratio={config.router_prune_target_ratio}"

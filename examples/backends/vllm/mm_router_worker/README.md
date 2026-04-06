@@ -52,42 +52,9 @@ This guide assumes Dynamo is already installed in your current Python environmen
 
 If the model is gated/private, also set `HF_TOKEN`.
 
-### vLLM Patch Requirement (as of 2026-02-25)
+### vLLM Version Requirement
 
-This MM router depends on vLLM PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) (`[feat] Add per-block extra_keys to KV events`) so Dynamo can reconstruct MM-aware block hashes from KV events.
-
-As of **2026-02-25**:
-- PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) is merged into `vllm-project/vllm:main` (merged on **2026-02-21**)
-- the latest vLLM release shown on GitHub releases is **v0.16.0 (2026-02-13)**, which predates this PR
-
-If you are using a released vLLM package, you likely need to patch your installed `site-packages` manually.
-
-Example (patch installed vLLM in-place, `site-packages` layout):
-
-```bash
-SITE_PACKAGES_ROOT="$(python - <<'PY'
-import pathlib
-import vllm
-print(pathlib.Path(vllm.__file__).resolve().parent.parent)
-PY
-)"
-
-cd "$SITE_PACKAGES_ROOT"
-
-# Filter the PR diff to only files under vllm/, since site-packages does not
-# contain the full vLLM repo layout (tests/, docs/, etc.).
-curl -sL https://github.com/vllm-project/vllm/pull/33304.diff | python3 -c '
-import sys
-chunks = sys.stdin.read().split("diff --git ")
-filtered = [c for c in chunks if c.startswith("a/vllm/")]
-print("".join("diff --git " + c for c in filtered), end="")
-' > /tmp/vllm_pr33304_vllm_only.diff
-
-patch --dry-run -p1 < /tmp/vllm_pr33304_vllm_only.diff
-patch -p1 < /tmp/vllm_pr33304_vllm_only.diff
-```
-
-After patching, restart the vLLM backend and MM router processes.
+Requires vLLM >= 0.17.0.
 
 ## Usage
 
@@ -130,7 +97,7 @@ Use the same environment in terminals 2/3/4/5:
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 ```
@@ -143,7 +110,7 @@ Use the same model string here and in the MM router.
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18081
@@ -172,7 +139,7 @@ worker again for a repeated multimodal request.
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18083
@@ -204,12 +171,12 @@ Important:
 - If you customize backend/MM router component names, update the MM router CLI args to match.
 - `--block-size` defaults to `16`; if your vLLM backend uses a different KV cache block size,
   pass the same value to the MM router.
-
 ```bash
+
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_LOG=debug
@@ -226,7 +193,7 @@ python -m examples.backends.vllm.mm_router_worker \
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 
@@ -300,6 +267,12 @@ If MM-aware routing and prefix reuse are working, after sending the same request
 | `--downstream-component` | `backend` | Downstream component name (use `backend` for current `dynamo.vllm` defaults) |
 | `--downstream-endpoint` | `generate` | Downstream vLLM endpoint name |
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_MM_IMAGE_CACHE_SIZE` | `8` | Maximum number of images to keep in the MM router's in-memory image cache. Increase this if your workload has high image reuse across a larger unique image set. |
+
 ## How It Works
 
 ### MM Hash Computation
@@ -353,6 +326,39 @@ For repeated identical images, multiple entries may appear in the same block whe
 - `Pillow` (`PIL`) for image loading
 - `requests` for `http(s)` image URLs
 - vLLM-capable backend worker via `python -m dynamo.vllm`
+
+## Performance
+
+### 8× B200, Qwen3-VL-30B-A3B-FP8, HTTP Image Transport
+
+On an 8-GPU B200 node serving 8 replicas of `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` with concurrent HTTP image requests and moderate (~50%) image reuse across workers, MM-aware routing delivers significant throughput and latency improvements over round-robin (default router mode). The benchmark uses a fixed text prompt and `--osl 1` to ensure the workload is dominated by image tokens, isolating the performance effect of MM router's image-aware KV cache routing on prefill:
+
+- **~1.6× higher throughput** — repeated image requests are steered to the worker that already holds the relevant KV cache blocks, avoiding redundant image downloads and prefill recomputation
+- **~1.6× lower average latency** and **~3× lower median (p50) latency** — cache-warm requests complete substantially faster
+- **p99 trade-off** — tail latency can increase under skewed workloads due to load imbalance when hot KV blocks are concentrated on a small number of workers
+
+To reproduce, prepare an `aiperf`-compatible JSONL dataset with ~50% image reuse — each line contains a text prompt and one image URL for simplicity, with some URLs repeated across requests. The dataset used in the benchmarks above was generated using the [multimodal JSONL generator](../../../../benchmarks/multimodal/jsonl/README.md).
+
+Example dataset format:
+
+```jsonl
+{"text": "Please describe this image.", "images": ["https://example.com/cat.jpg"]}
+{"text": "Please describe this image.", "images": ["https://example.com/dog.jpg"]}
+{"text": "Please describe this image.", "images": ["https://example.com/bird.jpg"]}
+{"text": "Please describe this image.", "images": ["https://example.com/cat.jpg"]}
+```
+
+Then benchmark against a running stack:
+
+```bash
+aiperf profile \
+    --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+    --input-file example.jsonl \
+    --custom-dataset-type single_turn \
+    --osl 1 \
+    --concurrency 5 \
+    --artifact-dir ./logs/mm_router_run
+```
 
 ## Known Limitations
 

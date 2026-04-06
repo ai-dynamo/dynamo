@@ -1,10 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
+
 use dynamo_tokens::{SequenceHash, Token};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
+
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
+/// The event subject that workers publish KV cache events on.
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
@@ -17,6 +26,36 @@ pub fn compute_hash(data: &[u8]) -> u64 {
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
     LocalBlockHash(compute_hash(data))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockHashOptions<'a> {
+    pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
+    pub lora_name: Option<&'a str>,
+    pub is_eagle: Option<bool>,
+}
+
+#[inline]
+fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> LocalBlockHash {
+    #[cfg(target_endian = "little")]
+    {
+        let _ = scratch_bytes;
+        // SAFETY: `u32` is plain-old-data, and on little-endian targets its in-memory
+        // representation matches the `to_le_bytes()` sequence used for hashing.
+        let chunk_bytes = unsafe {
+            std::slice::from_raw_parts(chunk.as_ptr().cast::<u8>(), std::mem::size_of_val(chunk))
+        };
+        LocalBlockHash(xxh3::xxh3_64_with_seed(chunk_bytes, seed))
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    {
+        scratch_bytes.clear();
+        for &token in chunk {
+            scratch_bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        LocalBlockHash(xxh3::xxh3_64_with_seed(scratch_bytes, seed))
+    }
 }
 
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
@@ -34,37 +73,58 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
-    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    lora_name: Option<&str>,
+    options: BlockHashOptions<'_>,
 ) -> Vec<LocalBlockHash> {
-    let seed = match lora_name.filter(|n| !n.is_empty()) {
+    if kv_block_size == 0 {
+        return Vec::new();
+    }
+
+    let seed = match options.lora_name.filter(|n| !n.is_empty()) {
         Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
         None => XXH3_SEED,
     };
-    tokens
-        .chunks_exact(kv_block_size as usize)
-        .enumerate()
-        .map(|(block_idx, chunk)| {
-            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+    let is_eagle_flag = options.is_eagle.unwrap_or(false);
+    let stride = kv_block_size as usize;
+    let window_size = if is_eagle_flag { stride + 1 } else { stride };
+    let estimated_blocks = if is_eagle_flag {
+        tokens.len().saturating_sub(1) / stride
+    } else {
+        tokens.len() / stride
+    };
+    let mut hashes = Vec::with_capacity(estimated_blocks);
+    let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
+    let mut mm_hashes = Vec::new();
+    let mut block_idx = 0;
+    let mut start = 0;
 
-            if let Some(mm_infos) = block_mm_infos
-                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
-            {
-                let mut mm_hashes: Vec<u64> = block_mm_info
-                    .mm_objects
-                    .iter()
-                    .map(|obj| obj.mm_hash)
-                    .collect();
-                mm_hashes.sort_unstable();
-
-                for mm_hash in mm_hashes {
-                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                }
+    while start + window_size <= tokens.len() {
+        let chunk = &tokens[start..start + window_size];
+        if let Some(mm_infos) = options.block_mm_infos
+            && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+        {
+            bytes.clear();
+            for &token in chunk {
+                bytes.extend_from_slice(&token.to_le_bytes());
             }
 
-            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
-        })
-        .collect()
+            mm_hashes.clear();
+            mm_hashes.extend(block_mm_info.mm_objects.iter().map(|obj| obj.mm_hash));
+            mm_hashes.sort_unstable();
+
+            for &mm_hash in &mm_hashes {
+                bytes.extend_from_slice(&mm_hash.to_le_bytes());
+            }
+
+            hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+        } else {
+            hashes.push(hash_block_no_mm(chunk, seed, &mut bytes));
+        }
+
+        start += stride;
+        block_idx += 1;
+    }
+
+    hashes
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -84,8 +144,25 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
         let current_block_hash = block_hashes[i].0;
 
         let combined = [parent_seq_hash, current_block_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
-        let seq_hash = compute_hash(&bytes);
+        #[cfg(target_endian = "little")]
+        let seq_hash = {
+            // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
+            // representation matches the `to_le_bytes()` sequence used by the previous code.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    combined.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(&combined),
+                )
+            };
+            compute_hash(bytes)
+        };
+        #[cfg(not(target_endian = "little"))]
+        let seq_hash = {
+            let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
+            bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
+            bytes[8..].copy_from_slice(&current_block_hash.to_le_bytes());
+            compute_hash(&bytes)
+        };
         sequence_hashes.push(seq_hash);
     }
 
@@ -96,9 +173,16 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
 pub trait WorkerConfigLike {
+    fn data_parallel_start_rank(&self) -> u32;
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+}
+
+/// Transport abstraction for publishing batched router-visible KV cache events.
+pub trait RouterEventSink: Send + Sync {
+    fn publish_event(&self, event: &RouterEvent)
+    -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 /// A worker identifier.
@@ -129,6 +213,94 @@ impl WorkerWithDpRank {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageTier {
+    #[default]
+    Device,
+    HostPinned,
+    Disk,
+    External,
+}
+
+impl StorageTier {
+    pub fn from_kv_medium(medium: &str) -> Option<Self> {
+        match medium {
+            "GPU" | "DEVICE" => Some(Self::Device),
+            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
+        medium
+            .and_then(Self::from_kv_medium)
+            .unwrap_or(Self::Device)
+    }
+
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Self::Device)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PlacementOwner {
+    LocalWorker(WorkerWithDpRank),
+    Shared,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Placement {
+    pub owner: PlacementOwner,
+    pub tier: StorageTier,
+}
+
+impl Placement {
+    pub fn local_worker(worker_id: WorkerId, dp_rank: DpRank, tier: StorageTier) -> Self {
+        Self {
+            owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
+            tier,
+        }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, dp_rank: DpRank) -> Self {
+        Self::local_worker(worker_id, dp_rank, StorageTier::Device)
+    }
+
+    pub fn is_local_gpu(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlacementEvent {
+    pub placement: Placement,
+    pub event: KvCacheEvent,
+}
+
+impl PlacementEvent {
+    pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
+        Self { placement, event }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
+        Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn into_router_event(self) -> Option<RouterEvent> {
+        let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
+            return None;
+        };
+        Some(RouterEvent::with_storage_tier(
+            worker.worker_id,
+            self.event,
+            self.placement.tier,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
@@ -139,7 +311,12 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     MarkPrefill,
-    MarkFree,
+    MarkFree {
+        // once request is cancelled, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 impl Default for RouterRequest {
@@ -258,6 +435,8 @@ pub enum ActiveSequenceEventData {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        #[serde(default = "default_track_prefill_tokens")]
+        track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
     },
     Free,
@@ -503,6 +682,9 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
+    /// The storage tier associated with the event.
+    #[serde(default)]
+    pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -519,7 +701,19 @@ impl RouterEvent {
     ///
     /// A new `RouterEvent`.
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
+        Self::with_storage_tier(worker_id, event, StorageTier::Device)
+    }
+
+    pub fn with_storage_tier(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            event,
+        }
     }
 }
 
@@ -598,6 +792,7 @@ pub struct TokensWithHashes {
     lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
+    is_eagle: Option<bool>,
 }
 
 impl TokensWithHashes {
@@ -610,6 +805,7 @@ impl TokensWithHashes {
             lora_name: None,
             block_hashes: None,
             seq_hashes: None,
+            is_eagle: None,
         }
     }
 
@@ -623,6 +819,24 @@ impl TokensWithHashes {
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
         self
+    }
+
+    /// Sets Eagle hashing semantics for this token sequence.
+    pub fn with_is_eagle(mut self, is_eagle: bool) -> Self {
+        self.set_is_eagle(is_eagle);
+        self
+    }
+
+    /// Updates Eagle hashing semantics and invalidates cached hashes when it changes.
+    pub fn set_is_eagle(&mut self, is_eagle: bool) {
+        let is_eagle = Some(is_eagle);
+        if self.is_eagle == is_eagle {
+            return;
+        }
+
+        self.is_eagle = is_eagle;
+        self.block_hashes = None;
+        self.seq_hashes = None;
     }
 
     /// Returns a reference to the tokens.
@@ -656,8 +870,11 @@ impl TokensWithHashes {
             self.block_hashes = Some(compute_block_hash_for_seq(
                 &self.tokens,
                 self.block_size,
-                self.block_mm_infos.as_deref(),
-                self.lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos: self.block_mm_infos.as_deref(),
+                    lora_name: self.lora_name.as_deref(),
+                    is_eagle: self.is_eagle,
+                },
             ));
         }
         self.block_hashes.as_ref().unwrap()
@@ -738,24 +955,41 @@ mod tests {
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
     }
 
     #[test]
     fn test_lora_name_produces_different_hash() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let lora_a = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-a"));
-        let lora_b = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-b"));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let lora_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let lora_b = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(base[0], lora_a[0]);
         assert_ne!(base[0], lora_b[0]);
@@ -763,18 +997,17 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_name_none_matches_legacy() {
-        let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
-        assert_eq!(hashes_none, hashes_none2);
-    }
-
-    #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let empty = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some(""),
+                ..Default::default()
+            },
+        );
         assert_eq!(
             base, empty,
             "empty lora_name should be treated as base model"
@@ -796,6 +1029,73 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_compute_block_hash_for_seq_eagle_windows() {
+        let tokens: Vec<u32> = (0..6).collect();
+
+        let default_hashes = compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default());
+        let eagle_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_set_is_eagle_invalidates_cache() {
+        let tokens: Vec<u32> = (0..6).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens, 2);
+
+        let default_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        with_hashes.set_is_eagle(true);
+        let eagle_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
     }
 
     #[test]
@@ -868,5 +1168,26 @@ mod tests {
         assert_eq!(deserialized.block_hashes.len(), 2);
         assert_eq!(deserialized.block_hashes[0].0, 4);
         assert_eq!(deserialized.block_hashes[1].0, 5);
+    }
+
+    #[test]
+    fn test_router_request_mark_free_serialization_with_request_id() {
+        let request = RouterRequest::MarkFree {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_free","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkFree {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
     }
 }

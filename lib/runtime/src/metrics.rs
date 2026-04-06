@@ -6,7 +6,12 @@
 //! This module provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
+pub mod frontend_perf;
 pub mod prometheus_names;
+pub mod request_plane;
+pub mod tokio_perf;
+pub mod transport_metrics;
+pub mod work_handler_perf;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -889,6 +894,13 @@ impl MetricsRegistry {
             .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
     }
 
+    /// Add a Prometheus metric collector, logging a warning on failure instead of returning an error.
+    pub fn add_metric_or_warn(&self, collector: Box<dyn prometheus::core::Collector>, name: &str) {
+        if let Err(e) = self.add_metric(collector) {
+            tracing::warn!(error = %e, metric = name, "Failed to register metric");
+        }
+    }
+
     /// Get a read guard to the Prometheus registry for scraping
     pub fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
         self.prometheus_registry.read().unwrap()
@@ -1530,15 +1542,16 @@ dynamo_component_testintgauge{dynamo_namespace="ns345"} 42
 dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server1",service="api",status="active"} 10
 dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0"#;
 
-        // Split actual output into non-uptime lines and the uptime value line.
+        // Split actual output into non-uptime lines and validate the uptime value line.
         let mut non_uptime_lines = Vec::new();
-        let mut uptime_value: Option<f64> = None;
+        let mut saw_uptime_value = false;
         for line in drt_output_raw.trim_end_matches('\n').lines() {
             if line.starts_with("dynamo_component_uptime_seconds ") {
                 let val_str = line
                     .strip_prefix("dynamo_component_uptime_seconds ")
                     .unwrap();
-                uptime_value = Some(val_str.parse::<f64>().expect("uptime should be a float"));
+                val_str.parse::<f64>().expect("uptime should be a float");
+                saw_uptime_value = true;
             } else if line.starts_with("# HELP dynamo_component_uptime_seconds")
                 || line.starts_with("# TYPE dynamo_component_uptime_seconds")
             {
@@ -1547,6 +1560,10 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
                 non_uptime_lines.push(line);
             }
         }
+        assert!(
+            saw_uptime_value,
+            "uptime_seconds metric should be present in initial scrape"
+        );
 
         let actual_without_uptime = non_uptime_lines.join("\n");
         assert_eq!(

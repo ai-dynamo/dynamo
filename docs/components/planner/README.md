@@ -4,20 +4,35 @@
 title: Planner
 ---
 
-The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
+## Why LLM Inference Needs a Different Autoscaler
 
-The SLA Planner supports two scaling modes:
+Scaling a traditional web service is straightforward: watch CPU or request rate, add replicas when load is high, remove them when it's low. Tools like HPA and KEDA work well for this because the relationship between load and latency is roughly linear — twice the requests means roughly twice the CPU, so a simple threshold policy keeps response times stable.
 
-- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the number of replicas needed to meet TTFT and ITL SLA targets. This is the primary scaling mode for production deployments.
-- **Load-based scaling (Experimental)**: Uses real-time per-worker load metrics (active prefill tokens, active KV blocks) from the router to make SLA-aware scaling decisions via online linear regression. Does not require profiling data. Responds quickly to traffic bursts.
+LLM inference breaks these assumptions:
 
-When both modes are enabled, throughput-based scaling provides a lower bound on replicas (long-term capacity planning) while load-based scaling handles real-time adjustments (burst response).
+- **Latency depends on request content, not just request count.** A single request with a 32K-token prompt consumes orders of magnitude more compute than a short one. Two requests per second can mean completely different GPU loads depending on input/output sequence lengths.
+- **Prefill and decode have different scaling characteristics.** In disaggregated serving, prefill is compute-bound (scales with input length) while decode is memory-bound (scales with concurrent sequences and KV cache usage). A single replica count doesn't capture both.
+- **The metrics that matter aren't standard.** The SLAs users care about — Time to First Token (TTFT) and Inter-Token Latency (ITL) — don't map cleanly to CPU utilization or request throughput. HPA can't target "keep P95 TTFT under 500ms" because that requires understanding the relationship between sequence lengths, GPU memory pressure, and latency.
+- **Scaling decisions are expensive.** Spinning up a GPU worker takes minutes, not seconds. Overscaling wastes GPU-hours at cloud prices; underscaling violates SLAs. The autoscaler needs to predict demand, not just react to it.
 
-> **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide.md) for a complete workflow including profiling and deployment.
+The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It understands engine profiling data, tracks per-worker GPU utilization, predicts traffic patterns, and makes scaling decisions that directly target TTFT and ITL SLAs — not proxy metrics.
+
+> **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
+
+> **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
+
+## Scaling Modes
+
+The Planner supports two scaling modes that can run independently or together:
+
+- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No profiling data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+
+When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
 ## Feature Matrix
 
-| Feature | Throughput-Based | Load-Based (Experimental) |
+| Feature | Throughput-Based | Load-Based |
 |---------|:----------------:|:-------------------------:|
 | **Deployment** | | |
 | Disaggregated | Supported | Supported |
@@ -28,6 +43,9 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 | vLLM | Supported | Supported |
 | **Requires Profiling Data** | Yes | No |
 | **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
+| **Router** | | |
+| Any (round-robin, random, etc.) | Supported | Not supported |
+| KV Router | Supported | Supported |
 | **Connectors** | | |
 | KubernetesConnector | Supported | Supported |
 | VirtualConnector | Supported | Supported |
@@ -68,7 +86,7 @@ args:
   - --loadbased-adjustment-interval=5
 ```
 
-The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner_load.yaml](https://github.com/ai-dynamo/dynamo/blob/main/tests/planner/scaling/disagg_planner_load.yaml) for a complete example.
+The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml) for a complete example.
 
 ### Manual DGD Deployment
 
@@ -79,14 +97,26 @@ For manual control with throughput-based scaling, use the disaggregated planner 
 kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 ```
 
+## Current Limitations
+
+### Load-based scaling
+
+Load-based scaling has the following known limitations. Throughput-based scaling is not affected by any of these.
+
+**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). FPM is currently only available for vllm and is automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set. The KV Router is **not** required for load-based scaling.
+
+### General
+
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `--min-endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `--loadbased-scaling-down-sensitivity` value to reduce the frequency of scale-down events.
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Planner Guide](planner-guide.md) | Deployment, configuration, integration, troubleshooting |
+| [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
+| [Planner Design](../../design-docs/planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
-| [SLA-Driven Profiling](../profiler/profiler-guide.md) | Pre-deployment profiling process and configuration |
-| [Planner Design](../../design-docs/planner-design.md) | Architecture deep-dive for contributors |
+| [Global Planner Guide](global-planner.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
 ## Configuration Reference
 
@@ -111,8 +141,8 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 | `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
 | `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
 | `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
-| `--no-correction` | `false` | Disable correction factors |
-| **Load-based scaling (Experimental)** | | |
+| `--no-correction` | `true` | Disable correction factors (auto-disabled when load-based scaling is on) |
+| **Load-based scaling** | | |
 | `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
 | `--disable-throughput-scaling` | `false` | Disable throughput-based scaling (required for `agg` mode) |
 | `--loadbased-router-metrics-url` | auto-discovered | URL to router's `/metrics` endpoint |
@@ -154,7 +184,7 @@ The dashboard shows:
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
-**Load-based scaling** pulls per-engine status directly from the frontend's `/metrics` endpoint:
-- Active prefill tokens per worker
-- Active decode blocks per worker
-- Last observed TTFT, ITL, and ISL per worker
+**Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
+- Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
+- Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
+- No router `/metrics` scraping required

@@ -3,11 +3,13 @@
 
 import asyncio
 import logging
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Dict, Optional
 
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -25,12 +27,14 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         super().__init__(engine, config, publisher, None, shutdown_event)
         logging.info("Embedding worker handler initialized")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Generate embeddings for the given input.
 
@@ -44,6 +48,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         embedding_request = EmbeddingRequest(**request)
 
         # Handle different input types
+        prompt: str | list[Any]
         if isinstance(embedding_request.input, str):
             prompt = embedding_request.input
         elif isinstance(embedding_request.input, list):
@@ -51,7 +56,14 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         else:
             raise TypeError(f"Invalid input type: {type(embedding_request.input)}")
 
-        result = await self.engine.async_encode(prompt=prompt)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_id = context.trace_id
+
+        result = await self.engine.async_encode(
+            prompt=prompt,
+            external_trace_header=trace_header,
+            rid=trace_id,
+        )
 
         # Transform the response to OpenAI format
         response = self._transform_response(result, embedding_request.model)

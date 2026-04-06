@@ -15,6 +15,7 @@ from PIL import Image
 
 from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -84,7 +85,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         logger.info(f"Image diffusion request: {request}")
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = self._get_trace_header(context)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
@@ -109,13 +110,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 seed=nvext.seed,
             )
 
-            user_id = req.user if req.user else context.id()
-
+            context_id = context.id()
+            assert context_id is not None
+            user_id = req.user or context_id
             image_data = []
             for img in images:
                 # uploading or encoding the image
                 if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context.id())
+                    url = await self._upload_to_fs(img, user_id, context_id)
                     image_data.append(ImageData(url=url))
                 else:
                     b64 = self._encode_base64(img)

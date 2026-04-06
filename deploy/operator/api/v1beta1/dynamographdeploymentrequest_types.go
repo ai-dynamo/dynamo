@@ -165,15 +165,6 @@ const (
 	ProfilingReasonJobCreationFailed = "JobCreationFailed"
 )
 
-// OptimizationType specifies the profiling optimization strategy.
-// +kubebuilder:validation:Enum=latency;throughput
-type OptimizationType string
-
-const (
-	OptimizationTypeLatency    OptimizationType = "latency"
-	OptimizationTypeThroughput OptimizationType = "throughput"
-)
-
 // SearchStrategy controls the profiling search depth.
 // +kubebuilder:validation:Enum=rapid;thorough
 type SearchStrategy string
@@ -181,6 +172,19 @@ type SearchStrategy string
 const (
 	SearchStrategyRapid    SearchStrategy = "rapid"
 	SearchStrategyThorough SearchStrategy = "thorough"
+)
+
+// GPUSKUType is the AIC hardware system identifier for a supported GPU.
+// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+type GPUSKUType string
+
+const (
+	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
+	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
+	GPUSKUTypeH100SXM  GPUSKUType = "h100_sxm"
+	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
+	GPUSKUTypeL40S     GPUSKUType = "l40s"
 )
 
 // BackendType specifies the inference backend.
@@ -218,14 +222,7 @@ type WorkloadSpec struct {
 }
 
 // SLASpec defines the service-level agreement targets for profiling optimization.
-// Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 type SLASpec struct {
-	// OptimizationType controls the profiling optimization strategy.
-	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
-	// +optional
-	// +kubebuilder:validation:Enum=latency;throughput
-	OptimizationType OptimizationType `json:"optimizationType,omitempty"`
-
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
 	// +python-default=2000
@@ -305,7 +302,7 @@ type KVRouterSpec struct {
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
 	// Planner is the raw SLA planner configuration passed to the planner service.
-	// Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
 	// Go treats this as opaque bytes; the Planner service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
@@ -324,9 +321,11 @@ type FeaturesSpec struct {
 // HardwareSpec describes the hardware resources available for profiling and deployment.
 // These fields are typically auto-filled by the operator from cluster discovery.
 type HardwareSpec struct {
-	// GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+	// GPUSKU is the AIC hardware system identifier for the GPU.
+	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
-	GPUSKU string `json:"gpuSku,omitempty"`
+	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
 	// +optional
@@ -500,8 +499,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
-// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
-// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`,priority=1
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type DynamoGraphDeploymentRequest struct {

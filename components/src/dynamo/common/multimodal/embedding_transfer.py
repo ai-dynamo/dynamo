@@ -11,15 +11,17 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, List, Optional
+from typing import Any, Awaitable, List, Optional
 
-import msgpack
+import msgspec
 import torch
 from nixl._api import nixl_agent, nixl_agent_config
 from pydantic import BaseModel
 from safetensors import torch as safetensors_torch
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ class AbstractEmbeddingReceiver(ABC):
         pass
 
     @abstractmethod
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Abstract method to indicate that the tensor associated with the ID is no longer in use.
         Args:
@@ -95,7 +97,7 @@ class AbstractEmbeddingSender(ABC):
     @abstractmethod
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Abstract method to send precomputed embeddings for a given request ID.
 
@@ -104,7 +106,7 @@ class AbstractEmbeddingSender(ABC):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         pass
 
@@ -141,9 +143,10 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         )
         return tensor_path
 
+    @_nvtx.annotate("mm:local:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Send precomputed embeddings for a given request ID.
 
@@ -152,7 +155,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         # Implementation to send embeddings to the downstream worker
         # This could involve publishing to a message queue or making an API call
@@ -185,6 +188,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.received_tensors = {}
         self.tensor_id_counter = 0
 
+    @_nvtx.annotate("mm:local:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -206,7 +210,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.received_tensors[tensor_id] = tensor_path
         return tensor_id, embedding_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 
@@ -397,7 +401,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
         # Background transfer task..
         # Create a queue hinting whether the sender is expecting future transfer
-        self.transfer_queue = asyncio.Queue()
+        self.transfer_queue: asyncio.Queue[str] = asyncio.Queue()
         self._state_update_task = asyncio.create_task(self._state_update())
         self.transfer_timeout = 60  # seconds, can be tuned based on expected transfer time and network condition
 
@@ -518,7 +522,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                     remote_agent_metadata,
-                ) = msgpack.unpackb(notif)
+                ) = msgspec.msgpack.decode(notif)
                 write_requests.append(
                     (
                         # receiver contact
@@ -568,7 +572,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         tensor_id = self.id_counter.get_next_id()
         fut = asyncio.get_event_loop().create_future()
@@ -699,7 +703,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # Request for transfer
         tensor_id = self.id_counter.get_next_id()
-        notif_msg = msgpack.packb(
+        notif_msg = msgspec.msgpack.encode(
             (
                 nixl_request.tensor_id,
                 (
@@ -751,7 +755,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.to_buffer_id[tensor_id] = buffer_id
         return tensor_id, embedding_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 
@@ -762,50 +766,20 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.ring_buffer.release_buffer(buffer_id)
 
 
-class PersistentConnector(nixl_connect.Connector):
-    """A persistent NIXL connector that can be shared across multiple send/receive operations."""
-
-    def __init__(self):
-        super().__init__()
-        self._connection = None
-
-    async def _create_connection(self) -> nixl_connect.Connection:
-        """
-        Private method to create a new connection.
-        """
-        if self._connection is None:
-            self._connection = nixl_connect.Connection(self, 1)
-            await self._connection.initialize()
-        return self._connection
-
-
-# Overwrite the remote release method to prevent deregistering the remote agent on each release,
-# with persistent connection, all operations will be initiated on the same agent-pair, if not
-# avoiding the deregisteration, the inflight operations will be teminated.
-def remote_release_overwrite(self) -> None:
-    pass
-
-
-nixl_connect.Remote._release = remote_release_overwrite
-
-
 class NixlReadEmbeddingSender(AbstractEmbeddingSender):
-    """
-    Initial implementation of NIXL READ based transfer. This implementation uses
-    a monkey-patched version of 'nixl_connect' wrapper library to persist
-    connection (agent registration) and descriptors across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    NOTE This implementation or the use of 'nixl_connect' needs to be revisited as
-    the benchmarking result is unexpectedly slow. Keeping it now for completeness,
-    i.e. provide NIXL WRITE based and READ based transfer classes.
+    """NIXL READ based embedding transfer sender.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(self):
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
 
+    @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Send precomputed embeddings.
 
@@ -815,15 +789,16 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
             if False, the sender will copy the embeddings.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         if stage_embeddings:
             transfer_buf = embeddings
         else:
             transfer_buf = embeddings.clone().detach()
-        descriptor = nixl_connect.Descriptor(transfer_buf)
-        readable_op = await self.connector.create_readable(descriptor)
-
+        with _nvtx.annotate("mm:nixl:create_descriptor", color="pink"):
+            descriptor = nixl_connect.Descriptor(transfer_buf)
+        with _nvtx.annotate("mm:nixl:create_readable", color="pink"):
+            readable_op = await self.connector.create_readable(descriptor)
         request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
@@ -833,41 +808,26 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
 
 
 class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
-    """
-    Counter part of 'NixlReadEmbeddingSender', see 'NixlReadEmbeddingSender' for details.
-    Initial implementation of another usage of NIXL connect library that persists
-    connection (agent registration) and descriptors (memory registration) across multiple send operations
-    to avoid the overhead of repeated connection setup and teardown.
-    [gluo FIXME] This implementation requires more memory allocation and somewhat rigid, should move away
-    from connect library so we can have single descriptor and chunk for transfer on demand, similarly to
-    KV cache transfer. We may worry less on memory fragmentation as the memory can be released for next
-    transfer as soon as the embedding has passed to the framework (NEED TO VERIFY: framework will copy) and
-    can simply loop around the large buffer.
+    """NIXL READ based embedding transfer receiver.
+
+    Uses nixl_connect.Connector which now natively provides a shared singleton
+    Connection (NIXL agent) and reference-counted Remote agent lifecycle.
     """
 
     def __init__(
-        self, embedding_hidden_size=8 * 1024, max_item_mm_token=1024, max_items=1024
-    ):
+        self,
+        embedding_hidden_size: int = 8 * 1024,
+        max_item_mm_token: int = 1024,
+        max_items: int = 1024,
+    ) -> None:
         super().__init__()
-        self.connector = PersistentConnector()
+        self.connector = nixl_connect.Connector()
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
-        self.warmedup_descriptors = Queue()
-        self.inuse_descriptors = {}
-        # Handle both sync and async contexts
-        try:
-            asyncio.get_running_loop()  # Check if we're in async context
-            # If we're in an async context, we need to run the connection creation in a separate thread to avoid blocking the event loop
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                connection = pool.submit(
-                    asyncio.run, self.connector._create_connection()
-                ).result(timeout=10)
-        except RuntimeError:
-            # No running loop - safe to use asyncio.run()
-            connection = asyncio.run(self.connector._create_connection())
+        self.warmedup_descriptors: Queue[nixl_connect.Descriptor] = Queue()
+        self.inuse_descriptors: dict[int, tuple[nixl_connect.Descriptor, bool]] = {}
+        connection = run_async(self.connector._create_connection)
         # Create descriptor for our allocated tensor
         for _ in range(max_items):
             encodings_tensor = torch.zeros(
@@ -877,6 +837,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             descriptor.register_with_connector(connection)
             self.warmedup_descriptors.put(descriptor)
 
+    @_nvtx.annotate("mm:nixl:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -911,6 +872,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             original_descriptor_size = descriptor._data_size
             tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
             descriptor._data_size = tensor_size_bytes
+            assert descriptor._data_ref is not None
             encodings_tensor = (
                 descriptor._data_ref[:tensor_size_bytes]
                 .view(dtype=embeddings_dtype)
@@ -918,10 +880,12 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             )
             dynamic_descriptor = False
 
-        # Create read operation to read from EncodeHandler
-        read_op = await self.connector.begin_read(readable_metadata, descriptor)
-        # Wait for the read operation to complete
-        await read_op.wait_for_completion()
+        with _nvtx.annotate("mm:nixl:begin_read", color="pink"):
+            # Create read operation to read from EncodeHandler
+            read_op = await self.connector.begin_read(readable_metadata, descriptor)
+        with _nvtx.annotate("mm:nixl:wait_completion", color="pink"):
+            # Wait for the read operation to complete
+            await read_op.wait_for_completion()
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )
@@ -932,7 +896,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.inuse_descriptors[tensor_id] = (descriptor, dynamic_descriptor)
         return tensor_id, encodings_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 

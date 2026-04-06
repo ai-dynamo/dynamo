@@ -47,16 +47,14 @@ branch based on `main`). The sync workflow copies changes to
 
 ## Claude Code Skills
 
-Three Claude Code skills automate common docs tasks. Invoke them as slash
-commands in Claude Code (e.g., `/add-dynamo-docs`) — each skill walks through
-the full workflow: creating or editing the markdown file, updating the
-navigation in `docs/index.yml`, and running `fern check` to validate.
+A single Claude Code skill automates common docs tasks. Invoke it as a slash
+command in Claude Code (e.g., `/dynamo-docs`) — the skill walks through
+the full workflow: creating, editing, or removing the markdown file, updating
+the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [add-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
-| [rm-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
-| [update-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
+| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
 
 ---
 
@@ -304,7 +302,7 @@ Place images in `docs/assets/` and reference them with relative paths from your
 markdown files:
 
 ```markdown
-![Architecture diagram](../assets/architecture.png)
+![Architecture Diagram](../assets/img/dynamo-architecture.svg)
 ```
 
 ### Custom components

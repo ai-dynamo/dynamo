@@ -9,20 +9,6 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Run KVBM Standalone](#run-kvbm-standalone)
-- [Run KVBM in Dynamo with vLLM](#run-kvbm-in-dynamo-with-vllm)
-- [Run KVBM in Dynamo with TensorRT-LLM](#run-kvbm-in-dynamo-with-tensorrt-llm)
-- [Run Dynamo with SGLang HiCache](#run-dynamo-with-sglang-hicache)
-- [Disaggregated Serving with KVBM](#disaggregated-serving-with-kvbm)
-- [Configuration](#configuration)
-- [Enable and View KVBM Metrics](#enable-and-view-kvbm-metrics)
-- [Benchmarking KVBM](#benchmarking-kvbm)
-- [Troubleshooting](#troubleshooting)
-- [Developing Locally](#developing-locally)
-
 ## Quick Start
 
 ## Run KVBM Standalone
@@ -380,15 +366,29 @@ export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600  # 1 hour
 
 **Symptom:** KVBM fails to start when disk offloading is enabled.
 
-**Cause:** `fallocate()` is not supported on the filesystem (e.g., Lustre, certain network filesystems).
+**Cause:** `fallocate()` is not supported on the filesystem (e.g., Lustre, certain network filesystems),
+or the storage backend requires a different method for setting `O_DIRECT`.
 
-**Solution:** Enable disk zerofill fallback:
+**Solution:**
+
+1. If `fallocate()` is not supported, enable the zerofill fallback:
 
 ```bash
 export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
-If you encounter "write all error" or EINVAL (errno 22), also try:
+2. If your filesystem ignores `fcntl(F_SETFL, O_DIRECT)` (e.g., IBM Storage Scale), set the
+disk allocator type to pass `O_DIRECT` at file open time instead:
+
+```bash
+export DYN_KVBM_DISK_ALLOCATOR_TYPE=open-direct
+```
+
+Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
+- `default`: Apply `O_DIRECT` via `fcntl` after file creation. Works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
+- `open-direct`: Pass `O_DIRECT` to `mkostemp` at file open time. Required on filesystems where `fcntl(F_SETFL, O_DIRECT)` is ignored (e.g., IBM Storage Scale).
+
+3. If you encounter "write all error" or EINVAL (errno 22), or need to debug without `O_DIRECT`:
 
 ```bash
 export DYN_KVBM_DISK_DISABLE_O_DIRECT=true

@@ -155,6 +155,55 @@ fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
+/// Extract visible text from OpenAI-style message content.
+///
+/// Matches common chat-template behavior:
+/// - string content: returned as-is
+/// - array content: concatenates `type=text` parts and raw string items
+/// - other JSON types: serialized to JSON string
+fn extract_visible_text(content: &JsonValue) -> String {
+    match content {
+        JsonValue::String(text) => text.clone(),
+        JsonValue::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.as_str() {
+                    return Some(text.to_string());
+                }
+
+                let item_type = item.get("type").and_then(|v| v.as_str());
+                if item_type == Some("text") {
+                    return item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|text| text.to_string());
+                }
+
+                tracing::warn!(
+                    chunk_type = item_type.unwrap_or("unknown"),
+                    "DeepSeek V3.2 formatter dropped non-text content chunk while normalizing message content",
+                );
+
+                None
+            })
+            .collect::<String>(),
+        _ => to_json(content),
+    }
+}
+
+/// Normalize message `content` fields for text-only DeepSeek V3.2 rendering.
+fn normalize_message_contents(messages: &mut [JsonValue]) {
+    for msg in messages {
+        let Some(content) = msg.get("content") else {
+            continue;
+        };
+        let normalized = extract_visible_text(content);
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("content".to_string(), JsonValue::String(normalized));
+        }
+    }
+}
+
 /// Encode arguments to DSML parameter format
 fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
     let arguments_str = tool_call
@@ -459,6 +508,33 @@ impl DeepSeekV32Formatter {
     pub fn new_chat() -> Self {
         Self::new(ThinkingMode::Chat)
     }
+
+    /// Resolve thinking mode from per-request `chat_template_args`, falling back to the
+    /// formatter's default. Two conventions are supported:
+    ///   - `{"thinking": bool}` — common across models (e.g. Kimi K25)
+    ///   - `{"thinking_mode": "chat"|"thinking"}` — matches the DSV3.2 Jinja template parameter
+    fn resolve_thinking_mode(
+        &self,
+        args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> ThinkingMode {
+        if let Some(args) = args {
+            if let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool()) {
+                return if thinking {
+                    ThinkingMode::Thinking
+                } else {
+                    ThinkingMode::Chat
+                };
+            }
+            if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
+                match mode {
+                    "chat" => return ThinkingMode::Chat,
+                    "thinking" => return ThinkingMode::Thinking,
+                    _ => {}
+                }
+            }
+        }
+        self.thinking_mode
+    }
 }
 
 impl super::OAIPromptFormatter for DeepSeekV32Formatter {
@@ -467,6 +543,8 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
     }
 
     fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
+        let thinking_mode = self.resolve_thinking_mode(req.chat_template_args());
+
         // Get messages from request
         let messages_value = req.messages();
 
@@ -478,6 +556,10 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
             .as_array()
             .context("Messages is not an array")?
             .clone();
+
+        // DeepSeek V3.2 native formatter expects text content in each message.
+        // Normalize OpenAI content arrays (e.g. [{type: "text", text: "..."}]) to strings.
+        normalize_message_contents(&mut messages_array);
 
         // Inject tools and response_format from request into the first system message
         // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
@@ -532,7 +614,7 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
         // Encode with native implementation
         encode_messages(
             &messages_array,
-            self.thinking_mode,
+            thinking_mode,
             true, // always add BOS token
         )
     }
@@ -559,6 +641,37 @@ mod tests {
         assert!(result.contains("Hello!"));
         assert!(result.contains(tokens::ASSISTANT_START));
         assert!(result.contains(tokens::THINKING_START));
+    }
+
+    #[test]
+    fn test_extract_visible_text_from_content_array() {
+        let content = json!([
+            {"type": "text", "text": "who "},
+            {"type": "text", "text": "are "},
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+            {"type": "text", "text": "you?"}
+        ]);
+
+        let result = extract_visible_text(&content);
+        assert_eq!(result, "who are you?");
+    }
+
+    #[test]
+    fn test_formatter_handles_user_content_array() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "user", "content": [
+                {"type": "text", "text": "who are you?"}
+            ]}
+        ]));
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.contains("who are you?"));
+        assert!(result.contains(tokens::USER_START));
+        assert!(result.contains(tokens::ASSISTANT_START));
     }
 
     #[test]
@@ -597,6 +710,7 @@ mod tests {
         messages: JsonValue,
         tools: Option<JsonValue>,
         response_format: Option<JsonValue>,
+        chat_template_args: Option<std::collections::HashMap<String, JsonValue>>,
     }
 
     impl MockRequest {
@@ -605,6 +719,7 @@ mod tests {
                 messages,
                 tools: None,
                 response_format: None,
+                chat_template_args: None,
             }
         }
 
@@ -615,6 +730,14 @@ mod tests {
 
         fn with_response_format(mut self, response_format: JsonValue) -> Self {
             self.response_format = Some(response_format);
+            self
+        }
+
+        fn with_chat_template_args(
+            mut self,
+            args: std::collections::HashMap<String, JsonValue>,
+        ) -> Self {
+            self.chat_template_args = Some(args);
             self
         }
     }
@@ -642,6 +765,12 @@ mod tests {
 
         fn should_add_generation_prompt(&self) -> bool {
             true
+        }
+
+        fn chat_template_args(
+            &self,
+        ) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+            self.chat_template_args.as_ref()
         }
     }
 
@@ -988,6 +1117,237 @@ mod tests {
         assert!(
             !result.contains("## Response Format:"),
             "Should not contain Response Format section when not provided"
+        );
+    }
+
+    // ==================== Thinking Mode Override Tests ====================
+
+    #[test]
+    fn test_chat_mode_via_thinking_false() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([("thinking".to_string(), json!(false))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // In chat mode, the last user message should be followed by </think> (closing tag)
+        // rather than <think> (opening tag)
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END
+            )),
+            "Chat mode should end with </think> after Assistant token, got: ...{}",
+            &result[result.len().saturating_sub(80)..],
+        );
+        assert!(
+            !result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_START
+            )),
+            "Chat mode should NOT end with <think>",
+        );
+    }
+
+    #[test]
+    fn test_explicit_thinking_true_via_args() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([("thinking".to_string(), json!(true))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_START
+            )),
+            "Thinking mode should end with <think> after Assistant token",
+        );
+    }
+
+    #[test]
+    fn test_chat_mode_via_thinking_mode_string() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([("thinking_mode".to_string(), json!("chat"))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END
+            )),
+            "thinking_mode='chat' should produce chat mode (ends with </think>)",
+        );
+    }
+
+    #[test]
+    fn test_thinking_mode_string_thinking() {
+        use super::super::OAIPromptFormatter;
+
+        let args =
+            std::collections::HashMap::from([("thinking_mode".to_string(), json!("thinking"))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_START
+            )),
+            "thinking_mode='thinking' should produce thinking mode (ends with <think>)",
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_without_args() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]));
+
+        // No chat_template_args — should default to formatter's thinking mode
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_START
+            )),
+            "Default (new_thinking) should produce thinking mode",
+        );
+
+        // Verify new_chat() default also works
+        let formatter_chat = DeepSeekV32Formatter::new_chat();
+        let result_chat = formatter_chat.render(&request).unwrap();
+
+        assert!(
+            result_chat.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END
+            )),
+            "Default (new_chat) should produce chat mode",
+        );
+    }
+
+    #[test]
+    fn test_thinking_false_overrides_default_thinking() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([("thinking".to_string(), json!(false))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        // Formatter defaults to thinking, but request overrides to chat
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END
+            )),
+            "Per-request thinking=false should override new_thinking() default",
+        );
+    }
+
+    #[test]
+    fn test_thinking_true_overrides_default_chat() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([("thinking".to_string(), json!(true))]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        // Formatter defaults to chat, but request overrides to thinking
+        let formatter = DeepSeekV32Formatter::new_chat();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_START
+            )),
+            "Per-request thinking=true should override new_chat() default",
+        );
+    }
+
+    #[test]
+    fn test_thinking_bool_takes_precedence_over_thinking_mode_string() {
+        use super::super::OAIPromptFormatter;
+
+        let args = std::collections::HashMap::from([
+            ("thinking".to_string(), json!(false)),
+            ("thinking_mode".to_string(), json!("thinking")),
+        ]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // "thinking": false should win over "thinking_mode": "thinking"
+        assert!(
+            result.ends_with(&format!(
+                "{}{}",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END
+            )),
+            "Boolean 'thinking' key should take precedence over 'thinking_mode' string",
         );
     }
 }

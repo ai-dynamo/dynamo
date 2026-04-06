@@ -6,10 +6,9 @@ import logging
 import os
 import re
 import secrets
-import shlex
 import time
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 import kr8s
 import requests
@@ -68,6 +67,20 @@ class ServiceSpec:
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
+    def frontend_sidecar_image(self) -> Optional[str]:
+        """Container image for the frontendSidecar (if present)."""
+        try:
+            return self._spec["frontendSidecar"]["image"]
+        except KeyError:
+            return None
+
+    @frontend_sidecar_image.setter
+    def frontend_sidecar_image(self, value: str):
+        if "frontendSidecar" not in self._spec:
+            self._spec["frontendSidecar"] = {}
+        self._spec["frontendSidecar"]["image"] = value
+
+    @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
         return self._spec.get("envs", [])
@@ -75,6 +88,25 @@ class ServiceSpec:
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
         self._spec["envs"] = value
+
+    def _get_args(self) -> list[str]:
+        """Return the container args list, normalising scalar strings to a list in-place.
+
+        Always returns the same list object that is stored in the spec, so
+        in-place mutations (append / index assignment) are reflected immediately
+        without an explicit writeback.
+        """
+        try:
+            container = self._spec["extraPodSpec"]["mainContainer"]
+        except KeyError:
+            return []
+        if "args" not in container:
+            container["args"] = []
+        args = container["args"]
+        if isinstance(args, str):
+            args = args.split()
+            container["args"] = args
+        return args
 
     # ----- Replicas -----
     @property
@@ -88,47 +120,21 @@ class ServiceSpec:
     @property
     def model(self) -> Optional[str]:
         """Model being served by this service (checks both --model and --model-path)"""
-        try:
-            args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
-        except KeyError:
-            return None
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-        for i, part in enumerate(parts):
-            if part in ["--model", "--model-path"]:
-                return parts[i + 1] if i + 1 < len(parts) else None
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg in ["--model", "--model-path"]:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    return args[i + 1]
         return None
 
     @model.setter
     def model(self, value: str):
-        if "extraPodSpec" not in self._spec:
-            return
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            return
-
-        args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-
-        # Try to update --model first, then --model-path
-        model_index = None
-        for i, part in enumerate(parts):
-            if part in ["--model", "--model-path"]:
-                model_index = i
-                break
-
-        if model_index is not None:
-            if model_index + 1 < len(parts):
-                parts[model_index + 1] = value
-            else:
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg in ["--model", "--model-path"]:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = value
                 return
-        else:
-            return
-
-        # Store args as a list of separate strings for proper command-line parsing
-        # WRONG: [" ".join(parts)] creates ["--model Qwen/Qwen3-0.6B"] (single string)
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B"] (separate strings)
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
 
     # ----- GPUs -----
     @property
@@ -149,54 +155,26 @@ class ServiceSpec:
     @property
     def tensor_parallel_size(self) -> int:
         """Get tensor parallel size from vLLM arguments"""
-        try:
-            args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
-        except KeyError:
-            return 1  # Default tensor parallel size
-
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-        for i, part in enumerate(parts):
-            if part == "--tensor-parallel-size":
-                return int(parts[i + 1]) if i + 1 < len(parts) else 1
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg == "--tensor-parallel-size":
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    return int(args[i + 1])
+                return 1
         return 1
 
     @tensor_parallel_size.setter
     def tensor_parallel_size(self, value: int):
-        if "extraPodSpec" not in self._spec:
-            return
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            return
-
-        args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
-
-        # Find existing tensor-parallel-size argument
-        tp_index = None
-        for i, part in enumerate(parts):
-            if part == "--tensor-parallel-size":
-                tp_index = i
-                break
-
-        if tp_index is not None:
-            # Update existing value
-            if tp_index + 1 < len(parts):
-                parts[tp_index + 1] = str(value)
-            else:
-                parts.append(str(value))
-        else:
-            # Add new argument
-            parts.extend(["--tensor-parallel-size", str(value)])
-
-        # Store args as a list of separate strings for proper command-line parsing
-        # When TP > 1, this setter is called and adds --tensor-parallel-size to args.
-        # WRONG: [" ".join(parts)] would create ["--model Qwen/Qwen3-0.6B --tensor-parallel-size 2"]
-        #        causing argparse to fail with "IndexError: list index out of range"
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2"]
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
-
-        # Auto-adjust GPU count to match tensor parallel size
+        args = self._get_args()
+        for i, arg in enumerate(args):
+            if arg == "--tensor-parallel-size":
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = str(value)
+                else:
+                    args.append(str(value))
+                self.gpus = value
+                return
+        args.extend(["--tensor-parallel-size", str(value)])
         self.gpus = value
 
 
@@ -265,6 +243,16 @@ class DeploymentSpec:
             services = [self[service_name]]
         for service in services:
             service.image = image
+
+    def set_frontend_sidecar_image(
+        self, image: str, service_name: Optional[str] = None
+    ):
+        if service_name is None:
+            services = self.services
+        else:
+            services = [self[service_name]]
+        for service in services:
+            service.frontend_sidecar_image = image
 
     def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
         """Scale deployment for different tensor parallel configurations
@@ -489,6 +477,31 @@ class PodProcess:
 
 
 @dataclass
+class PodStatusDetail:
+    """Container-level status snapshot for a single container in a pod."""
+
+    pod_name: str
+    container_name: str
+    state: Literal["Waiting", "Terminated", "Running", "Unknown"]
+    reason: str = ""
+    message: str = ""
+    exit_code: Optional[int] = None
+    restart_count: int = 0
+
+    def format(self) -> str:
+        result = f"{self.pod_name}/{self.container_name}: {self.state}"
+        if self.reason:
+            result += f": {self.reason}"
+        if self.message:
+            result += f" ({self.message})"
+        if self.exit_code is not None:
+            result += f" (exit_code={self.exit_code})"
+        if self.restart_count > 0:
+            result += f" [restarts={self.restart_count}]"
+        return result
+
+
+@dataclass
 class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
@@ -685,6 +698,15 @@ class ManagedDeployment:
                         self._logger.info(
                             f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {desired_ready_condition_val} and state {desired_state_val}"
                         )
+                        pod_details = await self._get_pod_status_details()
+                        if pod_details:
+                            for d in pod_details:
+                                self._logger.info(f"  Pod status: {d.format()}")
+                        pod_events = await self._get_pod_events()
+                        if pod_events:
+                            self._logger.info("  Pod warning events:")
+                            for ev in pod_events:
+                                self._logger.info(f"    {ev}")
 
             except exceptions.ApiException as e:
                 self._logger.info(
@@ -696,7 +718,106 @@ class ManagedDeployment:
                     f"Unexpected exception while checking deployment status: {e}"
                 )
             await asyncio.sleep(sleep)
-        raise TimeoutError("Deployment failed to become ready within timeout")
+
+        # Collect pod diagnostics before raising
+        pod_details = await self._get_pod_status_details()
+        elapsed = time.time() - start_time
+        msg = (
+            f"Deployment {self._deployment_name} failed to reach "
+            f"Ready={desired_ready_condition_val}, state={desired_state_val} "
+            f"within {elapsed:.0f}s (timeout={timeout}s)"
+        )
+        if pod_details:
+            detail_lines = "\n".join(f"  {d.format()}" for d in pod_details)
+            msg += f"\n\nPod status at timeout:\n{detail_lines}"
+        raise TimeoutError(msg)
+
+    async def _get_pod_status_details(self) -> List[PodStatusDetail]:
+        """Collect container-level status for all pods owned by this deployment.
+
+        Returns a list of PodStatusDetail objects. Returns empty list on any
+        API failure so callers never need to guard against exceptions.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+
+            details: List[PodStatusDetail] = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name
+                pod_status = pod.status
+                phase = pod_status.phase if pod_status else "Unknown"
+
+                container_statuses = (
+                    pod_status.container_statuses if pod_status else None
+                )
+                if not container_statuses:
+                    details.append(
+                        PodStatusDetail(
+                            pod_name=pod_name,
+                            container_name="*",
+                            state="Unknown",
+                            reason=f"{phase} (no container status)",
+                        )
+                    )
+                    continue
+
+                for cs in container_statuses:
+                    state: Literal[
+                        "Waiting", "Terminated", "Running", "Unknown"
+                    ] = "Unknown"
+                    reason = ""
+                    message = ""
+                    exit_code: Optional[int] = None
+
+                    if cs.state and cs.state.waiting:
+                        state = "Waiting"
+                        reason = cs.state.waiting.reason or ""
+                        message = cs.state.waiting.message or ""
+                    elif cs.state and cs.state.terminated:
+                        state = "Terminated"
+                        reason = cs.state.terminated.reason or ""
+                        exit_code = cs.state.terminated.exit_code
+                    elif cs.state and cs.state.running:
+                        state = "Running"
+
+                    details.append(
+                        PodStatusDetail(
+                            pod_name=pod_name,
+                            container_name=cs.name,
+                            state=state,
+                            reason=reason,
+                            message=message,
+                            exit_code=exit_code,
+                            restart_count=cs.restart_count or 0,
+                        )
+                    )
+
+            return details
+
+        except exceptions.ApiException as e:
+            self._logger.debug(f"Failed to collect pod status details: {e}")
+            return []
+
+    async def _get_pod_events(self) -> List[str]:
+        """Fetch warning events for pods in this deployment's namespace."""
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            events = await self._core_api.list_namespaced_event(self.namespace)
+            warnings = []
+            for event in events.items:
+                if event.type != "Normal" and event.involved_object.kind == "Pod":
+                    name = event.involved_object.name or "unknown"
+                    reason = event.reason or ""
+                    msg = event.message or ""
+                    warnings.append(f"{name}: {reason} - {msg}")
+            return warnings[-10:]
+        except Exception as e:
+            self._logger.debug(f"Failed to collect pod events: {e}")
+            return []
 
     async def _restart_nats(self):
         NATS_STS_NAME = "dynamo-platform-nats"
@@ -790,9 +911,10 @@ class ManagedDeployment:
 
         pod_names: list[str] = []
 
-        for service_name in service_names:
+        for original_name in service_names:
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
             assert self._core_api is not None, "Kubernetes API not initialized"
             pods: client.V1PodList = await self._core_api.list_namespaced_pod(
@@ -824,11 +946,11 @@ class ManagedDeployment:
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for service_name in service_names:
-            # List pods for this service using the selector label
-            # nvidia.com/selector: deployment-name-service
+        for original_name in service_names:
+            # List pods using stable labels that are not affected by worker hash suffixes.
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
 
             pods: list[Pod] = []
@@ -838,7 +960,7 @@ class ManagedDeployment:
             ):
                 pods.append(pod)  # type: ignore[arg-type]
 
-            result[service_name] = pods
+            result[original_name] = pods
 
         return result
 

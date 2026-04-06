@@ -12,8 +12,8 @@ data:
     enable_attention_dp: false
     enable_chunked_prefill: false
     max_batch_size: 128
-    max_num_tokens: 7800
-    max_seq_len: 7800
+    max_num_tokens: 7808
+    max_seq_len: 7808
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.7
@@ -166,8 +166,8 @@ data:
     enable_attention_dp: false
     enable_chunked_prefill: false
     max_batch_size: 1
-    max_num_tokens: 7800
-    max_seq_len: 7800
+    max_num_tokens: 7808
+    max_seq_len: 7808
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.7
@@ -218,7 +218,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
       replicas: 1
     TrtllmPrefillWorker:
       componentType: worker
@@ -253,7 +253,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -313,7 +313,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"

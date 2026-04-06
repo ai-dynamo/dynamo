@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from collections.abc import AsyncGenerator
 from typing import Optional
 
 from dynamo._core import Context
@@ -65,7 +66,9 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -108,6 +111,8 @@ class PrefillHandler(HandlerBase):
             Encoder's embeddings tensor to be used by the prefill worker
         """
         # Get response with shape info and readable metadata
+        if self.encode_client is None:
+            raise RuntimeError("Encode client is not configured.")
         encode_response = None
         async for res in await self.encode_client.round_robin(request):
             encode_response = res.data()
@@ -116,12 +121,16 @@ class PrefillHandler(HandlerBase):
         if not encode_response:
             raise RuntimeError("Did not receive a response from the encode worker.")
 
+        if self.connector is None:
+            raise RuntimeError("Connector is not configured.")
         # Use utility function to handle NIXL reading and reconstruction
         return await EncodeHelper.read_embeddings_from_encode_response(
             encode_response, self.connector
         )
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         """
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
@@ -195,7 +204,9 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         """
         Decode worker: generate tokens using disaggregated_params from prefill.
         If disaggregated_params is present, prefill was done. Otherwise generate normally.

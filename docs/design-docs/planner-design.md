@@ -147,7 +147,7 @@ The interpolators use the profiling sweep granularity to determine precision. Fi
 
 ## Initialization
 
-The planner starts with a 30-second delay (`INIT_PLANNER_START_DELAY`) to allow other components (frontend, workers) to register and stabilize. This is a known workaround (marked TODO in code) that should be replaced with a proper readiness check.
+The planner currently waits 30 seconds (`INIT_PLANNER_START_DELAY` in `components/src/dynamo/planner/__main__.py`) as a temporary workaround while other components (frontend, workers) register and stabilize; see [Known Limitations](#known-limitations) for the planned readiness-probing replacement.
 
 After the delay:
 
@@ -165,30 +165,31 @@ After the delay:
 - **Interpolation accuracy vs profiling cost**: Higher `prefillInterpolationGranularity` and `decodeInterpolationGranularity` in the profiling sweep produce more accurate interpolation but increase profiling time linearly. Default granularity (16 prefill, 6 decode) balances accuracy with profiling duration.
 - **Predictor warm-up period**: All predictors need observation history before making reliable forecasts. ARIMA and Prophet need multiple adjustment intervals of data. Kalman starts forecasting after `--kalman-min-points` observations. During warm-up, the planner uses the constant predictor as fallback.
 
-## Load-Based Scaling (Experimental)
+## Load-Based Scaling
 
-The load-based mode uses real-time per-worker metrics from the router to make SLA-aware scaling decisions without requiring profiling data.
+The load-based mode uses ForwardPassMetrics (FPM) from the Dynamo event plane to make SLA-aware scaling decisions without requiring profiling data or the KV Router.
 
 ### Metrics
 
-The planner pulls per-worker load metrics directly from the frontend's `/metrics` endpoint:
-- **Active prefill tokens**: pending prefill tokens per worker
-- **Active decode blocks**: active KV blocks per worker
-- **Last TTFT, ITL, ISL**: most recent observed latencies per worker
+Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay -> event plane. The planner subscribes via `FpmEventSubscriber` with automatic engine discovery and MDC-based lifecycle tracking. Key fields used:
+- **wall_time**: per-iteration execution time (regression target)
+- **scheduled_requests.sum_prefill_tokens**: prefill regression input
+- **scheduled_requests.sum_decode_kv_tokens**: decode regression input
+- **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
+- Idle heartbeats (wall_time=0) are skipped
 
-### Regression Model
+### Regression Models
 
-A sliding-window linear regression maps load to latency:
-- Prefill: `(active_prefill_tokens + ISL)` -> `TTFT`
-- Decode: `active_decode_blocks` -> `ITL`
-
-Given a TTFT/ITL SLA target, the model reverse-solves for the maximum load that satisfies the SLA.
+Three specialized regression models (`fpm_regression.py`):
+- **PrefillRegressionModel**: 1D regression `sum_prefill_tokens -> wall_time`. Estimates TTFT by simulating chunked prefill scheduling (chunks of `max_num_batched_tokens`).
+- **DecodeRegressionModel**: 1D regression `sum_decode_kv_tokens -> wall_time`. Estimates ITL for total decode load (scheduled + queued + avg decode length).
+- **AggRegressionModel**: 2D regression `(sum_prefill_tokens, sum_decode_kv_tokens) -> wall_time`. Estimates both TTFT (simulated prefill with piggybacked decode) and ITL (decode with average piggybacked prefill).
 
 ### Scaling Decisions
 
-- **Scale up**: if ALL workers' recent load exceeds the regression-derived target
-- **Scale down**: if ALL workers' recent load is below the target adjusted by `(num_workers - 1) / num_workers * sensitivity / 100`
-- Only scales by +/-1 per interval (blocking)
+- **Prefill/Decode**: Scale up if ALL engines' estimated TTFT/ITL > SLA; scale down if ALL < SLA * sensitivity
+- **Agg**: Scale up if (ALL TTFT > SLA) OR (ALL ITL > SLA); scale down if (ALL TTFT < SLA * sensitivity) AND (ALL ITL < SLA * sensitivity)
+- Only scales by +/-1 per interval (non-blocking with pending-desired guard: metrics continue to be observed while scaling is in progress, but no new scaling action is issued until the previous one completes)
 
 ### Co-existence with Throughput-Based Scaling
 
@@ -231,5 +232,4 @@ In aggregated mode (`--mode agg`), engines handle both prefill and decode via ch
 | `exceptions.py`              | Custom exception hierarchy                            |
 | `defaults.py`                | Default configs, backend name mappings                |
 | `planner_argparse.py`        | CLI argument definitions                              |
-
 

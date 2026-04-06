@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
-use crate::kv_router::{
-    Indexer, KV_EVENT_SUBJECT, KvRouterConfig,
-    protocols::{DpRank, RouterEvent, WorkerId},
-    worker_query::WorkerQueryClient,
-};
+use crate::kv_router::{Indexer, worker_query::WorkerQueryClient};
 use anyhow::Result;
+use dynamo_kv_router::{
+    config::KvRouterConfig,
+    protocols::{KV_EVENT_SUBJECT, RouterEvent},
+};
 use dynamo_runtime::{
     component::Component, discovery::EventTransportKind, prelude::*,
     transports::event_plane::EventSubscriber,
@@ -23,9 +21,6 @@ use dynamo_runtime::{
 /// - On worker Added: dumps worker's local indexer into router
 /// - On worker Removed: removes worker from router indexer
 ///
-/// This function first recovers state from all currently registered workers before
-/// spawning the background task, ensuring the router is ready before returning.
-///
 /// This is appropriate when workers have local indexers enabled.
 async fn start_kv_router_background_event_plane(
     component: Component,
@@ -33,15 +28,23 @@ async fn start_kv_router_background_event_plane(
     transport_kind: EventTransportKind,
 ) -> Result<()> {
     let cancellation_token = component.drt().primary_token();
-    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
-    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
 
-    // Subscribe to KV events using the selected event plane transport
+    // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
+    // This ensures no events are lost between the initial dump fetch and the
+    // subscription becoming active — the tree state at fetch time is guaranteed
+    // to be a subset of what the subscription will deliver.
     let mut subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
             .await?
             .typed::<RouterEvent>();
+
+    // Brief delay to let the subscription fully establish with the NATS server
+    // before recovery fetches the initial dump from workers.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
+    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
+    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -65,10 +68,6 @@ async fn start_kv_router_background_event_plane(
     }
 
     tokio::spawn(async move {
-        // Track last received event ID per (worker, dp_rank) for gap detection
-        // Each dp_rank has its own monotonic event ID sequence
-        let mut last_event_ids: HashMap<(WorkerId, DpRank), u64> = HashMap::new();
-
         loop {
             tokio::select! {
                 biased;
@@ -88,47 +87,19 @@ async fn start_kv_router_background_event_plane(
                         }
                     };
 
-                    let worker_id = event.worker_id;
-                    let dp_rank = event.event.dp_rank;
-                    let event_id = event.event.event_id;
-                    let event_key = (worker_id, dp_rank);
-
                     tracing::trace!(
                         "Received event from publisher {} (seq {})",
                         envelope.publisher_id,
                         envelope.sequence
                     );
 
-                    // Gap detection: check if event ID is monotonically increasing per (worker, dp_rank)
-                    // Note: event_id <= last_id is duplicate/out-of-order, apply anyway (idempotent)
-                    if let Some(&last_id) = last_event_ids.get(&event_key)
-                        && event_id > last_id + 1
-                    {
-                        let gap_start = last_id + 1;
-                        let gap_end = event_id - 1;
-                        let gap_size = gap_end - gap_start + 1;
-                        tracing::warn!(
-                            "Event ID gap detected for worker {worker_id} dp_rank {dp_rank}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
-                        );
-
-                        if let Err(e) = worker_query_client
-                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end))
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
-                            );
-                        }
-                    }
-
-                    // Update last seen event ID (use max to handle out-of-order)
-                    last_event_ids
-                        .entry(event_key)
-                        .and_modify(|id| *id = (*id).max(event_id))
-                        .or_insert(event_id);
-
-                    // Forward the RouterEvent to the indexer
-                    indexer.apply_event(event).await;
+                    tracing::trace!(
+                        "Forwarding live event to recovery coordinator for worker {} dp_rank {} event_id {}",
+                        event.worker_id,
+                        event.event.dp_rank,
+                        event.event.event_id
+                    );
+                    worker_query_client.handle_live_event(event).await;
                 }
             }
         }

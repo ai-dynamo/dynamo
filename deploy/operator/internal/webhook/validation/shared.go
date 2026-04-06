@@ -113,6 +113,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 			v.fieldPath))
 	}
 
+	// Validate frontend sidecar container name conflicts
+	if err := v.validateFrontendSidecar(); err != nil {
+		return nil, err
+	}
+
 	// Validate service-level annotations
 	if err := v.validateServiceAnnotations(); err != nil {
 		return nil, err
@@ -228,6 +233,25 @@ func (v *SharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Cont
 			epp.InferencePoolGroup)
 	}
 
+	return nil
+}
+
+// validateFrontendSidecar checks that extraPodSpec.containers does not already
+// contain a container whose name collides with the auto-generated frontend sidecar.
+func (v *SharedSpecValidator) validateFrontendSidecar() error {
+	if v.spec.FrontendSidecar == nil {
+		return nil
+	}
+	if v.spec.ExtraPodSpec == nil || v.spec.ExtraPodSpec.PodSpec == nil {
+		return nil
+	}
+	for _, c := range v.spec.ExtraPodSpec.PodSpec.Containers {
+		if c.Name == consts.FrontendSidecarContainerName {
+			return fmt.Errorf(
+				"%s: cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers",
+				v.fieldPath, consts.FrontendSidecarContainerName)
+		}
+	}
 	return nil
 }
 

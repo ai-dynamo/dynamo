@@ -10,29 +10,17 @@ title: Inference Gateway (GAIE)
 
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
-EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+## Features
 
-Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. The epp config is the same for both. If no prefill workers found the service degrades gracefully to perform aggregated serving.
-If you want to use LoRA deploy Dynamo without the Inference Gateway.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml), following the checked-in GAIE/EPP configuration layout used by this repository.
 
-Currently, these setups are only supported with the kGateway based Inference Gateway.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
 
-## Table of Contents
+- GAIE integration supports Data Parallelism.
 
-- [Prerequisites](#prerequisites)
-- [Installation Steps](#installation-steps)
-  - [1. Install Dynamo Platform](#1-install-dynamo-platform)
-  - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
-  - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Build EPP image (Optional)](#4-build-epp-image-optional)
-  - [5. Deploy](#5-deploy)
-  - [6. Verify Installation](#6-verify-installation)
-  - [7. Usage](#7-usage)
-  - [8. Deleting the installation](#8-deleting-the-installation)
-- [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
-  - [Router bookkeeping operations](#router-bookkeeping-operations)
-  - [Header Routing Hints](#header-routing-hints)
+- If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
+- Currently, these setups are only tested with the kGateway Inference Gateway.
 
 ## Prerequisites
 
@@ -44,6 +32,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
+If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
@@ -88,10 +77,6 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
-Take a note of the model's block size provided in the model card.
-
 ### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
@@ -123,14 +108,30 @@ make info # Check image tag
 ### 5. Deploy
 
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
-you could deploy it as a standalone pod
+you could deploy it as a standalone pod.
+Note that when deploying Dynamo with the Inference Gateway Extension each worker must have the FrontEnd as a sidecar.
 
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
+You have to deploy the Dynamo Graph and the HttpRoute service.
+For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+```bash
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: my-model # the namespace where your gateway is deployed.
+```
+
 ```bash
 cd <dynamo-source-root>
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# Choose disagg or agg example
+kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
+# or
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
+# make sure to apply the route
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
 
@@ -142,6 +143,11 @@ kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPAC
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
 We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+Note for the aggregated serving you need to disable DYN_ENFORCE_DISAGG in epp config.
+```bash
+  - name: DYN_ENFORCE_DISAGG
+    value: "false"
+```
 Use the proper folder in commands below.
 
 ```bash
@@ -149,7 +155,7 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR.
+# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -158,18 +164,20 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 ```
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
-- You must enable the flag in the FrontEnd cli as below.
-```bash
-    command:
-      - python3
-    args:
-      - -m
-      - dynamo.frontend
-      - --router-mode
-      - direct
+- The FrontEnd must run with `--router-mode direct` so that it respects the EPP's routing decisions passed via request headers.
+- Use the `frontendSidecar` field on a worker service to have the operator automatically inject a fully configured frontend sidecar container with all required Dynamo env vars, probes, and ports:
+
+```yaml
+frontendSidecar:
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  args:
+    - --router-mode
+    - direct
+  envFromSecret: hf-token-secret
 ```
+
 - The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
-- The flag assures the routing respects this selection.
+- The `--router-mode direct` flag ensures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
 If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,
@@ -184,7 +192,7 @@ extraPodSpec:
 
 **Gateway Namespace**
 Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
+If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
 
 
 #### 5.b. Deploy as a standalone pod
@@ -201,6 +209,7 @@ cd deploy/inference-gateway/standalone
 # Export the EPP image - use the Dynamo FrontEnd image or build your own EPP image (see section 4)
 export EPP_IMAGE=<the-epp-image>
 ```
+Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
@@ -225,11 +234,33 @@ Key configurations include:
 You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/values.yaml).
 
 Common Vars for Routing Configuration:
+
+**Enabling KV-Aware Routing (most precise)**
+
+KV-aware routing uses live KV cache block events from workers so the EPP can route requests to the worker with the best prefix cache overlap. To enable it (default):
+
+1. **Workers — enable prefix caching and KV event publishing.** Each worker must publish KV cache events to event plane (NATS/ZMQ) so the EPP's router can track per-worker cache state.
+   - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
+   - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
+   - **TRT-LLM:** Pass `--publish-events-and-metrics`.
+   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
+2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via event plane (NATS/ZMQ) and uses them for prefix-overlap scoring.
+3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
+
+**Disabling KV-Aware Routing**
+
+To disable the EPP from listening for KV events (e.g., when prefix caching is off on workers, or for simpler load-balanced routing):
+
+1. **EPP:** Set `DYN_USE_KV_EVENTS=false`. The router falls back to approximate mode (routing decisions are tracked locally with TTL decay instead of live KV events from workers).
+2. **Workers:** Pass `--no-enable-prefix-caching` to disable prefix caching entirely. Without prefix caching, no KV events are generated regardless of other flags.
+3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
+
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_DECODE_FALLBACK=true` to allow falling back to aggregated (decode-only) mode when prefill workers are unavailable. By default, disaggregated prefill-decode is enforced and requests fail if no prefill workers are found.
+- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
+  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
+  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- Set `DYN_USE_KV_EVENTS=false` if you want to disable the router listening for KV events while using kv-routing (default: true). SGLang workers require `--kv-events-config` and TRT-LLM workers require `--publish-events-and-metrics` to publish KV events. For vLLM, KV events are auto-configured when prefix caching is active (deprecated — use `--kv-events-config` explicitly)
 - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
@@ -268,9 +299,8 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-To test the gateway in minikube, use the following command:
-a. User minikube tunnel to expose the gateway to the host
-   This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
+a. To test the integration in minikube, proceed as below:
+Use minikube tunnel to expose the gateway to the host. This requires `sudo` access to the host machine. Alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
 
 ```bash
 # in first terminal
@@ -281,11 +311,13 @@ minikube tunnel # start the tunnel
 GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}') && echo $GATEWAY_URL
 ```
 
-b. use port-forward to expose the gateway to the host
+b. To test on a cluster use commands below:
+
+use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n {NAMESPACE} # for NAMESPACE put wherever you installed thee gateway i.e. kgateway-system
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -297,8 +329,9 @@ a. Query models:
 
 ```bash
 # in the second terminal where you GATEWAY_URL is set
-
 curl $GATEWAY_URL/v1/models | jq .
+# or if you added the host name to http route:
+curl -H "Host: llama3-70b-disagg.example.com" $GATEWAY_URL/v1/models | jq .
 ```
 
 Sample output:
@@ -322,6 +355,25 @@ b. Send inference request to gateway:
 ```bash
 MODEL_NAME="Qwen/Qwen3-0.6B"
 curl $GATEWAY_URL/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "'"${MODEL_NAME}"'",
+      "messages": [
+      {
+          "role": "user",
+          "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+      }
+      ],
+      "stream":false,
+      "max_tokens": 30,
+      "temperature": 0.0
+    }'
+```
+or
+
+```bash
+MODEL_NAME="RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "'"${MODEL_NAME}"'",
@@ -373,7 +425,9 @@ Sample inference output:
 ```
 
 ***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ...` to every request.
+Add the host to your HttpRoute.yaml and add the header
+`curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
+
 ```bash
 spec:
   hostnames:

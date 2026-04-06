@@ -17,8 +17,9 @@ use serde::Serialize;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::{
-    BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, compute_block_hash_for_seq,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent,
+    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement,
+    PlacementEvent, StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 // -------------------------------------------------------------------------
@@ -58,10 +59,17 @@ pub enum BlockHashValue {
 impl BlockHashValue {
     pub fn into_u64(self) -> u64 {
         match self {
-            BlockHashValue::Signed(v) => v as u64,
+            BlockHashValue::Signed(v) => v.cast_unsigned(),
             BlockHashValue::Unsigned(v) => v,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum KvTokenIds {
+    Single(Vec<u32>),
+    Bigram(Vec<(u32, u32)>),
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -82,6 +90,8 @@ pub enum RawKvEvent {
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_eagle: Option<bool>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -179,7 +189,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut event_type: Option<String> = None;
         let mut block_hashes: Option<Vec<BlockHashValue>> = None;
         let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
-        let mut token_ids: Option<Vec<u32>> = None;
+        let mut token_ids: Option<KvTokenIds> = None;
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
@@ -226,6 +236,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let (raw_token_ids, is_eagle) = match token_ids {
+                    KvTokenIds::Single(tids) => (tids, false),
+                    KvTokenIds::Bigram(tids) => {
+                        let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
+                        if !tids.is_empty() {
+                            let last_token = tids.last().map(|&(_, second)| second).unwrap();
+                            new_tids.push(last_token);
+                        }
+                        (new_tids, true)
+                    }
+                };
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let block_mm_infos = block_mm_infos
@@ -234,11 +255,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
-                    token_ids,
+                    token_ids: raw_token_ids,
                     block_size,
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
+                    is_eagle: Some(is_eagle),
                 })
             }
             Some("BlockRemoved") => {
@@ -276,7 +298,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let parent_block_hash: Option<BlockHashValue> = seq.next_element()?.unwrap_or(None);
-                let token_ids: Vec<u32> = seq
+                let token_ids: KvTokenIds = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(3, &"missing token_ids"))?;
                 let block_size: usize = seq
@@ -296,14 +318,27 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_mm_infos =
                     block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
 
+                let (raw_token_ids, is_eagle) = match token_ids {
+                    KvTokenIds::Single(tids) => (tids, false),
+                    KvTokenIds::Bigram(tids) => {
+                        let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
+                        if !tids.is_empty() {
+                            let last_token = tids.last().map(|&(_, second)| second).unwrap();
+                            new_tids.push(last_token);
+                        }
+                        (new_tids, true)
+                    }
+                };
+
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash,
-                    token_ids,
+                    token_ids: raw_token_ids,
                     block_size,
                     medium,
                     lora_name,
                     block_mm_infos,
+                    is_eagle: Some(is_eagle),
                 })
             }
             "BlockRemoved" => {
@@ -335,16 +370,22 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 // Event conversion --------------------------------------------------------
 // -------------------------------------------------------------------------
 
-/// Convert a raw event coming from the ZMQ channel into the internal
-/// [`KvCacheEvent`] representation used by the router.
+/// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
-    dp_rank: u32,
+    worker: WorkerWithDpRank,
     warning_count: &Arc<AtomicU32>,
-) -> KvCacheEvent {
-    match raw {
+) -> PlacementEvent {
+    let storage_tier = match &raw {
+        RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
+            StorageTier::from_kv_medium_or_default(medium.as_deref())
+        }
+        RawKvEvent::AllBlocksCleared => StorageTier::Device,
+    };
+    let dp_rank = worker.dp_rank;
+    let event = match raw {
         RawKvEvent::BlockStored {
             block_hashes,
             parent_block_hash,
@@ -353,6 +394,7 @@ pub fn convert_event(
             lora_name,
             block_mm_infos,
             medium: _,
+            is_eagle,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -366,11 +408,19 @@ pub fn convert_event(
                         event_id,
                         "Self-referencing block detected: duplicate hash in store event; dropping"
                     );
-                    return KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Cleared,
-                        dp_rank,
-                    };
+                    // Return an empty Removed instead of Cleared to avoid nuking
+                    // the worker's entire index state. An empty Removed is a no-op
+                    // in the radix tree (zero iterations, returns Ok(())).
+                    return PlacementEvent::new(
+                        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                        KvCacheEvent {
+                            event_id,
+                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                block_hashes: vec![],
+                            }),
+                            dp_rank,
+                        },
+                    );
                 }
             }
 
@@ -393,6 +443,7 @@ pub fn convert_event(
                         lora_name.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
+                        is_eagle,
                     ),
                 }),
                 dp_rank,
@@ -417,7 +468,12 @@ pub fn convert_event(
             data: KvCacheEventData::Cleared,
             dp_rank,
         },
-    }
+    };
+
+    PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+        event,
+    )
 }
 
 pub fn create_stored_block_from_parts(
@@ -426,13 +482,17 @@ pub fn create_stored_block_from_parts(
     token_ids: &[u32],
     lora_name: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
+    is_eagle: Option<bool>,
 ) -> KvCacheStoredBlockData {
     let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
     let tokens_hash = compute_block_hash_for_seq(
         token_ids,
         kv_block_size,
-        block_mm_infos.as_deref(),
-        lora_name,
+        BlockHashOptions {
+            block_mm_infos: block_mm_infos.as_deref(),
+            lora_name,
+            is_eagle,
+        },
     )[0];
 
     tracing::trace!(
@@ -450,6 +510,7 @@ pub fn create_stored_block_from_parts(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_stored_blocks(
     kv_block_size: u32,
     token_ids: &[u32],
@@ -458,10 +519,13 @@ pub fn create_stored_blocks(
     lora_name: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: Option<bool>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
+    let append = is_eagle.unwrap_or(false) as usize;
+
     for (block_idx, (num_tokens_it, block_hash_it)) in
         num_block_tokens.iter().zip(block_hashes.iter()).enumerate()
     {
@@ -476,7 +540,19 @@ pub fn create_stored_blocks(
             break;
         }
 
-        let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
+        let end = token_offset + append + *num_tokens_it as usize;
+        if end > token_ids.len() {
+            if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                tracing::warn!(
+                    "Block not published. token_ids too short: need {}, got {}",
+                    end,
+                    token_ids.len()
+                );
+            }
+            break;
+        }
+
+        let tokens = &token_ids[token_offset..end];
         let mm_extra_info = block_mm_infos
             .and_then(|infos| infos.get(block_idx))
             .and_then(|opt| opt.clone());
@@ -487,9 +563,102 @@ pub fn create_stored_blocks(
             tokens,
             lora_name,
             mm_extra_info,
+            is_eagle,
         ));
         token_offset += *num_tokens_it as usize;
     }
 
     blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
+
+    use rmp_serde::{from_slice, to_vec};
+
+    use super::*;
+
+    #[test]
+    fn test_deserialize_bigram_block_stored_sequence() {
+        let raw_event = (
+            "BlockStored",
+            vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
+            Option::<BlockHashValue>::None,
+            vec![(10u32, 11u32), (11, 12), (12, 13), (13, 14)],
+            2usize,
+            Option::<u64>::None,
+            Option::<String>::None,
+            Option::<String>::None,
+        );
+        let encoded = to_vec(&raw_event).unwrap();
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+        match event {
+            RawKvEvent::BlockStored {
+                token_ids,
+                block_size,
+                is_eagle,
+                ..
+            } => {
+                assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+                assert_eq!(block_size, 2);
+                assert_eq!(is_eagle, Some(true));
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_event_bigram_emits_eagle_windows() {
+        let raw_event = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(21), BlockHashValue::Unsigned(22)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11, 12, 13, 14],
+            block_size: 2,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            is_eagle: Some(true),
+        };
+        let warning_count = Arc::new(AtomicU32::new(0));
+        let placement_event =
+            convert_event(raw_event, 7, 2, WorkerWithDpRank::new(3, 0), &warning_count);
+
+        match placement_event.event.data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(store_data.blocks.len(), 2);
+                assert_eq!(
+                    store_data.blocks[0].block_hash,
+                    ExternalSequenceBlockHash(21)
+                );
+                assert_eq!(
+                    store_data.blocks[1].block_hash,
+                    ExternalSequenceBlockHash(22)
+                );
+
+                let expected_first = compute_block_hash_for_seq(
+                    &[10, 11, 12],
+                    2,
+                    BlockHashOptions {
+                        is_eagle: Some(true),
+                        ..Default::default()
+                    },
+                );
+                let expected_second = compute_block_hash_for_seq(
+                    &[12, 13, 14],
+                    2,
+                    BlockHashOptions {
+                        is_eagle: Some(true),
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(store_data.blocks[0].tokens_hash, expected_first[0]);
+                assert_eq!(store_data.blocks[1].tokens_hash, expected_second[0]);
+            }
+            other => panic!("expected Stored event, got {other:?}"),
+        }
+    }
 }

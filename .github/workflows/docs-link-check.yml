@@ -13,22 +13,21 @@ jobs:
   lychee:
     runs-on: ubuntu-latest
     steps:
+
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # Cache lychee results (e.g. to avoid hitting rate limits)
-      # https://lychee.cli.rs/github_action_recipes/caching/
       - name: Restore lychee cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v5
         with:
           path: .lycheecache
-          key: cache-lychee-${{ github.sha }}
+          key: cache-lychee-${{ github.run_id }}
           restore-keys: cache-lychee-
 
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
           args: >-
             --cache
             --no-progress
@@ -38,15 +37,40 @@ jobs:
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
-            --exclude-path "./docs/components/profiler/profiler_guide.md"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
-            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
+            --verbose
+            --host-concurrency 10
+            --host-request-interval 1s
+            --host-stats
             .
           fail: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Strip cached errors before saving
+        if: always() && github.ref == 'refs/heads/main'
+        run: |
+          if [ -f .lycheecache ]; then
+            grep -E ',2[0-9]{2},' .lycheecache > .lycheecache.tmp || true
+            cutoff=$(( $(date +%s) - 93600 ))
+            stale=$(awk -F',' -v c="$cutoff" '$3 < c' .lycheecache.tmp)
+            if [ -n "$stale" ]; then
+              echo "Removing stale cache entries (>26h old):"
+              echo "$stale"
+              awk -F',' -v c="$cutoff" '$3 >= c' .lycheecache.tmp > .lycheecache.tmp2 || true
+              mv .lycheecache.tmp2 .lycheecache.tmp
+            fi
+            mv .lycheecache.tmp .lycheecache
+          fi
+
+      - name: Save lychee cache
+        uses: actions/cache/save@v5
+        if: always() && github.ref == 'refs/heads/main'
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.run_id }}
 
   broken-links-check:
     name: Check for broken markdown links

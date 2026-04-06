@@ -41,6 +41,14 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
   - deployments
   verbs:
   - create
@@ -50,6 +58,18 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - autoscaling
   resources:
@@ -105,6 +125,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - grove.io
+  resources:
+  - clustertopologies
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - grove.io

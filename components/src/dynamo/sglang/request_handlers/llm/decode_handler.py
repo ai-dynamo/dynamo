@@ -12,6 +12,7 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -24,7 +25,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -129,9 +130,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            trace_header = (
-                self._get_trace_header(context) if self.enable_trace else None
-            )
+            trace_header = build_trace_headers(context) if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -160,7 +159,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # Extract image URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
-            image_data = None
+            image_data: list[str] | None = None
             image_items = request.get("multi_modal_data", {}).get("image_url")
             if image_items:
                 image_data = []
@@ -171,9 +170,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         image_data.append(item["Url"])
                 image_data = image_data or None
 
-            trace_header = (
-                self._get_trace_header(context) if self.enable_trace else None
-            )
+            trace_header = build_trace_headers(context) if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -215,7 +212,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             Dict with token_ids and optional finish_reason.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -230,7 +227,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # This lets SGLang proceed to the second token generation, which will
                 # async context switch and allow the abort monitor to signal cancellation.
                 # The loop should exit by itself when context.is_stopped() returns True.
-                out = {}
+                out: dict[str, Any] = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
                     out["finish_reason"] = normalize_finish_reason(
@@ -289,7 +286,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         count = 0
 
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future

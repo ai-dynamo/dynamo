@@ -28,6 +28,14 @@ pub struct ModelRuntimeConfig {
 
     pub reasoning_parser: Option<String>,
 
+    /// When true, strip tool definitions from the chat template when tool_choice is "none".
+    #[serde(default = "default_exclude_tools_when_tool_choice_none")]
+    pub exclude_tools_when_tool_choice_none: bool,
+
+    /// Starting rank of data parallel ranks for this worker (0 if DP not enabled)
+    #[serde(default = "default_data_parallel_start_rank")]
+    pub data_parallel_start_rank: u32,
+
     /// Total number of data parallel ranks for this worker (1 if DP not enabled)
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
@@ -53,6 +61,13 @@ pub struct ModelRuntimeConfig {
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
+
+    #[serde(default = "default_eagle")]
+    pub enable_eagle: bool,
+}
+
+const fn default_data_parallel_start_rank() -> u32 {
+    0
 }
 
 const fn default_data_parallel_size() -> u32 {
@@ -63,6 +78,14 @@ const fn default_local_indexer() -> bool {
     true
 }
 
+const fn default_exclude_tools_when_tool_choice_none() -> bool {
+    true
+}
+
+const fn default_eagle() -> bool {
+    false
+}
+
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -71,16 +94,23 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
+            data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,
+            enable_eagle: false,
         }
     }
 }
 
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+    fn data_parallel_start_rank(&self) -> u32 {
+        self.data_parallel_start_rank
+    }
+
     fn data_parallel_size(&self) -> u32 {
         self.data_parallel_size
     }

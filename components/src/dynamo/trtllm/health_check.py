@@ -8,6 +8,7 @@ This module defines the default health check payload for TRT-LLM backends.
 """
 
 import logging
+from typing import Any
 
 from dynamo.health_check import HealthCheckPayload
 
@@ -55,7 +56,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     Provides TRT-LLM defaults and inherits environment override support from base class.
     """
 
-    def __init__(self, tokenizer=None):
+    def __init__(self, tokenizer: Any = None) -> None:
         """
         Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.
 
@@ -81,7 +82,6 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "top_k": 1,
-                "beam_width": 1,
                 "repetition_penalty": 1.0,
                 "presence_penalty": 0.0,
                 "frequency_penalty": 0.0,
