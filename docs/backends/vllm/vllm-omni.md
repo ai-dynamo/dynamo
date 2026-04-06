@@ -324,48 +324,48 @@ For models with multiple pipeline stages (e.g., AR + Diffusion), Dynamo supports
 
 ### Architecture
 
-In aggregated mode, vLLM-Omni's monolithic `AsyncOmni` engine runs all stages in a single process. In disaggregated mode, Dynamo splits the pipeline into separate stage workers coordinated by a lightweight router:
+Each stage runs as an independent process on its own GPU. A lightweight router coordinates them, acting as a **pure message broker** — it never inspects or transforms inter-stage data.
 
 ```mermaid
 flowchart LR
-  client["Client"] --> frontend["Frontend:8000"]
-  frontend --> router["OmniStageRouter"]
-  router -- "gRPC" --> stage0["Stage 0: AR(GPU 0)"]
-  stage0 -- "SHM" --> router
-  router -- "write" --> connector[("Connector(shared memory)")]
-  router -- "gRPC" --> stage1["Stage 1: DiT (GPU 1)"]
-  connector -- "read" --> stage1
-  stage1 -- "SHM" --> router
+  client(Client) --> frontend(Frontend)
+  frontend --> router(Router)
+  router -->|request| s0(Stage 0)
+  s0 -->|ref| router
+  router -->|ref| s1(Stage 1)
+  s1 -->|result| router
   router --> frontend --> client
+  s0 <-->|bulk data| conn[(Connector)]
+  conn <--> s1
 ```
 
-<!-- TODO: Add key design choices section -->
+**How it works:**
+
+- The router sends the initial request to Stage 0 and receives back a lightweight connector reference (pointer to the output in shared memory).
+- The router forwards that reference — unchanged — to Stage 1. It never reads the bulk data.
+- Each stage fetches its inputs from the connector, runs any model-specific processor (e.g., `ar2diffusion`, `thinker2talker`), then runs its engine.
+- The final stage's result goes back to the router for formatting and response.
+- Connector references accumulate as the pipeline progresses, so any stage can access outputs from all previous stages.
 
 ### Data Flow
 
 ```mermaid
 sequenceDiagram
   participant C as Client
-  participant F as Frontend
   participant R as Router
   participant S0 as Stage 0 (AR)
-  participant SHM as /dev/shm
+  participant SHM as Connector
   participant S1 as Stage 1 (DiT)
 
-  C->>F: POST /v1/images/generations
-  F->>R: generate(request)
-  R->>S0: round_robin({engine_inputs: prompt})
-  S0->>S0: AsyncOmni.generate() with YAML defaults
-  S0-->>R: OmniRequestOutput (token_ids) via SHM
-  R->>R: ar2diffusion(token_ids) -> diffusion_input
-  R->>SHM: connector.put(diffusion_input)
-  R->>S1: round_robin({from_connector: true})
-  S1->>SHM: try_recv_via_connector()
-  S1->>S1: AsyncOmni.generate() with YAML defaults
-  S1-->>R: OmniRequestOutput (images) via SHM
-  R->>R: OutputFormatter -> NvImagesResponse
-  R-->>F: response
-  F-->>C: {"data": [{"b64_json": "..."}]}
+  C->>R: POST /v1/images/generations
+  R->>S0: request + prompt
+  S0->>SHM: store output
+  S0-->>R: connector ref
+  R->>S1: connector ref (opaque)
+  S1->>SHM: fetch output
+  S1->>S1: processor → engine
+  S1-->>R: result
+  R-->>C: {"data": [...]}
 ```
 
 ### Quick Start: GLM-Image (2-Stage, 2 GPUs)
@@ -391,21 +391,7 @@ curl -s http://localhost:8000/v1/images/generations \
 
 ### Scaling Stage Replicas
 
-To run multiple replicas of a stage (e.g., 2x AR workers):
-
-```bash
-# AR replica 1
-CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 \
-  python -m dynamo.vllm.omni --model zai-org/GLM-Image \
-    --stage-id 0 --stage-configs-path $YAML ...
-
-# AR replica 2 (same endpoint, different port)
-CUDA_VISIBLE_DEVICES=2 DYN_SYSTEM_PORT=8084 \
-  python -m dynamo.vllm.omni --model zai-org/GLM-Image \
-    --stage-id 0 --stage-configs-path $YAML ...
-```
-
-Both replicas register at the same Dynamo endpoint (`dynamo/ar/generate`). The router automatically load-balances across them.
+Each stage registers independently with Dynamo's service discovery. To scale a bottleneck stage, launch additional workers with the same `--stage-id` on different GPUs — the router automatically load-balances across all replicas for that stage. Other stages are unaffected.
 
 ### Tested Models
 
@@ -429,4 +415,3 @@ Both replicas register at the same Dynamo endpoint (`dynamo/ar/generate`). The r
 - Audio: streaming (`stream: true`) is not yet supported.
 - Audio: Base task (voice cloning) is not yet supported.
 - Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet supported.
-- Disaggregated mode: 3+ stage pipelines (e.g., Qwen2.5-Omni) are not yet tested.
