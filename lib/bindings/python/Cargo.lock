@@ -1696,8 +1696,6 @@ name = "dynamo-protocols"
 version = "1.0.0"
 dependencies = [
  "async-openai",
- "base64 0.22.1",
- "bytes",
  "derive_builder",
  "futures",
  "serde",
