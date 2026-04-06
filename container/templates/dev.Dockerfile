@@ -91,7 +91,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ltrace \
         # JSON/YAML + filesystem helpers
         jq \
-        yq \
         tree \
         fd-find \
         ripgrep \
@@ -110,6 +109,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         clang \
         libclang-dev \
         libfontconfig-dev && \
+    # Use system python explicitly: some runtime bases put a framework venv first on PATH.
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -212,13 +213,18 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
 {% else %}
+{% if framework == "vllm" %}
+# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
+# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+{% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
-# All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
-# For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
-# For sglang: This sets them for the first time (required).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+{% endif %}
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -304,6 +310,12 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
+{% elif framework == "vllm" %}
+# vLLM uses the upstream system Python solve. Create a venv that inherits those
+# packages so editable installs and dev-only tools do not mutate the upstream runtime.
+RUN mkdir -p /opt/dynamo/venv && \
+    python3 -m venv --system-site-packages /opt/dynamo/venv && \
+    ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
@@ -315,10 +327,7 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
 # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
 RUN git lfs install
 
-# Install only the ADDITIONAL dev/test dependencies.
-# Runtime deps (common, framework, planner, benchmark) are already installed
-# in the parent runtime image — re-resolving them here would risk version drift.
-# SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
+# Install shared dev/test dependencies.
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
@@ -386,6 +395,9 @@ RUN printf '%s\n' \
 {% if device == "xpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+ENTRYPOINT []
+CMD []
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

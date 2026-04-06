@@ -67,6 +67,8 @@ ARG SCCACHE_REGION=""
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
+ARG HWLOC_VERSION={{ context[framework].hwloc_version if context[framework].hwloc_version is defined else context.dynamo.hwloc_version }}
+ARG NIXL_DISABLE_PLUGINS={{ context[framework].nixl_disable_plugins if context[framework].nixl_disable_plugins is defined else "" }}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
@@ -87,27 +89,6 @@ ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
 ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
 ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% endif %}
-
-{% if framework == "vllm" -%}
-# Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF={{ context[framework][device_key].vllm_ref }}
-ARG MAX_JOBS={{ context.vllm.max_jobs }}
-# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-{% if device == "cuda" -%}
-ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
-{% endif %}
-ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
-
-{% if device == "cuda" -%}
-# If left blank, then we will fallback to vLLM defaults
-ARG DEEPGEMM_REF=""
-
-# ModelExpress for P2P weight transfer (optional)
-ARG ENABLE_MODELEXPRESS_P2P={{ context.vllm.enable_modelexpress_p2p }}
-ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
-{% endif %}
-{%- endif -%}
 
 {% if framework == "trtllm" %}
 # TensorRT-LLM specific configuration
