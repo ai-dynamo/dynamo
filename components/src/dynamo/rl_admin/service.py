@@ -210,6 +210,12 @@ async def chat_completions_tokens(request: Request):
             content={"error": {"message": "Missing 'tokens' field for TITO endpoint"}},
         )
 
+    # Dynamo Rust frontend requires `messages` to be non-empty.
+    # When Prime-RL sends tokens, it usually also sends messages (for logging).
+    # If messages are missing, inject a placeholder so the frontend doesn't reject.
+    if "messages" not in body or not body["messages"]:
+        body["messages"] = [{"role": "user", "content": "(token-in mode)"}]
+
     # Inject into nvext
     nvext = body.get("nvext", {}) or {}
     nvext["token_data"] = tokens
@@ -220,6 +226,9 @@ async def chat_completions_tokens(request: Request):
             extra_fields.append(field)
     nvext["extra_fields"] = extra_fields
     body["nvext"] = nvext
+
+    # Strip fields Dynamo frontend doesn't know about
+    _strip_unsupported(body)
 
     # Ensure logprobs are requested (RL always needs them)
     if "logprobs" not in body:
@@ -258,10 +267,22 @@ async def chat_completions_tokens(request: Request):
 # This allows Prime-RL to use a single base_url for everything.
 # ══════════════════════════════════════════════════════════════════════
 
+# Fields that Prime-RL sends but Dynamo Rust frontend doesn't recognize.
+# Strip them before proxying to avoid 400 validation errors.
+_STRIP_FIELDS = {"return_token_ids", "tokens"}
+
+
+def _strip_unsupported(body: dict) -> dict:
+    """Remove fields the Dynamo frontend doesn't support."""
+    for f in _STRIP_FIELDS:
+        body.pop(f, None)
+    return body
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
     """Proxy standard chat completions to Dynamo frontend."""
-    body = await request.json()
+    body = _strip_unsupported(await request.json())
     stream = body.get("stream", False)
 
     client = _get_http_client()
