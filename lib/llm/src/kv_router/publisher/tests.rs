@@ -455,6 +455,8 @@ mod test_event_processing {
 
     #[test]
     fn test_map_block_stored_supports_tuple_extra_keys() {
+        type BlockTupleExtraKeys = Option<Vec<Option<Vec<(String, i64)>>>>;
+
         #[derive(serde::Serialize)]
         struct MapBlockStoredEvent {
             #[serde(rename = "type")]
@@ -466,7 +468,7 @@ mod test_event_processing {
             lora_id: Option<u64>,
             medium: Option<String>,
             lora_name: Option<String>,
-            extra_keys: Option<Vec<Option<Vec<(String, i64)>>>>,
+            extra_keys: BlockTupleExtraKeys,
         }
 
         let mm_hash =
