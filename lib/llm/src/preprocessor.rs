@@ -406,23 +406,6 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Build extra_args JSON for multimodal requests, stripping inline data: URLs.
-    /// Called only when all media items were decoded via frontend (RDMA), so the
-    /// inline base64 payloads are redundant and safe to remove.
-    fn build_multimodal_extra_args(
-        messages: serde_json::Value,
-        formatted_prompt: Option<&str>,
-    ) -> serde_json::Value {
-        let mut extra_args = serde_json::json!({ "messages": messages });
-        Self::strip_inline_data_urls(&mut extra_args["messages"]);
-
-        if let Some(prompt) = formatted_prompt {
-            extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
-        }
-
-        extra_args
-    }
-
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
@@ -492,12 +475,23 @@ impl OpenAIPreprocessor {
         }
 
         if !media_map.is_empty() {
-            let messages_json = serde_json::to_value(request.messages())?;
-            let extra_args = Self::build_multimodal_extra_args(
-                messages_json,
-                formatted_prompt.as_deref(),
-            );
             builder.multi_modal_data(Some(media_map));
+
+            // Preserve original messages and formatted prompt in extra_args for multimodal
+            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
+            // <image> placeholders for embedding-path / NIXL flows).
+            let messages_json = serde_json::to_value(request.messages())?;
+            let mut extra_args = serde_json::json!({
+                "messages": messages_json
+            });
+
+            // Strip redundant inline data: URLs — the decoded pixels are already
+            // available via multi_modal_data RDMA descriptors.
+            Self::strip_inline_data_urls(&mut extra_args["messages"]);
+
+            if let Some(ref prompt) = formatted_prompt {
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
             builder.extra_args(Some(extra_args));
         }
 
@@ -1643,47 +1637,6 @@ mod strip_tests {
         assert_eq!(messages, serde_json::json!([]));
     }
 
-    #[test]
-    fn test_build_extra_args_strips_data_urls() {
-        let messages = serde_json::json!([{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Describe this image"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR...longdata..."}}
-            ]
-        }]);
-
-        let extra_args =
-            OpenAIPreprocessor::build_multimodal_extra_args(messages, None);
-
-        let parts = extra_args["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(parts[0]["text"], "Describe this image");
-        assert_eq!(parts[1]["image_url"]["url"], "");
-    }
-
-    #[test]
-    fn test_build_extra_args_mixed_urls_strips_data_preserves_https() {
-        let messages = serde_json::json!([{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA..."}},
-                {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
-                {"type": "text", "text": "Compare these"}
-            ]
-        }]);
-
-        let extra_args =
-            OpenAIPreprocessor::build_multimodal_extra_args(messages, Some("prompt"));
-
-        let parts = extra_args["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(parts[0]["image_url"]["url"], "");
-        assert_eq!(
-            parts[1]["image_url"]["url"],
-            "https://example.com/photo.jpg"
-        );
-        assert_eq!(parts[2]["text"], "Compare these");
-        assert_eq!(extra_args["formatted_prompt"], "prompt");
-    }
 }
 
 #[cfg(test)]
