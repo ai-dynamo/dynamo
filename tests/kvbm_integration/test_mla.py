@@ -126,9 +126,7 @@ def mla_tester(llm_server_kvbm):  # noqa: F811
 @pytest.mark.pre_merge
 @pytest.mark.mla
 @pytest.mark.skipif(not HAS_VLLM, reason="requires vllm")
-@pytest.mark.parametrize(
-    "llm_server_kvbm", [{"model": MLA_MODEL}], indirect=True
-)
+@pytest.mark.parametrize("llm_server_kvbm", [{"model": MLA_MODEL}], indirect=True)
 @pytest.mark.timeout(200)
 def test_mla_offload_and_onboard_vllm(mla_tester, llm_server_kvbm):  # noqa: F811
     """
@@ -325,16 +323,12 @@ def test_mla_kvbm_trtllm(request, runtime_services):
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
-        engine_config_path = (
-            "tests/kvbm_integration/engine_config_mla_kvbm.yaml"
-        )
+        engine_config_path = "tests/kvbm_integration/engine_config_mla_kvbm.yaml"
         logger.info(
             f"Starting MLA worker with DYN_KVBM_NCCL_MLA_MODE=true "
             f"(model: {MLA_MODEL})..."
         )
-        with MlaDynamoWorkerProcess(
-            request, "decode", engine_config_path
-        ) as worker:
+        with MlaDynamoWorkerProcess(request, "decode", engine_config_path) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
             response = send_mla_completion_request(PROMPT, 100, timeout=10)
