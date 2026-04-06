@@ -540,14 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_pci_bus_address() {
-        assert_eq!(format_pci_bus_address(0, 0, 0), "0000:00:00.0");
-        assert_eq!(format_pci_bus_address(0, 0x3b, 0), "0000:3b:00.0");
-        assert_eq!(format_pci_bus_address(0, 0xaf, 0), "0000:af:00.0");
-        assert_eq!(format_pci_bus_address(0x10, 0x1a, 0x03), "0010:1a:03.0");
-    }
-
-    #[test]
     fn test_read_numa_node_from_sysfs_nonexistent() {
         assert!(read_numa_node_from_sysfs("ffff:ff:ff.0").is_none());
     }

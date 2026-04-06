@@ -10,6 +10,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/kvbm-common",
     "lib/kvbm-config",
     "lib/kvbm-engine",
     "lib/kvbm-kernels",
