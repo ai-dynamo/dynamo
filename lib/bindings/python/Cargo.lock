@@ -1543,33 +1543,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-protocols"
-version = "1.0.0"
-dependencies = [
- "async-openai-macros",
- "backoff",
- "base64 0.22.1",
- "bytes",
- "derive_builder",
- "eventsource-stream",
- "futures",
- "rand 0.9.2",
- "reqwest",
- "reqwest-eventsource",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "url",
- "utoipa",
- "uuid",
-]
-
-[[package]]
 name = "dynamo-config"
 version = "1.0.0"
 dependencies = [
@@ -1634,11 +1607,11 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-protocols",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-protocols",
  "dynamo-runtime",
  "dynamo-tokens",
  "either",
@@ -1754,6 +1727,33 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-protocols"
+version = "1.0.0"
+dependencies = [
+ "async-openai-macros",
+ "backoff",
+ "base64 0.22.1",
+ "bytes",
+ "derive_builder",
+ "eventsource-stream",
+ "futures",
+ "rand 0.9.2",
+ "reqwest",
+ "reqwest-eventsource",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "url",
+ "utoipa",
  "uuid",
 ]
 

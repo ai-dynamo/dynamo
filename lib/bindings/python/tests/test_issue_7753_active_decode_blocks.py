@@ -136,9 +136,7 @@ def test_worker_load_state_is_busy_logic():
             if not all_dp_ranks:
                 return False
             return all(
-                (
-                    self.kv_total_blocks.get(dp) or 0
-                ) > 0
+                (self.kv_total_blocks.get(dp) or 0) > 0
                 and self.active_decode_blocks.get(dp, 0)
                 > active_decode_blocks_threshold * (self.kv_total_blocks.get(dp) or 1)
                 for dp in all_dp_ranks
@@ -152,7 +150,9 @@ def test_worker_load_state_is_busy_logic():
     buggy_state.kv_total_blocks[0] = 100
 
     # Engine publishes authoritative value: 90 blocks in use (should be busy)
-    buggy_state.apply_active_load(0, active_decode_blocks=90, active_prefill_tokens=None)
+    buggy_state.apply_active_load(
+        0, active_decode_blocks=90, active_prefill_tokens=None
+    )
     assert buggy_state.is_busy(threshold), "Engine-only: should be busy at 90/100"
 
     # Router OVERWRITES with its own bookkeeping value: 10 blocks (router's view is stale/different)
@@ -168,10 +168,14 @@ def test_worker_load_state_is_busy_logic():
     fixed_state.kv_total_blocks[0] = 100
 
     # Engine publishes authoritative value: 90 blocks in use (should be busy)
-    fixed_state.apply_active_load(0, active_decode_blocks=90, active_prefill_tokens=None)
+    fixed_state.apply_active_load(
+        0, active_decode_blocks=90, active_prefill_tokens=None
+    )
 
     # Router publishes with active_decode_blocks=None (fixed) - only updates prefill tokens
-    fixed_state.apply_active_load(0, active_decode_blocks=None, active_prefill_tokens=50)
+    fixed_state.apply_active_load(
+        0, active_decode_blocks=None, active_prefill_tokens=50
+    )
 
     # FIXED: engine's value (90) is preserved, busy detection works correctly
     assert fixed_state.is_busy(threshold), (
