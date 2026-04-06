@@ -189,7 +189,6 @@ class OmniStageRouter:
         # --- Call each stage in order ---
         raw: Dict[str, Any] = {}
         for i, stage_cfg in enumerate(self.stage_configs):
-            logger.info("Router: calling stage %d", i)
             model_stage = getattr(stage_cfg.engine_args, "model_stage", f"stage{i}")
             client = self.stage_clients.get(model_stage)
             if client is None:
@@ -209,9 +208,6 @@ class OmniStageRouter:
                     "engine_inputs": engine_inputs["engine_inputs"],
                 }
             else:
-                logger.info(
-                    "Router: stage %d received keys=%s", i - 1, list(raw.keys())
-                )
                 # Subsequent stages: validate + filter to known protocol fields only.
                 # StageOutput drops unknown keys; router never inspects stage_connector_refs.
                 stage_request = StageOutput.model_validate(raw).to_next_stage_request(
