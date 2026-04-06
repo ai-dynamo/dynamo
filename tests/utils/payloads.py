@@ -285,9 +285,15 @@ class ToolCallingChatPayload(ChatPayload):
             combined_args = " ".join(all_args).lower()
             found = [kw for kw in self.expected_response if kw.lower() in combined_args]
             if not found:
-                logger.warning(
-                    f"None of expected_response {self.expected_response} found in "
-                    f"tool call arguments (non-fatal for tool calling tests)"
+                logger.error(
+                    f"VALIDATION FAILED - Expected to find at least one of "
+                    f"{self.expected_response} in tool call arguments"
+                )
+                logger.error(f"Tool call arguments: {combined_args}")
+                raise AssertionError(
+                    f"Expected content not found in tool call arguments. "
+                    f"Expected at least one of: {self.expected_response}. "
+                    f"Tool call arguments: {combined_args}"
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
