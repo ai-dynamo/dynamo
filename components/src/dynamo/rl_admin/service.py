@@ -62,9 +62,12 @@ def _get_tokenizer():
 
 # ── Helper: call engine route via Dynamo system port ────────────────
 async def _call_engine_route(route: str, body: dict | None = None) -> dict:
-    """Call a registered engine route on the vLLM worker via system HTTP."""
+    """Call a registered engine route on the vLLM worker via system HTTP.
+
+    Engine routes are exposed at /engine/<route_name> on the system port.
+    """
     client = _get_http_client()
-    url = f"{DYNAMO_SYSTEM_URL}/engine_route/{route}"
+    url = f"{DYNAMO_SYSTEM_URL}/engine/{route}"
     try:
         resp = await client.post(url, json=body or {})
         if resp.status_code == 200:
