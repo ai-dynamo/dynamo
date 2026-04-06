@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use dynamo_memory::CudaMemPool;
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
-use velo_events::EventManager;
+use velo::EventManager;
 
 use crate::manager::TransferManager;
 

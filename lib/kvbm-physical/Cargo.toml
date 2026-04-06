@@ -13,7 +13,7 @@ repository.workspace = true
 dynamo-memory = { workspace = true }
 kvbm-common = { workspace = true }
 kvbm-kernels = { workspace = true }
-velo-events = { workspace = true }
+velo = { workspace = true }
 
 aligned-vec = "0.6.4"
 anyhow = { workspace = true }

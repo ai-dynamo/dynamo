@@ -4514,7 +4514,6 @@ dependencies = [
  "tracing",
  "validator",
  "velo",
- "velo-discovery",
 ]
 
 [[package]]
@@ -4626,7 +4625,7 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
- "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
+ "velo",
 ]
 
 [[package]]
@@ -9460,60 +9459,29 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
 dependencies = [
  "anyhow",
+ "bytes",
  "serde",
  "tokio",
  "tokio-util",
- "tracing",
- "velo-backend",
  "velo-common",
- "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
+ "velo-discovery",
+ "velo-events",
  "velo-messenger",
-]
-
-[[package]]
-name = "velo-backend"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
-dependencies = [
- "anyhow",
- "async-nats",
- "axum 0.8.4",
- "bs58",
- "bytes",
- "dashmap 6.1.0",
- "flume 0.11.1",
- "futures",
- "http 1.4.0",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
- "nix 0.30.1",
- "parking_lot",
- "prost 0.13.5",
- "reqwest 0.12.28",
- "rmp-serde",
- "serde_json",
- "socket2 0.6.2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tower 0.5.3",
- "tracing",
- "velo-common",
+ "velo-observability",
+ "velo-queue",
+ "velo-rendezvous",
+ "velo-streaming",
+ "velo-transports",
 ]
 
 [[package]]
 name = "velo-common"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -9527,41 +9495,29 @@ dependencies = [
 
 [[package]]
 name = "velo-discovery"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "bytes",
  "fs4",
  "futures",
  "parking_lot",
+ "rmp-serde",
  "serde",
  "serde_json",
- "tokio",
- "uuid",
- "velo-common",
- "velo-messenger",
-]
-
-[[package]]
-name = "velo-events"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "dashmap 6.1.0",
- "futures",
- "parking_lot",
- "serde",
  "tokio",
  "tokio-util",
  "tracing",
  "uuid",
- "xxhash-rust",
+ "velo-common",
 ]
 
 [[package]]
 name = "velo-events"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -9577,8 +9533,8 @@ dependencies = [
 
 [[package]]
 name = "velo-messenger"
-version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
 dependencies = [
  "anyhow",
  "bs58",
@@ -9586,7 +9542,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "flume 0.11.1",
+ "flume 0.12.0",
  "futures",
  "lru 0.12.5",
  "parking_lot",
@@ -9598,9 +9554,117 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "velo-backend",
  "velo-common",
- "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
+ "velo-discovery",
+ "velo-events",
+ "velo-observability",
+ "velo-transports",
+]
+
+[[package]]
+name = "velo-observability"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+dependencies = [
+ "prometheus",
+ "tracing",
+]
+
+[[package]]
+name = "velo-queue"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+dependencies = [
+ "bytes",
+ "dashmap 6.1.0",
+ "flume 0.12.0",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "velo-rendezvous"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap 6.1.0",
+ "futures",
+ "serde",
+ "serde_json",
+ "tracing",
+ "velo-common",
+ "velo-messenger",
+ "velo-observability",
+]
+
+[[package]]
+name = "velo-streaming"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap 6.1.0",
+ "derive_builder",
+ "flume 0.12.0",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "socket2 0.6.2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tonic-build 0.13.1",
+ "tracing",
+ "uuid",
+ "velo-common",
+ "velo-messenger",
+ "velo-observability",
+ "velo-transports",
+]
+
+[[package]]
+name = "velo-transports"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "axum 0.8.4",
+ "bs58",
+ "bytes",
+ "dashmap 6.1.0",
+ "flume 0.12.0",
+ "futures",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "nix 0.30.1",
+ "parking_lot",
+ "prost 0.13.5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "socket2 0.6.2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tower 0.5.3",
+ "tracing",
+ "velo-common",
+ "velo-observability",
 ]
 
 [[package]]
@@ -10597,8 +10661,3 @@ checksum = "410e9ecef634c709e3831c2cfdb8d9c32164fae1c67496d5b68fff728eec37fe"
 dependencies = [
  "zune-core 0.5.1",
 ]
-
-[[patch.unused]]
-name = "velo-events"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"

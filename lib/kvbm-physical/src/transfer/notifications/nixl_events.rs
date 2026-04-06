@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{error, warn};
 use uuid::Uuid;
-use velo_events::{EventHandle, EventManager};
+use velo::{EventHandle, EventManager};
 
 /// Registration message for NIXL notification-based transfer completion.
 pub struct RegisterNixlNotification {
