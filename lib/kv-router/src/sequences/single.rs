@@ -64,6 +64,11 @@ pub struct ActiveSequences {
     /// Cached sum of each active prefill request's full prompt-side load.
     prefill_full_tokens_sum: usize,
 
+    /// The request whose prompt-side load is currently decaying, plus the time it became oldest.
+    /// TODO: This assumes the oldest active prefill is the one making progress on the worker.
+    /// Revisit this when we have a better model for concurrent/batched prefill progress.
+    anchored_prefill: Option<(RequestId, Instant)>,
+
     unique_blocks: HashMap<SequenceHash, Weak<()>>,
 
     /// Fractional block counts for blocks that are partially cached.
@@ -86,6 +91,7 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill_order: VecDeque::new(),
             prefill_full_tokens_sum: 0,
+            anchored_prefill: None,
             unique_blocks: HashMap::new(),
             fractional_blocks: HashMap::new(),
             block_size,
@@ -129,7 +135,6 @@ impl ActiveSequences {
             .filter_map(|state| state.prefill)
             .map(|prefill| prefill.initial_effective_prefill_tokens)
             .sum();
-
         assert_eq!(
             ordered_prefills.len(),
             self.prefill_order.len(),
@@ -144,11 +149,23 @@ impl ActiveSequences {
             "prefill_full_tokens_sum drifted from request state",
         );
         if let Some(oldest_request_id) = self.prefill_order.front() {
+            let Some((anchored_request_id, _)) = self.anchored_prefill.as_ref() else {
+                panic!("anchored_prefill must exist when prefill_order is non-empty");
+            };
             assert!(
                 self.requests
                     .get(oldest_request_id)
                     .is_some_and(|state| state.prefill.is_some()),
                 "prefill_order front must point to an active prefill request",
+            );
+            assert_eq!(
+                anchored_request_id, oldest_request_id,
+                "anchored_prefill must match prefill_order.front()",
+            );
+        } else {
+            assert!(
+                self.anchored_prefill.is_none(),
+                "anchored_prefill must be absent when no active prefills remain",
             );
         }
         assert!(
@@ -177,23 +194,52 @@ impl ActiveSequences {
 
     fn insert_prefill_load(&mut self, request_id: &RequestId, prefill: PrefillLoadState) {
         self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
+        let should_anchor = self.anchored_prefill.is_none();
         self.prefill_order.push_back(request_id.clone());
+        if should_anchor {
+            self.anchored_prefill = Some((request_id.clone(), Instant::now()));
+        }
     }
 
     fn remove_prefill_load(&mut self, request_id: &RequestId) -> Option<PrefillLoadState> {
-        let state = self.requests.get_mut(request_id)?;
-        let prefill = state.prefill.take()?;
+        let prefill = {
+            let state = self.requests.get_mut(request_id)?;
+            state.prefill.take()?
+        };
         self.prefill_full_tokens_sum = self
             .prefill_full_tokens_sum
             .checked_sub(prefill.initial_effective_prefill_tokens)
             .expect("prefill_full_tokens_sum underflow");
-        self.prefill_order
-            .retain(|queued_request_id| queued_request_id != request_id);
+        let removed_front = self.prefill_order.front() == Some(request_id);
+        if removed_front {
+            let removed = self.prefill_order.pop_front();
+            debug_assert_eq!(removed.as_ref(), Some(request_id));
+        } else {
+            self.prefill_order
+                .retain(|queued_request_id| queued_request_id != request_id);
+        }
+        if self
+            .anchored_prefill
+            .as_ref()
+            .is_some_and(|(anchored_request_id, _)| anchored_request_id == request_id)
+        {
+            self.set_anchor_to_front(Instant::now());
+        }
         Some(prefill)
     }
 
+    fn set_anchor_to_front(&mut self, now: Instant) {
+        self.anchored_prefill = self
+            .prefill_order
+            .front()
+            .cloned()
+            .map(|request_id| (request_id, now));
+    }
+
     fn oldest_prefill_request_id(&self) -> Option<&RequestId> {
-        self.prefill_order.front()
+        self.anchored_prefill
+            .as_ref()
+            .map(|(request_id, _)| request_id)
     }
 
     fn remaining_prefill_tokens_at(&self, request_id: &RequestId, now: Instant) -> usize {
@@ -213,12 +259,14 @@ impl ActiveSequences {
             return 0;
         }
 
-        let started_at = self
-            .requests
-            .get(request_id)
-            .map(|state| state.started_at)
-            .expect("prefill-active request missing started_at timestamp");
-        let elapsed = now.saturating_duration_since(started_at);
+        let Some((anchored_request_id, oldest_since)) = self.anchored_prefill.as_ref() else {
+            return prefill.initial_effective_prefill_tokens;
+        };
+        if anchored_request_id != request_id {
+            return prefill.initial_effective_prefill_tokens;
+        }
+
+        let elapsed = now.saturating_duration_since(*oldest_since);
         let remaining_fraction = (1.0
             - (elapsed.as_secs_f64() / expected_prefill_duration.as_secs_f64()))
         .clamp(0.0, 1.0);
@@ -686,11 +734,89 @@ mod tests {
         assert_eq!(seq_manager.active_tokens(), 110);
 
         seq_manager.mark_prefill_completed(&"r1".to_string());
-        assert_eq!(seq_manager.active_tokens(), 25);
+        assert_eq!(seq_manager.active_tokens(), 40);
         assert_eq!(
             seq_manager.prefill_order,
             VecDeque::from(vec!["r2".to_string()])
         );
+        assert!(
+            seq_manager
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, _)| request_id == "r2")
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(seq_manager.active_tokens(), 30);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_prefill_decay_resets_when_request_becomes_oldest() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            100,
+            0,
+            None,
+            true,
+            Some(prefill_hint(100, 10)),
+        );
+        tokio::time::advance(Duration::from_secs(4)).await;
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            80,
+            0,
+            None,
+            true,
+            Some(prefill_hint(80, 8)),
+        );
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(seq_manager.active_tokens(), 100);
+
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.active_tokens(), 80);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(seq_manager.active_tokens(), 60);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_prefill_front_removal_reanchors_queue_front() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            30,
+            0,
+            None,
+            true,
+            Some(prefill_hint(30, 6)),
+        );
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            20,
+            0,
+            None,
+            true,
+            Some(prefill_hint(20, 4)),
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+
+        assert!(
+            seq_manager
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, _)| request_id == "r2")
+        );
+        assert_eq!(seq_manager.active_tokens(), 20);
     }
 
     #[test]
@@ -777,5 +903,44 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 1);
         assert_eq!(seq_manager.active_tokens(), 4);
         seq_manager.assert_consistent();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_force_expiry_reanchors_new_oldest_request() {
+        let mut seq_manager = ActiveSequences::new(4);
+
+        seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1]),
+            40,
+            0,
+            None,
+            true,
+            Some(prefill_hint(40, 100)),
+        );
+        tokio::time::advance(Duration::from_secs(250)).await;
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![2]),
+            30,
+            0,
+            None,
+            true,
+            Some(prefill_hint(30, 100)),
+        );
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let expired = seq_manager.force_expiry();
+        assert_eq!(expired, HashSet::from(["r1".to_string()]));
+        assert_eq!(seq_manager.active_tokens(), 30);
+        assert!(
+            seq_manager
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, _)| request_id == "r2")
+        );
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert_eq!(seq_manager.active_tokens(), 24);
     }
 }
