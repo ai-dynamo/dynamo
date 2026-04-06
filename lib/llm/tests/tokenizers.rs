@@ -115,7 +115,8 @@ fn test_encode_decode_roundtrip(#[case] tokenizer: Arc<dyn Tokenizer>) {
 
         let decoded = tokenizer
             .decode(encoding.token_ids(), false)
-            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"));
+            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"))
+            .into_string();
         assert_eq!(decoded, text, "Roundtrip failed for: '{text}'");
     }
 }
@@ -131,7 +132,8 @@ fn test_encode_decode_roundtrip_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>)
 
         let decoded = tokenizer
             .decode(encoding.token_ids(), false)
-            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"));
+            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"))
+            .into_string();
         assert_eq!(decoded, text, "Roundtrip failed for: '{text}'");
     }
 }
@@ -149,7 +151,8 @@ fn test_batch_encode_roundtrip(#[case] tokenizer: Arc<dyn Tokenizer>) {
     for (encoding, &input) in encodings.iter().zip(inputs.iter()) {
         let decoded = tokenizer
             .decode(encoding.token_ids(), false)
-            .expect("Failed to decode");
+            .expect("Failed to decode")
+            .into_string();
         assert_eq!(decoded, input);
     }
 }
@@ -356,12 +359,14 @@ fn test_decode_with_skip_special_tokens() {
     // Decode with skip_special_tokens = false (should keep special tokens)
     let decoded_with_special = tokenizer
         .decode(&token_ids, false)
-        .expect("Failed to decode with skip_special_tokens=false");
+        .expect("Failed to decode with skip_special_tokens=false")
+        .into_string();
 
     // Decode with skip_special_tokens = true (should remove special tokens)
     let decoded_without_special = tokenizer
         .decode(&token_ids, true)
-        .expect("Failed to decode with skip_special_tokens=true");
+        .expect("Failed to decode with skip_special_tokens=true")
+        .into_string();
 
     // Validate exact matches on the entire decoded strings
     assert_eq!(decoded_with_special, "<s> Hello world</s>");
