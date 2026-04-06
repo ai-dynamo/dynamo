@@ -148,7 +148,7 @@ jobs:
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "test_image_uri=${TEST_IMAGE_URI}" >> $GIHUB_OUTPUT
+          echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
