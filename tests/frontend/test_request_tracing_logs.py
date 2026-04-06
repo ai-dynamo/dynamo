@@ -96,7 +96,7 @@ def _send_chat_completions(
     """Send a chat completions request with optional request ID and streaming."""
     headers = {"Content-Type": "application/json"}
     if request_id:
-        headers["x-dynamo-request-id"] = request_id
+        headers["x-request-id"] = request_id
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "Hello"}],
@@ -122,25 +122,47 @@ def assert_lifecycle_logs(req_logs, expected_status="success"):
     completed = [e for e in req_logs if e.get("message") == "request completed"]
     http_sent = [e for e in req_logs if e.get("message") == "http response sent"]
     msgs = [e.get("message") for e in req_logs]
-    assert len(received) >= 1, f"Missing 'request received': {msgs}"
-    assert len(completed) >= 1, f"Missing 'request completed': {msgs}"
-    assert len(http_sent) >= 1, f"Missing 'http response sent': {msgs}"
+    assert (
+        len(received) == 1
+    ), f"Expected 1 'request received', got {len(received)}: {msgs}"
+    assert (
+        len(completed) == 1
+    ), f"Expected 1 'request completed', got {len(completed)}: {msgs}"
+    assert (
+        len(http_sent) == 1
+    ), f"Expected 1 'http response sent', got {len(http_sent)}: {msgs}"
     assert completed[0].get("status") == expected_status
     return received, completed, http_sent
 
 
-def assert_error_or_cancellation(req_logs):
-    """Assert error completion or cancellation was logged."""
-    error_logs = [
+def assert_cancellation(req_logs):
+    """Assert error completion with cancelled error_type is logged."""
+    completed = [
         e
         for e in req_logs
-        if (e.get("message") == "request completed" and e.get("status") == "error")
-        or e.get("message") == "request cancelled"
+        if e.get("message") == "request completed"
+        and e.get("status") == "error"
+        and e.get("error_type") == "cancelled"
     ]
+    msgs = [(e.get("message"), e.get("status"), e.get("error_type")) for e in req_logs]
     assert (
-        len(error_logs) >= 1
-    ), f"Missing error/cancellation: {[e.get('message') for e in req_logs]}"
-    return error_logs
+        len(completed) == 1
+    ), f"Expected 1 cancelled 'request completed', got {len(completed)}: {msgs}"
+    return completed
+
+
+def assert_error_completion(req_logs):
+    """Assert exactly one error completion was logged (for crash scenarios)."""
+    completed = [
+        e
+        for e in req_logs
+        if e.get("message") == "request completed" and e.get("status") == "error"
+    ]
+    msgs = [e.get("message") for e in req_logs]
+    assert (
+        len(completed) == 1
+    ), f"Expected 1 error 'request completed', got {len(completed)}: {msgs}"
+    return completed
 
 
 JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
@@ -282,7 +304,8 @@ def test_agg_unary_success(tracing_services) -> None:
     received, completed, http_sent = assert_lifecycle_logs(req_logs)
 
     assert received[0]["level"] == "INFO"
-    assert received[0].get("request_id") == rid
+    assert received[0].get("x_request_id") == rid
+    assert "request_id" in received[0]
     assert "model" in received[0]
     assert "endpoint" in received[0]
     assert "elapsed_ms" in completed[0]
@@ -290,16 +313,21 @@ def test_agg_unary_success(tracing_services) -> None:
 
     # Token counts on inference span
     ic = [e for e in completed if e.get("span_name") == "http-request"]
-    assert len(ic) >= 1, "Expected 'request completed' from http-request span"
+    assert len(ic) == 1, "Expected 1 'request completed' from http-request span"
     assert "input_tokens" in ic[0]
     assert "output_tokens" in ic[0]
 
-    # Worker lifecycle
+    # Worker lifecycle — verify both x_request_id and request_id propagated
+    server_rid = received[0].get("request_id")
     wk_logs = get_request_logs(tracing_services["worker"], rid)
     wk_received = [e for e in wk_logs if e.get("message") == "request received"]
     wk_completed = [e for e in wk_logs if e.get("message") == "request completed"]
-    assert len(wk_received) >= 1, "Worker should log 'request received'"
-    assert len(wk_completed) >= 1, "Worker should log 'request completed'"
+    assert len(wk_received) == 1, "Worker should log 1 'request received'"
+    assert len(wk_completed) == 1, "Worker should log 1 'request completed'"
+    assert wk_received[0].get("x_request_id") == rid, "Worker should have x_request_id"
+    assert (
+        wk_received[0].get("request_id") == server_rid
+    ), "Worker request_id should match frontend"
 
 
 def test_agg_streaming_success(tracing_services) -> None:
@@ -320,7 +348,7 @@ def test_agg_streaming_success(tracing_services) -> None:
 
     # Token counts and latency on inference span
     ic = [e for e in completed if e.get("span_name") == "http-request"]
-    assert len(ic) >= 1, "Expected 'request completed' from http-request span"
+    assert len(ic) == 1, "Expected 1 'request completed' from http-request span"
     assert int(ic[0]["output_tokens"]) > 0
     assert "ttft_ms" in ic[0]
     assert "avg_itl_ms" in ic[0]
@@ -348,31 +376,43 @@ def test_agg_404_error(tracing_services) -> None:
 
 
 def test_agg_invalid_uuid_warn(tracing_services) -> None:
-    """Invalid UUID: WARN logged, request proceeds with generated ID."""
+    """Invalid x-dynamo-request-id: WARN logged, request proceeds with generated ID."""
     port = tracing_services["frontend_port"]
 
-    resp = _send_chat_completions(port, request_id="NOT-A-VALID-UUID")
-    # Request succeeds (invalid UUID is warned, not rejected)
+    # Send deprecated x-dynamo-request-id with invalid value to test deprecation warning
+    # Send both x-request-id (for log filtering) and deprecated x-dynamo-request-id (invalid)
+    rid = str(uuid.uuid4())
+    resp = requests.post(
+        f"http://localhost:{port}/v1/chat/completions",
+        headers={
+            "Content-Type": "application/json",
+            "x-request-id": rid,
+            "x-dynamo-request-id": "NOT-A-VALID-UUID",
+        },
+        json={
+            "model": TEST_MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 5,
+        },
+        timeout=60,
+    )
     assert resp.status_code == 200
     time.sleep(1)
 
-    fe_logs = parse_jsonl_logs(read_log_file(tracing_services["frontend"]))
+    req_logs = get_request_logs(tracing_services["frontend"], rid)
 
     # A WARN log should be emitted about the invalid UUID
     warn_logs = [
         e
-        for e in fe_logs
+        for e in req_logs
         if e.get("level") == "WARN" and "must be a valid UUID" in e.get("message", "")
     ]
-    assert len(warn_logs) >= 1
+    assert len(warn_logs) == 1
 
-    # Request still gets a valid request_id (generated)
-    received = [e for e in fe_logs if e.get("message") == "request received"]
-    # Find the most recent "request received" — it should have a valid UUID request_id
-    assert len(received) >= 1
-    last_received = received[-1]
-    request_id = last_received.get("request_id", "")
-    # Verify it's a valid UUID (not the invalid one we sent)
+    # Request still gets a valid request_id (generated, not the invalid one)
+    received = [e for e in req_logs if e.get("message") == "request received"]
+    assert len(received) == 1
+    request_id = received[0].get("request_id", "")
     assert request_id != "NOT-A-VALID-UUID"
     try:
         uuid.UUID(request_id)
@@ -420,7 +460,7 @@ def test_agg_cancellation(tracing_services_slow) -> None:
             f"http://localhost:{port}/v1/chat/completions",
             headers={
                 "Content-Type": "application/json",
-                "x-dynamo-request-id": rid,
+                "x-request-id": rid,
             },
             json={
                 "model": TEST_MODEL,
@@ -450,9 +490,10 @@ def test_agg_cancellation(tracing_services_slow) -> None:
 
     received = [e for e in req_logs if e.get("message") == "request received"]
     assert (
-        len(received) >= 1
-    ), f"Missing 'request received': {[e.get('message') for e in req_logs]}"
-    assert_error_or_cancellation(req_logs)
+        len(received) == 1
+    ), f"Expected 1 'request received', got {len(received)}: {[e.get('message') for e in req_logs]}"
+
+    assert_cancellation(req_logs)
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +516,7 @@ def test_disagg_streaming_success(tracing_services_disagg) -> None:
     received, completed, http_sent = assert_lifecycle_logs(fe_req)
 
     ic = [e for e in completed if e.get("span_name") == "http-request"]
-    assert len(ic) >= 1
+    assert len(ic) == 1
     assert int(ic[0]["output_tokens"]) > 0
     assert "ttft_ms" in ic[0]
 
@@ -484,8 +525,8 @@ def test_disagg_streaming_success(tracing_services_disagg) -> None:
         wk_logs = get_request_logs(tracing_services_disagg[name], rid)
         wk_received = [e for e in wk_logs if e.get("message") == "request received"]
         wk_completed = [e for e in wk_logs if e.get("message") == "request completed"]
-        assert len(wk_received) >= 1, f"{name} should log 'request received'"
-        assert len(wk_completed) >= 1, f"{name} should log 'request completed'"
+        assert len(wk_received) == 1, f"{name} should log 1 'request received'"
+        assert len(wk_completed) == 1, f"{name} should log 1 'request completed'"
 
 
 def test_agg_worker_crash(tracing_services_slow) -> None:
@@ -522,8 +563,8 @@ def test_agg_worker_crash(tracing_services_slow) -> None:
 
     req_logs = get_request_logs(tracing_services_slow["frontend"], rid)
     received = [e for e in req_logs if e.get("message") == "request received"]
-    assert len(received) >= 1
-    assert_error_or_cancellation(req_logs)
+    assert len(received) == 1
+    assert_error_completion(req_logs)
 
 
 def test_disagg_unary_success(tracing_services_disagg) -> None:
@@ -623,7 +664,7 @@ def test_disagg_prefill_crash(tracing_services_disagg_slow) -> None:
             f"http://localhost:{port}/v1/chat/completions",
             headers={
                 "Content-Type": "application/json",
-                "x-dynamo-request-id": rid,
+                "x-request-id": rid,
             },
             json={
                 "model": TEST_MODEL,
@@ -647,8 +688,8 @@ def test_disagg_prefill_crash(tracing_services_disagg_slow) -> None:
     time.sleep(3)
 
     req_logs = get_request_logs(tracing_services_disagg_slow["frontend"], rid)
-    assert len(req_logs) >= 1, f"Frontend should have logs for request {rid}"
-    assert_error_or_cancellation(req_logs)
+    assert len(req_logs) > 0, f"Frontend should have logs for request {rid}"
+    assert_error_completion(req_logs)
 
 
 def test_disagg_decode_crash(tracing_services_disagg_slow) -> None:
@@ -683,5 +724,5 @@ def test_disagg_decode_crash(tracing_services_disagg_slow) -> None:
 
     req_logs = get_request_logs(tracing_services_disagg_slow["frontend"], rid)
     received = [e for e in req_logs if e.get("message") == "request received"]
-    assert len(received) >= 1, "Frontend should log 'request received'"
-    assert_error_or_cancellation(req_logs)
+    assert len(received) == 1, "Frontend should log 1 'request received'"
+    assert_error_completion(req_logs)
