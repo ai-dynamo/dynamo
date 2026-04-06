@@ -1436,12 +1436,17 @@ func GenerateGrovePodCliqueSet(
 				}
 			}
 
+			minAvailable := int32(1)
+			if isMultinode {
+				minAvailable = r.Replicas
+			}
+
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(r.Name),
 				Spec: grovev1alpha1.PodCliqueSpec{
 					RoleName:     strings.ToLower(r.Name),
 					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(int32(1)),
+					MinAvailable: ptr.To(minAvailable),
 					PodSpec:      *podSpec,
 				},
 			}
