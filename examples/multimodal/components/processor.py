@@ -15,7 +15,8 @@ from typing import AsyncIterator, Tuple, Union
 import uvloop
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -143,6 +144,7 @@ class Processor(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
+            model=raw_request.model,
             multimodal_input=multimodal_input,
         )
 
@@ -220,6 +222,7 @@ class Processor(ProcessMixIn):
             model=raw_request.model,
             messages=[msg],
             stream=True,
+            stream_options=raw_request.stream_options,
             max_tokens=raw_request.max_tokens,
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
@@ -229,11 +232,17 @@ class Processor(ProcessMixIn):
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
+                    raise ValueError(
+                        "Image requests should use the standard `python -m dynamo.frontend` "
+                        "+ `python -m dynamo.vllm --enable-multimodal` flow instead of the "
+                        "legacy multimodal example processor."
+                    )
                 elif item.type == "video_url":
-                    if multimodal_input.image_url is not None:
-                        raise ValueError("Cannot provide both image and video URLs")
-                    multimodal_input.video_url = item.video_url.url
+                    raise ValueError(
+                        "Video requests should use the standard `python -m dynamo.frontend` "
+                        "+ `python -m dynamo.vllm --enable-multimodal` flow instead of the "
+                        "legacy multimodal example processor."
+                    )
                 elif item.type == "audio_url":
                     if (
                         multimodal_input.image_url is not None
@@ -247,7 +256,10 @@ class Processor(ProcessMixIn):
             and multimodal_input.video_url is None
             and multimodal_input.audio_url is None
         ):
-            raise ValueError("Either image URL or video URL or audio URL is required")
+            raise ValueError(
+                "Audio requests are the only multimodal mode supported by the "
+                "legacy example processor."
+            )
 
         async for response in self._generate(
             chat_request, multimodal_input, RequestType.CHAT
@@ -298,19 +310,16 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         args.downstream_endpoint
     )
-    encode_worker_client = (
-        await runtime.namespace(parsed_namespace)
-        .component(parsed_component_name)
-        .endpoint(parsed_endpoint_name)
-        .client()
-    )
+    encode_worker_client = await runtime.endpoint(
+        f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+    ).client()
 
     handler = Processor(args, config.engine_args, encode_worker_client)
 

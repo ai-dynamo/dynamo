@@ -19,11 +19,16 @@ Usage:
 
 import logging
 from collections import OrderedDict
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+
+class CachedEmbedding(NamedTuple):
+    tensor: torch.Tensor
+    image_grid_thw: list | None = None
 
 
 class MultimodalEmbeddingCacheManager:
@@ -47,7 +52,7 @@ class MultimodalEmbeddingCacheManager:
         Args:
             capacity_bytes: Maximum cache capacity in bytes.
         """
-        self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        self._cache: OrderedDict[str, CachedEmbedding] = OrderedDict()
         self._capacity_bytes = capacity_bytes
         self._current_bytes = 0
 
@@ -77,9 +82,9 @@ class MultimodalEmbeddingCacheManager:
         ), "Tensor must be contiguous for accurate size calculation"
         return tensor.element_size() * tensor.numel()
 
-    def get(self, key: str) -> Optional[torch.Tensor]:
+    def get(self, key: str) -> Optional[CachedEmbedding]:
         """
-        Get a tensor from the cache.
+        Get a cached embedding from the cache.
 
         If found, the entry is moved to the end (most recently used).
 
@@ -87,7 +92,7 @@ class MultimodalEmbeddingCacheManager:
             key: Cache key (typically content hash).
 
         Returns:
-            The cached tensor, or None if not found.
+            The cached embedding, or None if not found.
         """
         if key not in self._cache:
             self._misses += 1
@@ -98,22 +103,22 @@ class MultimodalEmbeddingCacheManager:
         self._hits += 1
         return self._cache[key]
 
-    def set(self, key: str, tensor: torch.Tensor) -> bool:
+    def set(self, key: str, entry: CachedEmbedding) -> bool:
         """
-        Store a tensor in the cache.
+        Store a cached embedding in the cache.
 
         If the key already exists, the old value is replaced.
-        If adding the tensor would exceed capacity, LRU entries are evicted.
+        If adding the entry would exceed capacity, LRU entries are evicted.
         If the tensor itself is larger than capacity, it is not stored.
 
         Args:
             key: Cache key (typically content hash).
-            tensor: Tensor to cache.
+            entry: CachedEmbedding to cache.
 
         Returns:
-            True if the tensor was stored, False if it was too large.
+            True if the entry was stored, False if it was too large.
         """
-        size = self._tensor_size(tensor)
+        size = self._tensor_size(entry.tensor)
 
         # Don't cache if single tensor exceeds capacity
         if size > self._capacity_bytes:
@@ -125,20 +130,20 @@ class MultimodalEmbeddingCacheManager:
 
         # If key exists, remove old entry first
         if key in self._cache:
-            old_tensor = self._cache.pop(key)
-            self._current_bytes -= self._tensor_size(old_tensor)
+            old_entry = self._cache.pop(key)
+            self._current_bytes -= self._tensor_size(old_entry.tensor)
 
         # Evict LRU entries until we have space
         while self._current_bytes + size > self._capacity_bytes and self._cache:
-            evicted_key, evicted_tensor = self._cache.popitem(last=False)
-            evicted_size = self._tensor_size(evicted_tensor)
+            evicted_key, evicted_entry = self._cache.popitem(last=False)
+            evicted_size = self._tensor_size(evicted_entry.tensor)
             self._current_bytes -= evicted_size
             logger.debug(
                 f"Evicted key={evicted_key[:16]}..., size={evicted_size / 1024**2:.2f}MB"
             )
 
         # Store new entry
-        self._cache[key] = tensor
+        self._cache[key] = entry
         self._current_bytes += size
 
         logger.debug(

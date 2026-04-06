@@ -25,6 +25,9 @@ outputs:
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
+  planner:
+    description: 'Whether planner files changed'
+    value: ${{ steps.filter.outputs.planner_any_modified }}
   frontend:
     description: 'Whether frontend files changed'
     value: ${{ steps.filter.outputs.frontend_any_modified }}

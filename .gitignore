@@ -2,6 +2,8 @@
 .vs/
 .vscode/
 .helix
+issues/
+plans/
 *rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
@@ -35,6 +37,7 @@ CMakeCache.txt
 *_pb2.py
 *_pb2.pyi
 *.svg
+!docs/assets/**/*.svg
 
 *pytest_report.md
 *pytest_report.xml
@@ -105,13 +108,15 @@ TensorRT-LLM
 # The Linux kernel generates core dump files when a process crashes (receives signals
 # like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
 # determines the filename (typically core or core.<pid>)
-core
+/core
+core.*
 
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
 /.cursor
-/.claude
+/.claude/*
+!/.claude/skills/
 /CLAUDE.md
 /CLAUDE.md.bak
 

@@ -78,6 +78,7 @@ async fn test_metrics_prefix_default() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 false,
+                "",
             );
         }
 
@@ -117,6 +118,7 @@ async fn test_metrics_prefix_custom() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -151,6 +153,7 @@ async fn test_metrics_prefix_sanitized() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -218,16 +221,16 @@ async fn test_metrics_with_mock_model() {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, mock model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model("mockmodel")
             .messages(vec![message])
             .max_tokens(50u32)
@@ -295,7 +298,7 @@ mod integration_tests {
     use super::*;
     use dynamo_llm::{
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
-        local_model::LocalModelBuilder,
+        local_model::LocalModelBuilder, namespace::NamespaceFilter,
     };
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::discovery::DiscoveryQuery;
@@ -341,6 +344,7 @@ mod integration_tests {
             dynamo_llm::entrypoint::RouterConfig::default(),
             0, // migration_limit
             None,
+            None,
             service.state().metrics_clone(),
         );
         // Start watching for model registrations via discovery interface
@@ -355,7 +359,9 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher.watch(discovery_stream, None).await;
+            model_watcher
+                .watch(discovery_stream, NamespaceFilter::Global)
+                .await;
         });
 
         let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
@@ -417,16 +423,16 @@ mod integration_tests {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, MDC model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model(model.service_name())
             .messages(vec![message])
             .max_tokens(50u32)
@@ -553,13 +559,8 @@ mod integration_tests {
                     if let Some(key) = key {
                         // Remove from ModelManager first (this returns the ModelEntry)
                         if let Some(_removed_card) = manager.remove_model_card(&key) {
-                            // Remove engines (following ModelWatcher::handle_delete pattern)
-                            manager
-                                .remove_chat_completions_model(&model_entry.name)
-                                .ok();
-                            manager.remove_completions_model(&model_entry.name).ok();
-                            manager.remove_embeddings_model(&model_entry.name).ok();
-                            manager.remove_tensor_model(&model_entry.name).ok();
+                            // Remove entire model (following ModelWatcher::handle_delete pattern)
+                            manager.remove_model(&model_entry.name);
 
                             // Then delete from etcd
                             etcd_client.kv_delete(key.as_str(), None).await.unwrap();

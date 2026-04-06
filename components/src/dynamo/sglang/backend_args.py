@@ -3,11 +3,13 @@
 
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
+import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
 
@@ -17,7 +19,7 @@ class DynamoSGLangArgGroup(ArgGroup):
 
     name = "dynamo-sglang"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo SGLang arguments to parser."""
 
         parser.add_argument(
@@ -33,16 +35,12 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--use-sglang-tokenizer",
             env_var="DYN_SGL_USE_TOKENIZER",
             default=False,
-            help="Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
+            help="[Deprecated] Use SGLang's tokenizer for pre and post processing. "
+            "This option will be removed in a future release. Use "
+            "'--dyn-chat-processor sglang' on the frontend instead, which provides "
+            "the same SGLang-native pre/post processing with KV router support.",
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_SGL_MULTIMODAL_PROCESSOR",
-            default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
         add_negatable_bool_argument(
             g,
             flag_name="--multimodal-encode-worker",
@@ -56,6 +54,15 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="DYN_SGL_MULTIMODAL_WORKER",
             default=False,
             help="Run as multimodal worker component for LLM inference with multimodal data.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--embedding-transfer-mode",
+            env_var="DYN_SGL_EMBEDDING_TRANSFER_MODE",
+            default=EmbeddingTransferMode.NIXL_WRITE.value,
+            help="Worker embedding transfer mode: 'local', 'nixl-write', or 'nixl-read'. Can also be set with environment variable DYN_SGL_EMBEDDING_TRANSFER_MODE.",
+            choices=[m.value for m in EmbeddingTransferMode],
         )
 
         add_negatable_bool_argument(
@@ -72,20 +79,6 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="DYN_SGL_IMAGE_DIFFUSION_WORKER",
             default=False,
             help="Run as image diffusion worker for image generation.",
-        )
-        add_argument(
-            g,
-            flag_name="--image-diffusion-fs-url",
-            env_var="DYN_SGL_IMAGE_DIFFUSION_FS_URL",
-            default=None,
-            help="Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
-        )
-        add_argument(
-            g,
-            flag_name="--image-diffusion-base-url",
-            env_var="DYN_SGL_IMAGE_DIFFUSION_BASE_URL",
-            default="http://localhost:8008/",
-            help="Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs.",
         )
         add_argument(
             g,
@@ -108,34 +101,29 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Run as video generation worker for video generation (T2V/I2V).",
         )
-        add_argument(
-            g,
-            flag_name="--video-generation-fs-url",
-            env_var="DYN_SGL_VIDEO_GENERATION_FS_URL",
-            default=None,
-            help="Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
-        )
 
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
-    multimodal_processor: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
+    embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     image_diffusion_worker: bool
-    image_diffusion_fs_url: Optional[str] = None
-    image_diffusion_base_url: Optional[str] = None
 
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
-    video_generation_fs_url: Optional[str] = None
 
     def validate(self) -> None:
+        if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
+            self.embedding_transfer_mode = EmbeddingTransferMode(
+                str(self.embedding_transfer_mode)
+            )
+
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):
             raise ValueError(
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."

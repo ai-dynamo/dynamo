@@ -11,23 +11,34 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
+use dynamo_kv_router::{
+    config::{KvRouterConfig, RouterConfigOverride},
+    protocols::*,
+};
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_runtime::discovery::DiscoveryQuery;
+use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
+
+use std::collections::HashSet;
 
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+struct DiscoveredModelBootstrap {
+    preprocessor: Arc<OpenAIPreprocessor>,
+    card: ModelDeploymentCard,
+    actual_namespace: String,
+}
 
 /// Convert a C string pointer to a Rust string, falling back to a default when:
 /// - the pointer is NULL,
@@ -55,9 +66,9 @@ fn initialize_tracing() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    tracing::debug!("Tracing initialized");
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        tracing::debug!("Tracing initialized");
+    }
 }
 
 #[repr(u32)]
@@ -212,12 +223,15 @@ fn kv_event_create_stored_block_from_parts(
     token_ids: *const u32,
     num_tokens: usize,
     kv_block_size: u32,
-    _lora_id: u64,
+    lora_name: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
-        None,
+        BlockHashOptions {
+            lora_name,
+            ..Default::default()
+        },
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -264,7 +278,7 @@ fn kv_event_create_stored_from_parts(
             tokens,
             num_toks,
             kv_block_size,
-            kv_params.lora_id,
+            kv_params.lora_name.as_deref(),
         ));
     }
 
@@ -303,12 +317,13 @@ pub struct DynamoKvStoredEventParams {
     pub block_ids: *const u64,
     pub num_blocks: usize,
     pub parent_hash: Option<u64>,
-    pub lora_id: u64,
+    pub lora_name: Option<String>,
 }
 
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
-/// has a parent hash or not. nullptr is used to represent no parent hash
+/// has a parent hash or not. nullptr is used to represent no parent hash.
+/// lora_name is an optional null-terminated C string; pass nullptr for base model.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     event_id: u64,
@@ -317,13 +332,24 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     block_ids: *const u64,
     num_blocks: usize,
     parent_hash: *const u64,
-    lora_id: u64,
+    lora_name: *const c_char,
 ) -> DynamoLlmResult {
     let parent_hash = {
         if parent_hash.is_null() {
             None
         } else {
             Some(unsafe { *parent_hash })
+        }
+    };
+    let lora_name = if lora_name.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(lora_name) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to convert C string to Rust string (lora_name)");
+                return DynamoLlmResult::ERR;
+            }
         }
     };
     let kv_params = DynamoKvStoredEventParams {
@@ -333,7 +359,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         block_ids,
         num_blocks,
         parent_hash,
-        lora_id,
+        lora_name,
     };
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
@@ -378,6 +404,10 @@ pub struct CRoutingResult {
     pub prefill_worker_id: u64,
     /// Decode worker ID
     pub decode_worker_id: u64,
+    /// Data parallel rank selected for the prefill worker
+    pub prefill_dp_rank: u32,
+    /// Data parallel rank selected for the decode worker
+    pub decode_dp_rank: u32,
     /// Token IDs (needed for add_request callback)
     pub token_ids: *mut u32,
     /// Number of tokens in the request
@@ -390,6 +420,8 @@ impl Default for CRoutingResult {
             is_disaggregated: false,
             prefill_worker_id: 0,
             decode_worker_id: 0,
+            prefill_dp_rank: 0,
+            decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
         }
@@ -412,15 +444,22 @@ pub struct RouterHandles {
 
 impl RouterHandles {
     /// Query optimal prefill worker for a request.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// Returns worker_id on success.
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
-        block_mm_infos: Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
+        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
-    ) -> Result<u64, QueryRouterResult> {
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+    ) -> Result<(u64, u32), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
         self.prefill_router
             .query_prefill_worker(
                 tokens,
@@ -428,9 +467,9 @@ impl RouterHandles {
                 update_states,
                 lora_name,
                 priority_jump,
+                allowed_worker_ids,
             )
             .await
-            .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
@@ -441,6 +480,9 @@ impl RouterHandles {
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
     /// (since KV cache is being transferred from prefill, not reused).
     ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
+    /// This does NOT overwrite the router's internal worker state — it only filters this decision.
+    ///
     /// Note: The C bindings are query-only and must not mutate router state during worker
     /// selection. State updates require a `context_id` (request id) and are managed via the
     /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
@@ -449,12 +491,19 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.decode_router.register_workers(ids);
+        }
+
         // For decode phase in disaggregated mode, use overlap_score_weight=0
         // This matches prefill_router.rs
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
                 overlap_score_weight: Some(0.0),
+                assume_kv_reuse: Some(false),
+                track_prefill_tokens: Some(false),
                 ..Default::default()
             })
         } else {
@@ -470,6 +519,8 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
+                None,
+                allowed_worker_ids,
             )
             .await
             .map_err(|e| {
@@ -495,14 +546,6 @@ pub enum QueryRouterResult {
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
-///
-/// Supported env vars (all optional — unset or empty values are ignored):
-/// - `DYN_OVERLAP_SCORE_WEIGHT` — Weight for overlap score in worker selection (default: 1.0)
-/// - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
-/// - `DYN_USE_KV_EVENTS` — Use KV events for cache tracking (default: true)
-/// - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
-/// - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
-/// - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
 fn kv_router_config_from_env() -> KvRouterConfig {
     let mut cfg = KvRouterConfig::default();
 
@@ -537,6 +580,12 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         cfg.router_track_output_blocks = v;
     }
+    if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
+        cfg.router_track_prefill_tokens = v;
+    }
+    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
+        cfg.router_queue_threshold = Some(v);
+    }
 
     tracing::info!(
         overlap_score_weight = cfg.overlap_score_weight,
@@ -545,6 +594,8 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_replica_sync = cfg.router_replica_sync,
         router_track_active_blocks = cfg.router_track_active_blocks,
         router_track_output_blocks = cfg.router_track_output_blocks,
+        router_track_prefill_tokens = cfg.router_track_prefill_tokens,
+        router_queue_threshold = ?cfg.router_queue_threshold,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 
@@ -560,7 +611,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
+/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -573,6 +624,8 @@ pub unsafe extern "C" fn create_routers(
     enforce_disagg: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
+    initialize_tracing();
+
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -612,24 +665,35 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Wait for at least one worker to be discovered before proceeding
-        // This ensures the decode router can be created successfully
-        let instance_count = wait_for_discovery_sync(&drt).await;
-        if instance_count == 0 {
-            tracing::error!(
-                "Discovery sync failed: no worker instances found. Is the backend running?"
+        let DiscoveredModelBootstrap {
+            preprocessor,
+            card,
+            actual_namespace,
+        } = match init_preprocessor(&drt, &namespace_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize preprocessor");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+        let block_size = card.kv_cache_block_size;
+        let model_name = card.display_name.clone();
+        let enable_eagle = card.runtime_config.enable_eagle;
+
+        if actual_namespace != namespace_str {
+            tracing::info!(
+                base_namespace = %namespace_str,
+                actual_namespace = %actual_namespace,
+                "Worker namespace has rolling-update suffix"
             );
-            return Err(QueryRouterResult::ErrInitFailed);
         }
-        tracing::info!(
-            "Discovery sync complete, {} worker(s) found",
-            instance_count
-        );
 
-        let kv_router_config = kv_router_config_from_env();
+        let mut kv_router_config = kv_router_config_from_env();
+        kv_router_config.skip_initial_worker_wait = true;
 
-        // Get component and endpoint
-        let component_handle = match drt.namespace(&namespace_str) {
+        // Build endpoint using the actual namespace discovered from workers,
+        // which may include a rolling-update hash suffix.
+        let component_handle = match drt.namespace(&actual_namespace) {
             Ok(ns) => match ns.component(&component_str) {
                 Ok(c) => c,
                 Err(e) => {
@@ -646,32 +710,16 @@ pub unsafe extern "C" fn create_routers(
 
         let model_manager = Arc::new(ModelManager::new());
 
-        // Fetch model card via discovery and create preprocessor + get block_size
-        let (preprocessor, block_size, model_name) =
-            match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
-                Ok((prep, bs, name)) => {
-                    tracing::info!(
-                        kv_cache_block_size = bs,
-                        "Preprocessor created from discovery"
-                    );
-                    (Some(prep), bs, name)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to fetch model card from discovery - cannot determine block_size"
-                    );
-                    return Err(QueryRouterResult::ErrInitFailed);
-                }
-            };
-
         // Create decode router
         let decode_router = match model_manager
             .kv_chooser_for(
                 &endpoint,
                 block_size,
-                Some(kv_router_config),
+                Some(kv_router_config.clone()),
+                None,
                 WORKER_TYPE_DECODE,
+                Some(model_name.clone()),
+                enable_eagle,
             )
             .await
         {
@@ -682,46 +730,77 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Create PrefillRouter based on one-time discovery of prefill workers
-        // Auto-detects disaggregated mode by checking if prefill workers are present
-        // The prefill workers have to be created before the epp is created.
-        // Given that we wait first for the decode worker to show up it is reasonable to assume the prefill will be up as well.
-        let prefill_router = match find_prefill_endpoint(&drt, &namespace_str).await {
-            Some(prefill_endpoint) => {
-                tracing::info!("Prefill worker found, running in disaggregated mode");
-                let mut prefill_config = kv_router_config;
-                prefill_config.router_track_active_blocks = false;
+        // Wait for the runtime config watch to be populated with at least one
+        // decode worker's ModelRuntimeConfig. skip_initial_worker_wait=true
+        // skips this inside KvRouter::new, but the selector needs workers in
+        // workers_with_configs to avoid NoEndpoints on the first request.
+        // discovery sync already confirmed workers exist; this just waits for
+        // the async join of instance IDs + configs to complete in the watch.
+        {
+            let mut config_watch = model_manager
+                .get_or_create_runtime_config_watcher(&endpoint)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = ?e, "Failed to get runtime config watcher");
+                    QueryRouterResult::ErrInitFailed
+                })?;
+            tracing::info!(
+                "Waiting for decode workers to register ModelRuntimeConfig \
+                 (no timeout - controlled by K8s StartupProbe)..."
+            );
+            let wait_result = config_watch.wait_for(|m| !m.is_empty()).await.map(|_| ());
+            match wait_result {
+                Ok(()) => {
+                    let count = config_watch.borrow().len();
+                    tracing::info!(
+                        worker_count = count,
+                        "Runtime config watch populated with decode workers"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "Runtime config watch closed before any workers appeared. \
+                         Decode routing will fail. \
+                         Verify workers are running and publishing to discovery."
+                    );
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            }
+        }
 
-                // Create immediately-resolved channel to activate router
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = tx.send(prefill_endpoint);
+        // Create PrefillRouter with a pending activation channel.
+        // A background task watches discovery for prefill workers and activates
+        // the router when one appears. Before activation, requests gracefully
+        // fallback to decode-only routing.
+        let mut prefill_config = kv_router_config;
+        prefill_config.router_track_active_blocks = false;
 
-                PrefillRouter::new(
-                    rx,
-                    model_manager.clone(),
-                    RouterMode::KV,
-                    block_size,
-                    Some(prefill_config),
-                    enforce_disagg,
-                    model_name.clone(),
-                )
-            }
-            None if enforce_disagg => {
-                tracing::error!("Prefill workers required (enforce_disagg=true) but none found");
-                return Err(QueryRouterResult::ErrDisaggEnforced);
-            }
-            None => {
-                tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-            }
-        };
+        let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
+        let prefill_router = PrefillRouter::new(
+            prefill_rx,
+            model_manager.clone(),
+            RouterMode::KV,
+            block_size,
+            Some(prefill_config),
+            None,
+            enforce_disagg,
+            model_name.clone(),
+            actual_namespace.clone(),
+            enable_eagle,
+        );
+
+        // Spawn background discovery watcher for prefill workers.
+        // Polls discovery until a prefill-only worker appears in the same
+        // rolling-update namespace, then sends its endpoint through the channel
+        // to activate the PrefillRouter.
+        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
 
         Ok((
             prefill_router,
             decode_router,
             model_manager,
             namespace_str,
-            preprocessor,
+            Some(preprocessor),
         ))
     });
 
@@ -784,9 +863,18 @@ pub unsafe extern "C" fn add_request(
 
         tokio::time::timeout(timeout_duration, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let router_config_override = RouterConfigOverride {
+                overlap_score_weight: Some(0.0),
+                assume_kv_reuse: Some(false),
+                track_prefill_tokens: Some(false),
+                ..Default::default()
+            };
 
             // Compute overlap_blocks using the public method
-            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker).await {
+            let overlap_blocks = match decode_router
+                .get_overlap_blocks(&tokens, None, worker, None)
+                .await
+            {
                 Ok(overlap) => overlap,
                 Err(e) => {
                     tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
@@ -798,11 +886,12 @@ pub unsafe extern "C" fn add_request(
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
+                    None,
                     overlap_blocks,
                     None,
                     worker,
                     None, // lora_name
-                    None, // router_config_override
+                    Some(&router_config_override),
                 )
                 .await;
 
@@ -957,135 +1046,6 @@ pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
     }
 }
 
-/// Route a chat completion request in a single call.
-///
-/// This is the main function for EPP to route a `/v1/chat/completions` request.
-/// It combines tokenization and worker selection in one call:
-/// 1. Applies the chat template to the request JSON
-/// 2. Tokenizes the formatted prompt
-/// 3. Queries the prefill router (if disaggregated mode)
-/// 4. Queries the decode router
-/// 5. Returns worker IDs and token_ids
-///
-/// After this call, EPP should:
-/// - Call `add_request()` to register the request for bookkeeping
-/// - Set worker ID headers and forward to backend
-/// - Call `mark_prefill_complete()` on first token
-/// - Call `free_request()` when the stream ends
-/// - Call `free_routing_result()` to free the result
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `request_json` must be a valid null-terminated C string containing JSON
-/// - `out_result` must be a valid pointer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn route_request(
-    handle: RouterHandlesPtr,
-    request_json: *const c_char,
-    out_result: *mut CRoutingResult,
-) -> QueryRouterResult {
-    if handle.is_null() || request_json.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-
-    // Get preprocessor
-    let preprocessor = match &handles.preprocessor {
-        Some(p) => p,
-        None => {
-            tracing::error!("Preprocessor not available");
-            return QueryRouterResult::ErrInitFailed;
-        }
-    };
-
-    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return QueryRouterResult::ErrInvalidParam,
-    };
-
-    // Parse JSON
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
-            Ok(req) => req,
-            Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
-                return QueryRouterResult::ErrInvalidParam;
-            }
-        };
-
-    // Apply chat template
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to apply chat template");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    // Tokenize
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
-        Ok(enc) => enc,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to tokenize");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    let tokens = encoding.token_ids();
-    let token_count = tokens.len();
-    let is_disaggregated = handles.prefill_router.is_activated();
-
-    // Query workers
-    let result = handles.runtime.secondary().block_on(async {
-        let prefill_worker_id = if is_disaggregated {
-            handles
-                .query_prefill_worker(tokens, None, false, None, 0.0)
-                .await?
-        } else {
-            0
-        };
-
-        let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(tokens, is_disaggregated)
-            .await?;
-
-        tracing::info!(
-            is_disaggregated = is_disaggregated,
-            prefill_worker_id = prefill_worker_id,
-            decode_worker_id = decode_worker.worker_id,
-            decode_dp_rank = decode_worker.dp_rank,
-            token_count = token_count,
-            "Routed chat request"
-        );
-
-        Ok((prefill_worker_id, decode_worker))
-    });
-
-    match result {
-        Ok((prefill_worker_id, decode_worker)) => {
-            // Allocate and copy token IDs for caller (needed for add_request bookkeeping)
-            let token_vec: Vec<u32> = tokens.to_vec();
-            let mut tokens_boxed = token_vec.into_boxed_slice();
-            let token_ptr = tokens_boxed.as_mut_ptr();
-            std::mem::forget(tokens_boxed);
-
-            unsafe {
-                *out_result = CRoutingResult {
-                    is_disaggregated,
-                    prefill_worker_id,
-                    decode_worker_id: decode_worker.worker_id,
-                    token_ids: token_ptr,
-                    token_count,
-                };
-            }
-            QueryRouterResult::Ok
-        }
-        Err(code) => code,
-    }
-}
-
 /// Free a routing result.
 ///
 /// # Safety
@@ -1101,7 +1061,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     // Free token IDs
     if !res.token_ids.is_null() && res.token_count > 0 {
         drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 res.token_ids,
                 res.token_count,
             ))
@@ -1111,6 +1071,355 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     }
 }
 
+/// Parse a JSON request string, apply the chat template, and tokenize.
+/// Returns the token IDs on success, or a `QueryRouterResult` error code.
+unsafe fn preprocess_request(
+    handles: &RouterHandles,
+    request_json: *const c_char,
+) -> Result<Vec<u32>, QueryRouterResult> {
+    let preprocessor = match &handles.preprocessor {
+        Some(p) => p,
+        None => {
+            tracing::error!("Preprocessor not available");
+            return Err(QueryRouterResult::ErrInitFailed);
+        }
+    };
+
+    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(QueryRouterResult::ErrInvalidParam),
+    };
+
+    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        match serde_json::from_str(json_str) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse request JSON");
+                return Err(QueryRouterResult::ErrInvalidParam);
+            }
+        };
+
+    let formatted_prompt = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to apply chat template");
+            return Err(QueryRouterResult::ErrQueryFailed);
+        }
+    };
+
+    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+        Ok(enc) => enc,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to tokenize");
+            return Err(QueryRouterResult::ErrQueryFailed);
+        }
+    };
+
+    Ok(encoding.token_ids().to_vec())
+}
+
+/// Parse pods JSON into an optional set of allowed worker IDs.
+unsafe fn parse_pods_filter(pods_json: *const c_char) -> Option<HashSet<WorkerId>> {
+    if pods_json.is_null() {
+        return None;
+    }
+    match unsafe { CStr::from_ptr(pods_json) }.to_str() {
+        Ok(s) if !s.is_empty() => match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+            Ok(pods) => {
+                let mut worker_ids = HashSet::new();
+                for pod in &pods {
+                    let pod_name = pod
+                        .get("pod")
+                        .and_then(|p| p.get("podName"))
+                        .or_else(|| pod.get("podName"))
+                        .and_then(|v| v.as_str());
+                    if let Some(name) = pod_name {
+                        let worker_id = hash_pod_name(name);
+                        tracing::debug!(
+                            pod_name = name,
+                            worker_id = format!("{:x}", worker_id),
+                            "Mapped EPP pod to worker_id"
+                        );
+                        worker_ids.insert(worker_id);
+                    }
+                }
+                tracing::info!(
+                    pod_count = pods.len(),
+                    unique_worker_ids = worker_ids.len(),
+                    "Parsed EPP pods into allowed_worker_ids filter"
+                );
+                if worker_ids.is_empty() {
+                    None
+                } else {
+                    Some(worker_ids)
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse pods JSON");
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// Write token IDs into a `CRoutingResult`, transferring ownership to the caller.
+fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
+    let token_vec: Vec<u32> = tokens.to_vec();
+    let mut tokens_boxed = token_vec.into_boxed_slice();
+    out.token_ids = tokens_boxed.as_mut_ptr();
+    out.token_count = tokens.len();
+    std::mem::forget(tokens_boxed);
+}
+
+/// Route a request to select the best **prefill** worker only.
+///
+/// This is used in disaggregated mode where the EPP runs separate prefill and decode
+/// scoring profiles.  It tokenizes the request and queries only the prefill router.
+///
+/// The returned `CRoutingResult` contains:
+/// - `prefill_worker_id`: the selected prefill worker
+/// - `decode_worker_id`: 0 (unused — decode is handled by `route_decode_request`)
+/// - `is_disaggregated`: always true (this function is only called in disagg mode)
+/// - `token_ids` / `token_count`: the tokenized request (caller must free via `free_routing_result`)
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_prefill_request(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let tokens = match unsafe { preprocess_request(handles, request_json) } {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+
+    let result = handles.runtime.secondary().block_on(async {
+        let (prefill_worker_id, prefill_dp_rank) = handles
+            .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
+            .await?;
+
+        tracing::info!(
+            prefill_worker_id = prefill_worker_id,
+            prefill_dp_rank = prefill_dp_rank,
+            token_count = tokens.len(),
+            "Routed prefill request"
+        );
+
+        Ok((prefill_worker_id, prefill_dp_rank))
+    });
+
+    match result {
+        Ok((prefill_worker_id, prefill_dp_rank)) => {
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = true;
+            out.prefill_worker_id = prefill_worker_id;
+            out.prefill_dp_rank = prefill_dp_rank;
+            write_tokens_to_result(&tokens, out);
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
+/// Route a request to select the best **decode** worker only.
+///
+/// This is used in both aggregated and disaggregated modes.
+/// - When `is_disaggregated` is true, the decode router uses `overlap_score_weight=0`
+///   (KV cache is being transferred from prefill, not reused locally).
+/// - When `is_disaggregated` is false, normal KV-aware scoring is used.
+///
+/// The returned `CRoutingResult` contains:
+/// - `decode_worker_id`: the selected decode worker
+/// - `prefill_worker_id`: 0 (unused — prefill is handled by `route_prefill_request`)
+/// - `is_disaggregated`: mirrors the input parameter
+/// - `token_ids` / `token_count`: the tokenized request (caller must free via `free_routing_result`)
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_decode_request(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    is_disaggregated: bool,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let tokens = match unsafe { preprocess_request(handles, request_json) } {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+
+    let result = handles.runtime.secondary().block_on(async {
+        let (decode_worker, _overlap_blocks) = handles
+            .query_decode_worker(&tokens, is_disaggregated, allowed_worker_ids)
+            .await?;
+
+        tracing::info!(
+            is_disaggregated = is_disaggregated,
+            decode_worker_id = decode_worker.worker_id,
+            decode_dp_rank = decode_worker.dp_rank,
+            token_count = tokens.len(),
+            "Routed decode request"
+        );
+
+        Ok(decode_worker)
+    });
+
+    match result {
+        Ok(decode_worker) => {
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = is_disaggregated;
+            out.decode_worker_id = decode_worker.worker_id;
+            out.decode_dp_rank = decode_worker.dp_rank;
+            write_tokens_to_result(&tokens, out);
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
+/// Initialize the preprocessor and fetch the model card used for routing.
+///
+/// Waits for discovery to sync (model card must be available for tokenization),
+/// then creates the preprocessor from the model card. Router settings are
+/// derived directly from the returned card by the caller.
+async fn init_preprocessor(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<DiscoveredModelBootstrap> {
+    let instance_count = wait_for_discovery_sync(drt).await;
+    if instance_count == 0 {
+        anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
+    }
+    tracing::info!(
+        "Discovery sync complete, {} worker(s) found",
+        instance_count
+    );
+
+    // Retry fetching the preprocessor: model card metadata may arrive after
+    // worker endpoints are registered.
+    let bootstrap = loop {
+        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+            Ok(result) => break result,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    target_namespace,
+                    "Model card not available yet, retrying in 5s..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    };
+
+    tracing::info!(
+        kv_cache_block_size = bootstrap.card.kv_cache_block_size,
+        model_name = %bootstrap.card.display_name,
+        actual_namespace = %bootstrap.actual_namespace,
+        enable_eagle = bootstrap.card.runtime_config.enable_eagle,
+        "Preprocessor initialized from model card"
+    );
+
+    Ok(bootstrap)
+}
+
+/// Spawn a background task that watches discovery for a prefill-only worker
+/// in the given namespace. When found, sends its endpoint through `tx` to
+/// activate the PrefillRouter. Polls every 1 second until a match is found.
+fn spawn_prefill_discovery_watcher(
+    drt: DistributedRuntime,
+    target_namespace: String,
+    tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+) {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::DiscoveryInstance;
+
+    tokio::spawn(async move {
+        let discovery = drt.discovery();
+        tracing::info!(
+            namespace = target_namespace,
+            "Background task: watching for prefill workers to register..."
+        );
+
+        loop {
+            if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
+                for instance in instances {
+                    if let DiscoveryInstance::Model {
+                        namespace,
+                        component,
+                        endpoint,
+                        ..
+                    } = &instance
+                    {
+                        if namespace != &target_namespace {
+                            continue;
+                        }
+
+                        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                            Ok(card) => card,
+                            Err(_) => continue,
+                        };
+
+                        if !card.model_type.supports_prefill()
+                            || card.model_type.supports_chat()
+                            || card.model_type.supports_completions()
+                        {
+                            continue;
+                        }
+
+                        tracing::info!(
+                            model_name = card.name(),
+                            namespace = namespace.as_str(),
+                            "Prefill worker discovered, activating PrefillRouter"
+                        );
+
+                        if let Ok(ns) = drt.namespace(namespace)
+                            && let Ok(comp) = ns.component(component)
+                        {
+                            let ep = comp.endpoint(endpoint);
+                            if tx.send(ep).is_err() {
+                                tracing::debug!("PrefillRouter activation channel already closed");
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
 /// Fetch model card via discovery and create preprocessor.
 ///
 /// This function:
@@ -1118,12 +1427,11 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// 2. Finds the first model in the target namespace (decode workers only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
-/// 5. Returns the preprocessor, the kv_cache_block_size, and model_name from the model card
+/// 5. Returns the preprocessor, the model card, and the resolved worker namespace
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
-) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32, String)> {
-    use dynamo_llm::model_card::ModelDeploymentCard;
+) -> anyhow::Result<DiscoveredModelBootstrap> {
     use dynamo_runtime::discovery::DiscoveryInstance;
 
     let discovery = drt.discovery();
@@ -1131,16 +1439,18 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only)
-    let mut model_card: Option<ModelDeploymentCard> = None;
+    // Find first model card in the target namespace (decode workers only).
+    // Use prefix matching because workers may append a rolling-update hash
+    // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
+    let mut model_card: Option<(ModelDeploymentCard, String)> = None;
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            // Filter by namespace
-            if namespace != target_namespace {
+            if !namespace.starts_with(target_namespace) {
                 continue;
             }
 
+            let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
                     // Skip prefill-only workers, we want decode workers for routing
@@ -1150,7 +1460,7 @@ async fn fetch_preprocessor_from_discovery(
                     {
                         continue;
                     }
-                    model_card = Some(card);
+                    model_card = Some((card, actual_namespace));
                     break;
                 }
                 Err(e) => {
@@ -1161,18 +1471,18 @@ async fn fetch_preprocessor_from_discovery(
         }
     }
 
-    let mut card = model_card.ok_or_else(|| {
+    let (mut card, actual_namespace) = model_card.ok_or_else(|| {
         anyhow::anyhow!(
             "No model found in namespace '{}' via discovery",
             target_namespace
         )
     })?;
 
-    let kv_cache_block_size = card.kv_cache_block_size;
-    let model_name = card.name().to_string();
     tracing::info!(
-        model_name = model_name,
-        kv_cache_block_size = kv_cache_block_size,
+        model_name = %card.display_name,
+        kv_cache_block_size = card.kv_cache_block_size,
+        actual_namespace = %actual_namespace,
+        enable_eagle = card.runtime_config.enable_eagle,
         "Found model card via discovery"
     );
 
@@ -1180,64 +1490,10 @@ async fn fetch_preprocessor_from_discovery(
     card.download_config().await?;
 
     // Create preprocessor
-    let preprocessor = OpenAIPreprocessor::new(card)?;
-    Ok((preprocessor, kv_cache_block_size, model_name))
-}
-
-/// Find a prefill endpoint from already-discovered instances (one-time filter).
-/// Returns the endpoint if a prefill worker is found in the target namespace.
-async fn find_prefill_endpoint(
-    drt: &DistributedRuntime,
-    target_namespace: &str,
-) -> Option<dynamo_runtime::component::Endpoint> {
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_runtime::discovery::DiscoveryInstance;
-
-    let discovery = drt.discovery();
-    let instances = match discovery.list(DiscoveryQuery::AllModels).await {
-        Ok(instances) => instances,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list instances for prefill discovery");
-            return None;
-        }
-    };
-
-    for instance in instances {
-        if let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            ..
-        } = &instance
-        {
-            // Filter by namespace
-            if namespace != target_namespace {
-                continue;
-            }
-
-            let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => card,
-                Err(_) => continue,
-            };
-
-            // Only handle prefill models
-            if !card.model_type.supports_prefill() {
-                continue;
-            }
-
-            tracing::info!(
-                model_name = card.name(),
-                "Prefill worker found in discovered instances"
-            );
-
-            // Build and return the endpoint
-            if let Ok(ns) = drt.namespace(namespace)
-                && let Ok(comp) = ns.component(component)
-            {
-                return Some(comp.endpoint(endpoint));
-            }
-        }
-    }
-
-    None
+    let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+    Ok(DiscoveredModelBootstrap {
+        preprocessor,
+        card,
+        actual_namespace,
+    })
 }

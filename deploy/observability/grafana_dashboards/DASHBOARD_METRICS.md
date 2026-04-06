@@ -19,7 +19,7 @@ The dashboard is organized in **logical request flow order** (21 panels across 6
 - Request Throughput (x=0), Avg Request Duration (x=8), KV Cache Utilization (%) (x=16)
 
 **Row 5: KV Cache + GPU** (y=32)
-- KV Cache Blocks (Active/Total) ⭐ (x=0), GPU Compute Utilization (x=8), GPU Memory Used (x=16)
+- KV Cache Blocks (Total) (x=0), GPU Compute Utilization (x=8), GPU Memory Used (x=16)
 
 **Row 6: NIXL Transfer Metrics** (y=40)
 - GPU Memory Bandwidth (x=0), NVLink Bandwidth (GB/s) (x=8), Worker CPU Usage (x=16)
@@ -69,8 +69,8 @@ These metrics come from the decode worker pods' system endpoints (port 9090). In
 | **Component Latency - Prefill vs Decode** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="prefill",dynamo_endpoint="generate"}` & `{dynamo_component="backend",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average request duration for prefill workers (includes NIXL transfer) vs decode workers (entire decode session for all output tokens) over the last 5 minutes. **Note**: Decode worker latency measures the FULL decode session duration, not just time to first token. Only shows `generate` endpoint (filters out `clear_kv_blocks` maintenance operations) |
 | **Decode Worker - Request Throughput** | `dynamo_component_requests_total{dynamo_component="backend"}` | `rate(...[5m])` | Rate of requests processed by decode workers in requests/second |
 | **Decode Worker - Avg Request Duration** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="backend"}` | `rate(sum[5m]) / rate(count[5m])` | Average time decode workers spend processing requests (decode phase only) over the last 5 minutes |
-| **KV Cache Utilization** | `dynamo_component_kvstats_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
-| **KV Cache Blocks (Active/Total)** ⭐ | `dynamo_component_kvstats_active_blocks` & `dynamo_component_kvstats_total_blocks` | Raw values | Number of KV cache blocks in use vs total available for decode workers. When active approaches total, decode workers are at capacity. Shows numeric values (e.g., 2048/5297). **Note**: Only for decode workers |
+| **KV Cache Utilization** | `dynamo_component_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
+| **KV Cache Blocks (Total)** | `dynamo_component_total_blocks` | Raw value | Total number of KV cache blocks available on decode workers. **Note**: Only for decode workers |
 
 ### CPU Metrics (from cAdvisor and Node Exporter)
 These metrics come from Kubernetes cAdvisor (container metrics) and Node Exporter (node-level metrics). CPU bottlenecks can impact prefill/decode performance.
@@ -194,7 +194,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
 - Check deployment mode and request routing configuration
 
 ### KV Cache metrics only showing decode workers:
-**Important Limitation**: In disaggregated mode, prefill workers (`--is-prefill-worker`) do NOT expose `dynamo_component_kvstats_*` metrics. Only decode workers expose these.
+**Important Limitation**: In disaggregated mode, prefill workers (`--disaggregation-mode prefill`) do NOT expose `dynamo_component_total_blocks` or `dynamo_component_gpu_cache_usage_percent` metrics. Only decode workers expose these.
 
 **Why this happens:**
 - Prefill workers transfer KV cache to decode workers via NIXL

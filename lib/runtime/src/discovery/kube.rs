@@ -67,7 +67,7 @@ impl KubeDiscoveryClient {
 
         tokio::spawn(async move {
             if let Err(e) = daemon.run(watch_tx).await {
-                tracing::error!("Discovery daemon failed: {}", e);
+                tracing::error!("Discovery daemon failed: {e}");
             }
         });
 
@@ -89,7 +89,7 @@ impl Discovery for KubeDiscoveryClient {
         self.instance_id
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance_id = self.instance_id();
         let instance = spec.with_instance_id(instance_id);
 

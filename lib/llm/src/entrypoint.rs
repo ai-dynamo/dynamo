@@ -12,11 +12,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    kv_router::KvRouterConfig, local_model::LocalModel, model_card::ModelDeploymentCard,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -67,6 +68,7 @@ pub enum EngineConfig {
     Dynamic {
         model: Box<LocalModel>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.

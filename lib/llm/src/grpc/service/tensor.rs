@@ -20,7 +20,7 @@ use validator::Validate;
 use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 
 use crate::protocols::tensor;
@@ -60,13 +60,22 @@ pub async fn tensor_response_stream(
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
+    let cancellation_labels = CancellationLabels {
+        model: request.model.clone(),
+        endpoint: Endpoint::Tensor.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
     // [gluo TODO] revisit metrics to properly expose it
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -80,10 +89,12 @@ pub async fn tensor_response_stream(
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Tensor, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Tensor,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 

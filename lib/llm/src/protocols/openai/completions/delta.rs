@@ -7,7 +7,10 @@ use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
         common::{self, timing::RequestTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        },
     },
     types::TokenIdType,
 };
@@ -28,7 +31,7 @@ impl NvCreateCompletionRequest {
             // For non-streaming requests (stream=false), enable usage by default
             if self.inner.stream_options.is_none() {
                 self.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                         include_usage: true,
                         continuous_usage_stats: false,
                     });
@@ -92,7 +95,7 @@ pub struct DeltaGenerator {
     created: u32,
     model: String,
     system_fingerprint: Option<String>,
-    usage: dynamo_async_openai::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
     options: DeltaGeneratorOptions,
     tracker: Option<Arc<RequestTracker>>,
 }
@@ -110,7 +113,7 @@ impl DeltaGenerator {
 
         // Previously, our home-rolled CompletionUsage impl'd Default
         // PR !387 - https://github.com/64bit/async-openai/pull/387
-        let usage = dynamo_async_openai::types::CompletionUsage {
+        let usage = dynamo_protocols::types::CompletionUsage {
             completion_tokens: 0,
             prompt_tokens: 0,
             total_tokens: 0,
@@ -151,7 +154,7 @@ impl DeltaGenerator {
         token_ids: Vec<TokenIdType>,
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<dynamo_async_openai::types::Logprobs> {
+    ) -> Option<dynamo_protocols::types::Logprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -172,34 +175,13 @@ impl DeltaGenerator {
                 .zip(tok_lps.iter())
                 .zip(top_logprobs.iter())
                 .map(|(((t, tid), lp), top_lps)| {
-                    let mut found_selected_token = false;
-                    let mut converted_top_lps = top_lps
-                        .iter()
-                        .map(|top_lp| {
-                            let top_t = top_lp.token.clone().unwrap_or_default();
-                            let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == *tid;
-                            dynamo_async_openai::types::TopLogprobs {
-                                token: top_t,
-                                logprob: top_lp.logprob as f32,
-                                bytes: None,
-                            }
-                        })
-                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
-                    if !found_selected_token {
-                        // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
-                            token: t.clone(),
-                            logprob: *lp,
-                            bytes: None,
-                        });
-                    }
-                    serde_json::to_value(converted_top_lps).unwrap()
+                    let converted = convert_backend_top_logprobs(top_lps, t, *tid, *lp);
+                    serde_json::to_value(converted).unwrap()
                 })
                 .collect()
         });
 
-        Some(dynamo_async_openai::types::Logprobs {
+        Some(dynamo_protocols::types::Logprobs {
             tokens: toks.iter().map(|(t, _)| t.clone()).collect(),
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
             text_offset: vec![],
@@ -211,21 +193,21 @@ impl DeltaGenerator {
         &self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<dynamo_async_openai::types::CompletionFinishReason>,
-        logprobs: Option<dynamo_async_openai::types::Logprobs>,
+        finish_reason: Option<dynamo_protocols::types::CompletionFinishReason>,
+        logprobs: Option<dynamo_protocols::types::Logprobs>,
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![dynamo_async_openai::types::Choice {
+            choices: vec![dynamo_protocols::types::Choice {
                 text: text.unwrap_or_default(),
                 index,
                 finish_reason,
@@ -236,10 +218,9 @@ impl DeltaGenerator {
             } else {
                 None
             },
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -250,7 +231,7 @@ impl DeltaGenerator {
     pub fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
         let usage = self.get_usage();
 
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -258,10 +239,9 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
-            nvext: None, // Will be populated by router layer if needed
         };
 
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 
     /// Check if usage tracking is enabled
@@ -274,7 +254,7 @@ impl DeltaGenerator {
         self.options.continuous_usage_stats
     }
 
-    pub fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         usage
@@ -304,6 +284,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
 
+            // Propagate completion token details if provided
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
+            }
+
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
@@ -331,6 +316,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             .as_ref()
             .and_then(|params| params.get("token_ids"))
             .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+        let routed_experts = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("routed_experts"))
+            .cloned();
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
@@ -342,16 +332,21 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, or timing
-        if worker_id_info.is_some() || token_ids.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        if worker_id_info.is_some()
+            || token_ids.is_some()
+            || timing_info.is_some()
+            || routed_experts.is_some()
+        {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
+                routed_experts,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                response.inner.nvext = Some(nvext_json);
+                response.nvext = Some(nvext_json);
                 if let Some(ref info) = worker_id_info {
                     tracing::debug!(
                         "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
@@ -387,7 +382,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         DeltaGenerator::is_continuous_usage_enabled(self)
     }
 
-    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         DeltaGenerator::get_usage(self)
     }
 

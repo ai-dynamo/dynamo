@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
+    dynamo_nvtx_range,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -16,11 +18,7 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter,
-        metrics::RouterRequestMetrics,
-        protocols::{BlockExtraInfo, TokensWithHashes, WorkerWithDpRank},
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -40,8 +38,8 @@ struct WorkerSelection {
     overlap_amount: u32,
 }
 
-/// Drop guard that ensures `free()` and final metrics are recorded even if the
-/// response stream is dropped without being polled to completion.
+/// Drop guard that manages the full lifecycle of a routed request:
+/// per-item tracking (prefill, first token, output blocks) and final cleanup (free + metrics).
 ///
 /// In the happy path, `finish().await` runs cleanup inline in the async context.
 /// If the stream is dropped early (e.g., client disconnect, consumer drop), the
@@ -54,9 +52,82 @@ struct RequestGuard {
     cumulative_osl: usize,
     metrics_recorded: bool,
     freed: bool,
+    prefill_marked: bool,
+    first_token_recorded: bool,
+    track_output_blocks: bool,
+    current_total_blocks: usize,
+    isl_tokens: usize,
+    block_size: usize,
+    expected_output_tokens: Option<u32>,
 }
 
 impl RequestGuard {
+    async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if !self.prefill_marked {
+            let has_tokens = item
+                .data
+                .as_ref()
+                .map(|d| !d.token_ids.is_empty())
+                .unwrap_or(false);
+            if has_tokens {
+                if let Err(e) = self.chooser.mark_prefill_completed(&self.context_id).await {
+                    tracing::warn!(
+                        "Failed to mark prefill completed for request {}: {e}",
+                        self.context_id
+                    );
+                }
+                self.prefill_marked = true;
+            }
+        }
+
+        let new_tokens = item.data.as_ref().map(|d| d.token_ids.len()).unwrap_or(0);
+
+        if !self.first_token_recorded && new_tokens > 0 {
+            if let Some(ref tracker) = self.tracker {
+                tracker.record_first_token();
+                if let Some(ttft) = tracker.ttft_ms() {
+                    self.request_metrics
+                        .time_to_first_token_seconds
+                        .observe(ttft / 1000.0);
+                }
+            }
+            self.first_token_recorded = true;
+        }
+
+        self.cumulative_osl += new_tokens;
+
+        if self.track_output_blocks {
+            let new_total_blocks =
+                (self.isl_tokens + self.cumulative_osl).div_ceil(self.block_size);
+            if new_total_blocks > self.current_total_blocks {
+                let decay_fraction = self
+                    .expected_output_tokens
+                    .map(|eot| (1.0 - (self.cumulative_osl as f64 / eot.max(1) as f64)).max(0.0));
+                if let Err(e) = self
+                    .chooser
+                    .add_output_block(&self.context_id, decay_fraction)
+                {
+                    tracing::warn!(
+                        "Failed to add output block for request {}: {e}",
+                        self.context_id
+                    );
+                }
+
+                if let Some(ref tracker) = self.tracker {
+                    tracker.record_osl(self.cumulative_osl);
+                    tracker.record_finish();
+                    if let Some(avg_itl) = tracker.avg_itl_ms() {
+                        self.request_metrics
+                            .inter_token_latency_seconds
+                            .observe(avg_itl / 1000.0);
+                    }
+                }
+
+                self.current_total_blocks = new_total_blocks;
+            }
+        }
+    }
+
     async fn finish(&mut self) {
         self.record_metrics();
         if let Err(e) = self.chooser.free(&self.context_id).await {
@@ -73,10 +144,10 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
-            self.request_metrics
-                .output_sequence_tokens
-                .observe(self.cumulative_osl as f64);
         }
+        self.request_metrics
+            .output_sequence_tokens
+            .observe(self.cumulative_osl as f64);
         self.request_metrics.requests_total.inc();
     }
 }
@@ -105,22 +176,12 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
-    }
+        // Eagerly register router request metrics (as zeros) so they are
+        // scrapeable before any requests arrive. Both the frontend pipeline
+        // and the standalone router create KvPushRouter, so this covers both.
+        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-    fn routing_inputs(
-        request: &PreprocessedRequest,
-    ) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
-        if let Some(mm_routing_info) = request.mm_routing_info.as_ref() {
-            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
-            if !routing_tokens.is_empty() {
-                return (
-                    routing_tokens,
-                    Some(mm_routing_info.block_mm_infos.as_slice()),
-                );
-            }
-        }
-        (&request.token_ids, None)
+        KvPushRouter { inner, chooser }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -133,12 +194,14 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
+        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
-        let (routing_token_ids, block_mm_infos) = Self::routing_inputs(request);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
+        let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let preselected_id = match phase {
@@ -152,6 +215,7 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
+            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -162,6 +226,8 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    expected_output_tokens,
+                    allowed_worker_ids,
                 )
                 .await?;
 
@@ -203,7 +269,12 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(
+                routing_token_ids,
+                block_mm_infos,
+                worker,
+                lora_name.as_deref(),
+            )
             .await?;
 
         if !is_query_only {
@@ -211,6 +282,7 @@ impl KvPushRouter {
                 .add_request(
                     context_id.to_string(),
                     routing_token_ids,
+                    block_mm_infos,
                     overlap_blocks,
                     expected_output_tokens,
                     worker,
@@ -290,13 +362,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // so the indexer can track cache state based on routing decisions.
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
             let mut tokens_with_hashes =
-                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size());
+                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                    .with_is_eagle(self.chooser.is_eagle());
+            if let Some(infos) = block_mm_infos {
+                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+            }
+            if let Some(lora_name) = lora_name {
+                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+            }
             if let Err(e) = self
                 .chooser
-                .indexer()
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .record_routing_decision(tokens_with_hashes, worker)
                 .await
             {
                 tracing::warn!(
@@ -313,7 +393,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let request_metrics =
             RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
-            let (routing_token_ids, _) = Self::routing_inputs(&request);
+            let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
             tracker.record_isl(
@@ -321,6 +401,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
+            tracker.record_router_queue_depth(self.chooser.pending_count());
+            if let Some(hit_rate) = tracker.kv_hit_rate() {
+                request_metrics.kv_hit_rate.observe(hit_rate);
+            }
         }
         request_metrics
             .input_sequence_tokens
@@ -384,9 +468,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // Wrap stream with lifecycle management (mark_prefill_completed, free).
-        // RequestGuard ensures free() and final metrics run even if the stream is
-        // dropped without being polled to completion (e.g., client disconnect).
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut guard = RequestGuard {
                 chooser: chooser.clone(),
@@ -396,10 +477,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 cumulative_osl: 0,
                 metrics_recorded: false,
                 freed: false,
+                prefill_marked: false,
+                first_token_recorded: false,
+                track_output_blocks,
+                current_total_blocks: isl_tokens.div_ceil(block_size),
+                isl_tokens,
+                block_size,
+                expected_output_tokens,
             };
-            let mut prefill_marked = false;
-            let mut first_token_recorded = false;
-            let mut current_total_blocks = isl_tokens.div_ceil(block_size);
 
             loop {
                 tokio::select! {
@@ -414,65 +499,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         let Some(item) = item else {
                             break;
                         };
-
-                        if !prefill_marked {
-                            // Only mark prefill completed when we receive actual tokens,
-                            // not empty bootstrap info (token_ids: []) from disaggregated prefill
-                            let has_tokens = item.data.as_ref()
-                                .map(|d| !d.token_ids.is_empty())
-                                .unwrap_or(false);
-                            if has_tokens {
-                                if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                    tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
-                                }
-                                prefill_marked = true;
-                            }
-                        }
-
-                        let new_tokens = item.data.as_ref()
-                            .map(|d| d.token_ids.len())
-                            .unwrap_or(0);
-
-                        if !first_token_recorded && new_tokens > 0 {
-                            if let Some(ref tracker) = tracker {
-                                tracker.record_first_token();
-                                if let Some(ttft) = tracker.ttft_ms() {
-                                    request_metrics
-                                        .time_to_first_token_seconds
-                                        .observe(ttft / 1000.0);
-                                }
-                            }
-                            first_token_recorded = true;
-                        }
-
-                        guard.cumulative_osl += new_tokens;
-
-                        if track_output_blocks {
-                            let new_total_blocks = (isl_tokens + guard.cumulative_osl).div_ceil(block_size);
-                            if new_total_blocks > current_total_blocks {
-                                let decay_fraction = expected_output_tokens.map(|eot| {
-                                    (1.0 - (guard.cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
-                                });
-                                if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
-                                    tracing::warn!(
-                                        "Failed to add output block for request {context_id}: {e}"
-                                    );
-                                }
-
-                                if let Some(ref tracker) = tracker {
-                                    tracker.record_osl(guard.cumulative_osl);
-                                    tracker.record_finish();
-                                    if let Some(avg_itl) = tracker.avg_itl_ms() {
-                                        request_metrics
-                                            .inter_token_latency_seconds
-                                            .observe(avg_itl / 1000.0);
-                                    }
-                                }
-
-                                current_total_blocks = new_total_blocks;
-                            }
-                        }
-
+                        guard.on_item(&item).await;
                         yield item;
                     }
                 }

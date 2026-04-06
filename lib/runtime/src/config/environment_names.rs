@@ -42,16 +42,19 @@ pub mod logging {
     /// Enable span event logging (create/close events)
     pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
-    /// OTLP (OpenTelemetry Protocol) tracing configuration
+    /// OTLP (OpenTelemetry Protocol) tracing and logging configuration
     pub mod otlp {
-        /// Enable OTLP trace exporting (set to "1" to enable)
+        /// Enable OTLP export for traces and logs (set to "1" to enable)
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
-        /// OTLP exporter endpoint URL
+        /// OTLP exporter endpoint URL for traces
         /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
-        /// Service name for OTLP traces
+        /// OTLP exporter endpoint URL for logs (defaults to traces endpoint if unset)
+        pub const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+
+        /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
     }
 }
@@ -65,6 +68,10 @@ pub mod runtime {
 
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+    /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
+    /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
+    pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
 
     /// System status server configuration
     pub mod system {
@@ -273,6 +280,18 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
+    /// from the system prompt before forwarding to the target model. The preamble
+    /// varies per session and per release, wasting tokens and breaking prompt caching.
+    pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
+    /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
+    pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
+
+    /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
+    pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
+        "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -310,6 +329,16 @@ pub mod model {
         /// Set to "1" or "true" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
+}
+
+/// KV Router configuration environment variables
+pub mod router {
+    /// Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
+
+    /// Scheduling policy for the router queue ("fcfs" or "wspt").
+    pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
 }
 
 /// Event Plane transport environment variables
@@ -404,6 +433,7 @@ mod tests {
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
@@ -450,6 +480,9 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
+            llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
@@ -458,6 +491,9 @@ mod tests {
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
+            // Router
+            router::DYN_ROUTER_QUEUE_THRESHOLD,
+            router::DYN_ROUTER_QUEUE_POLICY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

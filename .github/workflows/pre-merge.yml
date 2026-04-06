@@ -160,3 +160,8 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Install and Run cargo-machete
+      working-directory: ${{ matrix.dir }}
+      run: |
+        cargo-machete --version || cargo install cargo-machete@0.9.1
+        cargo machete

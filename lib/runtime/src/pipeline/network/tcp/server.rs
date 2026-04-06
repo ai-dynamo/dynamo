@@ -160,8 +160,21 @@ impl TcpStreamServer {
 
                 match resolved_ip {
                     Ok(addr) => addr,
-                    Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
-                    Err(err) => return Err(err.into()),
+                    // Only fall back to loopback when no routable IP exists at all;
+                    // propagate other resolver errors (I/O, platform) so
+                    // misconfigured hosts fail fast instead of silently binding
+                    // to 127.0.0.1.
+                    Err(Error::LocalIpAddressNotFound) => {
+                        tracing::warn!(
+                            "No routable local IP address found; falling back to 127.0.0.1"
+                        );
+                        IpAddr::from([127, 0, 0, 1])
+                    }
+                    Err(err) => {
+                        return Err(PipelineError::Generic(format!(
+                            "Failed to resolve local IP address: {err}"
+                        )));
+                    }
                 }
                 .to_string()
             }
@@ -228,7 +241,7 @@ impl ResponseService for TcpStreamServer {
         // oneshot channels to pass back the sender and receiver objects
 
         let address = format!("{}:{}", self.local_ip, self.local_port);
-        tracing::debug!("Registering new TcpStream on {}", address);
+        tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
             let sender_subject = uuid::Uuid::new_v4().to_string();
@@ -342,7 +355,7 @@ async fn tcp_listener(
             Ok((stream, _addr)) => (stream, _addr),
             Err(e) => {
                 // the client should retry, so we don't need to abort
-                tracing::warn!("failed to accept tcp connection: {}", e);
+                tracing::warn!("failed to accept tcp connection: {e}");
                 eprintln!("failed to accept tcp connection: {}", e);
                 continue;
             }
@@ -351,14 +364,14 @@ async fn tcp_listener(
         match stream.set_nodelay(true) {
             Ok(_) => (),
             Err(e) => {
-                tracing::warn!("failed to set tcp stream to nodelay: {}", e);
+                tracing::warn!("failed to set tcp stream to nodelay: {e}");
             }
         }
 
         match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
-                tracing::warn!("failed to set tcp stream to linger: {}", e);
+                tracing::warn!("failed to set tcp stream to linger: {e}");
             }
         }
 
@@ -372,7 +385,7 @@ async fn tcp_listener(
         match result {
             Ok(_) => tracing::trace!("successfully processed tcp connection"),
             Err(e) => {
-                tracing::warn!("failed to handle tcp connection: {}", e);
+                tracing::warn!("failed to handle tcp connection: {e}");
                 #[cfg(debug_assertions)]
                 eprintln!("failed to handle tcp connection: {}", e);
             }
@@ -562,7 +575,7 @@ async fn tcp_listener(
 
                             if !data.is_empty()
                                 && let Err(err) = response_tx.send(data).await {
-                                    tracing::debug!("forwarding body/data message to response channel failed: {}", err);
+                                    tracing::debug!("forwarding body/data message to response channel failed: {err}");
                                     control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
                                     break;
                                 };
@@ -618,10 +631,10 @@ async fn tcp_listener(
 
         let mut inner = socket_tx.into_inner();
         if let Err(e) = inner.flush().await {
-            tracing::debug!("failed to flush socket: {}", e);
+            tracing::debug!("failed to flush socket: {e}");
         }
         if let Err(e) = inner.shutdown().await {
-            tracing::debug!("failed to shutdown socket: {}", e);
+            tracing::debug!("failed to shutdown socket: {e}");
         }
     }
 }

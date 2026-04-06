@@ -6,7 +6,8 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -19,26 +20,22 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher = None,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: SGLang engine with diffusion algorithm configured.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher.
             generate_endpoint: The endpoint handle for discovery.
             shutdown_event: Optional event to signal shutdown.
         """
-        super().__init__(
-            component, engine, config, publisher, generate_endpoint, shutdown_event
-        )
+        super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
 
         # Validate that diffusion algorithm is configured
         if (
@@ -80,7 +77,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         sampling_params = self._build_sampling_params(request)
 
         # Generate trace info if tracing is enabled
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         trace_id = context.id() if trace_header else None
 
         async_gen = await self.engine.async_generate(

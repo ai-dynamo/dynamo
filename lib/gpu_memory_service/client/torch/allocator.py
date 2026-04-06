@@ -1,28 +1,87 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU Memory Service allocator singleton management.
-
-Manages the singleton memory manager and PyTorch MemPool integration.
-"""
+"""GPU Memory Service allocator registry for PyTorch integration."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 if TYPE_CHECKING:
+    import torch
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from torch.cuda.memory import MemPool
 
 logger = logging.getLogger(__name__)
 
-# Global singleton state
-_gms_client_memory_manager: Optional["GMSClientMemoryManager"] = None
-_mem_pool: Optional["MemPool"] = None
-_pluggable_alloc: Optional[Any] = None
+
+@dataclass
+class _TagState:
+    manager: "GMSClientMemoryManager"
+    mem_pool: "MemPool | None"
+    socket_path: str
+    device: int
+
+
+_tag_states: dict[str, _TagState] = {}
+_active_tag: ContextVar[str | None] = ContextVar(
+    "gpu_memory_service_active_tag",
+    default=None,
+)
+_callbacks_initialized = False
+_pluggable_alloc: Any | None = None
+
+
+def _gms_malloc(size: int, device: int, stream: int) -> int:
+    tag = _active_tag.get()
+    if tag is None:
+        raise RuntimeError("No active GMS allocation tag")
+
+    state = _tag_states.get(tag)
+    if state is None:
+        raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
+
+    va = state.manager.create_mapping(size=int(size), tag=tag)
+    logger.debug("[GMS] malloc(tag=%s): va=0x%x size=%d", tag, va, size)
+    return va
+
+
+def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
+    va = int(ptr)
+    for tag, state in _tag_states.items():
+        if va not in state.manager.mappings:
+            continue
+        logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
+        state.manager.destroy_mapping(va)
+        return
+    logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
+
+
+def _ensure_callbacks_initialized() -> None:
+    global _callbacks_initialized, _pluggable_alloc
+
+    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
+    from torch.cuda import CUDAPluggableAllocator
+
+    if _callbacks_initialized:
+        return
+
+    _pluggable_alloc = CUDAPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
+    cumem.init_module(_gms_malloc, _gms_free)
+    _callbacks_initialized = True
+
+
+def _create_mem_pool() -> "MemPool":
+    from torch.cuda.memory import MemPool
+
+    assert _pluggable_alloc is not None
+    return MemPool(allocator=_pluggable_alloc.allocator())
 
 
 def get_or_create_gms_client_memory_manager(
@@ -32,93 +91,98 @@ def get_or_create_gms_client_memory_manager(
     *,
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
-) -> Tuple["GMSClientMemoryManager", Optional["MemPool"]]:
-    """Get existing memory manager or create a new one.
-
-    Args:
-        socket_path: Unix socket path for the allocation server.
-        device: CUDA device index.
-        mode: RW for cold start, RO for import-only, RW_OR_RO for auto.
-        tag: Allocation tag for RW mode.
-        timeout_ms: Lock acquisition timeout (None = wait indefinitely).
-
-    Returns:
-        (gms_client_memory_manager, pool) - pool is None for RO mode.
-    """
-    global _gms_client_memory_manager, _mem_pool
-
+) -> "GMSClientMemoryManager":
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
-    if _gms_client_memory_manager is not None:
-        return _get_existing(mode)
+    state = _tag_states.get(tag)
+    if state is not None:
+        if state.socket_path != socket_path or state.device != device:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} was initialized for "
+                f"{state.socket_path} on device {state.device}, not {socket_path} "
+                f"on device {device}"
+            )
 
-    # Create new manager
-    gms_client_memory_manager = GMSClientMemoryManager(
-        socket_path, mode=mode, device=device, timeout_ms=timeout_ms
+        manager = state.manager
+        if not manager.is_connected:
+            if manager.mappings or manager.is_unmapped or manager.granted_lock_type:
+                raise RuntimeError(
+                    f"GMS allocator tag={tag} is disconnected but still owns "
+                    "preserved state; recreate the process instead of reusing it"
+                )
+            manager._client = None
+            manager._granted_lock_type = None
+            _tag_states.pop(tag, None)
+            state = None
+
+    if state is not None:
+        current = state.manager.granted_lock_type
+        if mode == RequestedLockType.RW and current != GrantedLockType.RW:
+            raise RuntimeError(
+                f"Cannot get RW allocator for tag {tag}: existing is in {current} mode"
+            )
+        if mode == RequestedLockType.RO and current != GrantedLockType.RO:
+            raise RuntimeError(
+                f"Cannot get RO allocator for tag {tag}: existing is in {current} mode"
+            )
+        return state.manager
+
+    manager = GMSClientMemoryManager(socket_path, device=device)
+    manager.connect(mode, timeout_ms=timeout_ms)
+
+    mem_pool = None
+    if manager.granted_lock_type == GrantedLockType.RW:
+        _ensure_callbacks_initialized()
+        mem_pool = _create_mem_pool()
+
+    _tag_states[tag] = _TagState(
+        manager=manager,
+        mem_pool=mem_pool,
+        socket_path=socket_path,
+        device=device,
     )
-    _gms_client_memory_manager = gms_client_memory_manager
-
-    if gms_client_memory_manager.mode == GrantedLockType.RW:
-        _mem_pool = _setup_mempool(gms_client_memory_manager, tag)
-        logger.info("[GMS] Created RW allocator (device=%d)", device)
-        return gms_client_memory_manager, _mem_pool
-    else:
-        logger.info("[GMS] Created RO allocator (device=%d)", device)
-        return gms_client_memory_manager, None
+    logger.info(
+        "[GMS] Created %s allocator for tag=%s (device=%d)",
+        manager.granted_lock_type.value,
+        tag,
+        device,
+    )
+    return manager
 
 
-def _get_existing(
-    mode: RequestedLockType,
-) -> Tuple["GMSClientMemoryManager", Optional["MemPool"]]:
-    """Return existing allocator if mode-compatible."""
-    current = _gms_client_memory_manager.mode
-
-    if mode == RequestedLockType.RW:
-        if current == GrantedLockType.RW:
-            return _gms_client_memory_manager, _mem_pool
-        raise RuntimeError(f"Cannot get RW allocator: existing is in {current} mode")
-
-    if mode == RequestedLockType.RO:
-        if current == GrantedLockType.RO:
-            return _gms_client_memory_manager, None
-        raise RuntimeError(
-            f"Cannot get RO allocator: existing is in {current} mode. "
-            "Call manager.switch_to_read() first."
-        )
-
-    # RW_OR_RO: return whatever exists
-    pool = _mem_pool if current == GrantedLockType.RW else None
-    return _gms_client_memory_manager, pool
+def get_gms_client_memory_manager(
+    tag: str = "weights",
+) -> "GMSClientMemoryManager | None":
+    state = _tag_states.get(tag)
+    if state is None:
+        return None
+    return state.manager
 
 
-def _setup_mempool(
-    gms_client_memory_manager: "GMSClientMemoryManager",
-    tag: str,
-) -> "MemPool":
-    """Set up PyTorch CUDAPluggableAllocator and MemPool."""
-    global _pluggable_alloc
-
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
-    from torch.cuda import CUDAPluggableAllocator
-    from torch.cuda.memory import MemPool
-
-    pluggable_alloc = CUDAPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
-    pool = MemPool(allocator=pluggable_alloc.allocator())
-    _pluggable_alloc = pluggable_alloc
-
-    def malloc_cb(size: int, device: int, stream: int) -> int:
-        va = gms_client_memory_manager.allocate_and_map(int(size), tag=tag)
-        logger.debug("[GMS] malloc: va=0x%x size=%d", va, size)
-        return va
-
-    def free_cb(ptr: int, size: int, device: int, stream: int) -> None:
-        logger.debug("[GMS] free: va=0x%x size=%d", ptr, size)
-        gms_client_memory_manager.free_mapping(int(ptr))
-
-    cumem.init_module(malloc_cb, free_cb)
-    return pool
+def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
+    return tuple(state.manager for state in _tag_states.values())
 
 
-def get_gms_client_memory_manager() -> Optional["GMSClientMemoryManager"]:
-    """Get the active GMS client memory manager, or None if not initialized."""
-    return _gms_client_memory_manager
+def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:
+    for tag, state in list(_tag_states.items()):
+        if state.manager is manager:
+            _tag_states.pop(tag, None)
+            return
+
+
+@contextmanager
+def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
+    import torch
+
+    state = _tag_states.get(tag)
+    if state is None:
+        raise RuntimeError(f"No GMS allocator initialized for tag={tag}")
+    if state.mem_pool is None:
+        raise RuntimeError(f"GMS allocator tag={tag} does not have a mempool")
+
+    token = _active_tag.set(tag)
+    try:
+        with torch.cuda.use_mem_pool(state.mem_pool, device=device):
+            yield
+    finally:
+        _active_tag.reset(token)

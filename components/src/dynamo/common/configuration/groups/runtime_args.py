@@ -3,12 +3,14 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
+import argparse
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 
@@ -26,13 +28,18 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
     multimodal_embedding_cache_capacity_gb: float
     output_modalities: List[str]
+    media_output_fs_url: str = "file:///tmp/dynamo_media"
+    media_output_http_url: Optional[str] = None
 
     def validate(self) -> None:
+        self.namespace = get_worker_namespace(self.namespace)
+
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
@@ -58,7 +65,7 @@ class DynamoRuntimeConfig(ConfigBase):
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo runtime arguments to parser."""
         g = parser.add_argument_group("Dynamo Runtime Options")
 
@@ -67,7 +74,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--namespace",
             env_var="DYN_NAMESPACE",
             default="dynamo",
-            help="Dynamo namespace",
+            help="Dynamo namespace. If DYN_NAMESPACE_WORKER_SUFFIX is set, "
+            "'-{suffix}' is appended to support multiple worker pools",
         )
         add_argument(
             g,
@@ -104,8 +112,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
-            default=["nixl"],
-            help="List of connectors to use in order (e.g., --connector nixl lmcache). Options: nixl, lmcache, kvbm, null, none. Order will be preserved in MultiConnector.",
+            default=[],
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
             nargs="*",
         )
 
@@ -114,7 +122,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--durable-kv-events",
             env_var="DYN_DURABLE_KV_EVENTS",
             default=False,
-            help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
+            help="[Deprecated] Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)
@@ -133,6 +141,19 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
+        )
+        # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
+        # Both definitions are needed: this one controls the Rust-native chat
+        # template path (oai.rs), while the frontend copy controls the Python
+        # processors (vllm_processor / sglang_processor) which parse arguments
+        # independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help="Exclude tool definitions from the chat template when tool_choice='none'. "
+            "Prevents models from generating raw XML tool calls in the content field.",
         )
         add_argument(
             g,
@@ -175,4 +196,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=["text"],
             help="Output modalities for omni/diffusion mode (e.g., --output-modalities text image audio video).",
             nargs="*",
+        )
+
+        # Media storage (generated images and videos)
+        add_argument(
+            g,
+            flag_name="--media-output-fs-url",
+            env_var="DYN_MEDIA_OUTPUT_FS_URL",
+            default="file:///tmp/dynamo_media",
+            help="Filesystem URL for storing generated images and videos (e.g. file:///tmp/dynamo_media, s3://bucket/path).",
+        )
+        add_argument(
+            g,
+            flag_name="--media-output-http-url",
+            env_var="DYN_MEDIA_OUTPUT_HTTP_URL",
+            default=None,
+            help="Base URL for rewriting media file paths in responses (e.g. http://localhost:8000/media). If unset, returns raw filesystem paths.",
         )

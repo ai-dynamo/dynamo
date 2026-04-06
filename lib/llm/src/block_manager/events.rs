@@ -223,7 +223,7 @@ impl DynamoEventManager {
                             tokens,
                             parent_hash,
                             block_size,
-                            None, // lora_id
+                            None, // lora_name
                             None, // tier
                             None, // data_parallel_rank
                         )

@@ -1,15 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![doc = include_str!("../README.md")]
+//! Logical block lifecycle management for KVBM.
+//!
+//! This crate provides the core block lifecycle system:
+//! - Type-safe state transitions (Reset -> Complete -> Registered)
+//! - Block registry with deduplication and attachments
+//! - Active/inactive/reset pool management
+//! - Event pipeline for distributed coordination
+//! - Block manager orchestration
 
 pub mod blocks;
 pub mod events;
+pub mod integrations;
 pub mod manager;
 pub mod metrics;
 pub mod pools;
 pub mod pubsub;
 pub mod registry;
+pub mod sequence;
 pub mod tinylfu;
 
 #[cfg(any(test, feature = "testing"))]
@@ -22,8 +31,16 @@ use serde::{Deserialize, Serialize};
 pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
 };
+pub use integrations::{
+    ApplyError, DecodeOutcome, NoopDelegate, RequestSequence, SchedulableSequence,
+    SchedulableSequenceBuilder, ScheduleError, SequenceDelegate, SequenceEvent, SequenceState,
+};
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;
+pub use sequence::{
+    BlockSequence, BlockSequenceError, ExternalBlockAssignments, LogicalBlockAssignmentError,
+    LogicalBlockAssignments, zip_assigned, zip_assigned_pending,
+};
 
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;

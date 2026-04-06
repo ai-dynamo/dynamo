@@ -5,12 +5,14 @@ import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -21,15 +23,14 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
-from dynamo.runtime import Component, Endpoint
+from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
-    Properly handles IPv6 addresses by wrapping them in square brackets.
-    Uses SGLang's maybe_wrap_ipv6_address for consistent formatting.
+    Properly handles IPv6 addresses using SGLang's NetworkAddress utility.
 
     Args:
         endpoint_template: ZMQ endpoint template with wildcard (e.g., "tcp://*:5557")
@@ -44,9 +45,12 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         >>> format_zmq_endpoint("tcp://*:5557", "2a02:6b8:c46:2b4:0:74c1:75b0:0")
         'tcp://[2a02:6b8:c46:2b4:0:74c1:75b0:0]:5557'
     """
-    # Use SGLang's utility to wrap IPv6 addresses in brackets
-    formatted_ip = maybe_wrap_ipv6_address(ip_address)
-    return endpoint_template.replace("*", formatted_ip)
+    parsed = urlparse(endpoint_template)
+    if parsed.scheme != "tcp" or parsed.port is None:
+        raise ValueError(
+            f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
+        )
+    return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -63,7 +67,6 @@ class DynamoSglangPublisher:
         self,
         engine: sgl.Engine,
         config: Config,
-        component: Component,
         generate_endpoint: Endpoint,
         component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
@@ -73,7 +76,6 @@ class DynamoSglangPublisher:
         Args:
             engine: The SGLang engine instance.
             config: SGLang configuration including server args.
-            component: The Dynamo runtime component.
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
             component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
@@ -82,7 +84,6 @@ class DynamoSglangPublisher:
         self.server_args = config.server_args
         self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
-        self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
         self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
@@ -97,13 +98,14 @@ class DynamoSglangPublisher:
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
-            self._ctx = zmq.asyncio.Context()  # type: ignore
+            self._ctx = zmq.asyncio.Context()
             self._sock = get_zmq_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
-                True,  # type: ignore
+                True,
             )
         else:
             self._ctx = None
@@ -138,7 +140,9 @@ class DynamoSglangPublisher:
                     else self.dp_rank
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
-                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                self.metrics_publisher.publish(
+                    dp_rank, kv_used_blocks=active_decode_blocks
+                )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
                 self.component_gauges.set_total_blocks(
@@ -183,7 +187,7 @@ class DynamoSglangPublisher:
     def init_engine_metrics_publish(self) -> None:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
-        self.metrics_publisher.publish(self.dp_rank, 0)
+        self.metrics_publisher.publish(self.dp_rank, kv_used_blocks=0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
@@ -257,7 +261,7 @@ class DynamoSglangPublisher:
                     f"(connecting to {zmq_ep})"
                 )
                 publisher = KvEventPublisher(
-                    component=self.component,
+                    endpoint=self.generate_endpoint,
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
@@ -322,7 +326,6 @@ def setup_prometheus_registry(
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
-    component: Component,
     generate_endpoint: Endpoint,
 ) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
@@ -330,7 +333,6 @@ async def setup_sgl_metrics(
     Args:
         engine: The SGLang engine instance.
         config: SGLang configuration including server args.
-        component: The Dynamo runtime component.
         generate_endpoint: The Dynamo endpoint for generation requests.
 
     Returns:
@@ -366,13 +368,12 @@ async def setup_sgl_metrics(
     publisher = DynamoSglangPublisher(
         engine,
         config,
-        component,
         generate_endpoint,
         component_gauges=component_gauges,
         metrics_labels=metrics_labels,
     )
     # Create endpoint in async context (must await before publishing)
-    await publisher.metrics_publisher.create_endpoint(component)
+    await publisher.metrics_publisher.create_endpoint(generate_endpoint)
     logging.debug("SGLang metrics publisher endpoint created")
 
     publisher.init_engine_metrics_publish()
@@ -381,3 +382,33 @@ async def setup_sgl_metrics(
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
     return publisher, task, metrics_labels
+
+
+async def handle_non_leader_node(
+    engine: sgl.Engine,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
+) -> None:
+    """
+    Handle non-leader node (node_rank >= 1) in multi-node deployments.
+
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
+    """
+    logging.info(
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
+    )
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()

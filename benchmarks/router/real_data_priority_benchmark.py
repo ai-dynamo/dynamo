@@ -34,6 +34,11 @@ def parse_float_list(s):
     return [float(x.strip()) for x in s.split(",")]
 
 
+def parse_int_list(s):
+    """Parse a comma-separated string into a list of ints."""
+    return [int(x.strip()) for x in s.split(",")]
+
+
 def split_trace(requests, distribution, seed):
     """Split requests into priority tiers by distribution. Deterministic given seed."""
     rng = np.random.RandomState(seed)
@@ -81,11 +86,11 @@ def run_concurrent_streams(
     """Launch concurrent aiperf subprocesses for each tier.
 
     Args:
-        tag_priority: If True, inject nvext.agent_hints.latency_sensitivity per tier.
+        tag_priority: If True, inject nvext.agent_hints.priority per tier.
     """
     processes = []
     log_files = []
-    for tier, pj in zip(TIERS, priority_values):
+    for tier, priority in zip(TIERS, priority_values):
         tier_dir = os.path.join(run_dir, f"{tier}_priority")
         os.makedirs(tier_dir, exist_ok=True)
 
@@ -109,7 +114,7 @@ def run_concurrent_streams(
             cmd.extend(
                 [
                     "--extra-inputs",
-                    json.dumps({"nvext": {"agent_hints": {"latency_sensitivity": pj}}}),
+                    json.dumps({"nvext": {"agent_hints": {"priority": priority}}}),
                 ]
             )
 
@@ -118,7 +123,7 @@ def run_concurrent_streams(
         log_files.append(log_file)
 
         label = "priority" if tag_priority else "baseline"
-        logger.info(f"Launching {tier} tier ({label}, latency_sensitivity={pj})")
+        logger.info(f"Launching {tier} tier ({label}, priority={priority})")
         logger.info(f"  Command: {' '.join(cmd)}")
 
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
@@ -192,12 +197,13 @@ def plot_ttft_comparison(baseline_dir, priority_dir, output_path, priority_value
         priority_medians,
         width,
         yerr=[priority_lo, priority_hi],
-        label="With latency_sensitivity",
+        label="With priority",
         capsize=4,
     )
 
     tier_labels = [
-        f"{tier.capitalize()}\n(ls={pj})" for tier, pj in zip(TIERS, priority_values)
+        f"{tier.capitalize()}\n(p={priority})"
+        for tier, priority in zip(TIERS, priority_values)
     ]
     ax.set_xticks(x)
     ax.set_xticklabels(tier_labels)
@@ -230,14 +236,14 @@ def main():
         "--priority-values",
         type=str,
         default="0,1,2",
-        help="Comma-separated latency_sensitivity values for low/medium/high tiers (default: 0,1,2)",
+        help="Comma-separated priority values for low/medium/high tiers (default: 0,1,2)",
     )
 
     args = parser.parse_args()
     resolve_tokenizer(args)
 
     distribution = parse_float_list(args.priority_distribution)
-    priority_values = parse_float_list(args.priority_values)
+    priority_values = parse_int_list(args.priority_values)
 
     if len(distribution) != len(TIERS):
         parser.error(
@@ -262,10 +268,9 @@ def main():
     for tier in TIERS:
         logger.info(f"  {tier} priority: {len(tier_requests[tier])} requests")
 
-    # Use different aiperf random seeds per run so that the generated prompts
-    # differ, preventing mocker KV cache hits between runs.
-    baseline_seed = args.seed
-    priority_seed = args.seed + 1
+    # Offset hash_ids for the priority run so it starts with a cold KV cache,
+    # keeping the comparison fair. Same seed for both runs so prompts match.
+    priority_tier_requests = offset_hash_ids(tier_requests)
 
     # Run 1: Baseline (same split, no priority tagging)
     baseline_dir = os.path.join(args.output_dir, "baseline")
@@ -277,20 +282,20 @@ def main():
         baseline_dir,
         tag_priority=False,
         logger=logger,
-        seed=baseline_seed,
+        seed=args.seed,
     )
 
-    # Run 2: With priority tagging
+    # Run 2: With priority tagging (offset hash_ids for cold cache)
     priority_dir = os.path.join(args.output_dir, "priority")
     logger.info("=== Running with priority tagging ===")
     run_concurrent_streams(
         args,
-        tier_requests,
+        priority_tier_requests,
         priority_values,
         priority_dir,
         tag_priority=True,
         logger=logger,
-        seed=priority_seed,
+        seed=args.seed,
     )
 
     # Plot comparison

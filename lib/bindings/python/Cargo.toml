@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -24,18 +24,21 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
+kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
+kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
+dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
 
 anyhow = { version = "1" }
-dynamo-async-openai = { path = "../../async-openai" }
-async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-derive-getters = "0.5"
-either = { version = "1.13", features = ["serde"] }
+dashmap = { version = "6.1" }
 futures = { version = "0.3" }
+rmp = { version = "0.8" }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
@@ -44,9 +47,13 @@ thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
-tracing = { version = "0"  }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-uuid = { version = "1.17", features = ["v4", "serde"] }
+tracing = { version = "0" }
+uuid = { version = "1.18.1" }
+
+# kv-indexer / shared kv-router types
+dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
@@ -68,10 +75,6 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 
 pythonize = "0.23"
 
-dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
-cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
-prometheus = "0.14.0"
-
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dynamo-llm = { path = "../../llm" }
@@ -80,4 +83,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
-rstest = "0.25"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -9,7 +9,8 @@ class EmbeddingCache:
         # Initialize an empty dictionary to store key-value pairs
         self.cache = {}
 
-    def generate_hash_key(self, *args):
+    @classmethod
+    def generate_hash_key(cls, *args):
         """
         Generate a hashable key based on the provided arguments.
 

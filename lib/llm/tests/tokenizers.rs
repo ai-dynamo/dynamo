@@ -13,10 +13,16 @@
 //! in a hashmap. We will then use these hashes to test that the tokenizer is working correctly. This
 //! will detect if upstream dependency changes result in different/new behavior.
 
-use dynamo_llm::tokenizers::traits::{Decoder, Encoder};
+use dynamo_llm::tokenizers::traits::{Decoder, Encoder, Tokenizer};
 use dynamo_llm::tokenizers::*;
+use rstest::rstest;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Test data
+// ---------------------------------------------------------------------------
 
 const TEST_PROMPTS: [&str; 4] = [
     "deep learning is",
@@ -41,7 +47,267 @@ const LONG_TEST_PROMPTS: [(&str, &str); 6] = [
     ("Tell me about the following text.", "😀😃😄😁😆🥹😅😂🤣🥲☺️😊😇🙂🙃😉🤩😎 🤪🥳🤓🙄🤪😵👻")
 ];
 
+const MULTIBYTE_TEST_CASES: [&str; 14] = [
+    "hello world",
+    "deep learning is awesome",
+    "The quick brown fox jumps over the lazy dog.",
+    "line1\nline2\nline3",
+    "你好世界",            // CJK: 3-byte UTF-8 chars
+    "😀😃😄😁",            // Emoji: 4-byte UTF-8 chars
+    "hello 你好 world 🌍", // Mixed ASCII + CJK + emoji
+    "café résumé naïve",   // Latin with diacritics (2-byte UTF-8)
+    "こんにちは",          // Japanese hiragana
+    "Привет мир",          // Cyrillic
+    "مرحبا",               // Arabic (RTL)
+    "🧑‍💻👨‍👩‍👧‍👦",                // Emoji ZWJ sequences (complex multi-codepoint)
+    "a你b😀c",             // Interleaved single-byte and multi-byte
+    "",                    // Empty string
+];
+
+const STREAM_TEST_CASES: [(&str, &str); 8] = [
+    ("hello world", "deep learning is great"),
+    ("summarize:", "The quick brown fox jumps over the lazy dog."),
+    ("hello world", "你好世界"),
+    ("prompt:", "😀😃😄😁"),
+    ("translate this:", "hello 你好 world 🌍"),
+    ("text:", "café résumé naïve"),
+    ("say:", "こんにちは"),
+    ("input:", "🧑‍💻👨‍👩‍👧‍👦"),
+];
+
+// ---------------------------------------------------------------------------
+// Tokenizer paths
+// ---------------------------------------------------------------------------
+
 const TINYLLAMA_TOKENIZER_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1/tokenizer.json";
+const MOCK_TIKTOKEN_DIR: &str = "tests/data/sample-models/mock-tiktoken";
+
+fn tinyllama_tokenizer() -> Arc<dyn Tokenizer> {
+    Arc::new(
+        HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+            .expect("Failed to load HuggingFace tokenizer"),
+    )
+}
+
+fn mock_tiktoken_tokenizer() -> Arc<dyn Tokenizer> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(MOCK_TIKTOKEN_DIR)
+        .join("tiktoken.model");
+    Arc::new(
+        TikTokenTokenizer::from_file_auto(path.to_str().unwrap())
+            .expect("Failed to load tiktoken tokenizer"),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Parameterized scenario tests — every tokenizer must pass all of these
+// ---------------------------------------------------------------------------
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_encode_decode_roundtrip(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    for &text in TEST_PROMPTS.iter() {
+        let encoding = tokenizer
+            .encode(text)
+            .unwrap_or_else(|e| panic!("Failed to encode '{text}': {e}"));
+        assert!(!encoding.token_ids().is_empty());
+
+        let decoded = tokenizer
+            .decode(encoding.token_ids(), false)
+            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"));
+        assert_eq!(decoded, text, "Roundtrip failed for: '{text}'");
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_encode_decode_roundtrip_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    for &text in MULTIBYTE_TEST_CASES.iter() {
+        let encoding = tokenizer
+            .encode(text)
+            .unwrap_or_else(|e| panic!("Failed to encode '{text}': {e}"));
+
+        let decoded = tokenizer
+            .decode(encoding.token_ids(), false)
+            .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"));
+        assert_eq!(decoded, text, "Roundtrip failed for: '{text}'");
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_batch_encode_roundtrip(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    let inputs = &["hello", "world", "deep learning"];
+    let encodings = tokenizer
+        .encode_batch(inputs)
+        .expect("Failed to batch encode");
+    assert_eq!(encodings.len(), inputs.len());
+
+    for (encoding, &input) in encodings.iter().zip(inputs.iter()) {
+        let decoded = tokenizer
+            .decode(encoding.token_ids(), false)
+            .expect("Failed to decode");
+        assert_eq!(decoded, input);
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_sequence_append_and_decode(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    let text = TEST_PROMPTS[0];
+    let encoding = tokenizer.encode(text).expect("Failed to encode prompt");
+
+    // Append text and verify token count matches
+    let mut sequence = Sequence::new(tokenizer.clone().into());
+    sequence.append_text(text).expect("Failed to append prompt");
+    assert_eq!(sequence.len(), encoding.token_ids().len());
+
+    // Incremental token-by-token decode via Sequence::append_token_id
+    let mut decoder = Sequence::new(tokenizer.clone().into());
+    let mut output = String::new();
+    for &token_id in encoding.token_ids() {
+        let chunk = decoder
+            .append_token_id(token_id)
+            .expect("Failed to decode token_id");
+        output.push_str(&chunk);
+    }
+
+    assert_eq!(decoder.len(), sequence.len());
+    assert_eq!(decoder.token_ids(), sequence.token_ids());
+    assert_eq!(output, text);
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_sequence_roundtrip_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    // Skip empty string — Sequence doesn't produce output for zero tokens
+    for &text in MULTIBYTE_TEST_CASES.iter().filter(|t| !t.is_empty()) {
+        let encoding = tokenizer
+            .encode(text)
+            .unwrap_or_else(|e| panic!("Failed to encode '{text}': {e}"));
+
+        let mut sequence = Sequence::new(tokenizer.clone().into());
+        let mut output = String::new();
+        for &token_id in encoding.token_ids() {
+            let chunk = sequence
+                .append_token_id(token_id)
+                .unwrap_or_else(|e| panic!("append_token_id failed for '{text}': {e}"));
+            output.push_str(&chunk);
+        }
+        assert_eq!(output, text, "Sequence roundtrip failed for: '{text}'");
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_decode_stream_basic(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    let text = TEST_PROMPTS[0];
+    let encoding = tokenizer.encode(text).expect("Failed to encode prompt");
+
+    let mut stream = DecodeStream::new(tokenizer.clone(), &[], false);
+    let mut output = String::new();
+    for &token_id in encoding.token_ids() {
+        if let Some(chunk) = stream.step(token_id).expect("Failed to decode token_id") {
+            output.push_str(&chunk);
+        }
+    }
+    assert_eq!(output, text);
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_decode_stream_with_prefill(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    for &(input_text, output_text) in LONG_TEST_PROMPTS.iter() {
+        let input_encoding = tokenizer
+            .encode(input_text)
+            .unwrap_or_else(|e| panic!("Failed to encode prompt '{input_text}': {e}"));
+
+        let output_encoding = tokenizer
+            .encode(output_text)
+            .unwrap_or_else(|e| panic!("Failed to encode output '{output_text}': {e}"));
+
+        let mut stream = DecodeStream::new(tokenizer.clone(), input_encoding.token_ids(), false);
+
+        let mut output = String::new();
+        for &token_id in output_encoding.token_ids() {
+            if let Some(chunk) = stream
+                .step(token_id)
+                .unwrap_or_else(|e| panic!("DecodeStream::step failed for '{output_text}': {e}"))
+            {
+                output.push_str(&chunk);
+            }
+        }
+
+        assert_eq!(output.trim(), output_text.to_string());
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_decode_stream_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    for &(prompt, output_text) in STREAM_TEST_CASES.iter() {
+        let prompt_encoding = tokenizer
+            .encode(prompt)
+            .unwrap_or_else(|e| panic!("Failed to encode prompt '{prompt}': {e}"));
+
+        let output_encoding = tokenizer
+            .encode(output_text)
+            .unwrap_or_else(|e| panic!("Failed to encode output '{output_text}': {e}"));
+
+        let mut stream = DecodeStream::new(tokenizer.clone(), prompt_encoding.token_ids(), false);
+
+        let mut reassembled = String::new();
+        for &token_id in output_encoding.token_ids() {
+            if let Some(chunk) = stream
+                .step(token_id)
+                .unwrap_or_else(|e| panic!("DecodeStream::step failed for '{output_text}': {e}"))
+            {
+                reassembled.push_str(&chunk);
+            }
+        }
+
+        assert_eq!(
+            reassembled.trim(),
+            output_text,
+            "DecodeStream roundtrip failed for: '{output_text}'"
+        );
+    }
+}
+
+#[rstest]
+#[case::huggingface(tinyllama_tokenizer())]
+#[case::tiktoken(mock_tiktoken_tokenizer())]
+fn test_hash_determinism(#[case] tokenizer: Arc<dyn Tokenizer>) {
+    let prompts = &["hello world", "deep learning", "another prompt"];
+    let hashes1 = compute_hashes_for_tokenizer(tokenizer.as_ref(), prompts);
+    let hashes2 = compute_hashes_for_tokenizer(tokenizer.as_ref(), prompts);
+    assert_eq!(hashes1, hashes2, "Hashes should be deterministic");
+    assert!(hashes1.iter().all(|&h| h != 0), "Hashes should be non-zero");
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer-specific tests (not parameterized)
+// ---------------------------------------------------------------------------
+
+fn compute_hashes_for_tokenizer<E: Encoder + ?Sized>(tokenizer: &E, prompts: &[&str]) -> Vec<u64> {
+    prompts
+        .iter()
+        .map(|&prompt| {
+            tokenizer
+                .encode(prompt)
+                .expect("Failed to encode prompt")
+                .get_hash()
+        })
+        .collect()
+}
 
 const HF_TOKENIZERS_LOCAL: [&str; 1] = [TINYLLAMA_TOKENIZER_PATH];
 
@@ -54,19 +320,6 @@ const HASHES: [(&str, [u64; 4]); 1] = [(
         5097285695902185237,
     ],
 )];
-
-fn compute_hashes_for_tokenizer<E: Encoder>(tokenizer: &E, prompts: &[&str]) -> Vec<u64> {
-    prompts
-        .iter()
-        .map(|&prompt| {
-            tokenizer
-                .encode(prompt)
-                .expect("Failed to encode prompt")
-                .get_hash()
-            // Assuming `get_hash` returns a `u64`
-        })
-        .collect()
-}
 
 #[test]
 fn compute_hashes_hf() {
@@ -84,98 +337,6 @@ fn compute_hashes_hf() {
         );
 
         assert_eq!(prompt_hashes, hash_map[tokenizer_name]);
-    }
-}
-
-#[test]
-fn test_hf_lifecycle() {
-    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
-        .expect("Failed to load remote HuggingFace tokenizer");
-
-    let encoding = tokenizer
-        .encode(TEST_PROMPTS[0])
-        .expect("Failed to encode prompt");
-
-    let decoded = tokenizer
-        .decode(encoding.token_ids(), false)
-        .expect("Failed to decode token_ids");
-
-    assert_eq!(decoded, TEST_PROMPTS[0]);
-}
-
-#[test]
-fn test_sequence() {
-    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
-        .expect("Failed to load remote HuggingFace tokenizer");
-
-    let shared_tokenizer = Arc::new(tokenizer);
-
-    // let tokenizer = shared_tokenizer.read().unwrap();
-
-    let encoding = shared_tokenizer
-        .encode(TEST_PROMPTS[0])
-        .expect("Failed to encode prompt");
-
-    let mut sequence = Sequence::new(shared_tokenizer.clone().into());
-    sequence
-        .append_text(TEST_PROMPTS[0])
-        .expect("Failed to append prompt");
-
-    assert_eq!(sequence.len(), encoding.token_ids().len());
-
-    let mut decoder = Sequence::new(shared_tokenizer.clone().into());
-
-    let mut output = String::new();
-    for token_id in encoding.token_ids() {
-        let text = decoder
-            .append_token_id(*token_id)
-            .expect("Failed to decode token_id");
-        output.push_str(text.as_str());
-    }
-
-    assert_eq!(decoder.len(), sequence.len());
-    assert_eq!(decoder.token_ids(), sequence.token_ids());
-    assert_eq!(output, TEST_PROMPTS[0]);
-
-    let mut decoder = DecodeStream::new(shared_tokenizer.clone(), &[], false);
-    let mut output = String::new();
-    for token_id in encoding.token_ids() {
-        let text = decoder.step(*token_id).expect("Failed to decode token_id");
-        if let Some(text) = text {
-            output.push_str(text.as_str());
-        }
-    }
-    assert_eq!(output, TEST_PROMPTS[0]);
-}
-
-#[test]
-fn test_long_sequence_incremental_decode_with_prefill() {
-    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
-        .expect("Failed to load remote HuggingFace tokenizer");
-
-    let shared_tokenizer = Arc::new(tokenizer);
-
-    for (input_text, output_text) in LONG_TEST_PROMPTS.iter() {
-        let input_encoding = shared_tokenizer
-            .encode(input_text)
-            .expect("Failed to encode prompt");
-
-        let output_encoding = shared_tokenizer
-            .encode(output_text)
-            .expect("Failed to encode prompt");
-
-        let mut decoder =
-            DecodeStream::new(shared_tokenizer.clone(), input_encoding.token_ids(), false);
-
-        let mut output = String::new();
-        for token_id in output_encoding.token_ids() {
-            let text = decoder.step(*token_id).expect("Failed to decode token_id");
-            if let Some(text) = text {
-                output.push_str(text.as_str());
-            }
-        }
-
-        assert_eq!(output.trim(), output_text.to_string());
     }
 }
 
@@ -205,4 +366,28 @@ fn test_decode_with_skip_special_tokens() {
     // Validate exact matches on the entire decoded strings
     assert_eq!(decoded_with_special, "<s> Hello world</s>");
     assert_eq!(decoded_without_special, "Hello world");
+}
+
+#[test]
+fn test_tiktoken_create_from_file() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(MOCK_TIKTOKEN_DIR)
+        .join("tiktoken.model");
+    let tokenizer =
+        create_tokenizer_from_file(path.to_str().unwrap()).expect("Failed to create tokenizer");
+
+    let encoding = tokenizer
+        .encode("hello")
+        .expect("Failed to encode with factory-created tokenizer");
+    assert!(!encoding.token_ids().is_empty());
+}
+
+#[test]
+fn test_tiktoken_encoding_variant_is_sp() {
+    let tokenizer = mock_tiktoken_tokenizer();
+    let encoding = tokenizer.encode("hello world").expect("Failed to encode");
+    match &encoding {
+        Encoding::Sp(_) => {}
+        other => panic!("Expected Encoding::Sp, got {:?}", other),
+    }
 }

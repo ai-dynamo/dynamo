@@ -3,8 +3,10 @@
 
 """Unit tests for TRTLLM backend components."""
 
+import asyncio
 import re
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import torch
@@ -17,8 +19,10 @@ if not torch.cuda.is_available():
     )
 
 from dynamo.trtllm.args import Config, parse_args
+from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -164,3 +168,27 @@ def test_deep_update_adds_new_keys():
     source = {"b": 2, "c": {"nested": 3}}
     deep_update(target, source)
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
+
+
+class MultimodalProcessorInstantiated(Exception):
+    """Custom exception for testing MultimodalRequestProcessor."""
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_creates_multimodal_processor():
+    config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
+    assert config.modality == Modality.MULTIMODAL
+
+    # Mock everything init_llm_worker touches before MultimodalRequestProcessor.
+    with mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"), mock.patch(
+        "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+    ), mock.patch(
+        "dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor",
+        side_effect=MultimodalProcessorInstantiated,
+    ):
+        with pytest.raises(MultimodalProcessorInstantiated):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )

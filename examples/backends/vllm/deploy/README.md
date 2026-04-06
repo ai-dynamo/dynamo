@@ -24,7 +24,7 @@ High-performance deployment with separated prefill and decode workers.
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -33,7 +33,25 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+
+### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
+Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
+
+### 6. **Deployments with Intel XPU (Optional)** (`agg_xpu_dra.yaml` or `disagg_xpu_dra.yaml`)
+Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic Resource Allocation (DRA).
+
+**Aggregated Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `VllmDecodeWorker`: Single worker with XPU target (`VLLM_TARGET_DEVICE=xpu`)
+- GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
+
+**Disaggregated Architecture:**
+- `Frontend`: HTTP API server coordinating between workers
+- `VllmDecodeWorker`: Specialized decode-only worker with XPU target
+- `VllmPrefillWorker`: Specialized prefill-only worker with XPU target
+- GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
+- Communication via NIXL transfer backend with XPU buffer
 
 ## CRD Structure
 
@@ -85,16 +103,16 @@ extraPodSpec:
 **Common vLLM Flags:**
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
-- `--is-prefill-worker`: Prefill-only mode for disaggregated serving
-- `--connector [nixl|lmcache|kvbm|none]`: KV transfer backend selection
+- `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
 
 ## Prerequisites
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/pages/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
-3. **Container registry access** for vLLM runtime images
+3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
@@ -110,7 +128,7 @@ docker build -f container/rendered.Dockerfile .
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/pages/components/profiler/profiler-guide.md) to run pre-deployment profiling.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) to run pre-deployment profiling.
 
 ## Usage
 
@@ -121,6 +139,9 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
+- Use `agg_xpu_dra.yaml` for aggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use `disagg_xpu_dra.yaml` for disaggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -157,6 +178,31 @@ export DEPLOYMENT_FILE=agg.yaml
 
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
+
+#### Deploy with Intel XPU  (Optional)
+If your cluster uses Intel GPU devices via Kubernetes Dynamic Resource Allocation (DRA), ensure:
+- Your Kubernetes cluster is **v1.34+** (required for DRA API v1), and
+- The [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) is installed.
+
+Deploy the XPU template (includes the ResourceClaimTemplate):
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+
+# For aggregated deployment
+kubectl apply -f agg_xpu_dra.yaml -n $NAMESPACE
+
+# OR for disaggregated deployment
+kubectl apply -f disagg_xpu_dra.yaml -n $NAMESPACE
+```
+
+Verify claim allocation:
+
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get dynamographdeployment -n $NAMESPACE
+```
+
+`agg_xpu_dra.yaml` and `disagg_xpu_dra.yaml` are optional hardware-specific templates and do not change the default deployment paths defined by `agg.yaml` and `disagg.yaml`.
 
 ### 4. Using Custom Dynamo Frameworks Image for vLLM
 
@@ -198,7 +244,7 @@ spec:
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode prefill`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
 See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
@@ -235,7 +281,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/pages/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -245,12 +291,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/pages/components/planner/planner-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/pages/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/pages/components/router/README.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 
 ## Troubleshooting
 
@@ -262,4 +309,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/pages/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).

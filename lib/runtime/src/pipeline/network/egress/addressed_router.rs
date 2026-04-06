@@ -2,15 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
+use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
+use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
+use crate::metrics::request_plane::{
+    REQUEST_PLANE_INFLIGHT, REQUEST_PLANE_QUEUE_SECONDS, REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS,
+    REQUEST_PLANE_SEND_SECONDS,
+};
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
-use crate::pipeline::network::STREAM_ERR_MSG;
 use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
@@ -19,8 +26,11 @@ use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 
 use anyhow::{Error, Result};
+use futures::stream::Stream;
 use serde::Deserialize;
 use serde::Serialize;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
@@ -44,6 +54,60 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frontend_send_ts_ns: Option<u64>,
+}
+
+/// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
+/// Protects against gauge leaks when `?` operators cause early returns between
+/// the increment and `InflightDecStream` construction.
+struct InflightGuard {
+    armed: bool,
+}
+
+impl InflightGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    /// Consume the guard without decrementing. Call this when `InflightDecStream`
+    /// takes over responsibility for the decrement.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            REQUEST_PLANE_INFLIGHT.dec();
+        }
+    }
+}
+
+/// Wrapper that decrements request-plane inflight gauge when the stream is dropped.
+struct InflightDecStream<S> {
+    inner: S,
+}
+
+impl<S, T> Stream for InflightDecStream<S>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl<S> Drop for InflightDecStream<S> {
+    fn drop(&mut self) {
+        REQUEST_PLANE_INFLIGHT.dec();
+    }
 }
 
 pub struct AddressedRequest<T> {
@@ -92,6 +156,10 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        let queue_start = Instant::now();
+        REQUEST_PLANE_INFLIGHT.inc();
+        let inflight_guard = InflightGuard::new();
+
         let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
         let (request, address) = addressed_request.into_parts();
@@ -130,6 +198,7 @@ where
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
             connection_info,
+            frontend_send_ts_ns: None,
         };
 
         // next build the two part message where we package the connection info and the request into
@@ -151,7 +220,13 @@ where
         // or it should take a two part message directly
         // todo - update this
         let codec = TwoPartCodec::default();
-        let buffer = codec.encode_message(msg)?;
+        let buffer = {
+            let _nvtx = dynamo_nvtx_range!("codec.encode");
+            codec.encode_message(msg)?
+        };
+
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+        let tx_start = Instant::now();
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
@@ -166,33 +241,54 @@ where
         // Prepare trace headers using shared helper
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.clone());
 
-        // Send request (works for all transport types)
+        // Stamp send time right before the transport write so the network
+        // transit metric excludes serialization/encoding overhead.
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
+
+        // Phase A: Frontend → Backend (network + queue + ack)
+        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
         let _response = self
             .req_client
             .send_request(address, buffer, headers)
             .await?;
+        drop(_nvtx_send);
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
+        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
+        drop(_nvtx_wait);
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;
+        let mut first_response = true;
         let stream = tokio_stream::StreamNotifyClose::new(
             tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
         )
         .filter_map(move |res| {
             if let Some(res_bytes) = res {
+                if first_response {
+                    first_response = false;
+                    let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
+                    REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
+                    STAGE_DURATION_SECONDS
+                        .with_label_values(&["transport_roundtrip"])
+                        .observe(queue_start.elapsed().as_secs_f64());
+                }
                 if is_complete_final {
-                    return Some(U::from_err(
-                        Error::msg(
-                            "Response received after generation ended - this should never happen",
-                        )
-                        .into(),
-                    ));
+                    let err = DynamoError::msg(
+                        "Response received after generation ended - this should never happen",
+                    );
+                    return Some(U::from_err(err));
                 }
                 match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
                     Ok(item) => {
@@ -202,10 +298,10 @@ where
                         } else if is_complete_final {
                             None
                         } else {
-                            Some(U::from_err(
-                                Error::msg("Empty response received - this should never happen")
-                                    .into(),
-                            ))
+                            let err = DynamoError::msg(
+                                "Empty response received - this should never happen",
+                            );
+                            Some(U::from_err(err))
                         }
                     }
                     Err(err) => {
@@ -213,7 +309,7 @@ where
                         let json_str = String::from_utf8_lossy(&res_bytes);
                         tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
 
-                        Some(U::from_err(Error::new(err).into()))
+                        Some(U::from_err(DynamoError::msg(err.to_string())))
                     }
                 }
             } else if is_complete_final {
@@ -227,11 +323,17 @@ where
                 None
             } else {
                 // stream ended unexpectedly
-                tracing::debug!("{STREAM_ERR_MSG}");
-                Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
+                let err = DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Stream ended before generation completed")
+                    .build();
+                tracing::debug!("{err}");
+                Some(U::from_err(err))
             }
         });
 
+        inflight_guard.disarm();
+        let stream = InflightDecStream { inner: stream };
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
     }
 }

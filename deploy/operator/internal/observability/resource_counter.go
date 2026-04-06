@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -159,7 +160,7 @@ func updateDynamoModelCounts(ctx context.Context, c client.Client, excludedNames
 }
 
 func updateDynamoGraphDeploymentRequestCounts(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces, logger logr.Logger) {
-	dgdrList := &v1alpha1.DynamoGraphDeploymentRequestList{}
+	dgdrList := &v1beta1.DynamoGraphDeploymentRequestList{}
 	if err := c.List(ctx, dgdrList); err != nil {
 		logger.Error(err, "failed to list DynamoGraphDeploymentRequests")
 		return
@@ -168,7 +169,7 @@ func updateDynamoGraphDeploymentRequestCounts(ctx context.Context, c client.Clie
 		dgdrList.Items,
 		excludedNamespaces,
 		consts.ResourceTypeDynamoGraphDeploymentRequest,
-		func(d *v1alpha1.DynamoGraphDeploymentRequest) *v1alpha1.DynamoGraphDeploymentRequest { return d },
+		func(d *v1beta1.DynamoGraphDeploymentRequest) *v1beta1.DynamoGraphDeploymentRequest { return d },
 	)
 }
 

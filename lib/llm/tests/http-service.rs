@@ -3,7 +3,6 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynamo_async_openai::config::OpenAIConfig;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -22,12 +21,13 @@ use dynamo_llm::{
         service::{
             Metrics,
             error::HttpError,
-            metrics::{Endpoint, RequestType, Status},
+            metrics::{Endpoint, ErrorType, RequestType, Status},
             service_v2::HttpService,
         },
     },
     model_card::ModelDeploymentCard,
 };
+use dynamo_protocols::config::OpenAIConfig;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -197,16 +197,18 @@ fn compare_counter(
     endpoint: &Endpoint,
     request_type: &RequestType,
     status: &Status,
+    error_type: &ErrorType,
     expected: u64,
 ) {
     assert_eq!(
-        metrics.get_request_counter(model, endpoint, request_type, status),
+        metrics.get_request_counter(model, endpoint, request_type, status, error_type),
         expected,
-        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}",
+        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}, error_type: {:?}",
         model,
         endpoint.as_str(),
         request_type.as_str(),
-        status.as_str()
+        status.as_str(),
+        error_type.as_str()
     );
 }
 
@@ -220,6 +222,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Tensor => todo!(),
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
+        Endpoint::Audios => todo!(),
     };
 
     let request_type = match request_type {
@@ -240,12 +243,17 @@ fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
         for request_type in &[RequestType::Unary, RequestType::Stream] {
             for status in &[Status::Success, Status::Error] {
                 let index = compute_index(endpoint, request_type, status);
+                let error_type = match status {
+                    Status::Success => &ErrorType::None,
+                    Status::Error => &ErrorType::Validation, // Test engines return 4xx errors
+                };
                 compare_counter(
                     metrics,
                     model,
                     endpoint,
                     request_type,
                     status,
+                    error_type,
                     expected[index],
                 );
             }
@@ -310,16 +318,16 @@ async fn test_http_service() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "hi".to_string(),
             ),
             name: None,
         },
     );
 
-    let mut request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let mut request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![message])
         .build()
@@ -485,7 +493,7 @@ async fn test_http_service() {
     // ==== ChatCompletions / Unary / Error ====
 
     // ==== Completions / Unary / Error ====
-    let mut request = dynamo_async_openai::types::CreateCompletionRequestArgs::default()
+    let mut request = dynamo_protocols::types::CreateCompletionRequestArgs::default()
         .model("bar")
         .prompt("hi")
         .build()
@@ -641,15 +649,14 @@ async fn test_pure_openai_client() {
     wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -674,15 +681,14 @@ async fn test_pure_openai_client() {
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -708,15 +714,14 @@ async fn test_pure_openai_client() {
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -753,15 +758,14 @@ async fn test_nv_custom_client() {
     wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -795,15 +799,14 @@ async fn test_nv_custom_client() {
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -838,15 +841,14 @@ async fn test_nv_custom_client() {
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
+            dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
                     name: None,
                 },
             ),
@@ -1002,16 +1004,16 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will take a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("slow-model")
         .messages(vec![message])
         .stream(false) // Test unary response
@@ -1098,16 +1100,16 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will stream for a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("slow-stream-model")
         .messages(vec![message])
         .stream(true) // Test streaming response

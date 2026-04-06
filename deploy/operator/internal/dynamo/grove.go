@@ -239,6 +239,28 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	return true, "", serviceStatus
 }
 
+// specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
+// to a Grove TopologyConstraint, extracting only the PackDomain.
+func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
+// toGroveTopologyConstraint converts a service-level TopologyConstraint
+// to a Grove TopologyConstraint.
+func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default
 // This is the shared logic between DetermineKaiSchedulerQueue and ResolveKaiSchedulerQueue
 func resolveKaiSchedulerQueueName(annotations map[string]string) string {
@@ -305,11 +327,11 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
-	controllerConfig controller_common.Config,
+	runtimeConfig *controller_common.RuntimeConfig,
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !controllerConfig.Grove.Enabled || !controllerConfig.KaiScheduler.Enabled {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
 		return
 	}
 

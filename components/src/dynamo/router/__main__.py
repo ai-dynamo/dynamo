@@ -18,10 +18,13 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvRouter, KvRouterConfig
-from dynamo.router.args import build_kv_router_config
+from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.router.args import (
+    DynamoRouterConfig,
+    build_aic_perf_config,
+    build_kv_router_config,
+)
 from dynamo.router.args import parse_args as parse_router_args
-from dynamo.router.backend_args import DynamoRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -38,11 +41,13 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
+        aic_perf_config: Optional[AicPerfConfig],
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
+        self.aic_perf_config = aic_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -59,18 +64,16 @@ class StandaloneRouterHandler:
             namespace, component, endpoint = parts
 
             # Get worker endpoint
-            worker_endpoint = (
-                self.runtime.namespace(namespace)
-                .component(component)
-                .endpoint(endpoint)
+            worker_endpoint = self.runtime.endpoint(
+                f"{namespace}.{component}.{endpoint}"
             )
-
             self.worker_client = await worker_endpoint.client()
 
             self.kv_router = KvRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
+                aic_perf_config=self.aic_perf_config,
             )
 
         except Exception as e:
@@ -113,23 +116,23 @@ class StandaloneRouterHandler:
         }
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request
+            preprocessed_request  # type: ignore[arg-type]
         ):
             # Wrap worker output into LLMEngineOutput format
             # Worker should return dict with at minimum kv_transfer_params in extra_args
             llm_engine_output = {
-                "token_ids": worker_output.get("token_ids", []),
-                "tokens": worker_output.get("tokens"),
-                "text": worker_output.get("text"),
-                "cum_log_probs": worker_output.get("cum_log_probs"),
-                "log_probs": worker_output.get("log_probs"),
-                "top_logprobs": worker_output.get("top_logprobs"),
-                "finish_reason": worker_output.get("finish_reason"),
-                "stop_reason": worker_output.get("stop_reason"),
-                "index": worker_output.get("index"),
-                "disaggregated_params": worker_output.get("disaggregated_params"),
-                "extra_args": worker_output.get("extra_args"),
-                "completion_usage": worker_output.get("completion_usage"),
+                "token_ids": worker_output.get("token_ids", []),  # type: ignore[attr-defined]
+                "tokens": worker_output.get("tokens"),  # type: ignore[attr-defined]
+                "text": worker_output.get("text"),  # type: ignore[attr-defined]
+                "cum_log_probs": worker_output.get("cum_log_probs"),  # type: ignore[attr-defined]
+                "log_probs": worker_output.get("log_probs"),  # type: ignore[attr-defined]
+                "top_logprobs": worker_output.get("top_logprobs"),  # type: ignore[attr-defined]
+                "finish_reason": worker_output.get("finish_reason"),  # type: ignore[attr-defined]
+                "stop_reason": worker_output.get("stop_reason"),  # type: ignore[attr-defined]
+                "index": worker_output.get("index"),  # type: ignore[attr-defined]
+                "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
+                "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
+                "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
             }
             yield llm_engine_output
 
@@ -166,34 +169,37 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
-        f"overlap_score_weight={config.router_kv_overlap_score_weight}, "
+        f"overlap_score_weight={config.overlap_score_weight}, "
         f"router_temperature={config.router_temperature}, "
-        f"router_use_kv_events={config.router_use_kv_events}, "
-        f"router_durable_kv_events={config.router_durable_kv_events}, "
+        f"use_kv_events={config.use_kv_events}, "
+        f"durable_kv_events={config.durable_kv_events}, "
         f"router_replica_sync={config.router_replica_sync}, "
         f"router_reset_states={config.router_reset_states}, "
         f"router_track_active_blocks={config.router_track_active_blocks}, "
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
+        f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
         f"router_ttl_secs={config.router_ttl_secs}, "
         f"router_max_tree_size={config.router_max_tree_size}, "
         f"router_prune_target_ratio={config.router_prune_target_ratio}"
     )
 
     kv_router_config = build_kv_router_config(config)
-
-    # Create service component - use "router" as component name
-    component = runtime.namespace(config.namespace).component("router")
+    aic_perf_config = build_aic_perf_config(config)
 
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime, config.endpoint, config.router_block_size, kv_router_config
+        runtime,
+        config.endpoint,
+        config.router_block_size,
+        kv_router_config,
+        aic_perf_config,
     )
     await handler.initialize()
 
-    # Expose endpoints
-    generate_endpoint = component.endpoint("generate")
-    best_worker_endpoint = component.endpoint("best_worker_id")
+    # Create endpoints
+    generate_endpoint = runtime.endpoint(f"{config.namespace}.router.generate")
+    best_worker_endpoint = runtime.endpoint(f"{config.namespace}.router.best_worker_id")
 
     logger.debug("Starting to serve endpoints...")
 

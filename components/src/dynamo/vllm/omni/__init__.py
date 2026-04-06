@@ -3,6 +3,7 @@
 
 """vLLM-Omni integration for Dynamo."""
 
+from .base_handler import BaseOmniHandler
 from .omni_handler import OmniHandler
 
-__all__ = ["OmniHandler"]
+__all__ = ["BaseOmniHandler", "OmniHandler"]

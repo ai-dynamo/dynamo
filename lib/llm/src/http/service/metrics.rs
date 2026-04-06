@@ -40,7 +40,8 @@ pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock:
     GaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
             ),
             "Last observed time to first token per worker (seconds)",
@@ -57,7 +58,8 @@ pub static WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE: LazyLock<IntGaugeVec> = Lazy
     IntGaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS
             ),
             "Last observed input sequence tokens per worker",
@@ -73,7 +75,8 @@ pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock:
     GaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS
             ),
             "Last observed inter-token latency per worker (seconds)",
@@ -220,9 +223,13 @@ fn parse_bucket_config(
     (min, max, count)
 }
 
-/// State for metrics handler with custom backend support
+/// State for metrics handler.
+/// Optionally holds a reference to the DRT's [`MetricsRegistry`] so that
+/// metrics created via `metrics().create*()` anywhere in the process are
+/// automatically included in the `/metrics` response.
 struct MetricsHandlerState {
     registry: Arc<Registry>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
 pub struct Metrics {
@@ -249,6 +256,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_cancellation_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -273,11 +281,14 @@ pub struct InflightGuard {
     endpoint: Endpoint,
     request_type: RequestType,
     status: Status,
+    error_type: ErrorType,
     timer: Instant,
+    request_id: String,
 }
 
 /// Requests will be logged by the type of endpoint hit
 /// This will include llamastack in the future
+#[derive(Clone, Copy)]
 pub enum Endpoint {
     /// OAI Completions
     Completions,
@@ -293,6 +304,9 @@ pub enum Endpoint {
 
     /// OAI Videos
     Videos,
+
+    /// OAI Audio Speech
+    Audios,
 
     /// OAI Responses
     Responses,
@@ -313,11 +327,37 @@ pub enum RequestType {
     Stream,
 }
 
+/// Labels for cancellation metrics
+pub struct CancellationLabels {
+    pub model: String,
+    pub endpoint: String,
+    pub request_type: String,
+}
+
 /// Status
 #[derive(PartialEq)]
 pub enum Status {
     Success,
     Error,
+}
+
+/// Error type classification for fine-grained observability
+#[derive(PartialEq, Clone, Debug)]
+pub enum ErrorType {
+    /// No error (for successful requests)
+    None,
+    /// Client validation error (4xx with "Validation:" prefix)
+    Validation,
+    /// Model or resource not found (404)
+    NotFound,
+    /// Service overloaded, too many requests (503)
+    Overload,
+    /// Request cancelled by client or timeout
+    Cancelled,
+    /// Internal server error (500 and other unexpected errors)
+    Internal,
+    /// Feature not implemented (501)
+    NotImplemented,
 }
 
 /// Track response-specific metrics
@@ -332,6 +372,10 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
+    isl: usize,
+    ttft_ms: Option<f64>,
+    itl_sum_secs: f64,
+    itl_count: u64,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
     // we track if tokenize latency has been observed to ensure we only increment once per request
@@ -404,6 +448,9 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
+        // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
+        // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
@@ -422,7 +469,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::REQUESTS_TOTAL),
                 "Total number of LLM requests processed",
             ),
-            &["model", "endpoint", "request_type", "status"],
+            &["model", "endpoint", "request_type", "status", "error_type"],
         )
         .unwrap();
 
@@ -623,6 +670,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_cancellation_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
+                "Total number of request cancellations",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -643,6 +699,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_cancellation_total,
         }
     }
 
@@ -657,6 +714,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) -> u64 {
         self.request_counter
             .with_label_values(&[
@@ -664,6 +722,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .get()
     }
@@ -679,6 +738,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) {
         self.request_counter
             .with_label_values(&[
@@ -686,6 +746,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .inc()
     }
@@ -743,6 +804,7 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_cancellation_total.clone()))?;
 
         Ok(())
     }
@@ -826,6 +888,20 @@ impl Metrics {
             .get()
     }
 
+    /// Increment the cancellation counter
+    pub fn inc_cancellation(&self, labels: &CancellationLabels) {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .inc();
+    }
+
+    /// Get the current cancellation count
+    pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
+        self.model_cancellation_total
+            .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .get()
+    }
+
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
     /// and the kind of endpoint that was hit
     ///
@@ -843,6 +919,7 @@ impl Metrics {
         model: &str,
         endpoint: Endpoint,
         streaming: bool,
+        request_id: &str,
     ) -> InflightGuard {
         let request_type = if streaming {
             RequestType::Stream
@@ -855,6 +932,7 @@ impl Metrics {
             model.to_string().to_lowercase(),
             endpoint,
             request_type,
+            request_id.to_string(),
         )
     }
 
@@ -894,51 +972,116 @@ impl InflightGuard {
         model: String,
         endpoint: Endpoint,
         request_type: RequestType,
+        request_id: String,
     ) -> Self {
-        // Start the timer
         let timer = Instant::now();
-
-        // Increment the inflight gauge when the guard is created
         metrics.inc_inflight_gauge(&model);
 
-        // Return the RAII Guard
+        tracing::Span::current().record("model", model.as_str());
+
+        tracing::info!(
+            request_id = %request_id,
+            model = %model,
+            endpoint = %endpoint,
+            request_type = %request_type,
+            "request received"
+        );
+
         InflightGuard {
             metrics,
             model,
             endpoint,
             request_type,
             status: Status::Error,
+            error_type: ErrorType::Internal,
             timer,
+            request_id,
         }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+    pub fn request_type(&self) -> &RequestType {
+        &self.request_type
+    }
+    pub fn error_type(&self) -> &ErrorType {
+        &self.error_type
+    }
+    pub fn elapsed_ms(&self) -> u128 {
+        self.timer.elapsed().as_millis()
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
+        self.error_type = ErrorType::None;
+    }
+
+    pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
+        self.status = Status::Error;
+        self.error_type = error_type;
     }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         let duration = self.timer.elapsed().as_secs_f64();
-
-        // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
-
-        // the frequency on incrementing the full request counter is relatively low
-        // if we were incrementing the counter on every forward pass, we'd use static CounterVec or
-        // discrete counter object without the more costly lookup required for the following calls
         self.metrics.inc_request_counter(
             &self.model,
             &self.endpoint,
             &self.request_type,
             &self.status,
+            &self.error_type,
         );
-
-        // Record the duration of the request
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
             .observe(duration);
+
+        let elapsed_ms = (duration * 1000.0) as u64;
+        let status_str = self.status.as_str();
+        match self.status {
+            Status::Error => {
+                let detail = match self.error_type {
+                    ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::Internal => "internal server error during processing",
+                    ErrorType::Validation => "invalid request parameters",
+                    ErrorType::NotFound => "model or resource not found",
+                    ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::None => "unknown error",
+                };
+                tracing::error!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    error_type = %self.error_type,
+                    error_detail = %detail,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            Status::Success => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+        }
     }
 }
 
@@ -950,6 +1093,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
+            Endpoint::Audios => write!(f, "audios"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
@@ -965,6 +1109,7 @@ impl Endpoint {
             Endpoint::Embeddings => "embeddings",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
+            Endpoint::Audios => "audios",
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
@@ -981,12 +1126,38 @@ impl RequestType {
     }
 }
 
+impl std::fmt::Display for RequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Status {
     pub fn as_str(&self) -> &'static str {
         match self {
             Status::Success => frontend_service::status::SUCCESS,
             Status::Error => frontend_service::status::ERROR,
         }
+    }
+}
+
+impl ErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorType::None => frontend_service::error_type::NONE,
+            ErrorType::Validation => frontend_service::error_type::VALIDATION,
+            ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
+            ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::Internal => frontend_service::error_type::INTERNAL,
+            ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -999,6 +1170,10 @@ impl ResponseMetricCollector {
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
+            isl: 0,
+            ttft_ms: None,
+            itl_sum_secs: 0.0,
+            itl_count: 0,
             cached_tokens_observed: false,
             tokenize_latency_observed: false,
             detokenize_latency_total: Duration::ZERO,
@@ -1099,6 +1274,9 @@ impl ResponseMetricCollector {
             return;
         }
 
+        // Store ISL for span recording on drop
+        self.isl = isl;
+
         // Increment the real-time output tokens counter
         self.metrics
             .output_tokens_counter
@@ -1110,8 +1288,9 @@ impl ResponseMetricCollector {
             // we use the full response time as TTFT and ignore the ITL
             self.is_first_token = false;
 
-            // Publish TTFT
+            // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
+            self.ttft_ms = Some(ttft * 1000.0);
             self.metrics
                 .time_to_first_token
                 .with_label_values(&[&self.model])
@@ -1152,6 +1331,8 @@ impl ResponseMetricCollector {
         if let Some(last_response_time) = self.last_response_time {
             let response_duration = current_duration - last_response_time;
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            self.itl_sum_secs += itl * num_tokens as f64;
+            self.itl_count += num_tokens as u64;
             for _ in 0..num_tokens {
                 self.metrics
                     .inter_token_latency
@@ -1197,6 +1378,25 @@ impl Drop for ResponseMetricCollector {
             .output_sequence_length
             .with_label_values(&[&self.model])
             .observe(self.osl as f64);
+
+        // Record request summary on the enclosing span.
+        // InflightGuard::Drop and on_response logs will inherit these.
+        let span = tracing::Span::current();
+        span.record("input_tokens", self.isl as u32);
+        span.record("output_tokens", self.osl as u32);
+        if let Some(ttft_ms) = self.ttft_ms {
+            span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+        }
+        if self.itl_count > 0 {
+            let avg_ms = (self.itl_sum_secs / self.itl_count as f64) * 1000.0;
+            span.record("avg_itl_ms", format!("{:.2}", avg_ms).as_str());
+        }
+        if let Some(worker_id) = self.prefill_worker_id {
+            span.record("prefill_worker_id", worker_id);
+        }
+        if let Some(worker_id) = self.decode_worker_id {
+            span.record("decode_worker_id", worker_id);
+        }
     }
 }
 
@@ -1332,13 +1532,21 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     }
 }
 
-/// Create a new router with optional custom backend metrics support
-pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
+/// Create a new router with optional DRT metrics integration.
+///
+/// When `drt_metrics` is provided, the `/metrics` handler will also include
+/// metrics from the DRT's registry tree (anything created via `metrics().create*()`).
+pub fn router(
+    registry: Registry,
+    path: Option<String>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
 
     let metrics_state = MetricsHandlerState {
         registry: Arc::new(registry),
+        drt_metrics,
     };
 
     let route = Router::new()
@@ -1347,7 +1555,10 @@ pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Route
     (vec![doc], route)
 }
 
-/// Unified metrics handler
+/// Unified metrics handler.
+///
+/// Gathers from the local HTTP-service registry first, then appends any
+/// metrics from the DRT's registry tree (if configured).
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.registry.gather();
@@ -1360,7 +1571,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
             .into_response();
     }
 
-    let metrics = match String::from_utf8(buffer) {
+    let mut metrics = match String::from_utf8(buffer) {
         Ok(metrics) => metrics,
         Err(_) => {
             return (
@@ -1370,6 +1581,23 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
                 .into_response();
         }
     };
+
+    // Append DRT registry tree metrics (anything created via metrics().create*()).
+    if let Some(ref drt_metrics) = state.drt_metrics {
+        match drt_metrics.prometheus_expfmt_combined() {
+            Ok(drt_text) => {
+                if !drt_text.is_empty() {
+                    if !metrics.is_empty() && !metrics.ends_with('\n') {
+                        metrics.push('\n');
+                    }
+                    metrics.push_str(&drt_text);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to gather DRT metrics: {}", e);
+            }
+        }
+    }
 
     (StatusCode::OK, metrics).into_response()
 }
@@ -1766,6 +1994,7 @@ mod tests {
             data: None,
             event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
             comment: None,
+            error: None,
         };
 
         // Add metrics annotation with cached_tokens
@@ -1870,6 +2099,7 @@ mod tests {
             data: None,
             event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
             comment: None,
+            error: None,
         };
 
         let llm_metrics = LLMMetricAnnotation {
@@ -1937,5 +2167,230 @@ mod tests {
             "detokenize average latency should be 0.05ms, got {}",
             detokenize_metric.get_histogram().get_sample_sum()
         );
+    }
+
+    #[test]
+    fn test_error_type_as_str() {
+        assert_eq!(ErrorType::None.as_str(), "");
+        assert_eq!(ErrorType::Validation.as_str(), "validation");
+        assert_eq!(ErrorType::NotFound.as_str(), "not_found");
+        assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::Internal.as_str(), "internal");
+        assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_success_with_correct_error_type() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
+            guard.mark_ok();
+        } // guard drops here
+
+        // Verify counter incremented with status=success, error_type=""
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_validation_error() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
+            guard.mark_error(ErrorType::Validation);
+        } // guard drops here
+
+        // Verify counter incremented with status=error, error_type=validation
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_defaults_to_internal_error_on_drop() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
+            // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
+        } // guard drops with default error_type=Internal
+
+        // Verify counter incremented with status=error, error_type=internal
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_all_error_types_recorded_correctly() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let endpoint = Endpoint::ChatCompletions;
+
+        // Test each error type
+        let error_types = vec![
+            ErrorType::Validation,
+            ErrorType::NotFound,
+            ErrorType::Overload,
+            ErrorType::Cancelled,
+            ErrorType::Internal,
+            ErrorType::NotImplemented,
+        ];
+
+        for error_type in &error_types {
+            let mut guard = metrics
+                .clone()
+                .create_inflight_guard(model, endpoint, false, "");
+            guard.mark_error(error_type.clone());
+            drop(guard);
+        }
+
+        // Verify each error type recorded correctly
+        for error_type in &error_types {
+            let counter_value = metrics
+                .request_counter
+                .with_label_values(&[
+                    model,
+                    endpoint.as_str(),
+                    RequestType::Unary.as_str(),
+                    Status::Error.as_str(),
+                    error_type.as_str(),
+                ])
+                .get();
+            assert_eq!(
+                counter_value,
+                1,
+                "Should have 1 request for error_type={}",
+                error_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_requests_different_error_types() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        // Record 2 validation errors, 3 internal errors, 1 success
+        for _ in 0..2 {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
+            guard.mark_error(ErrorType::Validation);
+            drop(guard);
+        }
+
+        for _ in 0..3 {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Completions, false, "");
+            guard.mark_error(ErrorType::Internal);
+            drop(guard);
+        }
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Embeddings, false, "");
+            guard.mark_ok();
+            drop(guard);
+        }
+
+        // Check validation errors (2 from ChatCompletions)
+        let validation_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(validation_count, 2);
+
+        // Check internal errors (3 from Completions)
+        let internal_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Completions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(internal_count, 3);
+
+        // Check success (1 from Embeddings)
+        let success_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Embeddings.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(success_count, 1);
     }
 }
