@@ -917,13 +917,13 @@ def make_multimodal_configs(
 # Phase 1 model profiles — each must pass the onboarding gate before merge.
 MULTIMODAL_MODEL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
+        name="llava-hf/llava-v1.6-mistral-7b-hf",
+        short_name="llava-next-7b",
         supported_topologies={"agg"},
         image_expected_response=["green"],
         gpu_marker="gpu_1",
         timeout_s=360,
-        extra_vllm_args=["--dtype", "bfloat16", "--max-model-len", "4096"],
+        extra_vllm_args=["--max-model-len", "4096"],
     ),
 ]
 
