@@ -147,12 +147,8 @@ class DisaggSglangMultimodalRequest(BaseModel):
 class CreateImageRequest(BaseModel):
     """OpenAI /v1/images/generations and /v1/images/edits compatible request.
 
-    Generation params (seed, guidance_scale, etc.) can be specified either
-    at the top level (SGLang-compatible) or nested under ``nvext``
-    (Dynamo convention).  When both are present, ``nvext`` wins.
-
-    Uses the shared ``ImageNvExt`` from ``dynamo.common.protocols.image_protocol``
-    for the ``nvext`` field. SGLang-specific defaults (guidance_scale=7.5,
+    Generation params (seed, guidance_scale, num_inference_steps, negative_prompt)
+    are specified under ``nvext``.  SGLang-specific defaults (guidance_scale=7.5,
     num_inference_steps=50) are applied in the handler, not the model.
     """
 
@@ -165,14 +161,6 @@ class CreateImageRequest(BaseModel):
     user: Optional[str] = None
     input_reference: Optional[str] = None  # For I2I/TI2I - image path/url
 
-    # Top-level generation params (SGLang-compatible).
-    # These mirror fields in NvCreateImageRequest (image_protocol.py & images.rs).
-    seed: Optional[int] = None
-    negative_prompt: Optional[str] = None
-    num_inference_steps: Optional[int] = None
-    guidance_scale: Optional[float] = None
-
-    # NVIDIA extensions nested under nvext (takes precedence over top-level)
     nvext: Optional[ImageNvExt] = None
 
 

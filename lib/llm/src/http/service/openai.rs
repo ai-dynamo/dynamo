@@ -2035,7 +2035,7 @@ pub fn images_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let generations_path = path.unwrap_or("/v1/images/generations".to_string());
-    let edits_path = "/v1/images/edits".to_string();
+    let edits_path = generations_path.replace("/generations", "/edits");
     let doc = RouteDoc::new(axum::http::Method::POST, &generations_path);
     let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()

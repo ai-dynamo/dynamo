@@ -95,35 +95,17 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         try:
             req = CreateImageRequest(**request)
 
-            # When nvext is provided, use it; otherwise build from top-level params.
-            # ImageNvExt has no opinionated defaults — SGLang defaults applied below.
-            if req.nvext is not None:
-                nvext = req.nvext
-            else:
-                nvext = ImageNvExt(
-                    seed=req.seed,
-                    negative_prompt=req.negative_prompt,
-                    num_inference_steps=req.num_inference_steps,
-                    guidance_scale=req.guidance_scale,
-                )
+            nvext = req.nvext or ImageNvExt()
 
             # Apply SGLang-specific defaults for unset values
-            raw_steps = (
-                nvext.num_inference_steps
-                if nvext.num_inference_steps is not None
-                else DEFAULT_NUM_INFERENCE_STEPS
-            )
+            raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
             if raw_steps > MAX_NUM_INFERENCE_STEPS:
                 logger.warning(
                     f"num_inference_steps={raw_steps} exceeds max "
                     f"{MAX_NUM_INFERENCE_STEPS}, clamping"
                 )
             num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
-            guidance_scale = (
-                nvext.guidance_scale
-                if nvext.guidance_scale is not None
-                else DEFAULT_GUIDANCE_SCALE
-            )
+            guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
 
             width, height = self._parse_size(req.size)
 

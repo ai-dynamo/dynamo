@@ -12,12 +12,6 @@ pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
 /// Image generation request with NVIDIA extensions.
-///
-/// Generation params (seed, guidance_scale, etc.) can be specified at the top level
-/// (SGLang-native format) or nested under `nvext` (Dynamo convention). The Python
-/// handler merges them, with `nvext` taking precedence. Top-level fields exist because
-/// SGLang's native API uses them, and requiring `nvext` wrapping would break SGLang
-/// client compatibility.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateImageRequest {
     #[serde(flatten)]
@@ -26,23 +20,6 @@ pub struct NvCreateImageRequest {
     /// Optional image reference that guides generation (for I2I/TI2I).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
-
-    /// Random seed. Top-level alternative to nvext; nvext takes precedence.
-    /// i64 to match PyTorch's torch.manual_seed() accepted range.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-
-    /// Negative prompt. Top-level alternative to nvext; nvext takes precedence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub negative_prompt: Option<String>,
-
-    /// Number of denoising steps. Top-level alternative to nvext; nvext takes precedence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub num_inference_steps: Option<u32>,
-
-    /// CFG guidance scale. Top-level alternative to nvext; nvext takes precedence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub guidance_scale: Option<f32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,

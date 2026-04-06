@@ -438,34 +438,3 @@ class TestImageDiffusionWorkerHandler:
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
         assert "image_path" not in sampling_params
-
-    @pytest.mark.asyncio
-    async def test_generate_top_level_params(self, handler, mock_context):
-        """Test SGLang-style request with params at top level (no nvext)."""
-        test_image = Image.new("RGB", (256, 256), color="blue")
-
-        handler.generator.generate = Mock(
-            return_value=SimpleNamespace(frames=[test_image])
-        )
-
-        request = {
-            "prompt": "A blue square",
-            "model": "test-model",
-            "size": "256x256",
-            "response_format": "b64_json",
-            "seed": 123,
-            "negative_prompt": "ugly",
-            "num_inference_steps": 20,
-            "guidance_scale": 3.0,
-        }
-
-        results = []
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
-
-        call_args = handler.generator.generate.call_args
-        params = call_args[1]["sampling_params_kwargs"]
-        assert params["seed"] == 123
-        assert params["negative_prompt"] == "ugly"
-        assert params["num_inference_steps"] == 20
-        assert params["guidance_scale"] == 3.0
