@@ -7,6 +7,11 @@ pub enum TorchDevice {
     Other(String),
 }
 
+/// Check if a tensor is on an XPU/Ze device.
+pub fn is_ze(tensor: &dyn TorchTensor) -> bool {
+    matches!(tensor.device(), TorchDevice::Other(ref s) if s == "xpu")
+}
+
 pub trait TorchTensor: std::fmt::Debug + Send + Sync {
     fn device(&self) -> TorchDevice;
     fn data_ptr(&self) -> u64;

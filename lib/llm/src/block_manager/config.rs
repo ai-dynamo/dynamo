@@ -214,6 +214,10 @@ pub struct KvBlockManagerConfig {
     #[builder(default, setter(custom))]
     pub consolidator_config:
         Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
+
+    /// Device backend type: "cuda" or "ze"
+    #[builder(default = "String::from(\"cuda\")")]
+    pub device_type: String,
 }
 
 impl KvBlockManagerConfig {

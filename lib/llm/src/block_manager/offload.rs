@@ -35,10 +35,10 @@
 use super::block::{
     BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
     locality::LocalityProvider,
-    transfer::{PoolConfig, TransferContext},
+    transfer::{DeviceContextExt, PoolConfig, TransferContext},
 };
 use super::pool::{BlockPool, BlockPoolError};
-use super::storage::{Cuda, Storage};
+use super::storage::{DeviceBackend, Storage};
 use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
 use std::sync::{
@@ -125,6 +125,8 @@ pub struct OffloadManagerConfig {
     pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
     /// If true, offload directly from device (G1) to disk (G3), bypassing host (G2)
     pub bypass_cpu_mem: bool,
+    /// Device backend type: "cuda" or "ze"
+    pub device_type: String,
 }
 
 /// The offload manager handles all block transfers between different cache levels.
@@ -186,7 +188,9 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             bypass_cpu_mem: config.bypass_cpu_mem,
         });
 
-        let cuda_ctx = Cuda::device_or_create(0)?;
+        let backend = DeviceBackend::from_str(&config.device_type)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let device_ctx = backend.create(0)?;
 
         let max_concurrent_transfers = max_concurrent_transfers();
         let max_transfer_batch_size = max_transfer_batch_size();
@@ -209,14 +213,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         let device_offload_transfer_ctx = Arc::new(
             TransferContext::new(
                 config.nixl_agent.clone(),
-                cuda_ctx.new_stream()?,
+                device_ctx.new_stream()?,
                 config.async_rt_handle.clone(),
                 Some(pool_config.clone()),
             )
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to create device offload transfer context with CUDA memory pool: {}. \
-                     This is a critical error - the system cannot operate without CUDA memory pools. \
+                    "Failed to create device offload transfer context with Device memory pool: {}. \
+                     This is a critical error - the system cannot operate without Device memory pools. \
                      Please ensure sufficient GPU memory is available.",
                     e
                 )
@@ -257,13 +261,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         let transfer_ctx = Arc::new(
             TransferContext::new(
                 config.nixl_agent.clone(),
-                cuda_ctx.new_stream()?,
+                device_ctx.new_stream()?,
                 config.async_rt_handle.clone(),
                 Some(pool_config),
             )
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to create transfer context for host onboard operations: {}",
+                    "Failed to create transfer context for host onboard operations with {} backend: {}",
+                    config.device_type,
                     e
                 )
             })?,
@@ -775,7 +780,7 @@ mod tests {
         layout::{FullyContiguous, LayerSeparate, LayoutType, nixl::NixlLayout},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
         storage::{
-            DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
+            DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator, 
             PinnedStorage, StorageAllocator, StorageType,
         },
     };

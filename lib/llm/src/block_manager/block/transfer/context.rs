@@ -3,17 +3,15 @@
 
 use super::*;
 
-use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
+use cudarc::driver::{CudaContext, CudaStream};
+use dynamo_memory::{BackendType, DeviceContext, ZeCommandQueue, ZeContext, pool::CudaMemPool};
 use nixl_sys::Agent as NixlAgent;
 
 use anyhow::Result;
-use dynamo_memory::pool::CudaMemPool;
 use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 
 // ============================================================================
 // Legacy: Pinned Buffer Resource for Old Pooling (to be removed)
@@ -98,7 +96,6 @@ impl TransferResources {
         src_addresses: &[u64],
         dst_addresses: &[u64],
     ) -> Result<(), TransferError> {
-        // Returns (), not pointers
         if src_addresses.len() != dst_addresses.len() {
             return Err(TransferError::ExecutionError(format!(
                 "Address array length mismatch: src={}, dst={}",
@@ -109,7 +106,6 @@ impl TransferResources {
 
         let required_size = std::mem::size_of_val(src_addresses);
 
-        // Check buffer sizes
         if self.src_buffer.size < required_size || self.dst_buffer.size < required_size {
             return Err(TransferError::ExecutionError(format!(
                 "Buffer too small: {}B needed",
@@ -117,7 +113,6 @@ impl TransferResources {
             )));
         }
 
-        // Copy addresses to pinned buffers
         unsafe {
             std::ptr::copy_nonoverlapping(
                 src_addresses.as_ptr(),
@@ -157,7 +152,6 @@ impl Drop for TransferResources {
             self.src_buffer.id,
             self.dst_buffer.id
         );
-        // SyncPoolItem Drop handles returning buffers to pool automatically
     }
 }
 
@@ -170,118 +164,106 @@ pub struct PoolConfig {
     pub num_layers: usize,
 }
 
+// ============================================================================
+// Device memory pool wrapper
+// ============================================================================
+
+/// Backend-agnostic device stream.
+#[derive(Clone)]
+pub enum DeviceStream {
+    /// CUDA stream.
+    Cuda(Arc<CudaStream>),
+    /// Level Zero command queue.
+    Ze(Arc<ZeCommandQueue>),
+}
+
+/// Extension trait for DeviceContext — creates a DeviceStream by downcasting
+/// to the concrete backend and calling its `new_stream()` method.
+pub trait DeviceContextExt {
+    fn new_stream(&self) -> anyhow::Result<DeviceStream>;
+}
+
+impl DeviceContextExt for DeviceContext {
+    fn new_stream(&self) -> anyhow::Result<DeviceStream> {
+        match self.backend_type() {
+            BackendType::Cuda => {
+                let cuda_ctx = self.backend.as_any()
+                    .downcast_ref::<Arc<CudaContext>>()
+                    .expect("BackendType::Cuda but downcast to Arc<CudaContext> failed");
+                Ok(DeviceStream::Cuda(cuda_ctx.new_stream()?))
+            }
+            BackendType::Ze => {
+                let ze_ctx = self.backend.as_any()
+                    .downcast_ref::<Arc<ZeContext>>()
+                    .expect("BackendType::Ze but downcast to Arc<ZeContext> failed");
+                Ok(DeviceStream::Ze(ze_ctx.new_stream()?))
+            }
+        }
+    }
+}
+
+/// Type-erased device memory pool.
+pub enum DeviceMemPool {
+    /// CUDA stream-ordered memory pool.
+    Cuda(Arc<CudaMemPool>),
+    /// Level Zero memory pool.
+    Ze(Arc<super::ze::ZeMemPool>),
+}
+
+// ============================================================================
+// TransferBackend trait
+// ============================================================================
+
+/// Backend-specific operations for transfer contexts.
+pub(super) trait TransferBackend: Send + Sync {
+    /// Get the device memory pool, if configured.
+    fn device_mem_pool(&self) -> Option<DeviceMemPool>;
+
+    /// Record a device event and notify `tx` when it completes.
+    fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError>;
+
+    /// Acquire a pinned buffer from the legacy pool.
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError>;
+
+    /// Get the device stream.
+    fn device_stream(&self) -> DeviceStream;
+
+    /// Shut down the backend (cancel workers, join threads).
+    fn shutdown(&mut self);
+}
+
+// ============================================================================
+// TransferContext
+// ============================================================================
+
 pub struct TransferContext {
     nixl_agent: Arc<Option<NixlAgent>>,
-    stream: Arc<CudaStream>,
     async_rt_handle: Handle,
-
-    // NEW: CUDA memory pool for stream-ordered host memory allocation
-    cuda_mem_pool: Option<Arc<CudaMemPool>>,
-
-    // LEGACY: Old pinned buffer pool (still used by TransferResources)
-    pinned_buffer_pool: Option<SyncPinnedBufferPool>,
-
-    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
-    cuda_event_worker: Option<JoinHandle<()>>,
-    cancel_token: CancellationToken,
+    backend: Box<dyn TransferBackend>,
 }
 
 impl TransferContext {
     pub fn new(
         nixl_agent: Arc<Option<NixlAgent>>,
-        stream: Arc<CudaStream>,
+        stream: DeviceStream,
         async_rt_handle: Handle,
         config: Option<PoolConfig>,
     ) -> Result<Self, anyhow::Error> {
-        let (cuda_event_tx, cuda_event_rx) =
-            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
-
-        let cancel_token = CancellationToken::new();
-
-        let cancel_token_clone = cancel_token.clone();
-        let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
-
-        let pool = {
-            tracing::debug!(
-                "Pinned buffer pool is no longer used for kernel transfers and will be removed in the future"
-            );
-            None
-        };
-
-        // Create CUDA memory pool for stream-ordered allocation
-        let cuda_mem_pool = if let Some(ref cfg) = config {
-            if cfg.enable_pool {
-                // Calculate total reserve size for pre-warming
-                let num_buffers = cfg.max_concurrent_transfers * 2 + 2;
-                let buffer_size = cfg.max_transfer_batch_size
-                    * cfg.num_outer_components
-                    * cfg.num_layers
-                    * std::mem::size_of::<u64>();
-                let reserve_size = num_buffers * buffer_size;
-
-                tracing::info!(
-                    "Creating CUDA memory pool: {} buffers × {}KB = {}MB total",
-                    num_buffers,
-                    buffer_size / 1024,
-                    reserve_size / (1024 * 1024)
-                );
-
-                let pool = CudaMemPool::builder(stream.context().clone(), reserve_size)
-                    .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to create CUDA memory pool: {}", e))?;
-
-                tracing::info!(
-                    "CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with {}MB)",
-                    reserve_size / (1024 * 1024)
-                );
-                Some(Arc::new(pool))
-            } else {
-                tracing::debug!("CUDA memory pool disabled by configuration");
-                None
+        let backend: Box<dyn TransferBackend> = match &stream {
+            DeviceStream::Cuda(cuda_stream) => {
+                Box::new(super::cuda::TransferBackendCuda::new(cuda_stream.clone(), config.as_ref())?)
             }
-        } else {
-            tracing::debug!("No pool configuration provided - CUDA memory pool disabled");
-            None
+            DeviceStream::Ze(ze_queue) => {
+                Box::new(super::ze::TransferBackendZe::new(ze_queue.clone(), config.as_ref()))
+            }
         };
-
         Ok(Self {
             nixl_agent,
-            stream,
             async_rt_handle,
-            cuda_mem_pool,
-            pinned_buffer_pool: pool,
-            cuda_event_tx,
-            cuda_event_worker: Some(cuda_event_worker),
-            cancel_token,
-        })
-    }
-
-    fn setup_cuda_event_worker(
-        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
-        cancel_token: CancellationToken,
-    ) -> JoinHandle<()> {
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to build Tokio runtime for CUDA event worker.");
-
-            runtime.block_on(async move {
-                loop {
-                    tokio::select! {
-                        Some((event, tx)) = cuda_event_rx.recv() => {
-                            if let Err(e) = event.synchronize() {
-                                tracing::error!("Error synchronizing CUDA event: {}", e);
-                            }
-                            let _ = tx.send(());
-                        }
-                        _ = cancel_token.cancelled() => {
-                            break;
-                        }
-                    }
-                }
-            });
+            backend,
         })
     }
 
@@ -289,80 +271,35 @@ impl TransferContext {
         self.nixl_agent.clone()
     }
 
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
+    /// Get the device stream.
+    pub fn stream(&self) -> DeviceStream {
+        self.backend.device_stream()
     }
 
     pub fn async_rt_handle(&self) -> &Handle {
         &self.async_rt_handle
     }
 
-    /// Get the CUDA memory pool for stream-ordered allocations
-    pub fn cuda_mem_pool(&self) -> Option<&Arc<CudaMemPool>> {
-        self.cuda_mem_pool.as_ref()
+    /// Get the device memory pool for stream-ordered allocations.
+    pub fn device_mem_pool(&self) -> Option<DeviceMemPool> {
+        self.backend.device_mem_pool()
     }
 
-    pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
-        let event = self
-            .stream
-            .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
-            .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
-
-        self.cuda_event_tx
-            .send((event, tx))
-            .map_err(|_| TransferError::ExecutionError("CUDA event worker exited.".into()))?;
-        Ok(())
+    pub fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        self.backend.device_event(tx)
     }
 
     pub fn acquire_resources_for_transfer_sync(
         &self,
         size: usize,
     ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
-        let ptr_array_size = size * std::mem::size_of::<u64>();
-
-        tracing::debug!(
-            "Acquiring pinned buffer: need {} bytes for {} addresses",
-            ptr_array_size,
-            size
-        );
-
-        if let Some(pool) = &self.pinned_buffer_pool {
-            tracing::debug!("Pool available - acquiring buffer (blocking)...");
-
-            // All buffers are the same size, so just acquire one directly
-            let buffer = pool.acquire_blocking();
-
-            // Validate that the requested size fits in the buffer
-            if buffer.size < ptr_array_size {
-                return Err(TransferError::ExecutionError(format!(
-                    "Buffer too small: need {}KB but buffer is only {}KB (addresses: {})",
-                    ptr_array_size / 1024,
-                    buffer.size / 1024,
-                    size
-                )));
-            }
-
-            Ok(buffer)
-        } else {
-            tracing::warn!(
-                "No pinned buffer pool configured - this should not happen in production"
-            );
-            // No pool configured - this is a configuration error
-            Err(TransferError::ExecutionError(
-                "No sync pool configured - TransferContext must be created with a pool".into(),
-            ))
-        }
+        self.backend.acquire_resources_for_transfer_sync(size)
     }
 }
 
 impl Drop for TransferContext {
     fn drop(&mut self) {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.cuda_event_worker.take()
-            && let Err(e) = handle.join()
-        {
-            tracing::error!("Error joining CUDA event worker: {:?}", e);
-        }
+        self.backend.shutdown();
     }
 }
 

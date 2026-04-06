@@ -2,18 +2,207 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use super::context::{
+    DeviceMemPool, DeviceStream, PinnedBuffer, PoolConfig, SyncPinnedBufferPool, TransferBackend,
+};
 
 use super::TransferError;
 use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 
 use anyhow::Result;
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use cudarc::driver::result as cuda_result;
-use cudarc::driver::sys::{CUevent_flags, CUresult, cuMemcpyHtoDAsync_v2};
+use cudarc::driver::sys::{CUresult, cuMemcpyHtoDAsync_v2};
+use dynamo_memory::pool::CudaMemPool;
 use dynamo_runtime::config::environment_names::cuda as env_cuda;
+use dynamo_runtime::utils::pool::SyncPoolItem;
 use std::ops::Range;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+
+// ============================================================================
+// CUDA transfer backend
+// ============================================================================
+
+pub(super) struct TransferBackendCuda {
+    stream: Arc<CudaStream>,
+    cuda_mem_pool: Option<Arc<CudaMemPool>>,
+    pinned_buffer_pool: Option<SyncPinnedBufferPool>,
+    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
+    cuda_event_worker: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl TransferBackendCuda {
+    pub fn new(
+        stream: Arc<CudaStream>,
+        config: Option<&PoolConfig>,
+    ) -> Result<Self, anyhow::Error> {
+        let (cuda_event_tx, cuda_event_rx) =
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
+
+        let cancel_token = CancellationToken::new();
+        let cuda_event_worker =
+            Self::setup_cuda_event_worker(cuda_event_rx, cancel_token.clone());
+
+        let pool = {
+            tracing::debug!(
+                "Pinned buffer pool is no longer used for kernel transfers and will be removed in the future"
+            );
+            None
+        };
+
+        // Create CUDA memory pool for stream-ordered allocation
+        let device_mem_pool = if let Some(cfg) = config {
+            if cfg.enable_pool {
+                let num_buffers = cfg.max_concurrent_transfers * 2 + 2;
+                let buffer_size = cfg.max_transfer_batch_size
+                    * cfg.num_outer_components
+                    * cfg.num_layers
+                    * std::mem::size_of::<u64>();
+                let reserve_size = num_buffers * buffer_size;
+
+                tracing::info!(
+                    "Creating CUDA memory pool: {} buffers × {}KB = {}MB total",
+                    num_buffers,
+                    buffer_size / 1024,
+                    reserve_size / (1024 * 1024)
+                );
+
+                let cuda_pool =
+                    CudaMemPool::builder(stream.context().clone(), reserve_size)
+                        .release_threshold(128 * 1024 * 1024)
+                        .build()
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to create CUDA memory pool: {}", e)
+                        })?;
+
+                tracing::info!(
+                    "CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with {}MB)",
+                    reserve_size / (1024 * 1024)
+                );
+                Some(Arc::new(cuda_pool))
+            } else {
+                tracing::debug!("CUDA memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - CUDA memory pool disabled");
+            None
+        };
+
+        Ok(Self {
+            stream,
+            cuda_mem_pool: device_mem_pool,
+            pinned_buffer_pool: pool,
+            cuda_event_tx,
+            cuda_event_worker: Some(cuda_event_worker),
+            cancel_token,
+        })
+    }
+
+    fn setup_cuda_event_worker(
+        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime for CUDA event worker.");
+
+            runtime.block_on(async move {
+                loop {
+                    tokio::select! {
+                        Some((event, tx)) = cuda_event_rx.recv() => {
+                            if let Err(e) = event.synchronize() {
+                                tracing::error!("Error synchronizing CUDA event: {}", e);
+                            }
+                            let _ = tx.send(());
+                        }
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        })
+    }
+}
+
+impl TransferBackend for TransferBackendCuda {
+    fn device_mem_pool(&self) -> Option<DeviceMemPool> {
+        self.cuda_mem_pool.as_ref().map(|p| DeviceMemPool::Cuda(p.clone()))
+    }
+
+    fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let event = self
+            .stream
+            .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+            .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
+
+        self.cuda_event_tx
+            .send((event, tx))
+            .map_err(|_| TransferError::ExecutionError("CUDA event worker exited.".into()))?;
+        Ok(())
+    }
+
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
+        let ptr_array_size = size * std::mem::size_of::<u64>();
+
+        tracing::debug!(
+            "Acquiring pinned buffer: need {} bytes for {} addresses",
+            ptr_array_size,
+            size
+        );
+
+        if let Some(pool) = &self.pinned_buffer_pool {
+            tracing::debug!("Pool available - acquiring buffer (blocking)...");
+
+            let buffer = pool.acquire_blocking();
+
+            if buffer.size < ptr_array_size {
+                return Err(TransferError::ExecutionError(format!(
+                    "Buffer too small: need {}KB but buffer is only {}KB (addresses: {})",
+                    ptr_array_size / 1024,
+                    buffer.size / 1024,
+                    size
+                )));
+            }
+
+            Ok(buffer)
+        } else {
+            tracing::warn!(
+                "No pinned buffer pool configured - this should not happen in production"
+            );
+            Err(TransferError::ExecutionError(
+                "No sync pool configured - TransferContext must be created with a pool".into(),
+            ))
+        }
+    }
+
+    fn device_stream(&self) -> DeviceStream {
+        DeviceStream::Cuda(self.stream.clone())
+    }
+
+    fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.cuda_event_worker.take()
+            && let Err(e) = handle.join()
+        {
+            tracing::error!("Error joining CUDA event worker: {:?}", e);
+        }
+    }
+}
+
+// ============================================================================
+// CUDA copy operations
+// ============================================================================
 
 // Global storage for kernel function - store as usize to avoid Send/Sync issues
 static COPY_KERNEL_MODULE: Mutex<Option<usize>> = Mutex::new(None);
@@ -28,9 +217,9 @@ type CudaMemcpyFnPtr = unsafe fn(
 
 fn cuda_memcpy_fn_ptr(strategy: &TransferStrategy) -> Result<CudaMemcpyFnPtr, TransferError> {
     match strategy {
-        TransferStrategy::CudaAsyncH2D => Ok(cuda_memcpy_h2d),
-        TransferStrategy::CudaAsyncD2H => Ok(cuda_memcpy_d2h),
-        TransferStrategy::CudaAsyncD2D => Ok(cuda_memcpy_d2d),
+        TransferStrategy::AsyncH2D => Ok(cuda_memcpy_h2d),
+        TransferStrategy::AsyncD2H => Ok(cuda_memcpy_d2h),
+        TransferStrategy::AsyncD2D => Ok(cuda_memcpy_d2d),
         _ => Err(TransferError::ExecutionError(
             "Unsupported copy strategy for CUDA memcpy async".into(),
         )),
@@ -215,12 +404,12 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    let pool = ctx.cuda_mem_pool().ok_or_else(|| {
-        TransferError::ExecutionError(
+    let Some(super::context::DeviceMemPool::Cuda(pool)) = ctx.device_mem_pool() else {
+        return Err(TransferError::ExecutionError(
             "TransferContext was not instantiated with a CudaPool; please report this error"
                 .to_string(),
-        )
-    })?;
+        ));
+    };
 
     // Allocate DEVICE memory from pool (stream-ordered)
     let src_buffer = pool.alloc_async(size, stream).map_err(|e| {
@@ -399,19 +588,19 @@ fn expected_strategy<Source: Storage, Dest: Storage>() -> TransferStrategy {
             if src == std::any::TypeId::of::<PinnedStorage>()
                 && dst == std::any::TypeId::of::<DeviceStorage>() =>
         {
-            TransferStrategy::CudaAsyncH2D
+            TransferStrategy::AsyncH2D
         }
         (src, dst)
             if src == std::any::TypeId::of::<DeviceStorage>()
                 && dst == std::any::TypeId::of::<PinnedStorage>() =>
         {
-            TransferStrategy::CudaAsyncD2H
+            TransferStrategy::AsyncD2H
         }
         (src, dst)
             if src == std::any::TypeId::of::<DeviceStorage>()
                 && dst == std::any::TypeId::of::<DeviceStorage>() =>
         {
-            TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncD2D
         }
         _ => TransferStrategy::Invalid,
     }
@@ -657,9 +846,7 @@ mod tests {
         let device_allocator = DeviceAllocator::default();
         let pinned_allocator = PinnedAllocator::default();
 
-        let ctx = device_allocator.ctx().clone();
-
-        // Create CUDA stream
+        let ctx = crate::block_manager::storage::cuda::Cuda::device_or_create(0).unwrap();
         let stream = ctx.new_stream().unwrap();
 
         // Allocate host and device memory
@@ -744,7 +931,7 @@ mod tests {
         fn test_h2d_fc_host_to_ls_device() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = crate::block_manager::storage::cuda::Cuda::device_or_create(0).unwrap();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -861,7 +1048,7 @@ mod tests {
         fn test_d2h_ls_device_to_fc_host() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = crate::block_manager::storage::cuda::Cuda::device_or_create(0).unwrap();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -991,7 +1178,7 @@ mod tests {
         fn test_bidirectional_layout_transfers() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = crate::block_manager::storage::cuda::Cuda::device_or_create(0).unwrap();
             let stream = ctx.new_stream().unwrap();
 
             let config = create_test_config();
@@ -1100,7 +1287,7 @@ mod tests {
         fn test_layout_transfer_alignment_performance() {
             let device_allocator = DeviceAllocator::default();
             let pinned_allocator = PinnedAllocator::default();
-            let ctx = device_allocator.ctx().clone();
+            let ctx = crate::block_manager::storage::cuda::Cuda::device_or_create(0).unwrap();
             let stream = ctx.new_stream().unwrap();
 
             // Test different alignments

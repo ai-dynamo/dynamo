@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dynamo_memory::{DeviceStorage, PinnedStorage};
+use dynamo_memory::{DeviceContext, DeviceStorage, PinnedStorage};
 
 const REGION_ALIGNMENT: usize = 512;
 
@@ -45,10 +45,10 @@ pub enum LayoutKind {
 #[derive(Debug, Clone)]
 enum AllocationKind {
     System,
-    /// Pinned (page-locked) host memory. If `device_id` is Some, NUMA-aware
-    /// allocation is used on the GPU's NUMA node (when NUMA is enabled).
+    /// Pinned (page-locked) host memory. If `device_ctx` is Some, NUMA-aware
+    /// allocation is used on the device's NUMA node (when NUMA is enabled).
     Pinned {
-        device_id: Option<u32>,
+        device_ctx: Option<DeviceContext>,
     },
     Device {
         device_id: u32,
@@ -232,9 +232,9 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     ///   (disable with `DYN_MEMORY_DISABLE_NUMA=1`). If `None`, uses direct allocation.
     pub fn allocate_pinned(
         self,
-        device_id: Option<u32>,
+        device_ctx: Option<DeviceContext>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned { device_id }))
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned { device_ctx }))
     }
 
     /// Allocate device memory on the specified CUDA device (or the context device if `None`).
@@ -459,8 +459,8 @@ fn allocate_regions(
 
     let base_entry = match strategy {
         AllocationKind::System => allocate_system_entry(reserve_size, agent)?,
-        AllocationKind::Pinned { device_id } => {
-            allocate_pinned_entry(reserve_size, agent, device_id)?
+        AllocationKind::Pinned { device_ctx } => {
+            allocate_pinned_entry(reserve_size, agent, device_ctx.as_ref())?
         }
         AllocationKind::Device { device_id } => {
             allocate_device_entry(reserve_size, agent, device_id)?
@@ -480,10 +480,14 @@ fn allocate_system_entry(size: usize, agent: &NixlAgent) -> Result<MemoryEntry> 
 fn allocate_pinned_entry(
     size: usize,
     agent: &NixlAgent,
-    device_id: Option<u32>,
+    device_ctx: Option<&DeviceContext>,
 ) -> Result<MemoryEntry> {
-    let storage = PinnedStorage::new_for_device(size, device_id)
-        .map_err(|e| anyhow!("failed to allocate pinned memory ({size} bytes): {e}"))?;
+    let storage = if let Some(ctx) = device_ctx {
+        PinnedStorage::new_with_context(size, ctx)
+    } else {
+        PinnedStorage::new_for_device(size, None)
+    }
+    .map_err(|e| anyhow!("failed to allocate pinned memory ({size} bytes): {e}"))?;
     register_storage(storage, agent)
 }
 

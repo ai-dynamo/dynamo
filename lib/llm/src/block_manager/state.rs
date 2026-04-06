@@ -158,6 +158,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
+            device_type: resources.config.device_type.clone(),
         };
 
         let offload_manager = OffloadManager::new(
@@ -284,6 +285,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
             bypass_cpu_mem,
+            device_type: resources.config.device_type.clone(),
         };
 
         let offload_manager = OffloadManager::new(

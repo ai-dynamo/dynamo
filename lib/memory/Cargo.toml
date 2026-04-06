@@ -32,6 +32,7 @@ serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+level-zero = { workspace = true }
 libc = { version = "0.2" }
 nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"

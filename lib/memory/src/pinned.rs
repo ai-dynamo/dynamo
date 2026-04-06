@@ -1,12 +1,112 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CUDA pinned host memory storage.
+//! Pinned host memory storage supporting CUDA and Ze backends.
 
 use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use super::device::DeviceContext;
 use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Backend Type
+// ---------------------------------------------------------------------------
+
+/// Backend type identifier for storage operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendType {
+    /// CUDA backend (NVIDIA GPUs).
+    Cuda,
+    /// Level Zero backend (Intel GPUs).
+    Ze,
+}
+
+// ---------------------------------------------------------------------------
+// StorageBackendOps – single trait for backend-specific alloc/free
+// ---------------------------------------------------------------------------
+
+/// Backend operations for pinned and device memory allocation.
+///
+/// This is the single definition of this trait – the llm layer imports and
+/// reuses it rather than defining its own copy.
+pub trait StorageBackendOps: Send + Sync {
+    /// Allocate pinned host memory.
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend.
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8>;
+
+    /// Free pinned host memory.
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend and size matches.
+    unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<()>;
+
+    /// Allocate device memory. Returns `(ptr, device_id, optional_metadata)`.
+    ///
+    /// The metadata (`Option<Box<dyn Any + Send + Sync>>`) allows backends to
+    /// keep ownership handles alive (e.g. Ze `DeviceBuffer` whose `Drop` frees
+    /// the memory). CUDA returns `None`.
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend.
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, Option<Box<dyn Any + Send + Sync>>)>;
+
+    /// Free device memory.
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend.
+    unsafe fn free_device(&self, ptr: u64) -> Result<()>;
+
+    /// Get the device ID for this backend context.
+    fn device_id(&self) -> u32;
+
+    /// Get the backend type (CUDA or Ze).
+    fn backend_type(&self) -> BackendType;
+
+    /// Downcast to concrete type for backend-specific operations.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Create device storage from a torch tensor descriptor.
+    ///
+    /// The caller extracts tensor metadata into a [`TorchTensorDescriptor`],
+    /// and this method validates that the tensor matches the backend
+    /// (device type and device ID).
+    ///
+    /// Returns `(ptr, size)` on success.
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Tensor device type doesn't match backend type
+    /// - Tensor device ID doesn't match context device ID (where applicable)
+    fn new_from_torch(&self, desc: &TorchTensorDescriptor) -> Result<(u64, usize)>;
+}
+
+/// Descriptor carrying extracted torch tensor metadata across crate boundaries.
+///
+/// Higher-level crates (e.g. llm) populate this from their `TorchTensor` trait
+/// objects and pass it to [`StorageBackendOps::new_from_torch`] for validation.
+#[derive(Debug, Clone)]
+pub struct TorchTensorDescriptor {
+    /// Device pointer to tensor data.
+    pub data_ptr: u64,
+    /// Size in bytes.
+    pub size_bytes: usize,
+    /// True if tensor is on a CUDA device.
+    pub is_cuda: bool,
+    /// True if tensor is on an XPU/Ze device.
+    pub is_xpu: bool,
+    /// Device ID (CUDA device ordinal, or 0 for XPU).
+    pub device_id: u32,
+}
+
+// ---------------------------------------------------------------------------
+// CUDA implementation
+// ---------------------------------------------------------------------------
 
 /// Whether to use write-combined pinned allocations.
 ///
@@ -46,39 +146,84 @@ static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(
 ///
 /// # Safety
 /// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
-    if *USE_WRITE_COMBINED {
-        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
-        unsafe {
-            cudarc::driver::result::malloc_host(
-                size,
-                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-            )
-        }
-        .map(|ptr| ptr as *mut u8)
-        .map_err(StorageError::Cuda)
+pub(crate) unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
+    let flags = if *USE_WRITE_COMBINED {
+        cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED
     } else {
-        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
-        unsafe {
-            cudarc::driver::result::malloc_host(
-                size,
-                cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
-            )
-        }
+        cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP
+    };
+    unsafe { cudarc::driver::result::malloc_host(size, flags) }
         .map(|ptr| ptr as *mut u8)
         .map_err(StorageError::Cuda)
+}
+
+impl StorageBackendOps for Arc<CudaContext> {
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8> {
+        self.bind_to_thread().map_err(StorageError::Cuda)?;
+        unsafe { malloc_host_prefer_writecombined(size) }
+    }
+
+    unsafe fn free_pinned(&self, ptr: u64, _size: usize) -> Result<()> {
+        unsafe { cudarc::driver::result::free_host(ptr as _) }.map_err(StorageError::Cuda)
+    }
+
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, Option<Box<dyn Any + Send + Sync>>)> {
+        self.bind_to_thread().map_err(StorageError::Cuda)?;
+        let ptr =
+            unsafe { cudarc::driver::result::malloc_sync(size) }.map_err(StorageError::Cuda)?;
+        Ok((ptr, self.cu_device() as u32, None))
+    }
+
+    unsafe fn free_device(&self, ptr: u64) -> Result<()> {
+        unsafe { cudarc::driver::result::free_sync(ptr as _) }.map_err(StorageError::Cuda)
+    }
+
+    fn device_id(&self) -> u32 {
+        self.cu_device() as u32
+    }
+
+    fn backend_type(&self) -> BackendType {
+        BackendType::Cuda
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn new_from_torch(&self, desc: &TorchTensorDescriptor) -> Result<(u64, usize)> {
+        if !desc.is_cuda {
+            return Err(StorageError::OperationFailed(
+                "Tensor is not CUDA!".into(),
+            ));
+        }
+        if desc.device_id != self.cu_device() as u32 {
+            return Err(StorageError::OperationFailed(
+                "Tensor is not on the same device as the context!".into(),
+            ));
+        }
+        Ok((desc.data_ptr, desc.size_bytes))
     }
 }
 
-/// CUDA pinned host memory allocated via cudaHostAlloc.
+// ---------------------------------------------------------------------------
+// PinnedStorage
+// ---------------------------------------------------------------------------
+
+/// Pinned host memory supporting CUDA and Ze backends.
+///
+/// For CUDA: allocated via `cudaHostAlloc` (page-locked, optionally write-combined).
+/// For Ze: allocated via system allocator with 64-byte alignment.
 #[derive(Debug)]
 pub struct PinnedStorage {
     /// Host pointer to the pinned memory.
     ptr: usize,
     /// Size of the allocation in bytes.
     len: usize,
-    /// CUDA context used for allocation and deallocation.
-    ctx: Arc<CudaContext>,
+    /// Device context used for allocation and deallocation.
+    ctx: DeviceContext,
 }
 
 unsafe impl Send for PinnedStorage {}
@@ -162,13 +307,42 @@ impl PinnedStorage {
 
                 assert!(!ptr.is_null(), "Failed to allocate pinned memory");
                 assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-                assert!(len < isize::MAX as usize);
+            assert!(len < isize::MAX as usize);
 
                 ptr as usize
             }
         };
 
-        Ok(Self { ptr, len, ctx })
+        Ok(Self { ptr, len, ctx: DeviceContext::new(ctx) })
+    }
+
+    /// Allocate pinned host memory using an existing [`DeviceContext`].
+    ///
+    /// Dispatches to the appropriate backend based on the context type:
+    /// - CUDA: delegates to [`new_for_device`](Self::new_for_device)
+    /// - Ze: allocates via the Ze backend directly
+    pub fn new_with_context(len: usize, ctx: &DeviceContext) -> Result<Self> {
+        match ctx.backend.backend_type() {
+            BackendType::Cuda => {
+                Self::new_for_device(len, Some(ctx.backend.device_id()))
+            }
+            BackendType::Ze => {
+                if len == 0 {
+                    return Err(StorageError::AllocationFailed(
+                        "zero-sized allocations are not supported".into(),
+                    ));
+                }
+                let raw = unsafe { ctx.backend.alloc_pinned(len)? };
+                assert!(!raw.is_null(), "Failed to allocate pinned memory");
+                assert!(raw.is_aligned(), "Pinned memory is not aligned");
+                assert!(len < isize::MAX as usize);
+                Ok(Self {
+                    ptr: raw as usize,
+                    len,
+                    ctx: ctx.clone(),
+                })
+            }
+        }
     }
 
     /// Get a pointer to the underlying memory.
@@ -188,22 +362,19 @@ impl PinnedStorage {
         self.ptr as *mut u8
     }
 
-    /// Get a reference to the CUDA context used for this allocation.
-    pub fn ctx(&self) -> &Arc<CudaContext> {
+    /// Get a reference to the device context.
+    pub fn device_context(&self) -> &DeviceContext {
         &self.ctx
     }
 }
 
 impl Drop for PinnedStorage {
     fn drop(&mut self) {
-        if let Err(e) = self.ctx.bind_to_thread() {
-            tracing::debug!("failed to bind CUDA context for free: {e}");
-        }
         unsafe {
-            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
+            if let Err(e) = self.ctx.backend.free_pinned(self.ptr as u64, self.len) {
                 tracing::debug!("failed to free pinned memory: {e}");
             }
-        };
+        }
     }
 }
 

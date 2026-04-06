@@ -33,19 +33,21 @@ mod external;
 mod pinned;
 mod system;
 mod tensor;
+pub mod ze;
 
 #[cfg(test)]
 mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
-pub use device::DeviceStorage;
+pub use device::{DeviceContext, DeviceStorage};
+pub use ze::{Ze, ZeCommandQueue, ZeContext, ZeError, ZeEvent, ZeEventPool};
 #[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
 pub use numa::{NumaNode, is_numa_disabled};
 pub use offset::OffsetBuffer;
-pub use pinned::PinnedStorage;
+pub use pinned::{BackendType, PinnedStorage, StorageBackendOps, TorchTensorDescriptor};
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
