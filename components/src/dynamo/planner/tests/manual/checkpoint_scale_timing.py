@@ -87,9 +87,9 @@ DEFAULTS = {
     "snapshot_pvc_storage_class": os.getenv("SNAPSHOT_PVC_STORAGE_CLASS", "vast"),
 }
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_PLATFORM_CHART = _SCRIPT_DIR.parent.parent / "deploy" / "helm" / "charts" / "platform"
-_SNAPSHOT_CHART = _SCRIPT_DIR.parent.parent / "deploy" / "helm" / "charts" / "snapshot"
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
+_PLATFORM_CHART = _SCRIPT_DIR / "deploy" / "helm" / "charts" / "platform"
+_SNAPSHOT_CHART = _SCRIPT_DIR / "deploy" / "helm" / "charts" / "snapshot"
 
 
 # ---------------------------------------------------------------------------
