@@ -67,6 +67,7 @@ pub async fn run(
         EngineConfig::Dynamic {
             ref model,
             ref chat_engine_factory,
+            ref prefill_load_estimator,
         } => {
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
@@ -90,6 +91,7 @@ pub async fn run(
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
+                prefill_load_estimator.clone(),
             )
             .await?;
             http_service
@@ -167,6 +169,7 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
@@ -174,6 +177,7 @@ async fn run_watcher(
         router_config,
         migration_limit,
         chat_engine_factory,
+        prefill_load_estimator,
         metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
