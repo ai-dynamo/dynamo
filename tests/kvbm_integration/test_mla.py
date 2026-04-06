@@ -125,6 +125,7 @@ def mla_tester(llm_server_kvbm):  # noqa: F811
 @pytest.mark.vllm
 @pytest.mark.pre_merge
 @pytest.mark.mla
+@pytest.mark.model(MLA_MODEL)
 @pytest.mark.skipif(not HAS_VLLM, reason="requires vllm")
 @pytest.mark.parametrize("llm_server_kvbm", [{"model": MLA_MODEL}], indirect=True)
 @pytest.mark.timeout(200)
@@ -308,6 +309,7 @@ def send_mla_completion_request(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.mla
+@pytest.mark.model(MLA_MODEL)
 @pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_mla_kvbm_trtllm(request, runtime_services):
     """
