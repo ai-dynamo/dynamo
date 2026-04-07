@@ -218,12 +218,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         log_probs = [float(entry[0]) for entry in new_logprobs]
 
         # Extract top logprobs if available
-        top_logprobs = None
+        top_logprobs: list[list[dict[str, Any]]] | None = None
         output_top = meta_info.get("output_top_logprobs")
         if output_top:
             new_top = output_top[num_output_logprobs_so_far:]
             if new_top:
-                top_logprobs: list[list[dict[str, Any]]] = []
+                top_logprobs = []
                 for position_entries in new_top:
                     if position_entries is None:
                         top_logprobs.append([])
