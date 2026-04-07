@@ -53,8 +53,6 @@ except ImportError as e:
 
     DEVICE = "cpu"
 
-CACHE_SIZE_MAXIMUM = 8
-
 
 class VllmEncodeWorker:
     def __init__(
@@ -67,7 +65,7 @@ class VllmEncodeWorker:
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
-        self.audio_loader = AudioLoader(cache_size=CACHE_SIZE_MAXIMUM)
+        self.audio_loader = AudioLoader()
         self.audio_processor = AutoProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
