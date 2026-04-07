@@ -25,6 +25,7 @@ use nixl_sys::Agent as NixlAgent;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use validator::Validate;
 
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -394,13 +395,23 @@ impl Handler for BlockTransferDispatch {
     }
 }
 
-#[derive(Builder, Clone)]
+fn validate_page_size(value: usize) -> Result<(), validator::ValidationError> {
+    if !value.is_power_of_two() {
+        return Err(validator::ValidationError::new(
+            "page_size_not_power_of_two",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Builder, Clone, Validate)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
     cancel_token: CancellationToken,
 
     num_device_blocks: usize,
 
+    #[validate(custom(function = "validate_page_size"), range(max = 1024))]
     #[builder(default = "32")]
     page_size: usize,
 
@@ -421,6 +432,18 @@ pub struct KvbmWorkerConfig {
 
     #[builder(default = "LayoutType::FullyContiguous")]
     disk_layout_type: LayoutType,
+
+    /// Explicit outer dimension (1 for MLA, 2 for standard K/V).
+    /// When set, skips shape inference. Python should always provide this.
+    #[validate(range(min = 1, max = 2))]
+    #[builder(default = "None")]
+    pub outer_dim: Option<usize>,
+
+    /// Explicit inner dimension (head_size for MLA, num_heads * head_dim for standard).
+    /// When set, skips shape inference. Python should always provide this.
+    #[validate(range(min = 1))]
+    #[builder(default = "None")]
+    pub inner_dim: Option<usize>,
 
     #[builder(default = "None")]
     scheduler_client: Option<TransferSchedulerClient>,
@@ -444,6 +467,33 @@ impl KvbmWorkerConfig {
     pub fn builder() -> KvbmWorkerConfigBuilder {
         KvbmWorkerConfigBuilder::default()
     }
+
+    /// Validate configuration contract before use.
+    ///
+    /// Field-level rules (`outer_dim`, `inner_dim`, `page_size`) are enforced via
+    /// `#[validate]` attributes on the struct. This method additionally checks the
+    /// cross-field coupling invariant: `outer_dim` and `inner_dim` must both be
+    /// `Some` or both be `None`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // Run derive-based field validators (#[validate] attributes).
+        <Self as Validate>::validate(self)
+            .map_err(|e| anyhow::anyhow!("KvbmWorkerConfig validation failed: {}", e))?;
+
+        // Cross-field: outer_dim and inner_dim must be coupled (both Some or both None).
+        match (self.outer_dim, self.inner_dim) {
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!(
+                    "outer_dim and inner_dim must be provided together (both Some or both None); \
+                     got outer_dim={:?}, inner_dim={:?}",
+                    self.outer_dim,
+                    self.inner_dim
+                );
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
 }
 
 pub struct KvbmWorker {
@@ -459,6 +509,8 @@ impl KvbmWorker {
             config.page_size,
             config.dtype_width_bytes
         );
+
+        config.validate()?;
 
         if config.num_device_blocks == 0 {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
@@ -476,8 +528,10 @@ impl KvbmWorker {
         let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
             LayoutType::FullyContiguous => {
                 let num_layers = shape[1];
-                let outer_dim = shape[2];
-                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                let outer_dim = config.outer_dim.unwrap_or(shape[2]);
+                let inner_dim = config
+                    .inner_dim
+                    .unwrap_or_else(|| shape[3..].iter().product::<usize>() / config.page_size);
                 tracing::info!(
                     "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
                     num_layers,
@@ -494,21 +548,37 @@ impl KvbmWorker {
                 )
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
-                // Use the already-detected layout type from config (no re-detection needed)
                 let layout_type = config.device_layout_type;
+                let num_layers = device_tensors.len();
 
-                // Extract outer_dim based on the provided outer_contiguous value
-                let outer_dim = if outer_contiguous {
-                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
-                } else {
-                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                let (outer_dim, inner_dim) = match (config.outer_dim, config.inner_dim) {
+                    // Explicit dims provided by caller (e.g. Python via KvTensorLayout) — use as-is.
+                    (Some(od), Some(id)) => (od, id),
+                    // No explicit dims: infer from shape.
+                    // outer_dim valid range is [1, 2] (1 = MLA fused, 2 = standard K/V split).
+                    // If the candidate dimension exceeds 2 the tensor has no explicit K/V axis
+                    // (e.g. MLA models produce [n_blocks, page_size, latent_dim]) — fall back to
+                    // outer_dim=1 and compute inner_dim from all dims after n_blocks.
+                    _ => {
+                        let candidate = if outer_contiguous { shape[0] } else { shape[1] };
+                        if candidate <= 2 {
+                            // Standard layout: outer_dim is encoded in the shape.
+                            //   outer_contiguous=true:  [outer_dim, n_blocks, page_size, inner_dim]
+                            //   outer_contiguous=false: [n_blocks, outer_dim, page_size, inner_dim]
+                            let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+                            (candidate, inner_dim)
+                        } else {
+                            // MLA-style: no explicit K/V split, treat as outer_dim=1.
+                            let dims_start = if outer_contiguous { 2 } else { 1 };
+                            let inner_dim =
+                                shape[dims_start..].iter().product::<usize>() / config.page_size;
+                            (1, inner_dim)
+                        }
+                    }
                 };
 
-                let num_layers = device_tensors.len();
-                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
-
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    "Layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
                     num_layers,
                     outer_dim,
                     outer_contiguous,
