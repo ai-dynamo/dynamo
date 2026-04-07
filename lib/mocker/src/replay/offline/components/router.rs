@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
-    compute_block_hash_for_seq,
+    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
@@ -19,15 +19,18 @@ use dynamo_kv_router::{
     SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
+use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
-    replay_slots, replay_workers_with_configs,
-};
+use super::{RouterEffects, WorkerAdmission};
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::ReplayRequestHashes;
+use crate::replay::ReplayPrefillLoadEstimator;
+use crate::replay::router_shared::{
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
+    replay_slots, replay_workers_with_configs,
+};
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
@@ -183,12 +186,15 @@ pub(crate) struct OfflineReplayRouter {
     pending: BinaryHeap<QueueEntry>,
     next_enqueue_seq: u64,
     indexer: SyncReplayIndexer,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    decay_time_epoch: Instant,
 }
 
 impl OfflineReplayRouter {
     pub(crate) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
@@ -213,19 +219,25 @@ impl OfflineReplayRouter {
             pending: BinaryHeap::new(),
             next_enqueue_seq: 0,
             indexer: SyncReplayIndexer::new(args.block_size as u32),
+            prefill_load_estimator,
+            // This is only a base Instant for converting replay `now_ms` values into
+            // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
+            // time derived from this epoch, not wall-clock progression.
+            decay_time_epoch: Instant::now(),
         })
     }
 
-    pub(crate) fn submit_request_with_hashes(
+    pub(crate) fn on_request_arrival(
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
-    ) -> Result<Option<usize>> {
+    ) -> Result<RouterEffects> {
         let pending = self.build_pending_request(request, replay_hashes)?;
+        let decay_now = self.decay_now(now_ms);
         let should_queue = self
             .queue_threshold
-            .is_some_and(|threshold| self.all_workers_busy(threshold));
+            .is_some_and(|threshold| self.all_workers_busy(threshold, decay_now));
 
         if should_queue {
             let key = self.enqueue_key(now_ms, &pending);
@@ -236,28 +248,60 @@ impl OfflineReplayRouter {
                 request: pending,
             });
             self.next_enqueue_seq += 1;
-            return Ok(None);
+            return Ok(RouterEffects::default());
         }
 
-        self.admit_request(pending).map(Some)
+        Ok(RouterEffects {
+            admissions: vec![WorkerAdmission {
+                uuid: request
+                    .uuid
+                    .expect("offline replay requests must have UUIDs before router submission"),
+                worker_idx: self.admit_request(pending, decay_now)?,
+            }],
+        })
     }
 
-    pub(crate) fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
-        self.indexer.apply_event(event)
+    pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
+        for event in events {
+            self.indexer.apply_event(event)?;
+        }
+        Ok(RouterEffects::default())
     }
 
-    pub(crate) fn mark_prefill_completed(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
+    pub(crate) fn on_prefill_completed(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let decay_now = self.decay_now(now_ms);
         self.slots
-            .mark_prefill_completed(&uuid.to_string())
+            .mark_prefill_completed(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
-        self.drain_pending()
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending(decay_now)?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
     }
 
-    pub(crate) fn free(&mut self, uuid: Uuid) -> Result<Vec<(Uuid, usize)>> {
+    pub(crate) fn on_request_completed(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let decay_now = self.decay_now(now_ms);
         self.slots
-            .free(&uuid.to_string())
+            .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
-        self.drain_pending()
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending(decay_now)?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
     }
 
     pub(crate) fn pending_count(&self) -> usize {
@@ -265,7 +309,8 @@ impl OfflineReplayRouter {
     }
 
     #[cfg(test)]
-    pub(crate) fn debug_snapshot(&self) -> OfflineRouterSnapshot {
+    pub(crate) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
+        let decay_now = self.decay_now(now_ms);
         let mut pending = self
             .pending
             .iter()
@@ -302,7 +347,7 @@ impl OfflineReplayRouter {
 
         let mut active_tokens_by_worker = self
             .slots
-            .active_tokens()
+            .active_tokens(decay_now)
             .into_iter()
             .map(|(worker, tokens)| (worker.worker_id as usize, tokens))
             .collect::<Vec<_>>();
@@ -322,6 +367,10 @@ impl OfflineReplayRouter {
             arrival_offset,
             &request.scheduling_request(HashMap::new(), HashMap::new()),
         )
+    }
+
+    fn decay_now(&self, now_ms: f64) -> Instant {
+        self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
     }
 
     fn build_pending_request(
@@ -378,7 +427,7 @@ impl OfflineReplayRouter {
         })
     }
 
-    fn admit_request(&mut self, request: PendingRequest) -> Result<usize> {
+    fn admit_request(&mut self, request: PendingRequest, decay_now: Instant) -> Result<usize> {
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -386,6 +435,7 @@ impl OfflineReplayRouter {
                 request.isl_tokens,
                 request.overlaps.clone(),
                 request.track_prefill_tokens,
+                decay_now,
             );
         let scheduling_request = request.scheduling_request(decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(
@@ -396,56 +446,188 @@ impl OfflineReplayRouter {
         let worker_idx = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let request_id = request.request_id();
+        let prefill_load_hint = self.prefill_load_hint_for(
+            request.isl_tokens,
+            selection.overlap_blocks,
+            request.track_prefill_tokens,
+        );
 
         self.slots
-            .add_request(SequenceRequest {
-                request_id,
-                token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
-                track_prefill_tokens: request.track_prefill_tokens,
-                expected_output_tokens: request.expected_output_tokens,
-                worker: selection.worker,
-                lora_name: None,
-            })
+            .add_request(
+                SequenceRequest {
+                    request_id,
+                    token_sequence: request.token_seq,
+                    isl: request.isl_tokens,
+                    overlap: selection.overlap_blocks,
+                    track_prefill_tokens: request.track_prefill_tokens,
+                    expected_output_tokens: request.expected_output_tokens,
+                    prefill_load_hint,
+                    worker: selection.worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
             .map_err(anyhow::Error::from)?;
 
         Ok(worker_idx)
     }
 
-    fn drain_pending(&mut self) -> Result<Vec<(Uuid, usize)>> {
+    fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<(Uuid, usize)>> {
         let Some(threshold) = self.queue_threshold else {
             return Ok(Vec::new());
         };
 
         let mut admissions = Vec::new();
-        while !self.all_workers_busy(threshold) {
+        while !self.all_workers_busy(threshold, decay_now) {
             let Some(QueueEntry { request, .. }) = self.pending.pop() else {
                 break;
             };
             let uuid = request.uuid;
-            let worker_idx = self.admit_request(request)?;
+            let worker_idx = self.admit_request(request, decay_now)?;
             admissions.push((uuid, worker_idx));
         }
 
         Ok(admissions)
     }
 
-    fn all_workers_busy(&self, threshold: f64) -> bool {
+    fn all_workers_busy(&self, threshold: f64, decay_now: Instant) -> bool {
         let mut checked_any = false;
-        let any_worker_not_busy = self
-            .slots
-            .any_worker_matches_active_tokens(|worker, tokens| {
-                let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
-                    return false;
-                };
-                checked_any = true;
-                let max_batched = config
-                    .max_num_batched_tokens()
-                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-                (tokens as f64) <= threshold * (max_batched as f64)
-            });
+        let any_worker_not_busy =
+            self.slots
+                .any_worker_matches_active_tokens(decay_now, |worker, tokens| {
+                    let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
+                        return false;
+                    };
+                    checked_any = true;
+                    let max_batched = config
+                        .max_num_batched_tokens()
+                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                    (tokens as f64) <= threshold * (max_batched as f64)
+                });
 
         checked_any && !any_worker_not_busy
+    }
+
+    fn prefill_load_hint_for(
+        &self,
+        isl_tokens: usize,
+        overlap_blocks: u32,
+        track_prefill_tokens: bool,
+    ) -> Option<PrefillLoadHint> {
+        if !track_prefill_tokens {
+            return None;
+        }
+
+        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let effective_isl = isl_tokens.saturating_sub(prefix);
+        if effective_isl == 0 {
+            return None;
+        }
+
+        let Some(estimator) = &self.prefill_load_estimator else {
+            return None;
+        };
+
+        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: effective_isl,
+                expected_prefill_duration: Some(expected_prefill_duration),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    effective_isl,
+                    prefix,
+                    "failed to predict replay prefill duration for active load tracking: {error}"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dynamo_kv_router::PrefillLoadEstimator;
+    use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+    use uuid::Uuid;
+
+    use super::OfflineReplayRouter;
+    use crate::common::protocols::{DirectRequest, MockEngineArgs};
+    use crate::replay::ReplayPrefillLoadEstimator;
+
+    struct FixedPrefillLoadEstimator {
+        duration: Duration,
+    }
+
+    impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
+        fn predict_prefill_duration(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<Duration> {
+            Ok(self.duration)
+        }
+    }
+
+    fn replay_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(256))
+            .build()
+            .unwrap()
+    }
+
+    fn router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_track_prefill_tokens: true,
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn estimator(duration: Duration) -> ReplayPrefillLoadEstimator {
+        Arc::new(FixedPrefillLoadEstimator { duration })
+    }
+
+    fn request(uuid: u128, token: u32) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![token; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+        }
+    }
+
+    #[test]
+    fn test_prefill_load_estimator_decays_offline_router_active_tokens() {
+        let mut router = OfflineReplayRouter::new(
+            &replay_args(),
+            Some(router_config()),
+            Some(estimator(Duration::from_secs(10))),
+            1,
+        )
+        .unwrap();
+
+        let effects = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        assert_eq!(effects.admissions.len(), 1);
+        assert_eq!(
+            router.debug_snapshot(0.0).active_tokens_by_worker,
+            vec![(0, 64)]
+        );
+        assert_eq!(
+            router.debug_snapshot(5_000.0).active_tokens_by_worker,
+            vec![(0, 32)]
+        );
+        assert_eq!(
+            router.debug_snapshot(10_000.0).active_tokens_by_worker,
+            vec![(0, 0)]
+        );
     }
 }
