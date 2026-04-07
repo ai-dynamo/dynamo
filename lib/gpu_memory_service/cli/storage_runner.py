@@ -30,6 +30,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from gpu_memory_service.client.gms_storage_client import (
+    DEFAULT_RESTORE_WORKERS,
+    DEFAULT_SAVE_WORKERS,
+    DEFAULT_SHARD_SIZE_BYTES,
+)
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -126,9 +132,6 @@ def _run_load(args) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-_SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
@@ -172,10 +175,10 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p.add_argument(
         "--shard-size-bytes",
         type=int,
-        default=_SHARD_SIZE_DEFAULT,
+        default=DEFAULT_SHARD_SIZE_BYTES,
         help=(
             f"Soft upper bound per shard file in bytes "
-            f"(default: {_SHARD_SIZE_DEFAULT // 1024**3} GiB).  "
+            f"(default: {DEFAULT_SHARD_SIZE_BYTES // 1024**3} GiB).  "
             "Decrease to increase parallelism on save/load; increase to "
             "reduce file count."
         ),
@@ -183,8 +186,11 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p.add_argument(
         "--save-workers",
         type=int,
-        default=4,
-        help="Thread pool size for parallel shard writes (default: 4).",
+        default=DEFAULT_SAVE_WORKERS,
+        help=(
+            "Thread pool size for parallel shard writes "
+            f"(default: {DEFAULT_SAVE_WORKERS})."
+        ),
     )
     save_p.add_argument(
         "--verbose",
@@ -229,8 +235,11 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Thread pool size for parallel shard reads (default: 4).",
+        default=DEFAULT_RESTORE_WORKERS,
+        help=(
+            "Thread pool size for parallel shard reads or storage-device groups "
+            f"(default: {DEFAULT_RESTORE_WORKERS})."
+        ),
     )
     load_p.add_argument(
         "--no-clear",
