@@ -303,11 +303,31 @@ def send_mla_completion_request(
         raise
 
 
+def _precache_deepseek_remote_code():
+    """Pre-cache the remote code files from deepseek-ai/DeepSeek-R1.
+
+    The silence09/DeepSeek-R1-Small-2layers model's config.json has an auto_map
+    pointing to deepseek-ai/DeepSeek-R1 for configuration_deepseek.py and
+    modeling_deepseek.py. TRT-LLM's executor subprocess needs these files but
+    may not be able to download them in offline/slow-network CI environments.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id="deepseek-ai/DeepSeek-R1",
+            allow_patterns=["*.py", "*.json"],
+            ignore_patterns=["*.safetensors", "*.bin", "*.h5", "*.msgpack", "*.ckpt*"],
+        )
+        logger.info("Pre-cached deepseek-ai/DeepSeek-R1 remote code files")
+    except Exception as e:
+        logger.warning(f"Failed to pre-cache DeepSeek-R1 remote code: {e}")
+
+
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.e2e
-@pytest.mark.nightly
-@pytest.mark.slow
+@pytest.mark.pre_merge
 @pytest.mark.gpu_4
 @pytest.mark.mla
 @pytest.mark.model(MLA_MODEL)
@@ -322,6 +342,9 @@ def test_mla_kvbm_trtllm(request, runtime_services):
       when MPI/NCCL is not available)
     - KVBM offloads blocks for the MLA model
     """
+    # Pre-cache remote code files that TRT-LLM's executor subprocess needs
+    _precache_deepseek_remote_code()
+
     logger.info("Starting frontend...")
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
