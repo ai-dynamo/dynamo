@@ -218,9 +218,11 @@ class MlaDynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
-        env["DYN_KVBM_CPU_CACHE_GB"] = "20"
+        env["DYN_KVBM_CPU_CACHE_GB"] = "100"
         env["DYN_KVBM_DISK_CACHE_GB"] = "60"
         env["DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS"] = "1200"
+        env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+        env["DYN_KVBM_METRICS"] = "true"
         # Enable NCCL MLA mode to exercise the code path.
         # Without MPI, _get_mpi_info() returns (None, None) and the code
         # falls back gracefully to standard per-GPU loading.
