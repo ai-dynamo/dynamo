@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import random
-import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import (
@@ -21,12 +20,13 @@ from typing import (
 )
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -108,6 +108,7 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
+        self.enable_trace = config.server_args.enable_trace
 
         # Set up metrics and KV publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
@@ -132,21 +133,6 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
-
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to generation functions.
-
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
 
 class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
@@ -395,47 +381,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
-    async def pin_prefix(self, body: dict) -> dict:
-        """Pin a prefix by token_ids to resist eviction.
-
-        Args:
-            body: Dict with "token_ids" list of token IDs and optional
-                  "ttl_seconds" (default 300).
-        """
-        token_ids = body.get("token_ids", [])
-        ttl_seconds = body.get("ttl_seconds", 300)
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
-        try:
-            result = await self.engine.tokenizer_manager.pin_prefix(
-                token_ids, ttl_seconds
-            )
-            return {
-                "status": "ok" if result.success else "error",
-                "nodes_pinned": result.nodes_pinned,
-                "message": result.message,
-            }
-        except Exception as e:
-            logging.error(f"Failed to pin prefix: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def cache_control(self, request, context=None):
-        """Service mesh endpoint for cache control operations.
-
-        Args:
-            request: Dict with "action" key and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "pin_prefix":
-            result = await self.pin_prefix(request)
-        else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
-
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -450,7 +395,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
-        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -528,40 +472,18 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            bootstrap_host = (
+                NetworkAddress(dist_init.resolved().host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
         else:
-            bootstrap_host = get_local_ip_auto()
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
+            bootstrap_host = (
+                NetworkAddress(get_local_ip_auto(), bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
 
         return bootstrap_host, bootstrap_port
 
@@ -576,7 +498,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             context: Context object for cancellation handling.
 
         Raises:
-            GeneratorExit: If shutdown event was triggered.
+            EngineShutdown: If shutdown event was triggered.
         """
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
@@ -635,9 +557,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
                 )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during token generation")
+                raise EngineShutdown("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
@@ -661,7 +583,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID

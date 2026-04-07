@@ -235,6 +235,9 @@ pub mod frontend_service {
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
 
+    /// Total number of requests rejected due to resource exhaustion
+    pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";

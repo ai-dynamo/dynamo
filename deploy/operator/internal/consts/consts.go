@@ -140,17 +140,16 @@ const (
 	ResourceStateUnknown  = "unknown"
 
 	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in the snapshot package at
-	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
+	// CROSS-REFERENCE: Some constants below are duplicated in deploy/snapshot/protocol.
+	// If you change a value here, update there too.
 
 	// Kubernetes labels
 	KubeLabelIsCheckpointSource             = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash                 = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash used for lookup/reuse (may differ from DynamoCheckpoint metadata.name)
+	KubeLabelCheckpointID                   = "nvidia.com/snapshot-checkpoint-id"        // Checkpoint identity label; the operator stores the resolved identity hash as the value
 	KubeLabelIsRestoreTarget                = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
 	KubeAnnotationCheckpointArtifactVersion = "nvidia.com/snapshot-artifact-version"     // Checkpoint artifact generation; changing it triggers a new immutable capture attempt
 	DefaultCheckpointArtifactVersion        = "1"
-	KubeAnnotationCheckpointLocation        = "nvidia.com/snapshot-checkpoint-location"     // Pod annotation that tells snapshot-agent where the checkpoint lives
-	KubeAnnotationCheckpointStorageType     = "nvidia.com/snapshot-checkpoint-storage-type" // Pod annotation that tells snapshot-agent which storage backend owns the checkpoint
+	DefaultCheckpointJobTTLSeconds          = int32(300)
 
 	// Environment variables injected into pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods

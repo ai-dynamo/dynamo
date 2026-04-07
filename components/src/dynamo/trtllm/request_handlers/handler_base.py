@@ -27,12 +27,14 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -81,6 +83,8 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
+    max_seq_len: Optional[int] = None
+    disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -111,6 +115,8 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
+        self.max_seq_len = config.max_seq_len
+        self.disagg_machine_id = config.disagg_machine_id
 
     def check_error(self, result: dict) -> bool:
         """
@@ -200,7 +206,7 @@ class HandlerBase(BaseGenerativeHandler):
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        Raise GeneratorExit if shutdown event is triggered.
+        Raise EngineShutdown if shutdown event is triggered.
         """
         try:
             cancellation_triggers: list[asyncio.Future[Any]] = [
@@ -236,9 +242,9 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise GeneratorExit if cancellation is due to shutdown event triggered
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
@@ -252,7 +258,7 @@ class HandlerBase(BaseGenerativeHandler):
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        Raise GeneratorExit if shutdown event is triggered.
+        Raise EngineShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task
@@ -462,7 +468,18 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = ep_disaggregated_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(
+                        self.disagg_machine_id
+                    ),
+                )
+
+            # Ensure disagg_request_id is set even when using
+            # ep_disaggregated_params, so the PYTHON transceiver can track
+            # requests across prefill/decode workers.
+            if disaggregated_params.disagg_request_id is None:
+                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                    self.disagg_machine_id
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
@@ -749,8 +766,18 @@ class HandlerBase(BaseGenerativeHandler):
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
+        elif self.max_seq_len is not None:
+            if self.multimodal_processor and processed_input is not None:
+                logging.debug(
+                    "Skipping dynamic max_tokens default for multimodal request..."
+                )
+            else:
+                token_ids = request.get("token_ids", [])
+                input_length = len(token_ids)
+                dynamic_default = max(1, self.max_seq_len - input_length)
+                sampling_params.max_tokens = dynamic_default
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:
@@ -956,7 +983,11 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
 
-        # 3. ALL OTHER ERRORS - graceful shutdown
+        # 3. EngineShutdown - let it propagate to the Rust bridge
+        except EngineShutdown:
+            raise
+
+        # 4. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)

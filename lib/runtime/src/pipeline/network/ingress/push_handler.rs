@@ -111,17 +111,23 @@ impl WorkHandlerMetrics {
     }
 }
 
-// RAII guard to ensure inflight gauge is decremented and request duration is observed on all code paths.
+// RAII guard to ensure inflight gauge is decremented, request duration is observed,
+// and lifecycle logs are emitted on all code paths.
 struct RequestMetricsGuard {
     inflight_requests: prometheus::IntGauge,
     request_duration: prometheus::Histogram,
     start_time: Instant,
+    request_id: Option<String>,
 }
+
 impl Drop for RequestMetricsGuard {
     fn drop(&mut self) {
         self.inflight_requests.dec();
         self.request_duration
             .observe(self.start_time.elapsed().as_secs_f64());
+        if let Some(request_id) = &self.request_id {
+            tracing::info!(request_id = %request_id, "request completed");
+        }
     }
 }
 
@@ -149,7 +155,11 @@ where
         Ok(())
     }
 
-    async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -161,10 +171,14 @@ where
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
+            if let Some(rid) = &request_id {
+                tracing::info!(request_id = %rid, "request received");
+            }
             RequestMetricsGuard {
                 inflight_requests: m.inflight_requests.clone(),
                 request_duration: m.request_duration.clone(),
                 start_time,
+                request_id: request_id.clone(),
             }
         });
 
@@ -357,6 +371,7 @@ where
         }
 
         // Ensure the metrics guard is not dropped until the end of the function.
+        // Drop fires "request completed" log via RAII.
         drop(_inflight_guard);
 
         Ok(())

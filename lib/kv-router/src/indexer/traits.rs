@@ -36,6 +36,7 @@ pub trait KvIndexerInterface {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError>;
 
     /// Apply a `RouterEvent` to the KV store.

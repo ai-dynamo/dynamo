@@ -6,7 +6,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -42,12 +43,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-TRACE_ARGS=()
+TRTLLM_OVERRIDE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    TRACE_ARGS+=(--override-engine-args "{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\" }")
+    OTEL_JSON="{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\"}"
+    # Merge GPU mem config with OTEL config
+    OVERRIDE_JSON=$(build_trtllm_override_args_with_mem --merge-with-json "$OTEL_JSON")
+else
+    # Just GPU mem config (if any)
+    OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+fi
+
+# Add --override-engine-args if we have JSON
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -66,7 +77,7 @@ python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
-  "${TRACE_ARGS[@]}" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

@@ -110,6 +110,10 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Total number of request cancellations
+    MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
+    # Total number of requests rejected due to resource exhaustion
+    MODEL_REJECTION_TOTAL = "model_rejection_total"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
@@ -239,25 +243,29 @@ class model_info:
 
 
 class name_prefix:
-    """Metric name prefixes used across the metrics system"""
+    """Metric name prefixes used across the metrics system."""
 
-    # Prefix for all Prometheus metric names.
+    # Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     COMPONENT = "dynamo_component"
-    # Prefix for frontend service metrics
+    # Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     FRONTEND = "dynamo_frontend"
-    # Prefix for KV router metrics (used with router_id label)
+    # Prefix for KV router instance metrics (carries `router_id` label).
     ROUTER = "dynamo_router"
-    # Prefix for request-plane (transport-agnostic) metrics at AddressedPushRouter
-    REQUEST_PLANE = "dynamo_request_plane"
-    # Prefix for tokio runtime metrics
-    TOKIO = "dynamo_tokio"
     # Prefix for standalone KV indexer metrics
     KVINDEXER = "dynamo_kvindexer"
-    # Prefix for transport-layer metrics (TCP / NATS)
+    # Prefix for request-plane metrics at AddressedPushRouter.
+    # Transport-agnostic: measures request lifecycle latency and concurrency
+    # (queue → send → roundtrip TTFT, inflight gauge).
+    REQUEST_PLANE = "dynamo_request_plane"
+    # Prefix for transport-layer metrics (TCP / NATS).
+    # Protocol-specific: measures wire-level health (bytes sent/received, error counts).
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
-    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    TOKIO = "dynamo_tokio"
+    # Prefix for per-phase routing overhead latency (hashing, scheduling).
+    # Raw Prometheus, not component-scoped.
     ROUTING_OVERHEAD = "dynamo_routing_overhead"
 
 
@@ -401,6 +409,8 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    CANCELLATION_TOTAL = "cancellation_total"
     # Network transit: frontend send to backend receive (wall-clock, cross-process)
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent

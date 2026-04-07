@@ -53,6 +53,7 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
+  - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
@@ -116,10 +117,9 @@ deploy:
   - 'tests/deploy/**'
 
 planner:
+  - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
-  - 'tests/planner/**'
-  - 'tests/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
