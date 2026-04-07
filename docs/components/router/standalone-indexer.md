@@ -16,6 +16,10 @@ This is distinct from the [Standalone Router](../../../components/src/dynamo/rou
 
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
+`DYN_ROUTER_MIN_INITIAL_WORKERS` is also honored here. When set to a positive integer, the
+standalone indexer waits for that many workers to register before opening its startup-ready
+gate, matching the frontend/router startup behavior.
+
 ## Multi-Model and Multi-Tenant Support
 
 The indexer maintains one radix tree per `(model_name, tenant_id)` pair. Workers registered with different model names or tenant IDs are isolated into separate indexers — queries against one model/tenant never return scores from another.
@@ -142,6 +146,12 @@ In runtime mode, workers are discovered automatically via MDC. The `--workers` f
 | `--namespace` | `default` | Dynamo namespace to register the indexer component under |
 | `--component-name` | `kv-indexer` | Component name for this indexer in the Dynamo runtime |
 | `--worker-component` | `backend` | Component name that workers register under for event-plane subscription |
+
+### Shared Startup Gate
+
+Set `DYN_ROUTER_MIN_INITIAL_WORKERS=<n>` to require at least `<n>` workers before the
+standalone indexer, frontend push-router path, and KV router config-ready gate all proceed.
+Leave it unset or set it to `0` to disable the startup wait.
 
 ## HTTP API
 

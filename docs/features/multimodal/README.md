@@ -52,10 +52,10 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 
 Reference implementations for deploying multimodal models:
 
-- [vLLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch)
+- [vLLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch) (image, video)
 - [TRT-LLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/launch)
 - [SGLang multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch)
-- [Experimental multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/launch) (video, audio)
+- [Experimental multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/launch) (audio)
 
 ## Backend Documentation
 

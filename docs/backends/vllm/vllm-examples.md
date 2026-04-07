@@ -40,19 +40,36 @@ Each launch script runs the frontend and worker(s) in a single terminal. You can
 
 The simplest deployment pattern: a single worker handles both prefill and decode. Requires 1 GPU.
 
+Run on CUDA devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
+```
+
+Run on XPUs:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/xpu/agg_xpu.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
 
+Run on CUDA devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg_router.sh
 ```
+Run on XPUs:
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/xpu/agg_router_xpu.sh
+```
+
 
 This launches the frontend in KV routing mode with two workers publishing KV events over ZMQ.
 

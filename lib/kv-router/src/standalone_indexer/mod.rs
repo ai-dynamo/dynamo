@@ -9,12 +9,15 @@ pub mod registry;
 #[cfg(feature = "indexer-runtime")]
 pub mod runtime;
 pub mod server;
+mod zmq;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::min_initial_workers_from_env;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -36,10 +39,39 @@ pub struct RuntimeConfig {
 }
 
 pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    endpoint
-        .parse::<zeromq::Endpoint>()
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: {error}"))
+    let (scheme, address) = endpoint
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing scheme"))?;
+
+    if address.is_empty() {
+        anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing address");
+    }
+
+    match scheme {
+        "tcp" => {
+            let (host, port) = address.rsplit_once(':').ok_or_else(|| {
+                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing TCP port")
+            })?;
+            if host.is_empty() {
+                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP host");
+            }
+            if host.starts_with('[') {
+                if !host.ends_with(']') {
+                    anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing closing `]`");
+                }
+            } else if host.contains(':') {
+                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP port");
+            }
+            port.parse::<u16>().map_err(|error| {
+                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: invalid TCP port: {error}")
+            })?;
+            Ok(())
+        }
+        "ipc" | "inproc" => Ok(()),
+        other => Err(anyhow::anyhow!(
+            "invalid ZMQ endpoint `{endpoint}`: unsupported scheme `{other}`"
+        )),
+    }
 }
 
 pub(super) fn validate_listener_endpoints(
@@ -198,6 +230,33 @@ pub async fn run_with_runtime(
     run_common(&config, &registry, cancel_token).await
 }
 
+async fn wait_for_min_initial_workers(
+    registry: &WorkerRegistry,
+    cancel_token: &CancellationToken,
+) -> anyhow::Result<()> {
+    let min_initial_workers = min_initial_workers_from_env()?;
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    loop {
+        let registered_workers = registry.list().len();
+        if registered_workers >= min_initial_workers {
+            return Ok(());
+        }
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!(
+                    "shutdown triggered before {} indexer workers appeared",
+                    min_initial_workers
+                );
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
 async fn run_common(
     config: &IndexerConfig,
     registry: &Arc<WorkerRegistry>,
@@ -245,6 +304,7 @@ async fn run_common(
         }
     }
 
+    wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
 
     #[cfg(feature = "metrics")]
@@ -295,5 +355,21 @@ mod tests {
     fn test_parse_workers_invalid_entry() {
         let error = parse_workers("1").unwrap_err().to_string();
         assert!(error.contains("invalid worker entry"));
+    }
+
+    #[test]
+    fn test_validate_zmq_endpoint_allows_wildcard_tcp_bind() {
+        validate_zmq_endpoint("tcp://*:5558").unwrap();
+        validate_zmq_endpoint("tcp://127.0.0.1:0").unwrap();
+        validate_zmq_endpoint("inproc://listener").unwrap();
+        validate_zmq_endpoint("ipc:///tmp/dynamo.sock").unwrap();
+    }
+
+    #[test]
+    fn test_validate_zmq_endpoint_rejects_invalid_values() {
+        assert!(validate_zmq_endpoint("tcp://host").is_err());
+        assert!(validate_zmq_endpoint("tcp://:5558").is_err());
+        assert!(validate_zmq_endpoint("udp://host:5558").is_err());
+        assert!(validate_zmq_endpoint("not-an-endpoint").is_err());
     }
 }

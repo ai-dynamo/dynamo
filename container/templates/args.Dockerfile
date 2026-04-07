@@ -66,7 +66,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-ARG NIXL_REF={{ context.dynamo.nixl_ref }}
+ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
@@ -79,6 +79,13 @@ ARG FRAMEWORK={{ framework }}
 {% if target == "frontend" %}
 ARG EPP_IMAGE={{ context.dynamo.epp_image }}
 ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
+{% endif %}
+
+{% if target == "planner" %}
+ARG PLANNER_BUILD_IMAGE={{ context.dynamo.planner_build_image }}
+ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
+ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
+ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% endif %}
 
 {% if framework == "vllm" -%}

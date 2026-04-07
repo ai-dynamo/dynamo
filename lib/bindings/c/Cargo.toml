@@ -30,7 +30,6 @@ crate-type = ["cdylib", "staticlib"]
 cbindgen = "0.27"
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
 dynamo-kv-router = { path = "../../kv-router" }
 dynamo-runtime = { path = "../../runtime" }
 
@@ -43,3 +42,9 @@ async-once-cell = { version = "0.5.4" }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dynamo-llm = { path = "../../llm" }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+dynamo-llm = { path = "../../llm", default-features = false }

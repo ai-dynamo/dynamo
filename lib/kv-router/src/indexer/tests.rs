@@ -210,6 +210,13 @@ fn indexer_template(
 ) {
 }
 
+#[template]
+#[rstest]
+fn tree_size_indexer_template(
+    #[values("single", "sharded", "concurrent", "concurrent_compressed")] variant: &str,
+) {
+}
+
 fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
     let token = CancellationToken::new();
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -245,6 +252,52 @@ async fn flush_and_settle(index: &dyn KvIndexerInterface) {
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
+async fn query_scores(index: &dyn KvIndexerInterface, query: &[u64]) -> OverlapScores {
+    index
+        .find_matches(query.iter().copied().map(LocalBlockHash).collect())
+        .await
+        .unwrap()
+}
+
+async fn assert_score(
+    index: &dyn KvIndexerInterface,
+    query: &[u64],
+    worker: WorkerWithDpRank,
+    expected_score: u32,
+) {
+    let scores = query_scores(index, query).await;
+    assert_eq!(scores.scores.get(&worker), Some(&expected_score));
+}
+
+async fn assert_query_score_and_tree_size(
+    index: &dyn KvIndexerInterface,
+    query: &[u64],
+    worker: WorkerWithDpRank,
+    expected_score: u32,
+    expected_tree_size: usize,
+) {
+    let scores = query_scores(index, query).await;
+    assert_eq!(scores.scores.get(&worker), Some(&expected_score));
+    assert_eq!(scores.tree_sizes.get(&worker), Some(&expected_tree_size));
+}
+
+async fn assert_no_scores(index: &dyn KvIndexerInterface, query: &[u64]) {
+    let scores = query_scores(index, query).await;
+    assert!(scores.scores.is_empty());
+}
+
+async fn assert_exact_scores(
+    index: &dyn KvIndexerInterface,
+    query: &[u64],
+    expected_scores: &[(WorkerWithDpRank, u32)],
+) {
+    let scores = query_scores(index, query).await;
+    assert_eq!(scores.scores.len(), expected_scores.len());
+    for (worker, expected_score) in expected_scores {
+        assert_eq!(scores.scores.get(worker), Some(expected_score));
+    }
+}
+
 mod interface_tests {
     use super::*;
     use rstest_reuse::apply;
@@ -259,52 +312,106 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Find matches using local hashes
-        let scores = index
+        assert_score(index.as_ref(), &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+    }
+
+    #[tokio::test]
+    #[apply(tree_size_indexer_template)]
+    async fn test_tree_size_accounting_stays_stable(variant: &str) {
+        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let prefix_event = make_store_event(0, &[1, 2, 3]);
+        let continuation_event = make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]);
+        let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
+        let prefix_remove = make_remove_event(0, &[1, 2, 3]);
+
+        // TODO: The radix-family implementations still have a broader tree-size
+        // accounting gap after mid-chain removes because descendant lookup entries
+        // are cleaned up lazily. That means "store -> partial remove -> restore
+        // continuation" can still miscount restored coverage in single, sharded,
+        // concurrent, and concurrent_compressed. This test is intentionally scoped
+        // to duplicate store/remove replay, which was the concrete compressed-tree
+        // regression fixed on this branch.
+
+        index.apply_event(prefix_event.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+        let prefix_snapshot = snapshot_tree(index.as_ref()).await;
+
+        index.apply_event(prefix_event).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            prefix_snapshot,
+            snapshot_tree(index.as_ref()).await,
+            "replaying the same store event should not change the tree structure"
+        );
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+
+        index.apply_event(continuation_event.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5, 5).await;
+        let full_snapshot = snapshot_tree(index.as_ref()).await;
+
+        index.apply_event(continuation_event).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            full_snapshot,
+            snapshot_tree(index.as_ref()).await,
+            "replaying the same continuation store should not change the tree structure"
+        );
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5, 5).await;
+
+        index.apply_event(continuation_remove.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 3, 3).await;
+        let trimmed_snapshot = snapshot_tree(index.as_ref()).await;
+
+        index.apply_event(continuation_remove).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            trimmed_snapshot,
+            snapshot_tree(index.as_ref()).await,
+            "replaying the same remove event should not change the tree structure"
+        );
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 3, 3).await;
+
+        index.apply_event(prefix_remove.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+
+        let empty_scores = index
             .find_matches(vec![
                 LocalBlockHash(1),
                 LocalBlockHash(2),
                 LocalBlockHash(3),
+                LocalBlockHash(4),
+                LocalBlockHash(5),
             ])
             .await
             .unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
-    }
+        assert!(empty_scores.scores.is_empty());
+        assert!(snapshot_tree(index.as_ref()).await.is_empty());
 
-    #[tokio::test]
-    async fn test_concurrent_duplicate_store_does_not_inflate_tree_size() {
-        let index = make_indexer("concurrent");
-        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
-        let worker = WorkerWithDpRank::new(0, 0);
-        let event = make_store_event(0, &[1, 2, 3]);
-
-        index.apply_event(event.clone()).await;
+        index.apply_event(prefix_remove).await;
         flush_and_settle(index.as_ref()).await;
 
-        let initial_snapshot = snapshot_tree(index.as_ref()).await;
-        let initial_scores = index.find_matches(sequence.clone()).await.unwrap();
-        assert_eq!(
-            initial_scores.tree_sizes.get(&worker),
-            Some(&3),
-            "initial store should count all three blocks"
-        );
-
-        index.apply_event(event).await;
-        flush_and_settle(index.as_ref()).await;
-
-        let duplicate_snapshot = snapshot_tree(index.as_ref()).await;
-        let duplicate_scores = index.find_matches(sequence).await.unwrap();
-
-        assert_eq!(
-            initial_snapshot, duplicate_snapshot,
-            "replaying the same store event should not change the tree structure"
-        );
-        assert_eq!(
-            duplicate_scores.tree_sizes.get(&worker),
-            Some(&3),
-            "replaying the same store event should not increase the per-worker tree size"
-        );
+        let duplicate_empty_scores = index
+            .find_matches(vec![
+                LocalBlockHash(1),
+                LocalBlockHash(2),
+                LocalBlockHash(3),
+                LocalBlockHash(4),
+                LocalBlockHash(5),
+            ])
+            .await
+            .unwrap();
+        assert!(duplicate_empty_scores.scores.is_empty());
+        assert!(snapshot_tree(index.as_ref()).await.is_empty());
     }
 
     #[tokio::test]
@@ -317,16 +424,7 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Find matches for [1, 2, 999] - should match first 2 then stop
-        let scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(999),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+        assert_score(index.as_ref(), &[1, 2, 999], WorkerWithDpRank::new(0, 0), 2).await;
     }
 
     #[tokio::test]
@@ -342,16 +440,7 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Find should return nothing
-        let scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-            ])
-            .await
-            .unwrap();
-        assert!(scores.scores.is_empty());
+        assert_no_scores(index.as_ref(), &[1, 2, 3]).await;
     }
 
     #[tokio::test]
@@ -367,20 +456,25 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Query [1] - both workers should match
-        let scores = index.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
-        assert_eq!(scores.scores.len(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+        assert_exact_scores(
+            index.as_ref(),
+            &[1],
+            &[
+                (WorkerWithDpRank::new(0, 0), 1),
+                (WorkerWithDpRank::new(1, 0), 1),
+            ],
+        )
+        .await;
 
-        // Query [1, 2] - worker 0 matches both, worker 1 matches only first block
-        let scores = index
-            .find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)])
-            .await
-            .unwrap();
-        assert_eq!(scores.scores.len(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+        assert_exact_scores(
+            index.as_ref(),
+            &[1, 2],
+            &[
+                (WorkerWithDpRank::new(0, 0), 2),
+                (WorkerWithDpRank::new(1, 0), 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -399,16 +493,12 @@ mod interface_tests {
         // Allow time for async remove_worker processing
         flush_and_settle(index.as_ref()).await;
 
-        let scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+        assert_exact_scores(
+            index.as_ref(),
+            &[1, 2, 3],
+            &[(WorkerWithDpRank::new(1, 0), 3)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -501,9 +591,7 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Empty query should return empty scores
-        let scores = index.find_matches(vec![]).await.unwrap();
-        assert!(scores.scores.is_empty());
+        assert_no_scores(index.as_ref(), &[]).await;
     }
 
     #[tokio::test]
@@ -515,12 +603,7 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Query for non-existent blocks
-        let scores = index
-            .find_matches(vec![LocalBlockHash(999), LocalBlockHash(998)])
-            .await
-            .unwrap();
-        assert!(scores.scores.is_empty());
+        assert_no_scores(index.as_ref(), &[999, 998]).await;
     }
 
     #[tokio::test]
@@ -547,7 +630,10 @@ mod interface_tests {
 
         // Empty index should return no matches
         let tokens = vec![1, 2, 3, 4];
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index
+            .find_matches_for_request(&tokens, None, None)
+            .await
+            .unwrap();
         assert!(scores.scores.is_empty());
 
         // Store some data and verify we can find it via tokens
@@ -559,7 +645,10 @@ mod interface_tests {
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
         // For this test, we just verify the method works without error.
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index
+            .find_matches_for_request(&tokens, None, None)
+            .await
+            .unwrap();
         // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
         // because find_matches_for_request computes different hashes from raw tokens
         assert!(scores.scores.is_empty() || !scores.scores.is_empty());
@@ -599,15 +688,16 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
-        let full_seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
-        let scores = index.find_matches(full_seq).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 5);
+        assert_score(
+            index.as_ref(),
+            &[1, 2, 3, 4, 5],
+            WorkerWithDpRank::new(0, 0),
+            5,
+        )
+        .await;
 
         // Query for just [1, 2, 3] should match 3 blocks
-        let prefix_seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
-        let scores = index.find_matches(prefix_seq).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_score(index.as_ref(), &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
     }
 
     #[tokio::test]
@@ -883,9 +973,16 @@ mod lora_tests {
         // Same token sequence for both base model and LoRA adapter
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
-        let base_hashes = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
-        let lora_hashes =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+        let base_hashes =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_hashes = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         // Hashes must differ despite identical tokens
         assert_ne!(
@@ -970,9 +1067,16 @@ mod lora_tests {
         let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
 
         // With LoRA-aware hashing, base and adapter produce different LocalBlockHash
-        let base_local = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
-        let lora_local =
-            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+        let base_local =
+            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
+        let lora_local = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             base_local, lora_local,
@@ -1044,8 +1148,22 @@ mod lora_tests {
 
         let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
 
-        let hashes_a = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-a"));
-        let hashes_b = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-b"));
+        let hashes_a = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let hashes_b = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(
             hashes_a, hashes_b,

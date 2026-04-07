@@ -72,7 +72,6 @@ When throughput-based scaling is enabled, the planner needs interpolation curves
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
 | `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
-| `load_router_metrics_url` | string | `null` | Router metrics endpoint. Auto-discovered in Kubernetes mode. |
 
 ### General Settings
 
