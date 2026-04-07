@@ -23,6 +23,8 @@ Test markers:
 from __future__ import annotations
 
 import logging
+import json
+import yaml
 
 import pytest
 
@@ -242,7 +244,6 @@ class TestDGDRVersionConversion:
         instead of image) so we must use kubectl here rather than the
         v1beta1-only ManagedDGDR client.
         """
-        import yaml
         name = unique_dgdr_name("v1a1")
         v1alpha1_manifest = {
             "apiVersion": "nvidia.com/v1alpha1",
@@ -271,7 +272,6 @@ class TestDGDRVersionConversion:
         """
         A resource stored as v1beta1 must be retrievable as v1alpha1 via conversion.
         """
-        import json
         name = unique_dgdr_name("conv-get")
         manifest = build_dgdr_manifest(name, model=dgdr_model, image=dgdr_image)
         dgdr_factory(manifest)
