@@ -13,6 +13,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import SamplingParams
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -32,8 +33,6 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """
     logging.info("Start of prefill disaggregation warmup ...")
     from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-
-    from dynamo.sglang._compat import SamplingParams
 
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -187,9 +186,11 @@ async def init_prefill(
 
     try:
         await _warmup_prefill_engine(engine, server_args)
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
         logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
-        raise RuntimeError("Prefill warmup timed out; worker cannot serve requests")
+        raise RuntimeError(
+            "Prefill warmup timed out; worker cannot serve requests"
+        ) from e
     except Exception as e:
         logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
         raise RuntimeError(f"Prefill warmup failed: {e}") from e

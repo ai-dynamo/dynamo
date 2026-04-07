@@ -109,6 +109,8 @@ except ImportError:
             SamplingParams,
         )
     except ImportError:
+        # Fallback for sglang <= 0.2.13. Always available via re-export.
+        # Remove when min supported version is 0.2.14+.
         from sglang.srt.managers.io_struct import (  # type: ignore[no-redef]  # noqa: F401
             SamplingParams,
         )
