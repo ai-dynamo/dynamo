@@ -89,7 +89,8 @@ excluded because they require a real 8-GPU node even in mocker mode.
 
 ```bash
 python3 -m pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
-  --dgdr-namespace=default
+  --dgdr-namespace=default \
+  --dgdr-image=<your-image>
 ```
 
 Expect: 37 passed, 6 skipped (2 model-cache PVC; sglang backend; pareto in mocker; DGD-persistence in mocker; auto-apply-true in mocker), 4 xfail (DGD label merging; all-conditions requires Deployed; dry-run immutability requires Deployed; ConfigMap cleanup on deletion).
@@ -106,6 +107,7 @@ injection and run against real hardware.  `gpu_8` tests additionally require an 
 # gpu_0 + gpu_1 tests on real GPUs (single-GPU node sufficient)
 python3 -m pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
   --dgdr-namespace=dynamo-test \
+  --dgdr-image=<your-image> \
   --dgdr-no-mocker \
   --dgdr-profiling-timeout=3600 \
   --dgdr-deploy-timeout=1800
@@ -113,6 +115,7 @@ python3 -m pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
 # Full nightly suite including 8-GPU tests
 python3 -m pytest tests/dgdr/ -v \
   --dgdr-namespace=dynamo-test \
+  --dgdr-image=<your-image> \
   --dgdr-no-mocker \
   --dgdr-pvc-name=model-cache \
   --dgdr-profiling-timeout=14400 \
@@ -133,21 +136,27 @@ Without `--dgdr-pvc-name`: 2 additional skips for the model-cache tests.
 
 ```bash
 # Validation + conversion tests only (no cluster setup required beyond CRDs)
-python3 -m pytest tests/dgdr/ -m "gpu_0" -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/ -m "gpu_0" -v \
+  --dgdr-namespace=default \
+  --dgdr-image=<your-image>
 
 # Pre-merge gate (GPU-free)
-python3 -m pytest tests/dgdr/ -m "pre_merge" -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/ -m "pre_merge" -v \
+  --dgdr-namespace=default \
+  --dgdr-image=<your-image>
 
 # Single test class
-python3 -m pytest tests/dgdr/test_dgdr_v1beta1.py::TestDGDRAutoApply -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/test_dgdr_v1beta1.py::TestDGDRAutoApply -v \
+  --dgdr-namespace=default \
+  --dgdr-image=<your-image>
 ```
 
 ## CLI options
 
 | Option | Default | Description |
 |---|---|---|
-| `--dgdr-namespace` | `default` | Kubernetes namespace for test resources |
-| `--dgdr-image` | `docker.io/ashnam/dynamo-frontend:latest` | Container image for profiling and inference workers |
+| `--dgdr-namespace` | _(required)_ | Kubernetes namespace for test resources |
+| `--dgdr-image` | _(required)_ | Container image for profiling and inference workers |
 | `--dgdr-model` | `Qwen/Qwen3-0.6B` | HuggingFace model ID used by most tests |
 | `--dgdr-backend` | `vllm` | Default backend for DGDR tests |
 | `--dgdr-pvc-name` | _(empty)_ | PVC name holding pre-downloaded model weights (PVC tests are skipped if unset) |
