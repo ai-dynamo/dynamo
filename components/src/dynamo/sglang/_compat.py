@@ -15,6 +15,7 @@ removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
 """
 
+import importlib
 import ipaddress
 import logging
 import socket
@@ -22,24 +23,28 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Network utilities: NetworkAddress, get_local_ip_auto, get_zmq_socket
+#
+# 0.5.10+: sglang.srt.utils.network (canonical)
+# 0.5.9:   sglang.srt.utils (get_local_ip_auto, get_zmq_socket only;
+#           NetworkAddress did not exist)
+# ---------------------------------------------------------------------------
 try:
     from sglang.srt.utils.network import (  # noqa: F401
         NetworkAddress,
         get_local_ip_auto,
         get_zmq_socket,
     )
-
-    _SGLANG_HAS_NETWORK_MODULE = True
 except ImportError:
-    # Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+
+    # Fallback for sglang 0.5.9. Remove when min supported version is 0.5.10+
     from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
         get_local_ip_auto,
         get_zmq_socket,
     )
 
-    _SGLANG_HAS_NETWORK_MODULE = False
     logger.info(
-        "sglang.srt.utils.network not found (sglang <= 0.5.9); "
+        "sglang.srt.utils.network not found (sglang 0.5.9); "
         "using compatibility shim for NetworkAddress"
     )
 
@@ -99,6 +104,39 @@ except ImportError:
             return f"tcp://{self.host}:{self.port}"
 
 
+# ---------------------------------------------------------------------------
+# KvMetrics: scheduler metrics class
+#
+# 0.5.10+: sglang.srt.observability.scheduler_metrics_mixin
+# 0.5.9:   sglang.srt.managers.scheduler_metrics_mixin
+#
+# In 0.5.10 the observability module has a circular import at cold-import time
+# (observability -> scheduler -> observability). The import succeeds once the
+# scheduler module is fully loaded (i.e., inside a running engine process).
+# We handle both paths and swallow the circular-import error gracefully: the
+# type is only used for annotation on ZMQ recv_pyobj() results (duck-typed).
+# ---------------------------------------------------------------------------
+KvMetrics: type | None = None
+
+for _kv_path in (
+    "sglang.srt.observability.scheduler_metrics_mixin",  # 0.5.10+
+    "sglang.srt.managers.scheduler_metrics_mixin",  # 0.5.9
+):
+    try:
+        _kv_mod = importlib.import_module(_kv_path)
+        KvMetrics = getattr(_kv_mod, "KvMetrics", None)  # type: ignore[assignment]
+        if KvMetrics is not None:
+            break
+    except (ImportError, AttributeError):
+        continue
+
+if KvMetrics is None:
+    logger.warning(
+        "Could not import KvMetrics from SGLang — scheduler metrics "
+        "will still work (duck-typed via ZMQ recv_pyobj)"
+    )
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """
     Enable SGLang's disjoint streaming output across ServerArgs field renames.
@@ -137,5 +175,4 @@ __all__ = [
     "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
-    "_SGLANG_HAS_NETWORK_MODULE",
 ]
