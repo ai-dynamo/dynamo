@@ -1647,7 +1647,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # supported — synthetic image data would be overwritten.
             if multi_modal_data is None and has_mm_data:
                 mm = request["multi_modal_data"]
-                if mm.get(VIDEO_URL_KEY) or mm.get("audio_url"):
+                if mm.get(VIDEO_URL_KEY) or mm.get(AUDIO_URL_KEY):
                     multi_modal_data = await self._extract_multimodal_data(
                         request, request_id, context
                     )

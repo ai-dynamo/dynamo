@@ -107,6 +107,8 @@ async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decodin
 
 @pytest.mark.asyncio
 async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
+    # Construct with enable_frontend_decoding=False to skip real NIXL init,
+    # then set the flags directly so the decoded path is exercised.
     loader = AudioLoader(enable_frontend_decoding=False)
     loader._enable_frontend_decoding = True
     loader._nixl_connector = object()
