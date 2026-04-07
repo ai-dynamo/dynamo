@@ -152,9 +152,13 @@ impl ModelWatcher {
         }
     }
 
-    /// Common watch logic with optional namespace filtering
+    /// Common watch logic with optional namespace filtering.
+    ///
+    /// Takes `Arc<Self>` so that each `handle_put` call can be spawned into its own
+    /// tokio task, preventing a slow HuggingFace config download for one model from
+    /// blocking discovery events for all subsequent models.
     pub async fn watch(
-        &self,
+        self: Arc<Self>,
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
     ) {
@@ -237,24 +241,30 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    match self.handle_put(&mcid, &mut card).await {
-                        Ok(()) => {
-                            tracing::info!(
-                                model_name = card.name(),
-                                namespace = mcid.namespace,
-                                "added model"
-                            );
-                            self.notify_on_model.notify_waiters();
+                    // Spawn each handle_put into its own task so that a slow
+                    // HuggingFace config download for one model cannot block
+                    // discovery events for all subsequent models.
+                    let watcher = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        match watcher.handle_put(&mcid, &mut card).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    model_name = card.name(),
+                                    namespace = mcid.namespace,
+                                    "added model"
+                                );
+                                watcher.notify_on_model.notify_waiters();
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    model_name = card.name(),
+                                    namespace = mcid.namespace,
+                                    error = format!("{err:#}"),
+                                    "Error adding model from discovery",
+                                );
+                            }
                         }
-                        Err(err) => {
-                            tracing::error!(
-                                model_name = card.name(),
-                                namespace = mcid.namespace,
-                                error = format!("{err:#}"),
-                                "Error adding model from discovery",
-                            );
-                        }
-                    }
+                    });
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
