@@ -598,7 +598,12 @@ vllm_configs = {
         ],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
+        script_args=[
+            "--model",
+            "Qwen/Qwen2-Audio-7B-Instruct",
+            "--max-model-len",
+            "7232",
+        ],
         request_payloads=[
             chat_payload(
                 [
@@ -628,7 +633,12 @@ vllm_configs = {
         ],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
+        script_args=[
+            "--model",
+            "Qwen/Qwen2-Audio-7B-Instruct",
+            "--max-model-len",
+            "7232",
+        ],
         request_payloads=[
             chat_payload(
                 [
@@ -655,13 +665,17 @@ vllm_configs = {
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(19.9),  # align with multimodal_agg_qwen (7B VLM)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
         ],
-        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
             "--model",
-            "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
             "--max-model-len",
-            "10000",
+            "8192",
             "--dyn-tool-call-parser",
             "hermes",
         ],
@@ -714,12 +728,11 @@ vllm_configs = {
                 },
                 repeat_count=1,
                 expected_response=[
-                    "green",
                     "purple",
-                    "llm",
-                    "optimize",
-                    "deploy",
-                ],  # OR: pass if any keyword found in tool args
+                    "green",
+                    "lavender",
+                    "violet",
+                ],
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
@@ -859,6 +872,7 @@ def test_serve_deployment(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.nightly
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -915,6 +929,7 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,

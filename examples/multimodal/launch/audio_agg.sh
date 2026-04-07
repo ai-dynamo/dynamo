@@ -12,6 +12,8 @@ source "$SCRIPT_DIR/../../common/gpu_utils.sh"
 MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
 PROMPT_TEMPLATE=""
 PROVIDED_PROMPT_TEMPLATE=""
+# Extra arguments are passed through to vLLM workers (e.g. --max-model-len, --gpu-memory-utilization)
+EXTRA_ARGS=()
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -25,17 +27,18 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [OPTIONS]"
+            echo "Usage: $0 [OPTIONS] [-- EXTRA_VLLM_ARGS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
             echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Any additional arguments are passed through to components/worker.py (vLLM)."
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -103,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0 \
 CUDA_VISIBLE_DEVICES=1 \
     DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
     VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-    python3 components/worker.py --model $MODEL_NAME --worker-type prefill $GPU_MEM_ARGS &
+    python3 components/worker.py --model $MODEL_NAME --worker-type prefill $GPU_MEM_ARGS "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
