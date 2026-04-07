@@ -100,6 +100,7 @@ def preprocess_chat_request(
     tokenizer,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -115,7 +116,12 @@ def preprocess_chat_request(
         "add_generation_prompt": True,
         "tokenize": True,
     }
-    if sglang_tools:
+    # Strip tools from template when tool_choice=none so the model doesn't
+    # see them and generate raw XML tool calls in its response.
+    tool_choice = request.get("tool_choice", "auto")
+    if sglang_tools and not (
+        exclude_tools_when_tool_choice_none and tool_choice == "none"
+    ):
         template_kwargs["tools"] = [t.model_dump() for t in sglang_tools]
 
     prompt_token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
@@ -292,7 +298,7 @@ class SglangStreamingPostProcessor:
             missing_args = any(
                 idx not in self._tool_call_args for idx in self._tool_call_names
             )
-            if missing_args:
+            if missing_args and self.tool_call_parser is not None:
                 buffer = getattr(self.tool_call_parser.detector, "_buffer", "")
                 if buffer:
                     _, final_calls = self.tool_call_parser.parse_non_stream(buffer)

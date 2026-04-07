@@ -23,7 +23,7 @@ _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
 _engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
-_inputs_data = importlib.import_module("vllm.inputs.data")
+_inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
 _tool_parsers = importlib.import_module("vllm.tool_parsers")

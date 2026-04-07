@@ -12,9 +12,31 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+
+def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
+    """Normalize multimodal URL items from the frontend wire format."""
+
+    items = mm_data.get(media_key)
+    if not items:
+        return None
+
+    urls: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            urls.append(item)
+            continue
+
+        if isinstance(item, dict):
+            url = item.get("Url")
+            if isinstance(url, str):
+                urls.append(url)
+
+    return urls or None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -24,7 +46,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -129,9 +151,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            trace_header = (
-                self._get_trace_header(context) if self.enable_trace else None
-            )
+            trace_header = build_trace_headers(context) if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -158,22 +178,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
-            image_data: list[str] | None = None
-            image_items = request.get("multi_modal_data", {}).get("image_url")
-            if image_items:
-                image_data = []
-                for item in image_items:
-                    if isinstance(item, str):
-                        image_data.append(item)
-                    elif isinstance(item, dict) and "Url" in item:
-                        image_data.append(item["Url"])
-                image_data = image_data or None
+            mm_data = request.get("multi_modal_data", {})
+            image_data = _extract_media_urls(mm_data, "image_url")
+            video_data = _extract_media_urls(mm_data, "video_url")
 
-            trace_header = (
-                self._get_trace_header(context) if self.enable_trace else None
-            )
+            trace_header = build_trace_headers(context) if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -182,6 +193,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
+                video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
                 return_routed_experts=return_routed_experts,
@@ -230,7 +242,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # This lets SGLang proceed to the second token generation, which will
                 # async context switch and allow the abort monitor to signal cancellation.
                 # The loop should exit by itself when context.is_stopped() returns True.
-                out = {}
+                out: dict[str, Any] = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
                     out["finish_reason"] = normalize_finish_reason(

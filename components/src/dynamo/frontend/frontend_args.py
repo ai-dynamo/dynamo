@@ -8,6 +8,10 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.aic_perf_args import (
+    AicPerfArgGroup,
+    AicPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
@@ -39,7 +43,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(KvRouterConfigBase):
+class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -50,6 +54,7 @@ class FrontendConfig(KvRouterConfigBase):
     tls_key_path: Optional[pathlib.Path]
 
     router_mode: str
+    min_initial_workers: int
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
     enforce_disagg: bool
@@ -75,7 +80,11 @@ class FrontendConfig(KvRouterConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
+    tokenizer_backend: str
+
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -86,8 +95,41 @@ class FrontendConfig(KvRouterConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
-        if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.min_initial_workers < 0:
+            raise ValueError("--router-min-initial-workers must be >= 0")
+        if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
+            raise ValueError(
+                f"--tokenizer: invalid value '{self.tokenizer_backend}' "
+                f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
+        if self.router_prefill_load_model == "aic":
+            if self.router_mode != "kv":
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--router-prefill-load-model=aic currently requires "
+                    "--dyn-chat-processor=dynamo"
+                )
+            missing = [
+                flag
+                for flag, value in (
+                    ("--aic-backend", self.aic_backend),
+                    ("--aic-system", self.aic_system),
+                    ("--aic-model-path", self.aic_model_path),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
+                )
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires "
+                    "--router-track-prefill-tokens"
+                )
 
 
 @register_encoder(FrontendConfig)
@@ -173,12 +215,38 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
-            help="How to route the request.",
-            choices=["round-robin", "random", "kv", "direct"],
+            help="How to route the request. power-of-two picks 2 random workers and "
+            "routes to the one with fewer in-flight requests. least-loaded routes to "
+            "the worker with the fewest active requests. In disaggregated prefill mode, "
+            "both power-of-two and least-loaded skip bootstrap optimization and fall "
+            "back to the synchronous prefill path.",
+            choices=[
+                "round-robin",
+                "random",
+                "power-of-two",
+                "kv",
+                "direct",
+                "least-loaded",
+            ],
+        )
+        add_argument(
+            g,
+            flag_name="--router-min-initial-workers",
+            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+            default=0,
+            help=(
+                "Minimum number of workers required before router startup continues. "
+                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                "push-router path and the KV router's config-ready worker gate share "
+                "the same startup threshold. Set to 0 to disable the startup wait."
+            ),
+            arg_type=int,
+            dest="min_initial_workers",
         )
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
+        AicPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -381,6 +449,22 @@ class FrontendArgGroup(ArgGroup):
                 "Can be combined with --enable-streaming-tool-dispatch."
             ),
         )
+        # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
+        # Both definitions are needed: runtime_args controls the Rust-native
+        # chat template path (oai.rs), while this one controls the Python
+        # frontend processors (vllm_processor / sglang_processor) which parse
+        # arguments independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help=(
+                "Exclude tool definitions from the chat template when "
+                "tool_choice='none'. Prevents models from generating raw XML "
+                "tool calls in the content field."
+            ),
+        )
         add_argument(
             g,
             flag_name="--dyn-chat-processor",
@@ -423,4 +507,18 @@ class FrontendArgGroup(ArgGroup):
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tokenizer",
+            env_var="DYN_TOKENIZER",
+            default="default",
+            dest="tokenizer_backend",
+            help=(
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
+                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
+                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+            ),
+            choices=["default", "fastokens"],
         )

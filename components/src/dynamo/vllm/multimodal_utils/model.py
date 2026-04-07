@@ -51,7 +51,6 @@ class SupportedModels:
     QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
     QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
     QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
-    LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -198,10 +197,7 @@ def construct_mm_data(
 ) -> Dict[str, Any]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
 
-    # Handle video models
-    if is_model_supported(model, SupportedModels.LLAVA_NEXT_VIDEO_7B):
-        if video_numpy is None:
-            raise ValueError("No video frames provided.")
+    if video_numpy is not None:
         return {"video": video_numpy}
 
     # Handle image models - validate image embeddings first
@@ -279,14 +275,14 @@ def construct_qwen_decode_mm_data(
     # that happen to have the same dimensions (same image_grid_thw).
     # bit ops to convert request ID to somewhat unique value that fits in the dtype range
     if not hasattr(construct_qwen_decode_mm_data, "_counter"):
-        construct_qwen_decode_mm_data._counter = 0
-    fill_value = construct_qwen_decode_mm_data._counter
-    construct_qwen_decode_mm_data._counter += 1
+        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+    fill_value = construct_qwen_decode_mm_data._counter  # type: ignore[attr-defined]
+    construct_qwen_decode_mm_data._counter += 1  # type: ignore[attr-defined]
     max_val = (
         torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
     )
-    if construct_qwen_decode_mm_data._counter > max_val:
-        construct_qwen_decode_mm_data._counter = 0
+    if construct_qwen_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
+        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
     image_embeds = torch.full(
         embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )
