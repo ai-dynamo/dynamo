@@ -44,7 +44,7 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 |-------|-------|-------|-------|
 | **[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md)** | ✅ | 🧪  | 🧪 |
 | **[TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md)** | ✅ | ❌ | ❌ |
-| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | ❌ | ❌ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | 🧪 | ❌ |
 
 **Status:** ✅ Supported | 🧪 Experimental | ❌ Not supported
 
