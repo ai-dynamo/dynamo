@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from gpu_memory_service.common.protocol.messages import (
+    AllocateAndExportRequest,
     AllocateRequest,
     CommitRequest,
     ExportAllocationRequest,
@@ -87,6 +88,7 @@ def derive_state(has_rw: bool, ro_count: int, committed: bool) -> ServerState:
 # Permission sets: which message types require which connection mode
 RW_REQUIRED: frozenset[type] = frozenset(
     {
+        AllocateAndExportRequest,
         AllocateRequest,
         FreeAllocationRequest,
         MetadataPutRequest,
