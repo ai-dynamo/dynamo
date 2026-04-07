@@ -29,7 +29,7 @@ class FastVideoConfig(EngineConfig):
     """Configuration for FastVideo serve smoke tests."""
 
 
-fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/diffusers/local")
+fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/backends/fastvideo/launch")
 # CI single-GPU lanes run on smaller VRAM runners, so keep smoke tests on a
 # lighter FastVideo model for both pre-merge and nightly.
 fastvideo_smoke_model = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"

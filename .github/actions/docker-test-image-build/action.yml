@@ -13,7 +13,7 @@ inputs:
     description: 'Full image URI of the runtime image to use as BASE_IMAGE'
     required: true
   framework:
-    description: 'Framework name (vllm, sglang, trtllm) — used to derive the cache tag'
+    description: 'Framework name (vllm, sglang, trtllm, fastvideo) — used to derive the cache tag'
     required: true
   platform:
     description: 'Target platform architecture (amd64 or arm64)'

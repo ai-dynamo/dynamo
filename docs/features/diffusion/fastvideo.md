@@ -31,7 +31,7 @@ Launch the built-in backend directly:
 python -m dynamo.fastvideo --model-path FastVideo/LTX2-Distilled-Diffusers
 ```
 
-The local example flow in `examples/diffusers/` now shells into this built-in entrypoint rather than maintaining separate worker logic.
+The local example flow in `examples/backends/fastvideo/launch/` now shells into this built-in entrypoint rather than maintaining separate worker logic.
 
 ## Docker Image Build
 
@@ -47,6 +47,12 @@ python3 container/render.py \
 docker build -f container/fastvideo-runtime-cuda13.1-amd64-rendered.Dockerfile .
 ```
 
+For source-based container development, the same renderer also supports
+`--target dev` and `--target local-dev` for `--framework fastvideo`. For
+lower-level container work, FastVideo also exposes the same intermediate
+renderer targets as the other runtime backends: `--target base` and
+`--target wheel_builder`.
+
 This rendered runtime image:
 
 - Uses a multi-stage build with `nvcr.io/nvidia/pytorch:25.12-py3` as the build-side base
@@ -54,12 +60,11 @@ This rendered runtime image:
 - Installs the local Dynamo runtime wheels produced by the shared wheel builder
 - Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) and related Python dependencies in a dedicated framework stage through the shared `container/deps/fastvideo/` installer path, then copies the prepared environment into the final runtime image
 
-The example [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile) remains available as a local compatibility image for Docker Compose. It reuses the same FastVideo dependency installer, but installs the local repository directly from source so the example remains easy to run with:
+Released FastVideo runtime images are also published to NGC for local container use:
 
 ```bash
-docker build -f examples/diffusers/Dockerfile .
+docker pull nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13
 ```
-
 
 ## Warmup Time
 
@@ -86,18 +91,20 @@ On first start, workers download model weights. When `--torch-compile` is enable
 ### Option 1: Docker Compose
 
 ```bash
-cd <dynamo-root>/examples/diffusers/local
+cd <dynamo-root>/examples/backends/fastvideo/launch
+
+docker pull nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13
 
 # Start 4 workers on GPUs 0..3
-COMPOSE_PROFILES=4 docker compose up --build
+COMPOSE_PROFILES=4 docker compose up
 ```
 
-The Compose file builds from the compatibility Dockerfile and exposes the API on `http://localhost:8000`. See the [Docker Image Build](#docker-image-build) section for both the canonical rendered image flow and the local compose compatibility path.
+The Compose file defaults to `nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13` and exposes the API on `http://localhost:8000`. Override the image for top-of-tree or private builds with `FASTVIDEO_IMAGE=<custom-image> COMPOSE_PROFILES=4 docker compose up`.
 
 ### Option 2: Host-Local Script
 
 ```bash
-cd <dynamo-root>/examples/diffusers/local
+cd <dynamo-root>/examples/backends/fastvideo/launch
 ./run_local.sh
 ```
 
@@ -146,9 +153,10 @@ The script writes logs to:
 | File | Description |
 |---|---|
 | `agg.yaml` | Base aggregated deployment (Frontend + `FastVideoWorker`) |
-| `agg_user_workload.yaml` | Same deployment with `user-workload` tolerations and `imagePullSecrets` |
-| `huggingface-cache-pvc.yaml` | Shared HF cache PVC for model weights |
-| `dynamo-platform-values-user-workload.yaml` | Optional Helm values for clusters with tainted `user-workload` nodes |
+| `agg-with-model-cache.yaml` | Aggregated deployment that mounts a shared `model-cache` PVC |
+| `support/model-cache-pvc.yaml` | Optional starting point for a shared `model-cache` PVC |
+| `user-workload/agg.yaml` | Same deployment with `user-workload` tolerations and `imagePullSecrets` |
+| `user-workload/dynamo-platform-values.yaml` | Optional Helm values for clusters with tainted `user-workload` nodes |
 
 > [!NOTE]
 > FastVideo currently has only an aggregated deployment path in Dynamo. The example manifests in this directory do not include a disaggregated FastVideo setup.
@@ -158,9 +166,9 @@ The script writes logs to:
 1. Dynamo Kubernetes Platform installed
 2. GPU-enabled Kubernetes cluster
 3. FastVideo runtime image pushed to your registry
-4. Optional HF token secret (for gated models)
+4. `hf-token-secret` Kubernetes secret for model access
 
-Create a Hugging Face token secret if needed:
+Create the Hugging Face token secret:
 
 ```bash
 export NAMESPACE=<your-namespace>
@@ -173,22 +181,45 @@ kubectl create secret generic hf-token-secret \
 ### Deploy
 
 ```bash
-cd <dynamo-root>/examples/diffusers/deploy
+cd <dynamo-root>/examples/backends/fastvideo/deploy
 export NAMESPACE=<your-namespace>
 
-kubectl apply -f huggingface-cache-pvc.yaml -n ${NAMESPACE}
 kubectl apply -f agg.yaml -n ${NAMESPACE}
 ```
 
+The example deployment manifests pin a lighter model
+(`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) for faster startup and CI stability.
+To use the backend default (`FastVideo/LTX2-Distilled-Diffusers`), update the
+worker `--model-path` argument in the manifest.
+
+The shipped Kubernetes manifests also set
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and add the
+`SYS_PTRACE` container capability on the FastVideo worker. These match the
+FastVideo CI runtime requirements: the allocator setting reduces single-GPU OOM
+pressure during model load, and `SYS_PTRACE` avoids `pidfd_getfd` failures from
+FastVideo's CUDA IPC path. Unlike the local Docker Compose setup, the
+Kubernetes example manifests do not override TorchInductor or Triton cache
+paths; they rely on the backend's default writable cache location, matching the
+other backend deployment examples.
+
 For clusters with tainted `user-workload` nodes and private registry pulls:
 
-1. Set your pull secret name and image in `agg_user_workload.yaml`.
+1. Set your pull secret name and image in `user-workload/agg.yaml`.
 2. Apply:
 
 ```bash
-kubectl apply -f huggingface-cache-pvc.yaml -n ${NAMESPACE}
-kubectl apply -f agg_user_workload.yaml -n ${NAMESPACE}
+kubectl apply -f user-workload/agg.yaml -n ${NAMESPACE}
 ```
+
+If you want a persistent shared Hugging Face cache instead of per-pod downloads:
+
+```bash
+kubectl apply -f support/model-cache-pvc.yaml -n ${NAMESPACE}
+kubectl apply -f agg-with-model-cache.yaml -n ${NAMESPACE}
+```
+
+For production clusters, tune the PVC spec (size, storage class) and optional pre-download
+workflow using [Model Caching](../../kubernetes/model-caching.md).
 
 ### Update Image Quickly
 
@@ -299,7 +330,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 ## Source Code
 
-The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers) in the Dynamo repository.
+The example source lives at [`examples/backends/fastvideo/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/fastvideo) in the Dynamo repository.
 
 ## See Also
 

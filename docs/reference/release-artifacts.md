@@ -29,6 +29,7 @@ Release history in this document begins at v0.6.0.
 | `sglang-runtime:1.0.1-cuda13` | Runtime container for SGLang backend (CUDA 13) | SGLang `v0.5.9` | `v13.0` | AMD64/ARM64* | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.0.1-cuda13) | |
 | `tensorrtllm-runtime:1.0.1` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.0.1) | |
 | `tensorrtllm-runtime:1.0.1-efa-amd64` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | AMD64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.0.1-efa-amd64) | Experimental |
+| `fastvideo-runtime:1.0.1-cuda13` | Runtime container for FastVideo backend | FastVideo `833a33b` | `v13.1` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/fastvideo-runtime?version=1.0.1-cuda13) | |
 | `dynamo-frontend:1.0.1` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.0.1) | |
 | `kubernetes-operator:1.0.1` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.0.1) | |
 | `snapshot-agent:1.0.1` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.0.1) | Preview |
@@ -74,7 +75,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 ### Container Images (NGC)
 
 > [!TIP]
-> For detailed run instructions, see the backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
+> For detailed run instructions, see the backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md) | [FastVideo](../features/diffusion/fastvideo.md)
 
 ```bash
 # Runtime containers
@@ -85,6 +86,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
 # CUDA 13 variants
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-cuda13
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1-cuda13
+docker pull nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13
 
 # EFA variants (AWS, AMD64 only, experimental)
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64
@@ -270,6 +272,13 @@ For a complete list of known issues, refer to the release notes for each version
 | `tensorrtllm-runtime:0.6.1.post1` | `v1.1.0rc5` | AMD64/ARM64 | `v12.9` | Patch |
 | `tensorrtllm-runtime:0.6.1` | `v1.1.0rc5` | AMD64/ARM64 | `v12.9` | |
 | `tensorrtllm-runtime:0.6.0` | `v1.1.0rc5` | AMD64/ARM64 | `v12.9` | |
+
+#### fastvideo-runtime
+
+| Image:Tag | FastVideo | Arch | CUDA | Notes |
+|-----------|-----------|------|------|-------|
+| `fastvideo-runtime:1.0.1-cuda13` | `833a33b` | AMD64/ARM64 | `v13.1` | |
+| `fastvideo-runtime:1.0.0-cuda13` | `833a33b` | AMD64/ARM64 | `v13.1` | |
 
 #### dynamo-frontend
 

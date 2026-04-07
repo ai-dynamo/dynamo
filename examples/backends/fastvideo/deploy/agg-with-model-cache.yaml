@@ -7,7 +7,7 @@ metadata:
   name: fastvideo-agg
 spec:
   pvcs:
-    - name: huggingface-cache
+    - name: model-cache
       create: false
   services:
     Frontend:
@@ -30,6 +30,7 @@ spec:
             - "8000"
 
     FastVideoWorker:
+      envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
       sharedMemory:
@@ -39,26 +40,31 @@ spec:
           gpu: "1"
         requests:
           gpu: "1"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
       envs:
         - name: DYN_DISCOVERY_BACKEND
           value: kubernetes
         - name: LD_LIBRARY_PATH
           value: ""
-        - name: TORCHINDUCTOR_CACHE_DIR
-          value: /cache/torchinductor
-        - name: TRITON_CACHE_DIR
-          value: /cache/triton
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: expandable_segments:True
         - name: HF_HOME
-          value: /root/.cache/huggingface
-      volumeMounts:
-        - name: huggingface-cache
-          mountPoint: /root/.cache/huggingface
+          value: /opt/models
       extraPodSpec:
         mainContainer:
           image: my-registry/fastvideo-runtime:my-tag
           imagePullPolicy: IfNotPresent
           workingDir: /opt/app
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
           command:
             - python
             - -m
             - dynamo.fastvideo
+          args:
+            - --model-path
+            - Wan-AI/Wan2.1-T2V-1.3B-Diffusers

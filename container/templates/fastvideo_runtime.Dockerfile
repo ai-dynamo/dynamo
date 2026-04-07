@@ -78,6 +78,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         g++ \
         ninja-build \
         git \
+        git-lfs \
         ca-certificates \
         libnuma1 \
         ffmpeg && \
@@ -96,12 +97,21 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
+{% if target not in ("dev", "local-dev") %}
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% else %}
+# Dev/local-dev: skip Dynamo wheel install because those images build Dynamo
+# from source after the workspace is mounted. Install the pre-built NIXL wheel
+# only since it is still needed by the development environment.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
 
 # Install shared runtime dependencies (common + planner + benchmark).
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
@@ -114,6 +124,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt
+
+{% if target not in ("dev", "local-dev") %}
+# Copy benchmarks after dependency install so benchmark source changes do not
+# invalidate the shared runtime dependency layer above.
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    cd /workspace/benchmarks && \
+    uv pip install . && \
+    chmod -R g+w /workspace/benchmarks
+{% endif %}
 
 ARG WORKSPACE_DIR=/workspace
 WORKDIR ${WORKSPACE_DIR}

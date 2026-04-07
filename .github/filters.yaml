@@ -154,7 +154,7 @@ fastvideo:
   - 'container/deps/fastvideo/**'
   - 'container/templates/fastvideo_*'
   - 'components/src/dynamo/fastvideo/**'
-  - 'examples/diffusers/**'
+  - 'examples/backends/fastvideo/**'
 
 frontend:
   - '!**/*.md'

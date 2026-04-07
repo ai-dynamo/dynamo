@@ -148,10 +148,14 @@ def validate_args(args):
         },
         "fastvideo": {
             "device": ["cuda"],
-            # Follow-up: consider exposing base/wheel_builder once we want
-            # parity with the other non-dynamo frameworks, and dev/local-dev
-            # once a FastVideo development workflow is explicitly supported.
-            "target": ["runtime", "framework"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "framework",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["13.1"],
         },
     }

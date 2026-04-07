@@ -1,3 +1,5 @@
 .runtime/
 response.json
 output.mp4
+outputs
+outputs_video

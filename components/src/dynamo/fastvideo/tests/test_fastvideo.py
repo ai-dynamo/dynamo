@@ -12,6 +12,7 @@ import pytest
 
 from dynamo.fastvideo.args import parse_fastvideo_args
 from dynamo.fastvideo.backend import FastVideoHandler, register_fastvideo_model
+from dynamo.fastvideo.health_check import FastVideoHealthCheckPayload
 from dynamo.llm import ModelInput, ModelType
 
 pytestmark = [
@@ -145,6 +146,22 @@ async def test_register_fastvideo_model_uses_video_discovery_type():
         "org/model",
         "org/model",
     )
+
+
+def test_fastvideo_health_check_payload_uses_minimal_video_request():
+    payload = FastVideoHealthCheckPayload("org/model").to_dict()
+
+    assert payload["model"] == "org/model"
+    assert payload["prompt"] == "test"
+    assert payload["seconds"] == 1
+    assert payload["size"] == "256x256"
+    assert payload["response_format"] == "b64_json"
+    assert payload["nvext"] == {
+        "fps": 8,
+        "num_frames": 8,
+        "num_inference_steps": 1,
+        "guidance_scale": 5.0,
+    }
 
 
 @pytest.mark.asyncio
