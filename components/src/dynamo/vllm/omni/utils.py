@@ -99,14 +99,14 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
         diffusion_params = OmniDiffusionSamplingParams(**params_dict)
         if overrides:
             for arg, value in overrides.items():
-                if getattr(diffusion_params, arg, None) is not None:
+                if hasattr(diffusion_params, arg):
                     setattr(diffusion_params, arg, value)
         return [diffusion_params]
 
     llm_params = SamplingParams(**params_dict)
     if overrides:
         for arg, value in overrides.items():
-            if getattr(llm_params, arg, None) is not None:
+            if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
     return [llm_params]
 

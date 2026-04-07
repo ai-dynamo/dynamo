@@ -3,6 +3,7 @@
 
 """Single-stage omni worker for disaggregated pipelines."""
 
+import asyncio
 import importlib
 import logging
 import os
@@ -255,12 +256,14 @@ async def init_omni_stage(
     runtime: DistributedRuntime,
     config: OmniConfig,
     shutdown_endpoints: list,
+    shutdown_event: asyncio.Event | None = None,
 ) -> None:
     """Initialize a single omni stage worker.
 
     Mirrors init_omni() setup pattern exactly to avoid routing/handler issues.
     """
-    assert config.stage_id is not None  # dispatch in main.py guarantees this
+    if config.stage_id is None:
+        raise ValueError("--stage-id is required for stage worker initialization")
     stage_id: int = config.stage_id
     stage_configs = load_stage_configs_from_yaml(config.stage_configs_path)  # type: ignore[arg-type]
     if stage_id >= len(stage_configs):
@@ -288,41 +291,50 @@ async def init_omni_stage(
         stage_config=my_config,
         connectors=connectors,
         output_modalities=config.output_modalities,
-        default_video_fps=getattr(config, "default_video_fps", 16),
+        default_video_fps=config.default_video_fps,
         stage_id=stage_id,
     )
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    if not getattr(config.engine_args, "data_parallel_rank", 0):
+    if config.engine_args.data_parallel_rank:
         logger.info(
-            "Stage %d: serving internal stage endpoint '%s' (not registering model)",
+            "Stage %d: non-leader DP rank %d; waiting for shutdown",
             stage_id,
-            generate_endpoint,
+            config.engine_args.data_parallel_rank,
         )
-        health_check_payload = (
-            await VllmOmniHealthCheckPayload.create(engine)  # type: ignore[arg-type]
-        ).to_dict()
+        if shutdown_event is not None:
+            await shutdown_event.wait()
+        return
 
-        try:
-            await generate_endpoint.serve_endpoint(
-                worker.generate,
-                graceful_shutdown=True,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-                health_check_payload=health_check_payload,
-            )
-        except Exception as e:
-            logger.error("Stage %d: endpoint failed: %s", stage_id, e)
-            raise
+    logger.info(
+        "Stage %d: serving internal stage endpoint '%s' (not registering model)",
+        stage_id,
+        generate_endpoint,
+    )
+    health_check_payload = (
+        await VllmOmniHealthCheckPayload.create(engine)  # type: ignore[arg-type]
+    ).to_dict()
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            worker.generate,
+            graceful_shutdown=True,
+            metrics_labels=[
+                (
+                    prometheus_names.labels.MODEL,
+                    config.served_model_name or config.model,
+                ),
+                (
+                    prometheus_names.labels.MODEL_NAME,
+                    config.served_model_name or config.model,
+                ),
+            ],
+            health_check_payload=health_check_payload,
+        )
+    except Exception as e:
+        logger.error("Stage %d: endpoint failed: %s", stage_id, e)
+        raise
 
 
 def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:

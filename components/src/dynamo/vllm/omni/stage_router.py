@@ -140,10 +140,15 @@ class OmniStageRouter:
         if chunk:
             yield chunk
         else:
+            final_output_type = getattr(result, "final_output_type", "unknown")
             logger.warning(
                 "Router: formatter returned None, final_output_type=%s",
-                getattr(result, "final_output_type", "unknown"),
+                final_output_type,
             )
+            yield {
+                "error": f"Formatter returned no output for type '{final_output_type}'",
+                "finished": True,
+            }
 
 
 async def init_omni_stage_router(

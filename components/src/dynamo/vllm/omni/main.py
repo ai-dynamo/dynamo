@@ -148,7 +148,7 @@ async def worker():
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     if config.stage_id is not None:
-        await init_omni_stage(runtime, config, shutdown_endpoints)
+        await init_omni_stage(runtime, config, shutdown_endpoints, shutdown_event)
         logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
     elif config.omni_router:
         await init_omni_stage_router(runtime, config, shutdown_endpoints)

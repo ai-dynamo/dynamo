@@ -314,6 +314,8 @@ class OmniConfig(DynamoRuntimeConfig):
                 raise ValueError("--stage-id requires --stage-configs-path")
             if self.omni_router:
                 raise ValueError("--omni-router requires --stage-configs-path")
+        if self.stage_id is not None and self.stage_id < 0:
+            raise ValueError("--stage-id must be >= 0")
         if self.stage_id is not None and self.omni_router:
             raise ValueError("--stage-id and --omni-router are mutually exclusive")
 
