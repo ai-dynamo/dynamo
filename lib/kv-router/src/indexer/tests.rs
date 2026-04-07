@@ -325,13 +325,13 @@ mod interface_tests {
         let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
         let prefix_remove = make_remove_event(0, &[1, 2, 3]);
 
-        // TODO: The radix-family implementations still have a broader tree-size
-        // accounting gap after mid-chain removes because descendant lookup entries
-        // are cleaned up lazily. That means "store -> partial remove -> restore
-        // continuation" can still miscount restored coverage in single, sharded,
-        // concurrent, and concurrent_compressed. This test is intentionally scoped
-        // to duplicate store/remove replay, which was the concrete compressed-tree
-        // regression fixed on this branch.
+        // TODO: The non-compressed radix-family implementations still have a broader
+        // tree-size accounting gap after mid-chain removes because descendant
+        // lookup entries are cleaned up lazily. That means "store -> partial
+        // remove -> restore continuation" can still miscount restored coverage
+        // in single, sharded, and concurrent. This test is intentionally scoped
+        // to duplicate store/remove replay so all tree-size variants share the
+        // same stable baseline.
 
         index.apply_event(prefix_event.clone()).await;
         flush_and_settle(index.as_ref()).await;
@@ -412,6 +412,52 @@ mod interface_tests {
             .unwrap();
         assert!(duplicate_empty_scores.scores.is_empty());
         assert!(snapshot_tree(index.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_restore_after_mid_chain_remove_updates_tree_size() {
+        let index = make_indexer("concurrent_compressed");
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 1, 1).await;
+
+        index
+            .apply_event(make_store_event_with_parent(0, &[1], &[2, 3]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_partial_node_drops_unreachable_descendants() {
+        let index = make_indexer("concurrent_compressed");
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            snapshot_tree(index.as_ref()).await,
+            vec![make_store_event(0, &[1])]
+        );
     }
 
     #[tokio::test]

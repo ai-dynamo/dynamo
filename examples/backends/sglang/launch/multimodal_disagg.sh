@@ -140,6 +140,9 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
 fi
 
 # run SGLang multimodal prefill worker
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."

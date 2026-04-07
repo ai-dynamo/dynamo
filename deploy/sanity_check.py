@@ -156,11 +156,19 @@ import os
 import platform
 import resource
 import shutil
+import site
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    tomllib = None
+
+_LOG = logging.getLogger(__name__)
 
 # Path constants
 DYNAMO_RUNTIME_SRC_PATH = "lib/bindings/python/src/dynamo"
@@ -2962,9 +2970,6 @@ class DynamoFrameworkInfo(NodeInfo):
 
         # Add package info if installed
         if is_installed:
-            import glob
-            import site
-
             for site_dir in site.getsitepackages():
                 # Look specifically for ai_dynamo (not ai_dynamo_runtime)
                 dist_pattern = os.path.join(site_dir, "ai_dynamo-*.dist-info")
@@ -2981,6 +2986,76 @@ class DynamoFrameworkInfo(NodeInfo):
                             status=NodeStatus.INFO,
                             metadata={"part_of_previous": True},
                         )
+                        # Check for editable install via direct_url.json
+                        direct_url_path = os.path.join(path, "direct_url.json")
+                        if os.path.exists(direct_url_path):
+                            try:
+                                with open(direct_url_path, "r", encoding="utf-8") as f:
+                                    du = json.loads(f.read())
+                            except (OSError, json.JSONDecodeError) as exc:
+                                dist_node.add_child(
+                                    NodeInfo(
+                                        label="→",
+                                        desc=self._replace_home_with_var(
+                                            f"{direct_url_path}: {exc}"
+                                        ),
+                                        status=NodeStatus.WARNING,
+                                    )
+                                )
+                            else:
+                                url = du.get("url", "")
+                                is_editable = (du.get("dir_info") or {}).get(
+                                    "editable", False
+                                )
+                                if url.startswith("file://") and is_editable:
+                                    target = url[len("file://") :]
+                                    resolved_target = target
+                                    pyproject = os.path.join(target, "pyproject.toml")
+                                    if (
+                                        os.path.exists(pyproject)
+                                        and tomllib is not None
+                                    ):
+                                        try:
+                                            with open(pyproject, "rb") as pf:
+                                                cfg = tomllib.load(pf)
+                                            pkgs = (
+                                                cfg.get("tool", {})
+                                                .get("hatch", {})
+                                                .get("build", {})
+                                                .get("targets", {})
+                                                .get("wheel", {})
+                                                .get("packages", [])
+                                            )
+                                            if pkgs:
+                                                resolved_target = os.path.join(
+                                                    target, os.path.dirname(pkgs[0])
+                                                )
+                                        except (
+                                            OSError,
+                                            tomllib.TOMLDecodeError,
+                                        ) as exc:
+                                            _LOG.debug(
+                                                "editable pyproject resolve failed: %s",
+                                                exc,
+                                            )
+                                            dist_node.add_child(
+                                                NodeInfo(
+                                                    label="→",
+                                                    desc=self._replace_home_with_var(
+                                                        f"{pyproject}: {exc}"
+                                                    ),
+                                                    status=NodeStatus.WARNING,
+                                                )
+                                            )
+                                    display_target = self._replace_home_with_var(
+                                        resolved_target
+                                    )
+                                    points_to = NodeInfo(
+                                        label="→",
+                                        desc=display_target,
+                                        status=NodeStatus.INFO,
+                                    )
+                                    dist_node.add_child(points_to)
                         self.add_child(dist_node)
                     except Exception:
                         dist_node = NodeInfo(
@@ -3030,8 +3105,17 @@ class DynamoFrameworkInfo(NodeInfo):
                         )
                         self.add_child(component_node)
                         components_found = True
+                except ModuleNotFoundError as e:
+                    # Missing optional dependency (e.g., planner stack without kubernetes).
+                    padded_name = f"{component:<{max_len}}"
+                    error_msg = str(e) if str(e) else "Import failed"
+                    component_node = NodeInfo(
+                        label=padded_name, desc=error_msg, status=NodeStatus.WARNING
+                    )
+                    self.add_child(component_node)
+                    import_failures.append(component)
                 except ImportError as e:
-                    # Module not importable - show as error
+                    # e.g. "cannot import name ..." — treat as a real packaging/code issue.
                     padded_name = f"{component:<{max_len}}"
                     error_msg = str(e) if str(e) else "Import failed"
                     component_node = NodeInfo(
@@ -3039,7 +3123,6 @@ class DynamoFrameworkInfo(NodeInfo):
                     )
                     self.add_child(component_node)
                     import_failures.append(component)
-                    # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:

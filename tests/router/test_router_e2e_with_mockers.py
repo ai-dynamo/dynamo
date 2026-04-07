@@ -809,7 +809,7 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
+@pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
     request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
 ):

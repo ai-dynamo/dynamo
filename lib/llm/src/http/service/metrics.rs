@@ -27,6 +27,15 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
+use dynamo_runtime::error::ErrorType as DynamoErrorType;
+
+/// Check whether an error chain indicates the request was rejected.
+pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    const NON_REJECTION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -257,6 +266,7 @@ pub struct Metrics {
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
+    model_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -679,6 +689,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
+                "Total number of requests rejected due to resource exhaustion",
+            ),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -700,6 +719,7 @@ impl Metrics {
             model_migration_limit,
             model_migration_total,
             model_cancellation_total,
+            model_rejection_total,
         }
     }
 
@@ -805,6 +825,7 @@ impl Metrics {
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
+        registry.register(Box::new(self.model_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -899,6 +920,20 @@ impl Metrics {
     pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
         self.model_cancellation_total
             .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .get()
+    }
+
+    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current rejection count for a model and endpoint
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
             .get()
     }
 
