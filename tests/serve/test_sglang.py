@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 
@@ -43,10 +42,9 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
+REMOTE_VIDEO_TEST_URI = (
+    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+)
 
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
@@ -341,11 +339,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["red", "static", "still"],
+                expected_response=["guitar", "tablet", "draw"],
                 temperature=0.0,
                 max_tokens=100,
             )

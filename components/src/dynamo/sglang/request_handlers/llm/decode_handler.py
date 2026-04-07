@@ -18,6 +18,27 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
+def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
+    """Normalize multimodal URL items from the frontend wire format."""
+
+    items = mm_data.get(media_key)
+    if not items:
+        return None
+
+    urls: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            urls.append(item)
+            continue
+
+        if isinstance(item, dict):
+            url = item.get("Url")
+            if isinstance(url, str):
+                urls.append(url)
+
+    return urls or None
+
+
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -160,23 +181,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
-            image_data: list[str] | None = None
-            video_data: list[str] | None = None
-            for key, target in [("image_url", "image"), ("video_url", "video")]:
-                items = mm_data.get(key)
-                if not items:
-                    continue
-                urls = []
-                for item in items:
-                    if isinstance(item, str):
-                        urls.append(item)
-                    elif isinstance(item, dict) and "Url" in item:
-                        urls.append(item["Url"])
-                if urls:
-                    if target == "image":
-                        image_data = urls
-                    else:
-                        video_data = urls
+            image_data = _extract_media_urls(mm_data, "image_url")
+            video_data = _extract_media_urls(mm_data, "video_url")
 
             trace_header = build_trace_headers(context) if self.enable_trace else None
 
