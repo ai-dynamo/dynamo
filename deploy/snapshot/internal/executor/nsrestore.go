@@ -23,10 +23,10 @@ type RestoreOptions struct {
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID         int           `json:"restoredPID"`
-	PreCRIUDuration     time.Duration `json:"preCRIUDuration"`
-	CRIURestoreDuration time.Duration `json:"criuRestoreDuration"`
-	CUDADuration        time.Duration `json:"cudaDuration"`
+	RestoredPID            int           `json:"restoredPID"`
+	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
+	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
+	CUDADuration           time.Duration `json:"cudaDuration"`
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -66,14 +66,14 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 
 	result := &RestoreInNamespaceResult{
-		RestoredPID:         restoredPID,
-		PreCRIUDuration:     manifestReadDuration + configureDuration + executeTimings.preCRIUDuration,
-		CRIURestoreDuration: executeTimings.criuRestoreDuration,
-		CUDADuration:        executeTimings.cudaDuration,
+		RestoredPID:            restoredPID,
+		NSRestoreSetupDuration: manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration,
+		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
+		CUDADuration:           executeTimings.cudaDuration,
 	}
 	log.V(1).Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
-		"pre_criu_duration", result.PreCRIUDuration,
+		"nsrestore_setup_duration", result.NSRestoreSetupDuration,
 		"criu_restore_duration", result.CRIURestoreDuration,
 		"cuda_duration", result.CUDADuration,
 		"total_duration", time.Since(restoreStart),
@@ -82,16 +82,16 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 }
 
 type nsrestorePhaseTimings struct {
-	preCRIUDuration     time.Duration
-	criuRestoreDuration time.Duration
-	cudaDuration        time.Duration
+	nsrestoreSetupDuration time.Duration
+	criuRestoreDuration    time.Duration
+	cudaDuration           time.Duration
 }
 
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
 	timings := &nsrestorePhaseTimings{}
 
 	// Apply rootfs diff inside the namespace (target root is /)
-	preCRIUStart := time.Now()
+	nsrestoreSetupStart := time.Now()
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
@@ -108,7 +108,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
 		return nil, 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
-	timings.preCRIUDuration = time.Since(preCRIUStart)
+	timings.nsrestoreSetupDuration = time.Since(nsrestoreSetupStart)
 	defer func() {
 		if err := snapshotruntime.RemountProcSys(false); err != nil {
 			log.Error(err, "Failed to remount /proc/sys read-only after restore")

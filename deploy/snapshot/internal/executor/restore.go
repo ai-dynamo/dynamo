@@ -48,28 +48,28 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 		"container", req.ContainerName,
 	)
 
-	// Phase 1: Inspect — resolve placeholder, discover target GPUs, build device map
-	inspectStart := time.Now()
+	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
+	hostInspectStart := time.Now()
 	snap, err := inspectRestore(ctx, ctrd, log, req)
 	if err != nil {
 		return 0, err
 	}
-	inspectDuration := time.Since(inspectStart)
+	hostInspectDuration := time.Since(hostInspectStart)
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
 	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := inspectDuration + result.PreCRIUDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
 			"phases": map[string]string{
-				"inspect_duration":      inspectDuration.String(),
-				"pre_criu_duration":     result.PreCRIUDuration.String(),
-				"criu_restore_duration": result.CRIURestoreDuration.String(),
-				"cuda_duration":         result.CUDADuration.String(),
+				"host_inspect_duration":    hostInspectDuration.String(),
+				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
+				"criu_restore_duration":    result.CRIURestoreDuration.String(),
+				"cuda_duration":            result.CUDADuration.String(),
 			},
 		},
 	)
