@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 backend: pytorch
+trust_remote_code: true
 cuda_graph_config: null
 kv_cache_config:
   enable_partial_reuse: false
