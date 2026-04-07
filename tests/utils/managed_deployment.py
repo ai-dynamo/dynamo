@@ -698,6 +698,15 @@ class ManagedDeployment:
                         self._logger.info(
                             f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {desired_ready_condition_val} and state {desired_state_val}"
                         )
+                        pod_details = await self._get_pod_status_details()
+                        if pod_details:
+                            for d in pod_details:
+                                self._logger.info(f"  Pod status: {d.format()}")
+                        pod_events = await self._get_pod_events()
+                        if pod_events:
+                            self._logger.info("  Pod warning events:")
+                            for ev in pod_events:
+                                self._logger.info(f"    {ev}")
 
             except exceptions.ApiException as e:
                 self._logger.info(
@@ -791,6 +800,23 @@ class ManagedDeployment:
 
         except exceptions.ApiException as e:
             self._logger.debug(f"Failed to collect pod status details: {e}")
+            return []
+
+    async def _get_pod_events(self) -> List[str]:
+        """Fetch warning events for pods in this deployment's namespace."""
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            events = await self._core_api.list_namespaced_event(self.namespace)
+            warnings = []
+            for event in events.items:
+                if event.type != "Normal" and event.involved_object.kind == "Pod":
+                    name = event.involved_object.name or "unknown"
+                    reason = event.reason or ""
+                    msg = event.message or ""
+                    warnings.append(f"{name}: {reason} - {msg}")
+            return warnings[-10:]
+        except Exception as e:
+            self._logger.debug(f"Failed to collect pod events: {e}")
             return []
 
     async def _restart_nats(self):

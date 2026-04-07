@@ -7,6 +7,7 @@ use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use dashmap::DashSet;
+use dynamo_kv_router::PrefillLoadEstimator;
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -74,6 +75,7 @@ pub struct ModelWatcher {
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
@@ -118,6 +120,7 @@ impl ModelWatcher {
         router_config: RouterConfig,
         migration_limit: u32,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
@@ -128,6 +131,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             chat_engine_factory,
+            prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
         }
@@ -465,6 +469,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config.clone()),
+                            self.prefill_load_estimator.clone(),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
@@ -506,6 +511,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.prefill_load_estimator.clone(),
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),

@@ -64,7 +64,6 @@ anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
@@ -74,7 +73,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.19.2", features = ["cuda-version-from-build-system", "fallback-latest"] }
+cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
@@ -115,7 +114,6 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-zmq = { version = "0.10" }
 tokio = { version = "=1.48.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
