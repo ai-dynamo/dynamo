@@ -7,6 +7,7 @@ use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use dashmap::DashSet;
+use dynamo_kv_router::PrefillLoadEstimator;
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -34,6 +35,7 @@ use crate::{
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
+            audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
@@ -73,6 +75,7 @@ pub struct ModelWatcher {
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
@@ -117,6 +120,7 @@ impl ModelWatcher {
         router_config: RouterConfig,
         migration_limit: u32,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
@@ -127,6 +131,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             chat_engine_factory,
+            prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
         }
@@ -464,6 +469,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config.clone()),
+                            self.prefill_load_estimator.clone(),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
@@ -474,8 +480,19 @@ impl ModelWatcher {
                 None
             };
 
-            // This is expensive, we are loading ~10MiB JSON, so only do it once
-            let tokenizer = card.tokenizer().context("tokenizer")?;
+            // Loading the tokenizer is expensive (~10 MiB JSON), so only do it
+            // once and only when a local pipeline actually needs it.  Models
+            // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
+            // they rely on a Python chat_engine_factory for tokenization.
+            // When a chat_engine_factory handles chat and no completions are
+            // needed, skip tokenizer loading entirely — even if the file exists.
+            let needs_rust_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_rust_tokenizer && card.has_tokenizer() {
+                Some(card.tokenizer().context("tokenizer")?)
+            } else {
+                None
+            };
 
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
@@ -494,6 +511,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.prefill_load_estimator.clone(),
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
@@ -538,6 +556,13 @@ impl ModelWatcher {
                 let chat_engine = if let Some(engine) = factory_engine {
                     engine
                 } else {
+                    let tk = tokenizer.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Model has no supported Rust tokenizer and no chat_engine_factory. \
+                             Use --dyn-chat-processor vllm/sglang or provide a supported \
+                             tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
+                        )
+                    })?;
                     entrypoint::build_routed_pipeline::<
                         NvCreateChatCompletionRequest,
                         NvCreateChatCompletionStreamResponse,
@@ -548,7 +573,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
-                        tokenizer.clone(),
+                        tk,
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
                         self.migration_limit,
@@ -561,34 +586,54 @@ impl ModelWatcher {
                 tracing::info!("Chat completions is ready");
             }
 
-            // Add completions engine only if the model supports completions.
+            // Add completions engine only if the model supports completions
+            // and we have a tokenizer (completions always uses the Rust preprocessor).
             if card.model_type.supports_completions() {
-                let formatter = PromptFormatter::no_op();
-                let PromptFormatter::OAI(formatter) = formatter;
-                let preprocessor =
-                    OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
-                        .context("OpenAIPreprocessor::new_with_parts")?;
-                let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(
-                    card,
-                    &client,
-                    self.manager.clone(),
-                    self.router_config.router_mode,
-                    worker_monitor,
-                    kv_chooser,
-                    preprocessor,
-                    tokenizer,
-                    prefill_chooser,
-                    self.router_config.enforce_disagg,
-                    self.migration_limit,
-                    self.metrics.clone(),
-                )
-                .await
-                .context("build_routed_pipeline_with_preprocessor")?;
-                worker_set.completions_engine = Some(completions_engine);
-                tracing::info!("Completions is ready");
+                if let Some(tk) = tokenizer {
+                    let formatter = PromptFormatter::no_op();
+                    let PromptFormatter::OAI(formatter) = formatter;
+                    let preprocessor =
+                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
+                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
+                        NvCreateCompletionRequest,
+                        NvCreateCompletionResponse,
+                    >(
+                        card,
+                        &client,
+                        self.manager.clone(),
+                        self.router_config.router_mode,
+                        worker_monitor,
+                        kv_chooser,
+                        preprocessor,
+                        tk,
+                        prefill_chooser,
+                        self.router_config.enforce_disagg,
+                        self.migration_limit,
+                        self.metrics.clone(),
+                    )
+                    .await
+                    .context("build_routed_pipeline_with_preprocessor")?;
+                    worker_set.completions_engine = Some(completions_engine);
+                    tracing::info!("Completions is ready");
+                } else {
+                    tracing::warn!(
+                        "Skipping completions engine: no Rust tokenizer available for this model"
+                    );
+                }
+            }
+
+            // Verify we built at least one serving engine. A Tokens model that
+            // ends up with no chat AND no completions engine (e.g. completions-only
+            // model with no tokenizer) should fail fast rather than register an
+            // empty WorkerSet that can't serve any requests.
+            if !worker_set.has_decode_engine() {
+                anyhow::bail!(
+                    "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
+                     but no serving engine could be built. Provide a working tokenizer config or \
+                     perform tokenization in the backend (ModelInput::Text).",
+                    card.name()
+                );
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
             // Case: Text + Embeddings
@@ -647,7 +692,19 @@ impl ModelWatcher {
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
 
-            // TODO: add audio models support
+            if card.model_type.supports_audios() {
+                let audios_router = PushRouter::<
+                    NvCreateAudioSpeechRequest,
+                    Annotated<NvAudioSpeechResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    self.router_config.router_mode,
+                    None,
+                    None,
+                )
+                .await?;
+                worker_set.audios_engine = Some(Arc::new(audios_router));
+            }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router = PushRouter::<
