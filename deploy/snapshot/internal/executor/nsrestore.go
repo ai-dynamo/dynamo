@@ -93,7 +93,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	// Apply rootfs diff inside the namespace (target root is /)
 	preCRIUStart := time.Now()
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
-		timings.preCRIUDuration = time.Since(preCRIUStart)
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
 
@@ -103,12 +102,10 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
-		timings.preCRIUDuration = time.Since(preCRIUStart)
 		return nil, 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
 
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
-		timings.preCRIUDuration = time.Since(preCRIUStart)
 		return nil, 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
 	timings.preCRIUDuration = time.Since(preCRIUStart)
@@ -122,7 +119,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	criuRestoreStart := time.Now()
 	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
 	if err != nil {
-		timings.criuRestoreDuration = time.Since(criuRestoreStart)
 		return nil, 0, err
 	}
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
@@ -130,7 +126,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	cudaStart := time.Now()
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
-		timings.cudaDuration = time.Since(cudaStart)
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)
 	}
 	log.V(1).Info("Restored process table snapshot",
@@ -155,7 +150,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if !m.CUDA.IsEmpty() {
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
-			timings.cudaDuration = time.Since(cudaStart)
 			return nil, 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
 		}
 		log.V(1).Info("Resolved manifest CUDA PIDs to current restore PIDs",
@@ -165,13 +159,10 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		)
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
 		if err != nil {
-			timings.cudaDuration = time.Since(cudaStart)
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
-		timings.cudaDuration = time.Since(cudaStart)
-	} else {
-		timings.cudaDuration = time.Since(cudaStart)
 	}
+	timings.cudaDuration = time.Since(cudaStart)
 
 	return timings, int(restoredPID), nil
 }

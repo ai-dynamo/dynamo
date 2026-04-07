@@ -52,6 +52,7 @@ type checkpointPhaseTimings struct {
 func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	phaseTimings := checkpointPhaseTimings{}
+	prepareStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
 	if strings.TrimSpace(req.CheckpointID) == "" {
@@ -71,8 +72,6 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-
-	prepareStart := time.Now()
 
 	// Phase 1: Inspect container state
 	state, err := inspectContainer(ctx, ctrd, log, req)

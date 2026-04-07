@@ -61,25 +61,23 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	nsrestoreDuration := inspectDuration + result.PreCRIUDuration + result.CRIURestoreDuration + result.CUDADuration
-	preCRIUDuration := inspectDuration + result.PreCRIUDuration
-	if !req.StartedAt.IsZero() {
-		nsrestoreDuration = time.Since(req.StartedAt)
-		preCRIUDuration = nsrestoreDuration - result.CRIURestoreDuration - result.CUDADuration
-		if preCRIUDuration < 0 {
-			preCRIUDuration = 0
-		}
-	}
+	restoreDuration := inspectDuration + result.PreCRIUDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
-		"nsrestore", map[string]any{
-			"duration": nsrestoreDuration.String(),
+		"restore", map[string]any{
+			"duration": restoreDuration.String(),
 			"phases": map[string]string{
-				"pre_criu_duration":     preCRIUDuration.String(),
+				"inspect_duration":      inspectDuration.String(),
+				"pre_criu_duration":     result.PreCRIUDuration.String(),
 				"criu_restore_duration": result.CRIURestoreDuration.String(),
 				"cuda_duration":         result.CUDADuration.String(),
 			},
 		},
 	)
+	if !req.StartedAt.IsZero() {
+		log.Info("Restore wall time from agent detection",
+			"started_to_restore_complete", time.Since(req.StartedAt),
+		)
+	}
 
 	// Validate restored process from the host side
 	validationStart := time.Now()
