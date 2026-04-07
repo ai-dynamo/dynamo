@@ -256,27 +256,44 @@ impl HealthCheckManager {
                 anyhow::anyhow!("No health check target found for {}", endpoint_subject)
             })?;
 
-        // Set the DP-rank counter for the DP-rank aware health checking
+        // Create the Endpoint directly from the Instance info
+        let namespace = self.drt.namespace(&target.instance.namespace)?;
+        let component = namespace.component(&target.instance.component)?;
+        let endpoint = component.endpoint(&target.instance.endpoint);
+
+        // Set the DP-rank counter for the DP-rank aware health checking.
         let current_dp_rank = {
+            let dp_size = payload
+                .get("dp_size")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1);
+
             let mut counters = self.dp_rank_counters.lock();
             let counter = counters.entry(endpoint_subject.to_string()).or_insert(0);
             let dp_rank = *counter;
-            *counter = counter.wrapping_add(1);
+            *counter = counter.wrapping_add(1) % dp_size;
             dp_rank
         };
 
         // Create DP-rank aware payload
         let mut dp_rank_aware_payload = payload.clone();
         if let Some(obj) = dp_rank_aware_payload.as_object_mut() {
-            let bootstrap_info = obj
+            let _bootstrap_info = obj
                 .entry("bootstrap_info")
                 .or_insert_with(|| serde_json::json!({}));
-            if let Some(bi_obj) = bootstrap_info.as_object_mut() {
-                bi_obj.insert(
+            if let Some(_obj) = _bootstrap_info.as_object_mut() {
+                _obj.insert(
                     "bootstrap_room".to_string(),
                     serde_json::json!(current_dp_rank),
                 );
-                bi_obj.insert("bootstrap_hcheck".to_string(), serde_json::json!(true));
+            }
+            let _routing = obj
+                .entry("routing")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(_obj) = _routing.as_object_mut() {
+                _obj.insert("dp_rank".to_string(), serde_json::json!(current_dp_rank));
             }
         }
 
@@ -284,11 +301,6 @@ impl HealthCheckManager {
             "Sending health check to {} (instance_id: {}, dp_rank: {})",
             endpoint_subject, target.instance.instance_id, current_dp_rank
         );
-
-        // Create the Endpoint directly from the Instance info
-        let namespace = self.drt.namespace(&target.instance.namespace)?;
-        let component = namespace.component(&target.instance.component)?;
-        let endpoint = component.endpoint(&target.instance.endpoint);
 
         // Get or create router for this endpoint
         let router = self

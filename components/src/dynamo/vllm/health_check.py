@@ -65,11 +65,16 @@ def _make_default_payload(
         "ignore_eos": False,
     }
 
+    parallel_config = {"dp_size": 1}
+    if engine_client is not None:
+        parallel_config["dp_size"] = engine_client.vllm_config.parallel_config.data_parallel_size
+
     if use_text_input:
         return {
             "prompt": "Test",
             **sampling_options,
             **stop_conditions,
+            **parallel_config,
         }
     else:
         bos_token_id = _get_bos_token_id_from_engine(engine_client)
@@ -77,6 +82,7 @@ def _make_default_payload(
             "token_ids": [bos_token_id],
             "sampling_options": sampling_options,
             "stop_conditions": stop_conditions,
+            **parallel_config,
         }
 
 
