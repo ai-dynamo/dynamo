@@ -33,8 +33,6 @@ DEFAULT_DEPLOY_TIMEOUT = 600       # 10 minutes for DGD rollout
 
 # Label applied to all test-managed DGDRs so they can be bulk-deleted on cleanup
 DGDR_TEST_LABEL_KEY = "test.dynamo/managed"
-DGDR_TEST_LABEL_VALUE = "true"
-DGDR_TEST_LABEL_SELECTOR = f"{DGDR_TEST_LABEL_KEY}={DGDR_TEST_LABEL_VALUE}"
 
 # DGD kind name and the fixed DGD name that the mocker profiler always generates
 DGD_KIND = "DynamoGraphDeployment"
@@ -168,6 +166,17 @@ def _dgdr_event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 
 
 @pytest.fixture(scope="session")
+def dgdr_test_label() -> str:
+    """Generate a unique label value for this test session to avoid cross-run cleanup races."""
+    return f"test-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture(scope="session")
+def dgdr_test_label_selector(dgdr_test_label: str) -> str:
+    return f"{DGDR_TEST_LABEL_KEY}={dgdr_test_label}"
+
+
+@pytest.fixture(scope="session")
 def managed_dgdr(dgdr_namespace: str, _dgdr_event_loop: asyncio.AbstractEventLoop) -> Generator[ManagedDGDR, None, None]:
     """Session-scoped async K8s client for DGDR operations."""
     mgr = ManagedDGDR(namespace=dgdr_namespace, loop=_dgdr_event_loop)
@@ -270,13 +279,18 @@ def _run_kubectl(args: List[str], check: bool = True, input: Optional[str] = Non
     """
     cmd = ["kubectl"] + args
     logger.debug("Running: %s", " ".join(cmd))
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-        input=input,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            input=input,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as e:
+        logger.error("kubectl timed out: %s", e)
+        pytest.fail(f"kubectl timed out after 60s: {e}")
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode, cmd, result.stdout, result.stderr
@@ -368,6 +382,8 @@ def dgdr_factory(
     dgdr_profiling_timeout: int,
     dgdr_deploy_timeout: int,
     dgdr_use_mocker: bool,
+    dgdr_test_label: str,
+    dgdr_test_label_selector: str,
 ):
     """
     A factory fixture that applies a DGDR manifest and ensures cleanup.
@@ -393,7 +409,7 @@ def dgdr_factory(
 
     def _cleanup_all_test_dgdrs() -> None:
         """Delete all DGDRs bearing the test-managed label (handles orphans from prior runs)."""
-        items = managed_dgdr.run(managed_dgdr.list(label_selector=DGDR_TEST_LABEL_SELECTOR))
+        items = managed_dgdr.run(managed_dgdr.list(label_selector=dgdr_test_label_selector))
         for item in items:
             item_name = item.get("metadata", {}).get("name", "")
             if item_name:
@@ -408,7 +424,7 @@ def dgdr_factory(
         # Stamp the test-managed label so orphan cleanup can find it
         manifest.setdefault("metadata", {})
         manifest["metadata"].setdefault("labels", {})
-        manifest["metadata"]["labels"][DGDR_TEST_LABEL_KEY] = DGDR_TEST_LABEL_VALUE
+        manifest["metadata"]["labels"][DGDR_TEST_LABEL_KEY] = dgdr_test_label
         # Inject mocker config if enabled
         if use_mocker:
             _inject_mocker_config(manifest)

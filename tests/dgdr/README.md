@@ -27,7 +27,7 @@ inference models with Dynamo.
 
 ## Prerequisites
 
-1. A running Kubernetes cluster with GPU nodes (or see [GPU-free mode](#gpu-free-mode-aic--mocker) below)
+1. A running Kubernetes cluster with GPU nodes (or see [GPU-free mode](#gpu-free-mocker-mode) below)
 2. The Dynamo operator installed (including CRDs and webhooks)
 3. `kubectl` configured and pointing at the cluster
 4. Python 3.10+ with `pytest` and `pyyaml` installed:
@@ -88,7 +88,7 @@ for deployment.  Covers all `gpu_0` and `gpu_1` tests (~45 tests); `gpu_8` tests
 excluded because they require a real 8-GPU node even in mocker mode.
 
 ```bash
-pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
+python3 -m pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
   --dgdr-namespace=default
 ```
 
@@ -104,14 +104,14 @@ injection and run against real hardware.  `gpu_8` tests additionally require an 
 
 ```bash
 # gpu_0 + gpu_1 tests on real GPUs (single-GPU node sufficient)
-pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
+python3 -m pytest tests/dgdr/ -m "gpu_0 or gpu_1" -v \
   --dgdr-namespace=dynamo-test \
   --dgdr-no-mocker \
   --dgdr-profiling-timeout=3600 \
   --dgdr-deploy-timeout=1800
 
 # Full nightly suite including 8-GPU tests
-pytest tests/dgdr/ -v \
+python3 -m pytest tests/dgdr/ -v \
   --dgdr-namespace=dynamo-test \
   --dgdr-no-mocker \
   --dgdr-pvc-name=model-cache \
@@ -133,13 +133,13 @@ Without `--dgdr-pvc-name`: 2 additional skips for the model-cache tests.
 
 ```bash
 # Validation + conversion tests only (no cluster setup required beyond CRDs)
-pytest tests/dgdr/ -m "gpu_0" -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/ -m "gpu_0" -v --dgdr-namespace=default
 
 # Pre-merge gate (GPU-free)
-pytest tests/dgdr/ -m "pre_merge" -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/ -m "pre_merge" -v --dgdr-namespace=default
 
 # Single test class
-pytest tests/dgdr/test_dgdr_v1beta1.py::TestDGDRAutoApply -v --dgdr-namespace=default
+python3 -m pytest tests/dgdr/test_dgdr_v1beta1.py::TestDGDRAutoApply -v --dgdr-namespace=default
 ```
 
 ## CLI options
