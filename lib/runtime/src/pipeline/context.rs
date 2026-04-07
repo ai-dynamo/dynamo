@@ -387,7 +387,14 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        // Do not regress from Killed to Stopped — Killed is terminal
+        self.tx.send_if_modified(|state| {
+            if *state == State::Killed {
+                return false;
+            }
+            *state = State::Stopped;
+            true
+        });
     }
 
     fn stop(&self) {
@@ -403,7 +410,14 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        // Do not regress from Killed to Stopped — Killed is terminal
+        self.tx.send_if_modified(|state| {
+            if *state == State::Killed {
+                return false;
+            }
+            *state = State::Stopped;
+            true
+        });
     }
 
     fn kill(&self) {
