@@ -99,6 +99,21 @@ except ImportError:
             return f"tcp://{self.host}:{self.port}"
 
 
+try:
+    from sglang.srt.sampling.sampling_params import SamplingParams  # noqa: F401
+except ImportError:
+    # Fallback for sglang <= 0.5.x where SamplingParams may be at a different path.
+    # Remove when min supported version has sglang.srt.sampling.sampling_params.
+    try:
+        from sglang.srt.sampling_params import (  # type: ignore[no-redef]  # noqa: F401
+            SamplingParams,
+        )
+    except ImportError:
+        from sglang.srt.managers.io_struct import (  # type: ignore[no-redef]  # noqa: F401
+            SamplingParams,
+        )
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """
     Enable SGLang's disjoint streaming output across ServerArgs field renames.
@@ -134,6 +149,7 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 __all__ = [
     "NetworkAddress",
+    "SamplingParams",
     "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
