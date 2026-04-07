@@ -487,16 +487,16 @@ def test_multiple_choices_n5(
         stream=True,
         timeout=180,
     )
-    assert response.status_code == 200, (
-        f"Streaming request failed with status {response.status_code}: {response.text}"
-    )
+    assert (
+        response.status_code == 200
+    ), f"Streaming request failed with status {response.status_code}: {response.text}"
 
     # Parse SSE events
     chunks = []
     for line in response.iter_lines(decode_unicode=True):
         if not line or not line.startswith("data: "):
             continue
-        data_str = line[len("data: "):]
+        data_str = line[len("data: ") :]
         if data_str == "[DONE]":
             break
         chunks.append(json.loads(data_str))
@@ -519,14 +519,22 @@ def test_multiple_choices_n5(
                 finished_indices.add(idx)
 
     # Verify all 5 choice indices appeared
-    assert all_indices == {0, 1, 2, 3, 4}, (
-        f"Expected indices {{0,1,2,3,4}}, got {all_indices}"
-    )
+    assert all_indices == {
+        0,
+        1,
+        2,
+        3,
+        4,
+    }, f"Expected indices {{0,1,2,3,4}}, got {all_indices}"
 
     # Verify all 5 choices finished
-    assert finished_indices == {0, 1, 2, 3, 4}, (
-        f"Expected all 5 choices to finish, only got {finished_indices}"
-    )
+    assert finished_indices == {
+        0,
+        1,
+        2,
+        3,
+        4,
+    }, f"Expected all 5 choices to finish, only got {finished_indices}"
 
     # Verify each choice produced some content
     for i in range(5):

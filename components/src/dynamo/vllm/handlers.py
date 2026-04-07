@@ -1428,7 +1428,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             prompt_tokens = None
 
-        completion_tokens = sum(len(output.token_ids) for output in request_output.outputs)
+        completion_tokens = sum(
+            len(output.token_ids) for output in request_output.outputs
+        )
 
         return {
             "prompt_tokens": prompt_tokens,
@@ -1596,7 +1598,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     choice_index = output.index
                     if choice_index in finished_choices:
                         continue
-                    num_output_tokens_so_far = output_tokens_per_choice.get(choice_index, 0)
+                    num_output_tokens_so_far = output_tokens_per_choice.get(
+                        choice_index, 0
+                    )
                     next_total_toks = len(output.token_ids)
                     out: Dict[str, Any] = {
                         "token_ids": output.token_ids[num_output_tokens_so_far:],
@@ -1614,8 +1618,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         out["top_logprobs"] = top_logprobs
 
                     if output.finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(output.finish_reason)
-                        out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                        out["finish_reason"] = normalize_finish_reason(
+                            output.finish_reason
+                        )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
                             embedding_sequence_length=embedding_sequence_length,
                         )
@@ -1905,7 +1913,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             continue
                         previous_text = previous_text_per_choice.get(choice_index, "")
                         # Calculate the delta text (new text since last chunk)
-                        delta_text = output.text[len(previous_text):]
+                        delta_text = output.text[len(previous_text) :]
                         previous_text_per_choice[choice_index] = output.text
 
                         # Skip if no new text and no finish_reason for this choice
@@ -1918,7 +1926,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "role": "assistant",
                                 "content": delta_text,
                             },
-                            "finish_reason": normalize_finish_reason(output.finish_reason),
+                            "finish_reason": normalize_finish_reason(
+                                output.finish_reason
+                            ),
                         }
                         choices.append(choice_data)
 
