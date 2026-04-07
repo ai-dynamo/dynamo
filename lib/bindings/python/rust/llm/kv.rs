@@ -30,6 +30,9 @@ use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
 
+use super::aic_callback::create_aic_prefill_load_estimator;
+use super::entrypoint::AicPerfConfig;
+
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
 }
@@ -231,11 +234,17 @@ impl WorkerMetricsPublisher {
     ///
     /// # Arguments
     /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
-    /// * `active_decode_blocks` - Number of active KV cache blocks
-    #[pyo3(signature = (dp_rank, active_decode_blocks))]
-    fn publish(&self, dp_rank: Option<u32>, active_decode_blocks: u64) -> PyResult<()> {
+    /// * `active_decode_blocks` - Scheduler-compatible active decode block count
+    /// * `kv_used_blocks` - Authoritative total KV blocks currently in use
+    #[pyo3(signature = (dp_rank=None, active_decode_blocks=None, kv_used_blocks=None))]
+    fn publish(
+        &self,
+        dp_rank: Option<u32>,
+        active_decode_blocks: Option<u64>,
+        kv_used_blocks: Option<u64>,
+    ) -> PyResult<()> {
         self.inner
-            .publish(dp_rank, active_decode_blocks)
+            .publish(dp_rank, active_decode_blocks, kv_used_blocks)
             .map_err(to_pyerr)
     }
 }
@@ -703,6 +712,7 @@ async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -766,6 +776,7 @@ async fn create_kv_router_from_endpoint(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
+            prefill_load_estimator,
             worker_type,
             model_name,
             enable_eagle,
@@ -888,12 +899,29 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
+        aic_perf_config: Option<&AicPerfConfig>,
     ) -> PyResult<Self> {
+        let prefill_load_estimator = aic_perf_config
+            .map(|config| {
+                Python::with_gil(|py| {
+                    create_aic_prefill_load_estimator(
+                        py,
+                        config.backend_name(),
+                        config.system(),
+                        config.model_path(),
+                        config.tp_size(),
+                        config.backend_version(),
+                    )
+                })
+            })
+            .transpose()
+            .map_err(to_pyerr)?;
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
             let client = endpoint.inner.client().await.map_err(to_pyerr)?;
@@ -916,6 +944,7 @@ impl KvRouter {
                 endpoint,
                 block_size,
                 Some(kv_router_config.inner()),
+                prefill_load_estimator,
             )
             .await?;
 

@@ -80,15 +80,20 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.9 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),  # actual nvidia-smi peak 3.9 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(
                 300
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -137,9 +142,19 @@ trtllm_configs = {
         name="aggregated_logprobs",
         directory=trtllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.8 GiB
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.8),  # actual nvidia-smi peak 3.8 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
             chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
@@ -360,9 +375,17 @@ trtllm_configs = {
             "17",
         ],
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 17.1 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
+            # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
+            # doesn't apply.  requested_trtllm_vram_gib maps to
+            # KvCacheConfig.max_gpu_total_bytes which has no effect on the
+            # diffusion engine itself, but the parallel scheduler requires one
+            # of the KV/VRAM markers to accept the test.  We set it to the
+            # profiled peak so the scheduler's VRAM budget is accurate.
+            pytest.mark.profiled_vram_gib(17.1),  # actual nvidia-smi peak 17.1 GiB
+            pytest.mark.requested_trtllm_vram_gib(17.1),
             pytest.mark.timeout(
                 600
             ),  # Video generation is slow even at small resolution
@@ -370,7 +393,7 @@ trtllm_configs = {
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=300,
-        delayed_start=60,  # Model loading takes time
+        delayed_start=5,
         request_payloads=[
             VideoGenerationPayload(
                 body={
