@@ -25,11 +25,12 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import ExitStack
 from dataclasses import asdict
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -69,7 +70,16 @@ from gpu_memory_service.client.gms_storage_client import (  # noqa: E402
     _RestorePipelineContext,
     _ShardWriter,
 )
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager  # noqa: E402
+from gpu_memory_service.client.session import _GMSClientSession  # noqa: E402
 from gpu_memory_service.cli.storage_runner import _build_parser  # noqa: E402
+from gpu_memory_service.common.protocol.messages import (  # noqa: E402
+    AllocateAndExportRequest,
+    AllocateResponse,
+)
+from gpu_memory_service.common.types import GrantedLockType, ServerState  # noqa: E402
+from gpu_memory_service.server.allocations import AllocationInfo  # noqa: E402
+from gpu_memory_service.server.gms import GMS  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -718,6 +728,111 @@ class TestRestoreReadGrouping:
             "shards/shard_0000.bin",
             "shards/shard_0001.bin",
         ]
+
+
+class TestAllocateAndExportRPC:
+    @pytest.mark.asyncio
+    async def test_server_allocate_and_export_returns_fd(self):
+        gms = object.__new__(GMS)
+        gms._sessions = MagicMock()
+        gms._sessions.state = ServerState.RW
+        gms._sessions.check_operation = MagicMock()
+        gms._allocations = MagicMock()
+        gms._events = deque()
+        gms._metadata = {}
+        gms._memory_layout_hash = ""
+
+        info = AllocationInfo(
+            allocation_id="alloc-0",
+            size=64,
+            aligned_size=64,
+            handle=77,
+            tag="weights",
+            layout_slot=3,
+            created_at=time.time(),
+        )
+        gms._allocations.allocate = AsyncMock(return_value=info)
+        gms._allocations.export_allocation.return_value = 901
+        gms._allocations.allocation_count = 1
+
+        response, fd, should_close = await gms.handle_request(
+            MagicMock(),
+            AllocateAndExportRequest(size=64, tag="weights"),
+            lambda: True,
+        )
+
+        gms._sessions.check_operation.assert_called_once()
+        gms._allocations.allocate.assert_called_once()
+        gms._allocations.export_allocation.assert_called_once_with("alloc-0")
+        assert response == AllocateResponse(
+            allocation_id="alloc-0",
+            size=64,
+            aligned_size=64,
+            layout_slot=3,
+        )
+        assert fd == 901
+        assert should_close is False
+
+    def test_session_allocate_and_export_requests_fd(self):
+        session = object.__new__(_GMSClientSession)
+        session._transport = MagicMock()
+
+        response = AllocateResponse(
+            allocation_id="alloc-1",
+            size=64,
+            aligned_size=64,
+            layout_slot=7,
+        )
+        session._transport.request_with_fd.return_value = (response, 123)
+
+        got_response, got_fd = session.allocate_and_export_info(64, "weights")
+
+        session._transport.request_with_fd.assert_called_once_with(
+            AllocateAndExportRequest(size=64, tag="weights"),
+            AllocateResponse,
+        )
+        assert got_response == response
+        assert got_fd == 123
+
+    def test_create_mapping_allocate_path_uses_fused_rpc(self):
+        manager = object.__new__(GMSClientMemoryManager)
+        manager.device = 0
+        manager.granularity = 64
+        manager._client = MagicMock()
+        manager._mappings = {}
+        manager._inverse_mapping = {}
+        manager._unmapped = False
+        manager._granted_lock_type = GrantedLockType.RW
+
+        manager._client.allocate_and_export_info.return_value = (
+            AllocateResponse(
+                allocation_id="alloc-2",
+                size=64,
+                aligned_size=64,
+                layout_slot=9,
+            ),
+            456,
+        )
+        manager._client.export = MagicMock()
+
+        with (
+            patch.object(manager, "reserve_va", return_value=0x12340000) as reserve_va,
+            patch.object(manager, "map_va") as map_va,
+        ):
+            va = manager.create_mapping(size=64, tag="weights")
+
+        manager._client.allocate_and_export_info.assert_called_once_with(64, "weights")
+        manager._client.export.assert_not_called()
+        reserve_va.assert_called_once_with(64)
+        map_va.assert_called_once_with(
+            456,
+            0x12340000,
+            64,
+            "alloc-2",
+            "weights",
+            9,
+        )
+        assert va == 0x12340000
 
 
 # ===========================================================================

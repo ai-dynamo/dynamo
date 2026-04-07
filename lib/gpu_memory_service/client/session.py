@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.common.protocol.messages import (
+    AllocateAndExportRequest,
     AllocateRequest,
     AllocateResponse,
     CommitRequest,
@@ -126,6 +127,20 @@ class _GMSClientSession:
     def allocate(self, size: int, tag: str = "default") -> Tuple[str, int]:
         response = self.allocate_info(size=size, tag=tag)
         return response.allocation_id, response.aligned_size
+
+    def allocate_and_export_info(
+        self, size: int, tag: str = "default"
+    ) -> Tuple[AllocateResponse, int]:
+        response, fd = self._transport.request_with_fd(
+            AllocateAndExportRequest(size=size, tag=tag),
+            AllocateResponse,
+        )
+        if fd < 0:
+            raise RuntimeError(
+                "GMS allocate_and_export returned no FD "
+                f"for size={size}, tag={tag}"
+            )
+        return response, fd
 
     def export(self, allocation_id: str) -> int:
         response, fd = self._transport.request_with_fd(
