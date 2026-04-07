@@ -38,7 +38,7 @@ on:
       AZURE_ACR_PASSWORD:
         required: true
 
-jobs:  
+jobs:
   compliance:
     strategy:
       fail-fast: false

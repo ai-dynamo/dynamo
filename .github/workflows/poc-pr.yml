@@ -332,7 +332,7 @@ jobs:
       gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
-  
+
   planner-test:
     name: planner Test
     needs: [changed-files, planner-build]
@@ -439,7 +439,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.  
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
 
@@ -455,7 +455,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.  
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
 
