@@ -2747,9 +2747,10 @@ func TestReconcileRollingUpdate_CompletedGCSweep_NoOldDCDs(t *testing.T) {
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
 }
 
-func TestReconcileRollingUpdate_StuckDetection_NoAnnotationWrite(t *testing.T) {
-	// Stuck case: hashes match but phase is InProgress. Should force-complete in memory
-	// without calling r.Update() (annotation is already correct).
+func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate(t *testing.T) {
+	// Stuck case: hashes match but phase is InProgress (e.g., operator restarted between
+	// annotation write and status persistence). Should call completeRollingUpdate which
+	// cleans up old DCDs, updates annotation, and sets Completed.
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill},
 		"decode":  {ComponentType: consts.ComponentTypeDecode},
@@ -2771,7 +2772,7 @@ func TestReconcileRollingUpdate_StuckDetection_NoAnnotationWrite(t *testing.T) {
 	// UpdatedServices should contain all worker services
 	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedServices, "prefill")
 	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedServices, "decode")
-	// Annotation should remain unchanged (no r.Update() call)
+	// Annotation should still have the correct hash
 	assert.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 }
 
