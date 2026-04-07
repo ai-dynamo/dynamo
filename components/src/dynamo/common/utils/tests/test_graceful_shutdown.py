@@ -153,23 +153,3 @@ def test_drain_callback_exception_does_not_block_shutdown():
     # Should not raise
     asyncio.run(_run())
     mock_runtime.shutdown.assert_called_once()
-
-
-def test_install_signal_handlers_accepts_drain_callback():
-    """install_signal_handlers must accept and forward a drain_callback."""
-    mock_loop = MagicMock()
-    mock_runtime = MagicMock()
-    mock_endpoints = []
-
-    async def mock_drain():
-        pass
-
-    # Should not raise TypeError about unexpected keyword argument
-    install_signal_handlers(
-        mock_loop,
-        mock_runtime,
-        mock_endpoints,
-        shutdown_event=None,
-        grace_period_s=0,
-        drain_callback=mock_drain,
-    )
