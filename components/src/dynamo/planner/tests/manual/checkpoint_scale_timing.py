@@ -31,7 +31,6 @@ import argparse
 import datetime
 import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -764,9 +763,8 @@ def _deploy_snapshot_chart(
     else:
         ok("snapshot-agent DaemonSet ready.")
 
-    # Annotate the PVC so helm uninstall does not delete it.  The binaries we
-    # stage below are expensive to copy (37 MB nsrestore + criu deps) and the
-    # checkpoint data itself must survive cleanup between benchmark runs.
+    # Annotate the PVC so helm uninstall does not delete it.  The checkpoint
+    # data itself must survive cleanup between benchmark runs.
     _kubectl(
         "annotate",
         "pvc",
@@ -777,380 +775,6 @@ def _deploy_snapshot_chart(
         ns,
         check=False,
     )
-
-    _stage_restore_binaries(ns, release, ds_name)
-
-
-def _stage_restore_binaries(ns: str, release: str, ds_name: str) -> None:
-    """Copy nsrestore, criu (+ libs), and cuda-checkpoint from an agent pod to the
-    shared snapshot PVC at /checkpoints/.
-
-    These binaries must be accessible from within the vLLM container's mount
-    namespace during CRIU restore.  The PVC is mounted at /checkpoints/ in both
-    the agent and the vLLM worker containers, making it the only path visible in
-    both namespaces without modifying the vLLM image.
-
-    Also updates snapshot-agent-config to point binaryPath / nsRestorePath / libDir
-    at the PVC-staged paths so that new checkpoints are created with the correct
-    paths baked into the manifest (avoiding the need to patch manifests later).
-    """
-    # Find any ready agent pod (retry for up to 60s in case rollout just completed).
-    agent_pod = ""
-    for _ in range(6):
-        r = subprocess.run(
-            [
-                "kubectl",
-                "get",
-                "pods",
-                "-n",
-                ns,
-                "-l",
-                f"app.kubernetes.io/instance={release}",
-                "--field-selector=status.phase=Running",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        agent_pod = r.stdout.strip()
-        if agent_pod:
-            break
-        time.sleep(10)
-    if not agent_pod:
-        warn("No running snapshot-agent pod found — skipping binary staging.")
-        return
-
-    # Idempotent: skip if all required binaries are already staged AND nsrestore
-    # matches the agent's version (guards against stale binaries from a different agent image).
-    chk = _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "test -x /checkpoints/nsrestore && "
-        "test -x /checkpoints/criu && "
-        "test -x /checkpoints/cuda-checkpoint && "
-        "test -x /checkpoints/cuda-checkpoint-helper && "
-        "[ \"$(md5sum /checkpoints/nsrestore | cut -d' ' -f1)\" = "
-        "\"$(md5sum /usr/local/bin/nsrestore | cut -d' ' -f1)\" ]",
-        check=False,
-    )
-    if chk.returncode == 0:
-        ok(
-            "Restore binaries already staged to PVC (nsrestore version matches) — skipping copy."
-        )
-        if _update_agent_config_paths(ns, release):
-            # Config changed — restart agents so they pick up the new paths.
-            _kubectl(
-                "rollout", "restart", f"daemonset/{ds_name}", "-n", ns, check=False
-            )
-            _kubectl(
-                "rollout",
-                "status",
-                f"daemonset/{ds_name}",
-                "-n",
-                ns,
-                "--timeout=120s",
-                check=False,
-            )
-            ok("snapshot-agent DaemonSet restarted with updated config.")
-        return
-
-    step("Staging restore binaries to snapshot PVC (/checkpoints/) ...")
-
-    # nsrestore: statically-linked Go binary, copy directly.
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "cp /usr/local/bin/nsrestore /checkpoints/nsrestore && chmod +x /checkpoints/nsrestore",
-    )
-
-    # criu: dynamically linked — bundle all shared-library deps alongside it and
-    # use a wrapper script that sets LD_LIBRARY_PATH before exec-ing the real binary.
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "cp /usr/local/sbin/criu /checkpoints/criu-bin && chmod +x /checkpoints/criu-bin",
-    )
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "mkdir -p /checkpoints/lib && "
-        "ldd /checkpoints/criu-bin | grep -oP '/[^ ]+\\.so[^ ]*' | "
-        "xargs -I{} cp -L {} /checkpoints/lib/ 2>/dev/null || true",
-    )
-    wrapper = '#!/bin/bash\nLD_LIBRARY_PATH=/checkpoints/lib exec /checkpoints/criu-bin "$@"\n'
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        f"printf {shlex.quote(wrapper)} > /checkpoints/criu && chmod +x /checkpoints/criu",
-    )
-
-    # CRIU CUDA plugin (only libc dependency — safe to use from inside container).
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "mkdir -p /checkpoints/criu-lib && "
-        "cp /usr/local/lib/criu/cuda_plugin.so /checkpoints/criu-lib/",
-    )
-
-    # cuda-checkpoint + cuda-checkpoint-helper: stored on PVC so
-    # _patch_checkpoint_rootfs_with_cuda_checkpoint can inject both into each
-    # checkpoint's rootfs-diff.tar after the checkpoint is taken.
-    _kubectl(
-        "exec",
-        agent_pod,
-        "-n",
-        ns,
-        "--",
-        "sh",
-        "-c",
-        "cp /usr/local/sbin/cuda-checkpoint /checkpoints/cuda-checkpoint && "
-        "chmod +x /checkpoints/cuda-checkpoint && "
-        "cp /usr/local/bin/cuda-checkpoint-helper /checkpoints/cuda-checkpoint-helper && "
-        "chmod +x /checkpoints/cuda-checkpoint-helper",
-    )
-
-    ok("Restore binaries staged.")
-
-    _update_agent_config_paths(ns, release)
-
-    # Restart agents to pick up the updated config.
-    _kubectl("rollout", "restart", f"daemonset/{ds_name}", "-n", ns, check=False)
-    _kubectl(
-        "rollout",
-        "status",
-        f"daemonset/{ds_name}",
-        "-n",
-        ns,
-        "--timeout=120s",
-        check=False,
-    )
-    ok("snapshot-agent DaemonSet restarted with updated config.")
-
-
-def _update_agent_config_paths(ns: str, release: str) -> bool:
-    """Returns True if the ConfigMap was actually modified."""
-    """Patch the snapshot-agent ConfigMap to use PVC-staged binary paths.
-
-    This ensures:
-    - nsRestorePath → /checkpoints/nsrestore (used by the agent to launch nsrestore
-      via nsenter into the container's namespace)
-    - binaryPath → /checkpoints/criu (wrapper script; also baked into checkpoint
-      manifests so restore uses the same path)
-    - libDir → /checkpoints/criu-lib (for cuda_plugin.so; written to criu.conf
-      during dump so restore finds the plugin automatically)
-
-    The Helm chart names the ConfigMap "{release}-config" (e.g. dynamo-snapshot-config).
-    """
-    cm_name = f"{release}-config"
-    r = subprocess.run(
-        [
-            "kubectl",
-            "get",
-            "configmap",
-            cm_name,
-            "-n",
-            ns,
-            "-o",
-            "jsonpath={.data.config\\.yaml}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0 or not r.stdout.strip():
-        warn(f"{cm_name} ConfigMap not found — skipping config patch.")
-        return False
-
-    config_yaml = r.stdout
-    updated = config_yaml
-    # Handle both quoted and unquoted variants emitted by different chart versions.
-    replacements = [
-        (
-            'nsRestorePath: "/usr/local/bin/nsrestore"',
-            "nsRestorePath: /checkpoints/nsrestore",
-        ),
-        (
-            "nsRestorePath: /usr/local/bin/nsrestore",
-            "nsRestorePath: /checkpoints/nsrestore",
-        ),
-        ('binaryPath: "/usr/local/sbin/criu"', "binaryPath: /checkpoints/criu"),
-        ("binaryPath: /usr/local/sbin/criu", "binaryPath: /checkpoints/criu"),
-        ('libDir: ""', "libDir: /checkpoints/criu-lib"),
-    ]
-    for old, new in replacements:
-        updated = updated.replace(old, new)
-
-    # Ensure storage.basePath is present (required by newer agent images).
-    if "storage:" not in updated:
-        updated = "storage:\n  basePath: /checkpoints\n\n" + updated
-
-    if updated == config_yaml:
-        info(f"{cm_name} already uses /checkpoints/ paths — no update needed.")
-        return False
-
-    patch = json.dumps({"data": {"config.yaml": updated}})
-    subprocess.run(
-        [
-            "kubectl",
-            "patch",
-            "configmap",
-            cm_name,
-            "-n",
-            ns,
-            "--type=merge",
-            "-p",
-            patch,
-        ],
-        check=True,
-    )
-    ok(f"{cm_name} updated to use /checkpoints/ paths.")
-    return True
-
-
-def _patch_checkpoint_rootfs_with_cuda_checkpoint(
-    ns: str, ckpt_name: str, snapshot_release: str = "dynamo-snapshot"
-) -> None:
-    """Inject restore binaries into a checkpoint's rootfs-diff.tar.
-
-    The agent enters the target container's mount namespace and runs nsrestore
-    from within that namespace. If the vllm-runtime image has a stale (schwinns)
-    nsrestore baked in, it will fail on Janelle-format checkpoints. We inject the
-    agent's nsrestore into rootfs-diff.tar so it overrides the image-baked version.
-
-    Also injects cuda-checkpoint and cuda-checkpoint-helper, which nsrestore needs
-    for the CUDA state restore step.
-
-    All binaries are pre-staged to /checkpoints/ by _stage_restore_binaries.
-
-    ckpt_name is the DynamoCheckpoint CR name, e.g. "checkpoint-3ae84b0cfcfd489e".
-    The PVC directory uses just the hash portion after "checkpoint-".
-    """
-    r = subprocess.run(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            ns,
-            "-l",
-            f"app.kubernetes.io/instance={snapshot_release}",
-            "--field-selector=status.phase=Running",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    agent_pod = r.stdout.strip()
-    if not agent_pod:
-        warn("No running snapshot-agent pod — cannot patch checkpoint rootfs-diff.tar.")
-        return
-
-    # The PVC directory is named after the nvidia.com/snapshot-checkpoint-id label value
-    # (which the script sets to "1"), not the CR hash. Find rootfs-diff.tar by searching.
-    find_r = subprocess.run(
-        [
-            "kubectl",
-            "exec",
-            agent_pod,
-            "-n",
-            ns,
-            "--",
-            "sh",
-            "-c",
-            "find /checkpoints -name rootfs-diff.tar -maxdepth 4 2>/dev/null",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    tar_paths = [p.strip() for p in find_r.stdout.strip().splitlines() if p.strip()]
-    if not tar_paths:
-        warn("No rootfs-diff.tar found on PVC — cannot inject cuda binaries.")
-        return
-
-    ckpt_label = ckpt_name[:24]
-    for tar_path in tar_paths:
-        # Idempotent: skip if already injected (check for nsrestore).
-        chk = _kubectl(
-            "exec",
-            agent_pod,
-            "-n",
-            ns,
-            "--",
-            "sh",
-            "-c",
-            f"tar -tf {tar_path} 2>/dev/null | grep -q 'usr/local/bin/nsrestore'",
-            check=False,
-        )
-        if chk.returncode == 0:
-            info(f"nsrestore already in {tar_path} — skipping.")
-            continue
-
-        step(f"Injecting restore binaries into {tar_path} ({ckpt_label}) ...")
-        # Use extract→add→re-create rather than tar -rf (append) because -rf requires
-        # seekable files and fails with "bad fd" on network-backed PVCs (NFS/Ceph).
-        # Also injects nsrestore so the agent's version overrides any stale one in the
-        # vllm-runtime image (schwinns vs Janelle format incompatibility).
-        result = _kubectl(
-            "exec",
-            agent_pod,
-            "-n",
-            ns,
-            "--",
-            "sh",
-            "-c",
-            f"set -e && "
-            f"rm -rf /tmp/ckpt-inject && "
-            f"mkdir -p /tmp/ckpt-inject && "
-            f"tar -xf {tar_path} -C /tmp/ckpt-inject 2>/dev/null || true && "
-            f"mkdir -p /tmp/ckpt-inject/usr/local/sbin /tmp/ckpt-inject/usr/local/bin && "
-            f"cp /checkpoints/nsrestore /tmp/ckpt-inject/usr/local/bin/nsrestore && "
-            f"chmod +x /tmp/ckpt-inject/usr/local/bin/nsrestore && "
-            f"cp /checkpoints/cuda-checkpoint /tmp/ckpt-inject/usr/local/sbin/cuda-checkpoint && "
-            f"chmod +x /tmp/ckpt-inject/usr/local/sbin/cuda-checkpoint && "
-            f"cp /checkpoints/cuda-checkpoint-helper /tmp/ckpt-inject/usr/local/bin/cuda-checkpoint-helper && "
-            f"chmod +x /tmp/ckpt-inject/usr/local/bin/cuda-checkpoint-helper && "
-            f"tar -cf {tar_path}.new -C /tmp/ckpt-inject . && "
-            f"mv {tar_path}.new {tar_path} && "
-            f"rm -rf /tmp/ckpt-inject",
-            check=False,
-        )
-        if result.returncode != 0:
-            warn(
-                f"Failed to inject restore binaries into {tar_path} (exit {result.returncode})."
-            )
-        else:
-            ok(f"Restore binaries injected into {tar_path}.")
 
 
 def _apply_crds() -> None:
@@ -1571,10 +1195,8 @@ def build_dgdr_yaml(cfg: dict, phase_mode: str = "auto") -> str:
     ns = cfg["namespace"]
     image = cfg[
         "image"
-    ]  # vllm-runtime: used for spec.image, profiler, planner, workers
-    frontend_image = _derive_frontend_image(
-        image
-    )  # dynamo-frontend: used for Frontend service only
+    ]  # placeholder image: used for spec.image, profiler, planner, workers
+    frontend_image = cfg.get("frontend_image") or _derive_frontend_image(image)
     ngc_secret = cfg["ngc_secret"]
     hf_secret = cfg["hf_secret"]
     hf_cache_pvc = cfg["hf_cache_pvc"]
@@ -1729,6 +1351,7 @@ def build_dgdr_yaml(cfg: dict, phase_mode: str = "auto") -> str:
                           persistentVolumeClaim:
                             claimName: {hf_cache_pvc}
                       mainContainer:
+                        image: {image}
 {tp_args_lines}                        env:
                           - name: HF_HOME
                             value: /home/dynamo/.cache/huggingface
@@ -1750,6 +1373,7 @@ def build_dgdr_yaml(cfg: dict, phase_mode: str = "auto") -> str:
                           persistentVolumeClaim:
                             claimName: {hf_cache_pvc}
                       mainContainer:
+                        image: {image}
 {tp_args_lines}                        env:
                           - name: HF_HOME
                             value: /home/dynamo/.cache/huggingface
@@ -1821,73 +1445,6 @@ def detect_prometheus_endpoint() -> str:
 # ---------------------------------------------------------------------------
 # Benchmark scenarios
 # ---------------------------------------------------------------------------
-
-
-def _patch_checkpoint_job_id_label(ns: str, stop_event: threading.Event) -> None:
-    """Background thread: add nvidia.com/snapshot-checkpoint-id=1 to checkpoint/restore pods.
-
-    The new snapshot-agent image requires this label on both checkpoint source pods and
-    restore target pods, but the operator does not set it automatically.
-    Polls every 10s for pods missing the label and patches them.
-    """
-    labeled: set[str] = set()
-    selectors = [
-        "nvidia.com/snapshot-is-checkpoint-source=true",
-        "nvidia.com/snapshot-is-restore-target=true",
-    ]
-    while not stop_event.is_set():
-        try:
-            for selector in selectors:
-                r = subprocess.run(
-                    [
-                        "kubectl",
-                        "get",
-                        "pods",
-                        "-n",
-                        ns,
-                        "-l",
-                        selector,
-                        "-o",
-                        "json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-                if r.returncode != 0:
-                    continue
-                items = json.loads(r.stdout).get("items", [])
-                for pod in items:
-                    pod_name = pod["metadata"]["name"]
-                    if pod_name in labeled:
-                        continue
-                    labels_on_pod = pod.get("metadata", {}).get("labels", {})
-                    if "nvidia.com/snapshot-checkpoint-id" not in labels_on_pod:
-                        patch_r = subprocess.run(
-                            [
-                                "kubectl",
-                                "label",
-                                "pod",
-                                pod_name,
-                                "-n",
-                                ns,
-                                "nvidia.com/snapshot-checkpoint-id=1",
-                                "--overwrite",
-                            ],
-                            capture_output=True,
-                            text=True,
-                        )
-                        if patch_r.returncode == 0:
-                            info(
-                                f"Added nvidia.com/snapshot-checkpoint-id=1 to pod {pod_name}"
-                            )
-                            labeled.add(pod_name)
-                        else:
-                            warn(
-                                f"Failed to label pod {pod_name}: {patch_r.stderr.strip()}"
-                            )
-        except Exception as e:
-            warn(f"[checkpoint-id-labeler] {e}")
-        stop_event.wait(10)
 
 
 def wait_for_checkpoint_ready(
@@ -2148,17 +1705,6 @@ def run_all_scenarios(cfg: dict, args, workdir: Path) -> list[dict]:
     table = _LiveTable(labels)
     print()  # blank line before live table
 
-    # Start background labeler for the full benchmark duration.
-    # The new snapshot-agent requires nvidia.com/snapshot-checkpoint-id=1 on both
-    # checkpoint source and restore target pods, but the operator doesn't set it.
-    labeler_stop = threading.Event()
-    labeler_thread = threading.Thread(
-        target=_patch_checkpoint_job_id_label,
-        args=(cfg["namespace"], labeler_stop),
-        daemon=True,
-    )
-    labeler_thread.start()
-
     # ── Phase 1: Sequential deployment + checkpoint wait ─────────────────────
     # Deploy cold first, then snap.  Running both profiling jobs in parallel
     # causes GPU contention: cold's profiling job occupies the GPU while snap's
@@ -2189,11 +1735,6 @@ def run_all_scenarios(cfg: dict, args, workdir: Path) -> list[dict]:
                     )
                     table.update(dep["label"], f"checkpoint ready ({ckpt_name[:16]})")
                     info(f"Checkpoint ready: {ckpt_name!r}")
-                    _patch_checkpoint_rootfs_with_cuda_checkpoint(
-                        dep["cfg"]["namespace"],
-                        ckpt_name,
-                        dep["cfg"].get("snapshot_release", "dynamo-snapshot"),
-                    )
                 except TimeoutError as e:
                     warn(
                         f"[{dep['label']}] {e} — will scale up without checkpoint restore"
@@ -2208,7 +1749,6 @@ def run_all_scenarios(cfg: dict, args, workdir: Path) -> list[dict]:
 
     if not deployed:
         table.stop()
-        labeler_stop.set()
         warn("All scenarios failed during deployment.")
         return []
 
@@ -2233,7 +1773,6 @@ def run_all_scenarios(cfg: dict, args, workdir: Path) -> list[dict]:
                 )
 
     table.stop()
-    labeler_stop.set()
     return results
 
 
@@ -2308,8 +1847,14 @@ def parse_args():
         "--image",
         default=os.getenv("IMAGE"),
         required=not os.getenv("IMAGE"),
-        help="vllm-runtime image (used for spec.image/profiler, Planner, and workers). "
-        "The dynamo-frontend image is derived automatically from the same tag.",
+        help="Worker image (used for spec.image/profiler, Planner, and workers). "
+        "When using a placeholder image, pass it here and also set --frontend-image.",
+    )
+    p.add_argument(
+        "--frontend-image",
+        default=os.getenv("FRONTEND_IMAGE"),
+        help="Frontend service image. Defaults to deriving dynamo-frontend:<tag> from --image. "
+        "Set explicitly when --image is a placeholder or non-standard image.",
     )
     p.add_argument("--namespace", default=DEFAULTS["namespace"])
     p.add_argument("--model", default=DEFAULTS["model"])
@@ -2427,6 +1972,7 @@ def main():
 
     cfg = {
         "image": args.image,
+        "frontend_image": args.frontend_image or None,
         "namespace": ns,
         "model": args.model,
         "gpu_count": args.gpu_count,
