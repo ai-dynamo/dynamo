@@ -160,6 +160,8 @@ navigation:
             path: observability/tracing.md
           - page: Logging
             path: observability/logging.md
+          - page: GPU System Monitor
+            path: observability/gpu-system-monitor.md
       - section: Fault Tolerance
         path: fault-tolerance/README.md
         contents:

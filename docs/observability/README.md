@@ -44,6 +44,12 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 **Variables marked with † are shared across multiple observability systems.**
 
+## Live Monitoring
+
+| Guide | Description |
+|-------|-------------|
+| [GPU System Monitor](gpu-system-monitor.md) | Real-time per-process GPU/CPU/disk/network dashboard (single-file web server, no external dependencies) |
+
 ## Developer Guides
 
 | Guide | Description | Environment Variables to Control |

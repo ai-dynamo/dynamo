@@ -25,21 +25,43 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
 import multiprocessing
 import os
 import signal
 import socketserver
+import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
 
-import psutil
-import pynvml
-from flask import Flask, Response
-from flask import request as flask_request
-from flask_socketio import SocketIO
+_REQUIRED_PACKAGES = {
+    "flask": "flask",
+    "flask_socketio": "flask-socketio",
+    "psutil": "psutil",
+    "pynvml": "nvidia-ml-py",
+}
+_missing = [
+    pypi
+    for mod, pypi in _REQUIRED_PACKAGES.items()
+    if importlib.util.find_spec(mod) is None
+]
+if _missing:
+    print(
+        f"gpu_monitor: missing packages: {', '.join(_missing)}\n"
+        f"This tool is meant to run on the HOST machine (not inside a container).\n"
+        f"Install with:\n\n  pip install {' '.join(_missing)}\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+import psutil  # noqa: E402
+import pynvml  # noqa: E402
+from flask import Flask, Response  # noqa: E402
+from flask import request as flask_request  # noqa: E402
+from flask_socketio import SocketIO  # noqa: E402
 
 HAS_NVML = False
 try:
