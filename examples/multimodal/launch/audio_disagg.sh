@@ -12,6 +12,8 @@ source "$SCRIPT_DIR/../../common/gpu_utils.sh"
 MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
 PROMPT_TEMPLATE=""
 PROVIDED_PROMPT_TEMPLATE=""
+# Pass-through vLLM CLI for components/worker.py only. Only tests/serve/test_vllm.py
+# (multimodal_audio_*) passes extras today; docs/manual launch leaves EXTRA_ARGS empty.
 # Extra arguments are passed through to vLLM workers (e.g. --max-model-len, --gpu-memory-utilization)
 EXTRA_ARGS=()
 

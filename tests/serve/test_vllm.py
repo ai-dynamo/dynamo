@@ -585,8 +585,7 @@ vllm_configs = {
             )
         ],
     ),
-    # Audio multimodal tests for nightly CI pipeline
-    # These tests validate audio inference capabilities with Qwen2-Audio model
+    # Audio multimodal: nightly multi-GPU CI (vllm + gpu_2|gpu_4); not pre_merge on PR.
     "multimodal_audio_agg": VLLMConfig(
         name="multimodal_audio_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
@@ -657,6 +656,7 @@ vllm_configs = {
             )
         ],
     ),
+    # Multimodal tool calling: nightly single-GPU (vllm + gpu_1); not pre_merge on PR.
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
@@ -885,6 +885,10 @@ def test_multimodal_b64(
 
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
+
+    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (gpu_2 without the
+    gpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
+    ``HF_HUB_OFFLINE=1``.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
@@ -929,7 +933,6 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
-@pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
@@ -943,6 +946,10 @@ def test_multimodal_b64_frontend_decoding(
     This exercises the Rust frontend image decode + NIXL RDMA transfer path
     with inline base64 data: URIs (not HTTP URLs). Verifies that the
     strip_inline_data_urls optimization does not break correctness.
+
+    HF predownload: same model is already listed via ``@pytest.mark.model`` on
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + gpu_1), so no
+    extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 
