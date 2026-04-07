@@ -126,9 +126,9 @@ use level_zero as ze;
 // Same binary loaded by kvbm-physical ze/mod.rs at runtime.
 // ---------------------------------------------------------------------------
 static VECTORIZED_COPY_SPIRV: &[u8] =
-    include_bytes!("../sycl/vectorized_copy_kernel.spv");
+    include_bytes!("../opencl/vectorized_copy.spv");
 
-const COPY_KERNEL_NAME: &str = "__sycl_kernel_kvbm_vectorized_copy";
+const COPY_KERNEL_NAME: &str = "vectorized_copy";
 const COPY_WG_SIZE: u32 = 128;
 const COPY_MAX_WGS: u32 = 65535;
 
@@ -499,7 +499,8 @@ fn execute_vectorized(
     ptr_array_bytes: usize,
     num_copies: usize,
 ) {
-    // Upload pointer arrays on the same CCS queue (tiny, few KB).
+    // Upload pointer arrays on the same ImmediateCommandList with CCS
+    // (given tiny, few KB, only limited benefit via BCS).
     cmd_compute
         .append_memcpy(
             src_addrs_dev.as_mut_ptr(),
@@ -613,7 +614,7 @@ fn run_benchmark(
         let k = kernel.expect("vectorized backend requires kernel");
         let src_ptr = src_addrs_dev.as_ref().unwrap().as_mut_ptr() as u64;
         let dst_ptr = dst_addrs_dev.as_ref().unwrap().as_mut_ptr() as u64;
-        let copy_sz = copy_size;
+        let copy_sz = copy_size as u64;
         let n_pairs = num_copies as i32;
         k.set_arg(0, &src_ptr).expect("arg0");
         k.set_arg(1, &dst_ptr).expect("arg1");
