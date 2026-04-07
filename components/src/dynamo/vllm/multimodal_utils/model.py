@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -51,6 +53,7 @@ class SupportedModels:
     QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
     QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
     QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
+    KIMI_K2_5 = "moonshotai/Kimi-K2.5"
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -122,6 +125,24 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
     return normalized_name == normalized_supported
 
 
+@lru_cache(maxsize=64)
+def _load_local_model_config(model_name: str) -> Dict[str, Any] | None:
+    """Load a local Hugging Face config.json when the model path is available."""
+    model_path = Path(model_name)
+    config_path = (
+        model_path if model_path.name == "config.json" else model_path / "config.json"
+    )
+
+    if not config_path.exists() or not config_path.is_file():
+        return None
+
+    try:
+        return json.loads(config_path.read_text())
+    except Exception as exc:  # pragma: no cover - best effort metadata lookup
+        logger.debug("Failed to read model config from %s: %s", config_path, exc)
+        return None
+
+
 # List of all Qwen VL model variants for easy extension
 QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_VL_2B,
@@ -140,6 +161,22 @@ QWEN_VL_MODELS = [
 ]
 
 
+QWEN_VL_MODEL_TYPES = {
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "qwen3_vl",
+    "qwen3_5_moe",
+}
+
+
+QWEN_VL_ARCHITECTURES = {
+    "qwen2vlforconditionalgeneration",
+    "qwen2_5vlforconditionalgeneration",
+    "qwen3vlforconditionalgeneration",
+    "qwen3_5moeforconditionalgeneration",
+}
+
+
 def is_qwen_vl_model(model_name: str) -> bool:
     """
     Check if a model is any Qwen VL variant.
@@ -150,9 +187,58 @@ def is_qwen_vl_model(model_name: str) -> bool:
     Returns:
         True if the model is a Qwen VL variant, False otherwise
     """
-    return any(
-        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
-    )
+    if any(is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS):
+        return True
+
+    config = _load_local_model_config(model_name)
+    if config is None or "vision_config" not in config:
+        return False
+
+    model_type = str(config.get("model_type", "")).lower()
+    if model_type in QWEN_VL_MODEL_TYPES:
+        return True
+
+    architectures = {
+        str(arch).lower() for arch in config.get("architectures", []) if arch
+    }
+    return any(arch in QWEN_VL_ARCHITECTURES for arch in architectures)
+
+
+def is_kimi_k25_model(model_name: str) -> bool:
+    """Detect Kimi-K2.5 reliably for both registry names and local model paths."""
+    lowered_name = model_name.lower()
+    normalized_name = normalize_model_name(model_name).lower()
+    if "kimi-k2.5" in lowered_name or "kimi-k2.5" in normalized_name:
+        return True
+
+    config = _load_local_model_config(model_name)
+    if config is None:
+        return is_model_supported(model_name, SupportedModels.KIMI_K2_5)
+
+    if str(config.get("model_type", "")).lower() == "kimi_k25":
+        return True
+
+    architectures = {
+        str(arch).lower() for arch in config.get("architectures", []) if arch
+    }
+    return "kimik25forconditionalgeneration" in architectures
+
+
+def construct_kimi_vision_chunk_data(images: List[Any]) -> Dict[str, Any]:
+    """Wrap raw images in the vLLM vision_chunk schema expected by Kimi-K2.5."""
+    if not images:
+        raise ValueError("No images provided for Kimi-K2.5 multimodal request.")
+
+    return {
+        "vision_chunk": [
+            {
+                "type": "image",
+                "image": image,
+                "uuid": None,
+            }
+            for image in images
+        ]
+    }
 
 
 def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
@@ -209,6 +295,11 @@ def construct_mm_data(
     # Model-specific image handling
     if is_qwen_vl_model(model):
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
+    if is_kimi_k25_model(model):
+        raise ValueError(
+            "Kimi-K2.5 expects raw vision_chunk inputs; embedding-based "
+            "multimodal transfer is not supported."
+        )
     else:
         # Default image handling for other models (e.g., LLAVA_1_5_7B)
         return {"image": image_embeds}

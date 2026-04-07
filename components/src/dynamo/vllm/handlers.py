@@ -55,7 +55,12 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.model import (
+    construct_kimi_vision_chunk_data,
+    construct_qwen_decode_mm_data,
+    is_kimi_k25_model,
+    is_qwen_vl_model,
+)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
@@ -122,20 +127,42 @@ def _compute_mm_uuids(
     Each image gets a SHA256 hex digest as its UUID, ensuring consistent
     hashing across the MM Router, vLLM handler, and Rust KV publisher.
     """
-    if not multi_modal_data or "image" not in multi_modal_data:
+    if not multi_modal_data:
         return None
-    images = multi_modal_data["image"]
-    # [gluo FIXME] Dict being returned when the mm data has been processed,
-    # in this case, we skip computing mm_uuids for now until we better understand
-    # what info should be hash on.
-    if isinstance(images, dict):
+    if "image" in multi_modal_data:
+        images = multi_modal_data["image"]
+        # [gluo FIXME] Dict being returned when the mm data has been processed,
+        # in this case, we skip computing mm_uuids for now until we better understand
+        # what info should be hash on.
+        if isinstance(images, dict):
+            return None
+        if not isinstance(images, list):
+            images = [images]
+        if not images:
+            return None
+        uuids = compute_mm_uuids_from_images(images)
+        return {"image": uuids}
+
+    if "vision_chunk" not in multi_modal_data:
         return None
-    if not isinstance(images, list):
-        images = [images]
+
+    vision_chunks = multi_modal_data["vision_chunk"]
+    if not isinstance(vision_chunks, list):
+        vision_chunks = [vision_chunks]
+
+    images = []
+    for item in vision_chunks:
+        if not isinstance(item, dict) or item.get("type") != "image":
+            return None
+        image = item.get("image")
+        if image is None:
+            return None
+        images.append(image)
+
     if not images:
         return None
-    uuids = compute_mm_uuids_from_images(images)
-    return {"image": uuids}
+
+    return {"vision_chunk": compute_mm_uuids_from_images(images)}
 
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
@@ -1188,37 +1215,53 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         mm_map = request["multi_modal_data"]
 
         vllm_mm_data = {}
+        is_kimi_k25 = is_kimi_k25_model(self.config.model)
 
         # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
         # Still continue below so mixed image+video requests can attach `video`.
         if self.embedding_loader is not None:
-            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
-            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
-            # support 'Decoded' variant. Need to update the encode worker to unify handling
-            image_urls = []
-            supported = True
-            for item in mm_map.get(IMAGE_URL_KEY, []):
-                if isinstance(item, dict) and "Url" in item:
-                    image_urls.append(item["Url"])
-                elif isinstance(item, dict) and "Decoded" in item:
-                    supported = False
-            if supported:
-                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
-                    image_urls, request_id, model=self.config.model, context=context
-                )
+            if is_kimi_k25:
                 logger.debug(
-                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                    "Skipping embedding loader for Kimi-K2.5 because vLLM expects "
+                    "raw vision_chunk inputs instead of image embeddings."
                 )
+            else:
+                # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+                # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+                # support 'Decoded' variant. Need to update the encode worker to unify handling
+                image_urls = []
+                supported = True
+                for item in mm_map.get(IMAGE_URL_KEY, []):
+                    if isinstance(item, dict) and "Url" in item:
+                        image_urls.append(item["Url"])
+                    elif isinstance(item, dict) and "Decoded" in item:
+                        supported = False
+                if supported:
+                    vllm_mm_data = (
+                        await self.embedding_loader.load_multimodal_embeddings(
+                            image_urls,
+                            request_id,
+                            model=self.config.model,
+                            context=context,
+                        )
+                    )
+                    logger.debug(
+                        f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                    )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        if "image" not in vllm_mm_data and image_mm_items:
+        image_key = "vision_chunk" if is_kimi_k25 else "image"
+        if image_key not in vllm_mm_data and image_mm_items:
             images = await self.image_loader.load_image_batch(
                 image_mm_items,
             )
 
             if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                if is_kimi_k25:
+                    vllm_mm_data.update(construct_kimi_vision_chunk_data(images))
+                else:
+                    # vLLM expects single image or list
+                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
                 logger.debug(
                     f"Extracted {len(images)} image(s) for multimodal processing"
                 )
