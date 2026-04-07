@@ -108,7 +108,7 @@ impl RetryManager {
         context: Arc<dyn AsyncEngineContext>,
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
-        retries_left: u32,
+        mut retries_left: u32,
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
     ) -> Result<Self> {
@@ -119,7 +119,7 @@ impl RetryManager {
         // already-generated tokens as context, causing the FSM to restart from the schema
         // root and producing duplicated or nested JSON. This applies to all backends
         // (vLLM, SGLang, TRT-LLM) equally. Propagate the error cleanly instead.
-        let effective_retries = if preprocessed_request
+        if preprocessed_request
             .sampling_options
             .guided_decoding
             .is_some()
@@ -129,16 +129,14 @@ impl RetryManager {
                     "Guided-decoding request: migration disabled — FSM state is not transferable (applies to all backends)"
                 );
             }
-            0
-        } else {
-            retries_left
-        };
+            retries_left = 0;
+        }
         let mut slf = Self {
             context,
             request: preprocessed_request,
             next_generate: next,
             next_stream: None,
-            retries_left: effective_retries + 1, // +1 to account for the initial attempt
+            retries_left: retries_left + 1, // +1 to account for the initial attempt
             model_name,
             metrics,
         };
@@ -866,6 +864,54 @@ mod tests {
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
     }
 
+    /// Test case 7: Request cancelled when creating new stream
+    /// Tests the scenario where context.stop_generating() is called when creating a new stream.
+    /// The RetryManager should detect that the context is stopped and abort creating new streams.
+    /// Expected behavior: Should fail to build RetryManager with "Context is stopped or killed" error.
+    #[tokio::test]
+    async fn test_retry_manager_context_stopped_before_stream() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::Success,
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+
+        // Stop the context before building RetryManager
+        ctx.stop_generating();
+
+        // Should fail to build due to stopped context
+        let metrics = Arc::new(Metrics::new());
+        let retry_manager_result = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await;
+
+        assert!(retry_manager_result.is_err());
+        if let Err(error) = retry_manager_result {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Context id {} is stopped or killed", context_id))
+            );
+        }
+
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
     /// Test case 8: No migration for guided-decoding (structured-output) requests
     ///
     /// Bug (#7634): When a worker crashes mid-stream during a structured-output
@@ -956,53 +1002,5 @@ mod tests {
             ErrorType::Disconnected,
             "Error type should be Disconnected"
         );
-    }
-
-    /// Test case 7: Request cancelled when creating new stream
-    /// Tests the scenario where context.stop_generating() is called when creating a new stream.
-    /// The RetryManager should detect that the context is stopped and abort creating new streams.
-    /// Expected behavior: Should fail to build RetryManager with "Context is stopped or killed" error.
-    #[tokio::test]
-    async fn test_retry_manager_context_stopped_before_stream() {
-        dynamo_runtime::logging::init();
-        let context_id = uuid::Uuid::new_v4().to_string();
-        let request = create_mock_request(10);
-        let mock_engine = Arc::new(MockEngine::new(
-            MockBehavior::Success,
-            10,
-            100,
-            context_id.clone(),
-        ));
-        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
-            mock_engine;
-
-        let ctx = Arc::new(Controller::new(context_id.clone()));
-
-        // Stop the context before building RetryManager
-        ctx.stop_generating();
-
-        // Should fail to build due to stopped context
-        let metrics = Arc::new(Metrics::new());
-        let retry_manager_result = RetryManager::build(
-            ctx,
-            request,
-            next_generate,
-            3,
-            Arc::new(TEST_MODEL.to_string()),
-            metrics.clone(),
-        )
-        .await;
-
-        assert!(retry_manager_result.is_err());
-        if let Err(error) = retry_manager_result {
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("Context id {} is stopped or killed", context_id))
-            );
-        }
-
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 }
