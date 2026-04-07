@@ -57,8 +57,8 @@
 //! | **D2D**   | vec_indirect‡    | OK       | OK       | n/a            |
 //! | **D2D**   | memcpy           | OK       | OK       | n/a            |
 //! | **D2D**   | vectorized_sycl  | OK       | OK       | n/a            |
-//! | **H2D**   | vectorized‡      | WARN†    | WARN†    | pinned         |
-//! | **H2D**   | vec_indirect‡    | WARN†    | WARN†    | pinned         |
+//! | **H2D**   | vectorized‡      | OK       | OK       | pinned         |
+//! | **H2D**   | vec_indirect‡    | OK       | OK       | pinned         |
 //! | **H2D**   | memcpy           | OK       | OK       | pinned, system |
 //! | **H2D**   | vectorized_sycl  | OK       | OK       | pinned         |
 //! | **D2H**   | vectorized‡      | OK       | OK       | pinned         |
@@ -70,18 +70,17 @@
 //!
 //! ‡ Requires `--features ocl-kernel`.
 //!
-//! † H2D with CCS kernel backends (vectorized, vec_indirect) triggers
-//!   `ZE_RESULT_ERROR_DEVICE_LOST` at exactly `--tokens-per-block 32`
-//!   (64 KB chunk = BMG GPU page size). All other tpb values (16, 64,
-//!   128) work. This appears to be a driver-level page-boundary bug.
-//!   The SYCL backend avoids this — likely due to different command
-//!   queue mode / preemption settings in the DPC++ runtime.
+//! † (historical) H2D with CCS kernel backends previously triggered
+//!   `ZE_RESULT_ERROR_DEVICE_LOST` at tpb=32. Root cause: the kernel
+//!   performs indirect memory access (pointer-chasing through
+//!   `src_addrs[pair_id]`) but `zeKernelSetIndirectAccess` was never
+//!   called, so the driver could not discover host allocations for
+//!   the CCS engine. Fixed by setting `FLAG_HOST | FLAG_DEVICE`
+//!   after kernel creation. The SYCL backend was unaffected because
+//!   DPC++ auto-sets all indirect access flags.
 //!
 //! # Limitations
 //!
-//! - CCS kernel backends may DEVICE_LOST on H2D at tpb=32 on discrete
-//!   GPUs (see compatibility matrix above). Use `--backend memcpy` or
-//!   `--backend sycl` for H2D, or avoid `--tokens-per-block 32`.
 //! - Only one KV cache shape is modeled (Llama 3.1 70B bf16).
 //!   Dimensions are compile-time constants.
 //!
@@ -89,73 +88,94 @@
 //!
 //! # Usage
 //!
-//! ```sh
-//! # ── Safe full sweep (avoids tpb=32 H2D vectorized) ────────────────
+//! Each command below corresponds to one row (or row-group) of the
+//! compatibility matrix.  All commands use the default `--tokens-per-block
+//! 16,32,64` and `--num-blocks 1,2,4,8,16,32,64,128,256`.
 //!
-//! # D2D: all L0 backends + memcpy (needs ocl-kernel for vectorized)
+//! ```sh
+//! # ── D2D ───────────────────────────────────────────────────────────
+//!
+//! # D2D vectorized (CCS, SPIR-V kernel, direct args)
 //! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2d --backend vectorized,vec_indirect,memcpy \
+//!   --direction d2d --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
 //!
-//! # H2D/D2H: memcpy (BCS) — always safe
+//! # D2D vec_indirect (CCS, SPIR-V kernel, packed args via BCS)
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vec_indirect \
+//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!
+//! # D2D memcpy (BCS blitter)
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction h2d,d2h --backend memcpy \
+//!   --direction d2d --backend memcpy \
+//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!
+//! # D2D vectorized_sycl (SYCL runtime)
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction d2d --backend sycl \
+//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!
+//! # ── H2D ───────────────────────────────────────────────────────────
+//!
+//! # H2D vectorized (CCS, pinned host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction h2d --backend vectorized \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # H2D vec_indirect (CCS, pinned host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction h2d --backend vec_indirect \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # H2D memcpy (BCS, pinned + system host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction h2d --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
 //!
-//! # D2H: vectorized (CCS) — works on B580
-//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2h --backend vectorized,vec_indirect \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
-//!
-//! # H2D: vectorized (CCS) — skip tpb=32 to avoid DEVICE_LOST
-//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --tokens-per-block 16,64,128 --direction h2d \
-//!   --backend vectorized,vec_indirect \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
-//!
-//! # ── Single-direction examples ─────────────────────────────
-//!
-//! # D2D vectorized, LW→FC pattern only:
-//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2d --backend vectorized --pattern lw_to_fc
-//!
-//! # Compare pinned vs system host memory for H2D (BCS):
+//! # H2D vectorized_sycl (SYCL runtime, pinned host memory)
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction h2d --backend memcpy --host-mem pinned,system
+//!   --direction h2d --backend sycl \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
 //!
-//! # Direct-args vs indirect-args (L0 kernel only):
+//! # ── D2H ───────────────────────────────────────────────────────────
+//!
+//! # D2H vectorized (CCS, pinned host memory)
 //! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2d --backend vectorized,vec_indirect \
-//!   --pattern lw_to_fc --num-blocks 32,64,128
+//!   --direction d2h --backend vectorized \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # D2H vec_indirect (CCS, pinned host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2h --backend vec_indirect \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # D2H memcpy (BCS, pinned + system host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction d2h --backend memcpy \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!
+//! # D2H vectorized_sycl (SYCL runtime, pinned host memory)
+//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//!   --direction d2h --backend sycl \
+//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!
+//! # ── Combo / utility ───────────────────────────────────────────────
+//!
+//! # All 4 backends head-to-head, D2D:
+//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
+//!   --direction d2d --backend vectorized,vec_indirect,sycl,memcpy \
+//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
 //!
 //! # Quick smoke test on device 2:
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --device 2 --num-blocks 1,4 --tokens-per-block 16 \
 //!   --warmup 3 --iters 10
-//!
-//! # ── SYCL kernel (always available) ───────────────────────────
-//!
-//! # L0 SPIR-V vs SYCL kernel, D2D (needs ocl-kernel for L0 backends):
-//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2d --backend vectorized,vec_indirect,sycl \
-//!   --pattern lw_to_fc --num-blocks 32,64,128 2>/dev/null
-//!
-//! # SYCL H2D (works at all tpb values, unlike L0 vectorized):
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
-//!   --direction h2d --backend sycl \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned
-//!
-//! # All backends head-to-head, D2D:
-//! cargo run --example kvbench_xpu --features kvbench-xpu,ocl-kernel --release -- \
-//!   --direction d2d --backend vectorized,vec_indirect,sycl,memcpy \
-//!   --pattern lw_to_fc --num-blocks 32,64,128 2>/dev/null
 //! ```
 
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use clap::Parser;
-#[cfg(feature = "ocl-kernel")]
 use syclrc::level_zero::ze::sys;
 use syclrc::{ZeDevice, ZeHostSlice, ZeImmediateCmdList, ZeKernel, ZeModule, ZeSlice};
 
@@ -1033,10 +1053,20 @@ fn main() {
         let k = ZeKernel::new(&m, vc::KERNEL_NAME).expect("Failed to create kernel");
         k.set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
             .expect("Failed to set group size");
+        k.set_indirect_access(
+            sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST as u32
+                | sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE as u32,
+        )
+        .expect("Failed to set indirect access flags on kernel");
         let ki = ZeKernel::new(&m, vc::KERNEL_NAME_INDIRECT)
             .expect("Failed to create indirect kernel");
         ki.set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
             .expect("Failed to set indirect group size");
+        ki.set_indirect_access(
+            sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST as u32
+                | sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE as u32,
+        )
+        .expect("Failed to set indirect access flags on indirect kernel");
         (Some(m), Some(k), Some(ki))
     } else {
         (None, None, None)

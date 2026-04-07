@@ -126,11 +126,23 @@ fn ze_resources(device_ordinal: u32) -> Result<Arc<Mutex<ZeDeviceResources>>> {
         kernel
             .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
             .map_err(|e| anyhow!("Failed to set kernel group size for device {}: {}", device_ordinal, e))?;
+        kernel
+            .set_indirect_access(
+                sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST as u32
+                    | sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE as u32,
+            )
+            .map_err(|e| anyhow!("Failed to set indirect access flags for device {}: {}", device_ordinal, e))?;
         let kernel_indirect = ZeKernel::new(&module, vc::KERNEL_NAME_INDIRECT)
             .map_err(|e| anyhow!("Failed to create indirect ZeKernel for device {}: {}", device_ordinal, e))?;
         kernel_indirect
             .set_group_size(vc::WORK_GROUP_SIZE, 1, 1)
             .map_err(|e| anyhow!("Failed to set indirect kernel group size for device {}: {}", device_ordinal, e))?;
+        kernel_indirect
+            .set_indirect_access(
+                sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST as u32
+                    | sys::ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE as u32,
+            )
+            .map_err(|e| anyhow!("Failed to set indirect access flags for device {}: {}", device_ordinal, e))?;
         (module, kernel, kernel_indirect)
     };
 
