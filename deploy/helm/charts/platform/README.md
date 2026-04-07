@@ -118,11 +118,14 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | Namespace access controls for the operator |
-| dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
-| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
-| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | GPU discovery configuration (only applies when namespaceRestriction.enabled=true) |
-| dynamo-operator.gpuDiscovery.enabled | bool | `true` | Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels. When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access. Set to false if your installer lacks ClusterRole creation permissions. |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
+| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
+| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated. |
+| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode. |
+| dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated. |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
 | dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |

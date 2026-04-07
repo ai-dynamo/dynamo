@@ -15,8 +15,9 @@ in-process instrumentation.  Using NVML directly (the same C library that
 and allows high-frequency sampling.
 
 In **binary-search mode** (the default), the profiler bisects the KV cache
-allocation — ``_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`` for vLLM (bytes) or
-``_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`` for SGLang (tokens).
+allocation — ``_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`` for vLLM (bytes),
+``_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`` for SGLang (tokens), or
+``_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`` for TensorRT-LLM (tokens).
 If the test passes, the allocation is lowered; if it OOMs, it is raised —
 standard bisection to find the minimum the test needs.  A safety factor
 is applied and the peak ``memory.used`` from the last passing run becomes
@@ -24,7 +25,8 @@ the ``@pytest.mark.profiled_vram_gib`` recommendation.
 
 **IMPORTANT**: The test under profile **MUST** read the appropriate KV cache
 override — either directly (see ``test_mock_gpu_alloc.py``) or via launch
-scripts that call ``build_gpu_mem_args`` (e.g. ``agg.sh``).  If the test
+scripts that call ``build_gpu_mem_args`` (vLLM/SGLang) or
+``build_trtllm_override_args_with_mem`` (TensorRT-LLM).  If the test
 ignores the override, every probe will pass at the same peak and the profiler
 will warn that the binary search is unreliable.
 
@@ -459,6 +461,7 @@ def _recommend_markers(
     model_name: str | None = None,
     num_runs: int = 1,
     requested_sglang_kv_tokens: int | None = None,
+    requested_trtllm_kv_tokens: int | None = None,
     requested_vllm_kv_cache_bytes: int | None = None,
     min_kv_value: int | None = None,
 ) -> tuple[list[MarkerRecommendation], list[str]]:
@@ -559,6 +562,14 @@ def _recommend_markers(
                     f"KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety{min_label})",
                 )
             )
+        if requested_trtllm_kv_tokens is not None:
+            min_label = f" over min={min_kv_value}" if min_kv_value is not None else ""
+            recs.append(
+                MarkerRecommendation(
+                    f"requested_trtllm_kv_tokens({requested_trtllm_kv_tokens})",
+                    f"KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety{min_label})",
+                )
+            )
         if requested_vllm_kv_cache_bytes is not None:
             min_label = (
                 f" over min={min_kv_value:_}" if min_kv_value is not None else ""
@@ -634,12 +645,20 @@ def _print_recommendations(
 
 
 _SGLANG_NODEID_MARKERS = ["test_sglang", "sglang"]
+_TRTLLM_NODEID_MARKERS = ["test_trtllm", "trtllm"]
 
 
 def _is_sglang_test(pytest_args: list[str]) -> bool:
     """Check if any pytest arg looks like a SGLang test node ID."""
     return any(
         marker in arg for arg in pytest_args for marker in _SGLANG_NODEID_MARKERS
+    )
+
+
+def _is_trtllm_test(pytest_args: list[str]) -> bool:
+    """Check if any pytest arg looks like a TensorRT-LLM test node ID."""
+    return any(
+        marker in arg for arg in pytest_args for marker in _TRTLLM_NODEID_MARKERS
     )
 
 
@@ -668,6 +687,22 @@ def _extract_requested_sglang_kv_tokens(stdout: str) -> int | None:
     SGLang logs: "Got total KV blocks from scheduler: N (max_total_tokens=M, page_size=P)"
     """
     match = _SGLANG_MAX_TOKENS_RE.search(stdout)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+_TRTLLM_MAX_TOKENS_RE = re.compile(
+    r"\[MemUsageChange\] Allocated .* for max tokens in paged KV cache \((\d+)\)"
+)
+
+
+def _extract_requested_trtllm_kv_tokens(stdout: str) -> int | None:
+    """Extract max_tokens from TensorRT-LLM engine output.
+
+    TensorRT-LLM logs: "[MemUsageChange] Allocated 0.22 GiB for max tokens in paged KV cache (2048)."
+    """
+    match = _TRTLLM_MAX_TOKENS_RE.search(stdout)
     if match:
         return int(match.group(1))
     return None
@@ -765,15 +800,17 @@ def _find_min_vram(
 ) -> int:
     """Binary search to find the minimum VRAM a test needs.
 
-    Three modes, two patterns:
+    Three modes, three patterns:
 
     KV bisection (deterministic, no profiling race):
-      vLLM:   bisects _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES (bytes)
-      SGLang: bisects _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS (tokens)
-      Both use the same _KV_SAFETY_FACTOR (2x) and the same bisect loop.
+      vLLM:         bisects _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES (bytes)
+      SGLang:       bisects _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS (tokens)
+      TensorRT-LLM: bisects _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS (tokens)
+      All use the same _KV_SAFETY_FACTOR (2x) and the same bisect loop.
       The only differences are env var name, units, display, and bounds.
     """
     is_sglang = _is_sglang_test(pytest_args)
+    is_trtllm = _is_trtllm_test(pytest_args)
 
     gpu_info = _query_gpu_stats()
     if not gpu_info:
@@ -792,11 +829,13 @@ def _find_min_vram(
 
     model_name = _extract_model_from_markers(pytest_args)
 
-    if not is_sglang:
+    if not is_sglang and not is_trtllm:
         kv_bytes_mode = True
 
     if kv_bytes_mode:
         mode_label = "KV CACHE BYTES (vLLM, deterministic)"
+    elif is_trtllm:
+        mode_label = "KV TOKENS (TensorRT-LLM)"
     else:
         mode_label = "KV TOKENS (SGLang)"
     print(f"\n--- FIND MINIMUM {mode_label} (binary search) ---")
@@ -909,20 +948,31 @@ def _find_min_vram(
             f"iter took {iter_elapsed:.0f}s"
         )
     else:
-        max_tokens = _extract_requested_sglang_kv_tokens(stdout)
-        if max_tokens is None:
-            print(
-                "  [ERROR] Could not extract max_total_tokens from SGLang output.\n"
-                "  The launch script must log 'max_total_tokens=N' (SGLang does this by default)."
-            )
-            return 4
+        if is_trtllm:
+            max_tokens = _extract_requested_trtllm_kv_tokens(stdout)
+            if max_tokens is None:
+                print(
+                    "  [ERROR] Could not extract max_tokens from TensorRT-LLM output.\n"
+                    "  The launch script must log '[MemUsageChange] Allocated ... for max tokens in paged KV cache (N)'."
+                )
+                return 4
+            backend_label = "TensorRT-LLM"
+        else:
+            max_tokens = _extract_requested_sglang_kv_tokens(stdout)
+            if max_tokens is None:
+                print(
+                    "  [ERROR] Could not extract max_total_tokens from SGLang output.\n"
+                    "  The launch script must log 'max_total_tokens=N' (SGLang does this by default)."
+                )
+                return 4
+            backend_label = "SGLang"
         page_size = 16
         lo = page_size
         hi = max_tokens
         tolerance = page_size * 2
         print(
             f"  [PASS] peak {_format_mib(peak_mib)}, wall {wall:.0f}s, "
-            f"max_total_tokens={max_tokens}, iter took {iter_elapsed:.0f}s"
+            f"max_tokens={max_tokens} ({backend_label}), iter took {iter_elapsed:.0f}s"
         )
 
     baseline_time = iter_elapsed
@@ -968,6 +1018,14 @@ def _find_min_vram(
                 "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": str(mid_int),
             }
             probe_desc = f"kv_cache={mid_int // (1024**2)} MiB ({mid_int:,} bytes)"
+        elif is_trtllm:
+            mid_int = ((int(lo) + int(hi)) // 2 // page_size) * page_size
+            mid_int = max(mid_int, page_size)
+            probe_env = {
+                **_gpu_env,
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS": str(mid_int),
+            }
+            probe_desc = f"tokens={mid_int}"
         else:
             mid_int = ((int(lo) + int(hi)) // 2 // page_size) * page_size
             mid_int = max(mid_int, page_size)
@@ -1083,7 +1141,7 @@ def _find_min_vram(
         # safe_kv_bytes which allocates more KV cache and thus more VRAM.
         print(f"  [final probe] Measuring VRAM at safe_kv_bytes={safe_kv_mib} MiB")
         sys.stdout.flush()
-        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+        rc_final, wall_final, reports_final, samples_final, _stdout_final = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
@@ -1141,14 +1199,24 @@ def _find_min_vram(
         # safe_tokens which allocates more KV cache and thus more VRAM.
         print(f"  [final probe] Measuring VRAM at safe_tokens={safe_tokens}")
         sys.stdout.flush()
-        rc_final, wall_final, reports_final, samples_final, stdout_final = _run_once(
+
+        if is_trtllm:
+            env_var_name = "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"
+            marker_name = "requested_trtllm_kv_tokens"
+            backend_label = "TensorRT-LLM"
+        else:
+            env_var_name = "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"
+            marker_name = "requested_sglang_kv_tokens"
+            backend_label = "SGLang"
+
+        rc_final, wall_final, reports_final, samples_final, _stdout_final = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
             teardown_seconds=teardown_seconds,
             extra_env={
                 **_gpu_env,
-                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS": str(safe_tokens),
+                env_var_name: str(safe_tokens),
             },
             quiet=True,
             run_label="final",
@@ -1171,7 +1239,7 @@ def _find_min_vram(
             )
 
         print(f"\n{'=' * 72}")
-        print("MINIMUM KV TOKENS RESULT")
+        print(f"MINIMUM KV TOKENS RESULT ({backend_label})")
         print(f"{'=' * 72}")
         print(f"  Minimum tokens  : {min_tokens} (raw bisection result)")
         print(f"  Recommended     : {safe_tokens} ({_KV_SAFETY_FACTOR:.0f}x safety)")
@@ -1180,12 +1248,13 @@ def _find_min_vram(
         )
         print(f"  {test_short}: @pytest.mark.profiled_vram_gib({peak_gib})")
         print(
-            f"  {test_short}: @pytest.mark.requested_sglang_kv_tokens({safe_tokens}),  # KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety over min={min_tokens})"
+            f"  {test_short}: @pytest.mark.{marker_name}({safe_tokens}),  # KV cache cap ({_KV_SAFETY_FACTOR:.0f}x safety over min={min_tokens})"
         )
     print(f"{'=' * 72}")
 
     # Marker recommendations
     requested_sglang_kv_tokens = safe_tokens if is_sglang else None
+    requested_trtllm_kv_tokens = safe_tokens if is_trtllm else None
     requested_vllm_kv_cache_bytes = safe_kv_bytes if kv_bytes_mode else None
     min_kv_value = int(last_pass_value)
     if recommend:
@@ -1196,6 +1265,7 @@ def _find_min_vram(
             model_name,
             num_runs=len(pass_wall_times),
             requested_sglang_kv_tokens=requested_sglang_kv_tokens,
+            requested_trtllm_kv_tokens=requested_trtllm_kv_tokens,
             requested_vllm_kv_cache_bytes=requested_vllm_kv_cache_bytes,
             min_kv_value=min_kv_value,
         )
@@ -1326,6 +1396,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model_name = _extract_model_from_markers(pytest_args)
     is_sglang = _is_sglang_test(pytest_args)
+    is_trtllm = _is_trtllm_test(pytest_args)
 
     rc, wall_secs, reports, samples, stdout = _run_once(
         pytest_args,
@@ -1333,20 +1404,24 @@ def main(argv: list[str] | None = None) -> int:
         baseline_seconds=args.baseline_seconds,
         teardown_seconds=args.teardown_seconds,
         extra_env=gpu_env,
-        run_label="profile" if is_sglang else None,
+        run_label="profile" if (is_sglang or is_trtllm) else None,
     )
 
     _print_report(reports, rc, wall_secs, model_name=model_name)
 
     if not args.no_recommend and reports:
         requested_sglang_kv_tokens = None
+        requested_trtllm_kv_tokens = None
         if is_sglang:
             requested_sglang_kv_tokens = _extract_requested_sglang_kv_tokens(stdout)
+        if is_trtllm:
+            requested_trtllm_kv_tokens = _extract_requested_trtllm_kv_tokens(stdout)
         recs, warnings = _recommend_markers(
             reports,
             wall_secs,
             model_name=model_name,
             requested_sglang_kv_tokens=requested_sglang_kv_tokens,
+            requested_trtllm_kv_tokens=requested_trtllm_kv_tokens,
         )
         _print_recommendations(recs, warnings, pytest_args=pytest_args)
 

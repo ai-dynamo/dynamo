@@ -10,7 +10,9 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
+use dynamo_kv_router::config::{
+    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+};
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
@@ -23,7 +25,7 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::create_aic_callback;
+use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -55,10 +57,76 @@ impl KvRouterConfig {
     }
 }
 
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct AicPerfConfig {
+    aic_backend: String,
+    aic_system: String,
+    aic_backend_version: Option<String>,
+    aic_tp_size: usize,
+    aic_model_path: String,
+}
+
+impl AicPerfConfig {
+    pub(crate) fn backend_name(&self) -> &str {
+        &self.aic_backend
+    }
+
+    pub(crate) fn system(&self) -> &str {
+        &self.aic_system
+    }
+
+    pub(crate) fn backend_version(&self) -> Option<&str> {
+        self.aic_backend_version.as_deref()
+    }
+
+    pub(crate) fn tp_size(&self) -> usize {
+        self.aic_tp_size
+    }
+
+    pub(crate) fn model_path(&self) -> &str {
+        &self.aic_model_path
+    }
+}
+
+#[pymethods]
+impl AicPerfConfig {
+    #[new]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None))]
+    fn new(
+        aic_backend: String,
+        aic_system: String,
+        aic_model_path: String,
+        aic_tp_size: usize,
+        aic_backend_version: Option<String>,
+    ) -> PyResult<Self> {
+        if aic_backend.is_empty() {
+            return Err(PyValueError::new_err("aic_backend must be non-empty"));
+        }
+        if aic_system.is_empty() {
+            return Err(PyValueError::new_err("aic_system must be non-empty"));
+        }
+        if aic_model_path.is_empty() {
+            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
+        }
+        if aic_tp_size == 0 {
+            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
+        }
+
+        Ok(Self {
+            aic_backend,
+            aic_system,
+            aic_backend_version,
+            aic_tp_size,
+            aic_model_path,
+        })
+    }
+}
+
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", remote_indexer_component=None))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -70,6 +138,7 @@ impl KvRouterConfig {
         router_track_output_blocks: bool,
         router_assume_kv_reuse: bool,
         router_track_prefill_tokens: bool,
+        router_prefill_load_model: &str,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
         router_ttl_secs: f64,
@@ -91,6 +160,11 @@ impl KvRouterConfig {
                 router_track_output_blocks,
                 router_assume_kv_reuse,
                 router_track_prefill_tokens,
+                router_prefill_load_model: router_prefill_load_model
+                    .parse::<RsRouterPrefillLoadModel>()
+                    .unwrap_or_else(|_| {
+                        panic!("invalid router_prefill_load_model: {router_prefill_load_model:?}")
+                    }),
                 router_snapshot_threshold,
                 router_reset_states,
                 router_ttl_secs,
@@ -249,13 +323,14 @@ pub(crate) struct EntrypointArgs {
     is_prefill: bool,
     migration_limit: u32,
     chat_engine_factory: Option<PyEngineFactory>,
+    aic_perf_config: Option<AicPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -279,6 +354,7 @@ impl EntrypointArgs {
         is_prefill: bool,
         migration_limit: u32,
         chat_engine_factory: Option<PyObject>,
+        aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -327,6 +403,7 @@ impl EntrypointArgs {
             is_prefill,
             migration_limit,
             chat_engine_factory,
+            aic_perf_config,
         })
     }
 }
@@ -467,9 +544,26 @@ async fn select_engine(
         EngineType::Dynamic => {
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
+            let prefill_load_estimator = args
+                .aic_perf_config
+                .as_ref()
+                .map(|config| {
+                    Python::with_gil(|py| {
+                        create_aic_prefill_load_estimator(
+                            py,
+                            config.backend_name(),
+                            config.system(),
+                            config.model_path(),
+                            config.tp_size(),
+                            config.backend_version(),
+                        )
+                    })
+                })
+                .transpose()?;
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,
+                prefill_load_estimator,
             }
         }
         EngineType::Mocker => {
