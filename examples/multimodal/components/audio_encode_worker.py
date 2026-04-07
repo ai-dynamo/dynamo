@@ -33,8 +33,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
-from utils.audio_loader import AudioLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+
+from dynamo.common.multimodal.audio_loader import AudioLoader
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
