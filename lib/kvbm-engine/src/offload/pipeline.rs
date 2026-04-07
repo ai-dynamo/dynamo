@@ -1739,6 +1739,24 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 .put_blocks(keys.clone(), shared.src_layout, block_ids)
                 .await;
 
+            // Guard: put_blocks must return exactly one result per input block.
+            // If mismatched, mark all blocks as failed since we can't correlate results.
+            if results.len() != keys.len() {
+                tracing::error!(
+                    expected = keys.len(),
+                    actual = results.len(),
+                    "put_blocks returned mismatched result count"
+                );
+                for (_transfer_id, (state, block_ids)) in transfer_states {
+                    let mut state_guard = state.lock().unwrap();
+                    state_guard.mark_failed(block_ids);
+                    state_guard.set_error(
+                        "put_blocks returned mismatched result count".to_string(),
+                    );
+                }
+                return Ok(());
+            }
+
             // Log results and track successful transfers
             let mut success_count = 0;
             let mut fail_count = 0;
@@ -1845,13 +1863,62 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             "Object batch transfer complete"
         );
 
-        // Mark blocks as completed in each transfer state
+        // Build success lookup for filtering completion tracking.
+        //
+        // INVARIANT: SequenceHash values within a batch must be unique. This is
+        // enforced by PendingTracker in PolicyEvaluator — each block's pending guard
+        // is inserted into a DashSet before the next block is evaluated, so duplicate
+        // hashes are filtered out. If this invariant is violated, success/failure
+        // correlation becomes ambiguous because put_blocks() returns Result<SequenceHash, _>
+        // without block-level identity (and S3 uses buffer_unordered, losing input order).
+        let block_to_hash: std::collections::HashMap<BlockId, SequenceHash> = resolved
+            .iter()
+            .map(|b| (b.block_id, b.sequence_hash))
+            .collect();
+        let success_set: std::collections::HashSet<SequenceHash> =
+            successful_hashes.into_iter().collect();
+
+        debug_assert_eq!(
+            block_to_hash.len(),
+            resolved.len(),
+            "duplicate BlockId in batch — block_to_hash would lose entries"
+        );
+        debug_assert_eq!(
+            resolved.iter().map(|b| b.sequence_hash).collect::<std::collections::HashSet<_>>().len(),
+            resolved.len(),
+            "duplicate SequenceHash in batch — hash-based success correlation is ambiguous"
+        );
+
+        // Mark blocks as completed/failed in each transfer state
         for (transfer_id, (state, block_ids)) in transfer_states {
             let mut state_guard = state.lock().unwrap();
-            state_guard.mark_completed(block_ids);
+
+            if shared.skip_transfers {
+                // In test/skip mode, all blocks are considered successful
+                state_guard.mark_completed(block_ids);
+            } else {
+                let (succeeded, failed): (Vec<_>, Vec<_>) = block_ids.into_iter().partition(
+                    |id| {
+                        block_to_hash
+                            .get(id)
+                            .is_some_and(|h| success_set.contains(h))
+                    },
+                );
+                state_guard.mark_completed(succeeded);
+                if !failed.is_empty() {
+                    tracing::warn!(
+                        %transfer_id,
+                        failed_count = failed.len(),
+                        "Marking blocks as failed in transfer state"
+                    );
+                    state_guard.mark_failed(failed);
+                }
+            }
 
             let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
-            let done = state_guard.completed.len() + state_guard.filtered_out.len();
+            let done = state_guard.completed.len()
+                + state_guard.failed.len()
+                + state_guard.filtered_out.len();
             tracing::debug!(
                 %transfer_id,
                 total,
@@ -1859,10 +1926,18 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 passed = state_guard.passed_blocks.len(),
                 filtered = state_guard.filtered_out.len(),
                 completed = state_guard.completed.len(),
+                failed = state_guard.failed.len(),
                 "Object transfer batch progress"
             );
             if done >= total && total > 0 {
-                state_guard.set_complete();
+                let failed_count = state_guard.failed.len();
+                if failed_count == 0 {
+                    state_guard.set_complete();
+                } else {
+                    state_guard.set_error(format!(
+                        "{failed_count} blocks failed to transfer to object storage",
+                    ));
+                }
             }
         }
 
@@ -1897,5 +1972,298 @@ mod tests {
         assert!(config.policies.is_empty());
         assert!(!config.auto_chain);
         assert_eq!(config.sweep_interval, Duration::from_millis(10));
+    }
+
+    /// Mock ObjectBlockOps that fails specific hashes.
+    struct FailableObjectBlockOps {
+        fail_hashes: std::collections::HashSet<SequenceHash>,
+    }
+
+    impl crate::object::ObjectBlockOps for FailableObjectBlockOps {
+        fn has_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+        ) -> futures::future::BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+            Box::pin(async move { keys.into_iter().map(|h| (h, Some(1))).collect() })
+        }
+
+        fn put_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            let fail_set = self.fail_hashes.clone();
+            Box::pin(async move {
+                keys.into_iter()
+                    .map(|h| {
+                        if fail_set.contains(&h) {
+                            Err(h)
+                        } else {
+                            Ok(h)
+                        }
+                    })
+                    .collect()
+            })
+        }
+
+        fn get_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            Box::pin(async move { keys.into_iter().map(Ok).collect() })
+        }
+    }
+
+    fn test_hash(n: u64) -> SequenceHash {
+        SequenceHash::new(n, None, 0)
+    }
+
+    #[tokio::test]
+    async fn test_execute_transfer_partial_failure() {
+        use crate::offload::handle::{TransferState, TransferStatus};
+
+        let hash_ok_1 = test_hash(1);
+        let hash_fail = test_hash(2);
+        let hash_ok_2 = test_hash(3);
+
+        let fail_hashes = [hash_fail].into_iter().collect();
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
+            Arc::new(FailableObjectBlockOps { fail_hashes });
+
+        let shared = SharedObjectExecutorState {
+            object_ops,
+            src_layout: LogicalLayoutHandle::G2,
+            skip_transfers: false,
+            lock_manager: None,
+        };
+
+        let transfer_id = crate::offload::handle::TransferId::new();
+        let (mut state, handle) =
+            TransferState::new(transfer_id, vec![10, 20, 30]);
+        state.add_passed(vec![10, 20, 30]);
+        state.mark_in_flight(vec![10, 20, 30]);
+        let state_arc = Arc::new(std::sync::Mutex::new(state));
+
+        let blocks = vec![
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 10,
+                sequence_hash: hash_ok_1,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 20,
+                sequence_hash: hash_fail,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 30,
+                sequence_hash: hash_ok_2,
+                guard: None,
+                state: state_arc.clone(),
+            },
+        ];
+
+        let mut timing = TimingTrace::new();
+        timing.mark_policy_complete();
+        timing.mark_precondition_complete();
+
+        let batch = ResolvedBatch {
+            blocks,
+            evicted: Vec::new(),
+            timing,
+        };
+
+        ObjectTransferExecutor::<crate::G2>::execute_transfer(&shared, batch)
+            .await
+            .expect("execute_transfer should succeed");
+
+        // Verify: block 20 (hash_fail) should be in failed, not completed
+        let state_guard = state_arc.lock().unwrap();
+        assert_eq!(state_guard.completed, vec![10, 30]);
+        assert_eq!(state_guard.failed, vec![20]);
+        assert_eq!(state_guard.in_flight.len(), 0);
+        assert_eq!(state_guard.status, TransferStatus::Failed);
+        assert!(state_guard.error.is_some());
+
+        // Handle should reflect the same
+        drop(state_guard);
+        assert_eq!(handle.completed_blocks(), vec![10, 30]);
+        assert_eq!(handle.failed_blocks(), vec![20]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_transfer_all_success() {
+        use crate::offload::handle::{TransferState, TransferStatus};
+
+        let hash1 = test_hash(1);
+        let hash2 = test_hash(2);
+
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
+            Arc::new(FailableObjectBlockOps {
+                fail_hashes: std::collections::HashSet::new(),
+            });
+
+        let shared = SharedObjectExecutorState {
+            object_ops,
+            src_layout: LogicalLayoutHandle::G2,
+            skip_transfers: false,
+            lock_manager: None,
+        };
+
+        let transfer_id = crate::offload::handle::TransferId::new();
+        let (mut state, handle) = TransferState::new(transfer_id, vec![10, 20]);
+        state.add_passed(vec![10, 20]);
+        state.mark_in_flight(vec![10, 20]);
+        let state_arc = Arc::new(std::sync::Mutex::new(state));
+
+        let blocks = vec![
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 10,
+                sequence_hash: hash1,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 20,
+                sequence_hash: hash2,
+                guard: None,
+                state: state_arc.clone(),
+            },
+        ];
+
+        let mut timing = TimingTrace::new();
+        timing.mark_policy_complete();
+        timing.mark_precondition_complete();
+
+        let batch = ResolvedBatch {
+            blocks,
+            evicted: Vec::new(),
+            timing,
+        };
+
+        ObjectTransferExecutor::<crate::G2>::execute_transfer(&shared, batch)
+            .await
+            .expect("execute_transfer should succeed");
+
+        let state_guard = state_arc.lock().unwrap();
+        assert_eq!(state_guard.completed, vec![10, 20]);
+        assert!(state_guard.failed.is_empty());
+        assert_eq!(state_guard.status, TransferStatus::Complete);
+
+        drop(state_guard);
+        assert_eq!(handle.completed_blocks(), vec![10, 20]);
+        assert!(handle.failed_blocks().is_empty());
+    }
+
+    /// Mixed batch: two transfer_ids, one partially fails, the other fully succeeds.
+    #[tokio::test]
+    async fn test_execute_transfer_mixed_transfers() {
+        use crate::offload::handle::{TransferState, TransferStatus};
+
+        let hash_a1 = test_hash(10);
+        let hash_a2_fail = test_hash(20); // transfer A, will fail
+        let hash_b1 = test_hash(30);
+        let hash_b2 = test_hash(40);
+
+        let fail_hashes = [hash_a2_fail].into_iter().collect();
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
+            Arc::new(FailableObjectBlockOps { fail_hashes });
+
+        let shared = SharedObjectExecutorState {
+            object_ops,
+            src_layout: LogicalLayoutHandle::G2,
+            skip_transfers: false,
+            lock_manager: None,
+        };
+
+        // Transfer A: blocks 100, 200 (200 will fail)
+        let tid_a = crate::offload::handle::TransferId::new();
+        let (mut state_a, handle_a) = TransferState::new(tid_a, vec![100, 200]);
+        state_a.add_passed(vec![100, 200]);
+        state_a.mark_in_flight(vec![100, 200]);
+        let state_a_arc = Arc::new(std::sync::Mutex::new(state_a));
+
+        // Transfer B: blocks 300, 400 (both succeed)
+        let tid_b = crate::offload::handle::TransferId::new();
+        let (mut state_b, handle_b) = TransferState::new(tid_b, vec![300, 400]);
+        state_b.add_passed(vec![300, 400]);
+        state_b.mark_in_flight(vec![300, 400]);
+        let state_b_arc = Arc::new(std::sync::Mutex::new(state_b));
+
+        let blocks = vec![
+            ResolvedBlock::<crate::G2> {
+                transfer_id: tid_a,
+                block_id: 100,
+                sequence_hash: hash_a1,
+                guard: None,
+                state: state_a_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id: tid_a,
+                block_id: 200,
+                sequence_hash: hash_a2_fail,
+                guard: None,
+                state: state_a_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id: tid_b,
+                block_id: 300,
+                sequence_hash: hash_b1,
+                guard: None,
+                state: state_b_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id: tid_b,
+                block_id: 400,
+                sequence_hash: hash_b2,
+                guard: None,
+                state: state_b_arc.clone(),
+            },
+        ];
+
+        let mut timing = TimingTrace::new();
+        timing.mark_policy_complete();
+        timing.mark_precondition_complete();
+
+        let batch = ResolvedBatch {
+            blocks,
+            evicted: Vec::new(),
+            timing,
+        };
+
+        ObjectTransferExecutor::<crate::G2>::execute_transfer(&shared, batch)
+            .await
+            .expect("execute_transfer should succeed");
+
+        // Transfer A: block 100 succeeded, block 200 failed
+        let sa = state_a_arc.lock().unwrap();
+        assert_eq!(sa.completed, vec![100]);
+        assert_eq!(sa.failed, vec![200]);
+        assert_eq!(sa.status, TransferStatus::Failed);
+        assert!(sa.error.is_some());
+        drop(sa);
+
+        assert_eq!(handle_a.completed_blocks(), vec![100]);
+        assert_eq!(handle_a.failed_blocks(), vec![200]);
+
+        // Transfer B: both succeeded
+        let sb = state_b_arc.lock().unwrap();
+        assert_eq!(sb.completed, vec![300, 400]);
+        assert!(sb.failed.is_empty());
+        assert_eq!(sb.status, TransferStatus::Complete);
+        drop(sb);
+
+        assert_eq!(handle_b.completed_blocks(), vec![300, 400]);
+        assert!(handle_b.failed_blocks().is_empty());
     }
 }

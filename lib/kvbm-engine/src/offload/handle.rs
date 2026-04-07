@@ -96,6 +96,8 @@ pub struct TransferResult {
     pub passed_blocks: Vec<BlockId>,
     /// Blocks successfully transferred
     pub completed_blocks: Vec<BlockId>,
+    /// Blocks that failed transfer
+    pub failed_blocks: Vec<BlockId>,
     /// Blocks that were filtered out
     pub filtered_blocks: Vec<BlockId>,
     /// Error message if failed
@@ -114,6 +116,7 @@ pub struct TransferHandle {
     status_rx: watch::Receiver<TransferStatus>,
     passed_blocks_rx: watch::Receiver<Vec<BlockId>>,
     completed_rx: watch::Receiver<Vec<BlockId>>,
+    failed_rx: watch::Receiver<Vec<BlockId>>,
     remaining_rx: watch::Receiver<Vec<BlockId>>,
     cancel_token: CancellationToken,
     result_rx: watch::Receiver<Option<TransferResult>>,
@@ -138,6 +141,11 @@ impl TransferHandle {
     /// Get blocks that have been successfully transferred.
     pub fn completed_blocks(&self) -> Vec<BlockId> {
         self.completed_rx.borrow().clone()
+    }
+
+    /// Get blocks that failed transfer.
+    pub fn failed_blocks(&self) -> Vec<BlockId> {
+        self.failed_rx.borrow().clone()
     }
 
     /// Get blocks remaining to be transferred.
@@ -204,6 +212,7 @@ impl std::fmt::Debug for TransferHandle {
             .field("status", &self.status())
             .field("passed_count", &self.passed_blocks().len())
             .field("completed_count", &self.completed_blocks().len())
+            .field("failed_count", &self.failed_blocks().len())
             .field("remaining_count", &self.remaining_blocks().len())
             .finish()
     }
@@ -223,6 +232,8 @@ pub(crate) struct TransferState {
     pub(crate) in_flight: HashSet<BlockId>,
     /// Successfully transferred blocks
     pub(crate) completed: Vec<BlockId>,
+    /// Blocks that failed transfer
+    pub(crate) failed: Vec<BlockId>,
     /// Blocks that failed filters
     pub(crate) filtered_out: Vec<BlockId>,
     /// Error message if failed
@@ -249,6 +260,7 @@ impl TransferState {
         let (status_tx, status_rx) = watch::channel(TransferStatus::Evaluating);
         let (passed_tx, passed_rx) = watch::channel(Vec::new());
         let (completed_tx, completed_rx) = watch::channel(Vec::new());
+        let (failed_tx, failed_rx) = watch::channel(Vec::new());
         let (remaining_tx, remaining_rx) = watch::channel(input_blocks.clone());
         let (result_tx, result_rx) = watch::channel(None);
         let (cancel_token, cancel_updater) = CancellationToken::new();
@@ -257,6 +269,7 @@ impl TransferState {
             status_tx,
             passed_tx,
             completed_tx,
+            failed_tx,
             remaining_tx,
             result_tx,
         };
@@ -268,6 +281,7 @@ impl TransferState {
             passed_blocks: Vec::new(),
             in_flight: HashSet::new(),
             completed: Vec::new(),
+            failed: Vec::new(),
             filtered_out: Vec::new(),
             error: None,
             notifiers,
@@ -282,6 +296,7 @@ impl TransferState {
             status_rx,
             passed_blocks_rx: passed_rx,
             completed_rx,
+            failed_rx,
             remaining_rx,
             cancel_token,
             result_rx,
@@ -329,12 +344,22 @@ impl TransferState {
         self.update_remaining();
     }
 
+    /// Mark blocks as failed (transfer unsuccessful).
+    pub(crate) fn mark_failed(&mut self, block_ids: impl IntoIterator<Item = BlockId>) {
+        for id in block_ids {
+            self.in_flight.remove(&id);
+            self.failed.push(id);
+        }
+        let _ = self.notifiers.failed_tx.send(self.failed.clone());
+        self.update_remaining();
+    }
+
     /// Update remaining blocks notification.
     fn update_remaining(&self) {
         let remaining: Vec<BlockId> = self
             .passed_blocks
             .iter()
-            .filter(|id| !self.completed.contains(id))
+            .filter(|id| !self.completed.contains(id) && !self.failed.contains(id))
             .copied()
             .collect();
         let _ = self.notifiers.remaining_tx.send(remaining);
@@ -367,6 +392,7 @@ impl TransferState {
             status: self.status,
             passed_blocks: self.passed_blocks.clone(),
             completed_blocks: self.completed.clone(),
+            failed_blocks: self.failed.clone(),
             filtered_blocks: self.filtered_out.clone(),
             error: self.error.clone(),
         };
@@ -395,6 +421,7 @@ pub(crate) struct TransferNotifiers {
     pub(crate) status_tx: watch::Sender<TransferStatus>,
     pub(crate) passed_tx: watch::Sender<Vec<BlockId>>,
     pub(crate) completed_tx: watch::Sender<Vec<BlockId>>,
+    pub(crate) failed_tx: watch::Sender<Vec<BlockId>>,
     pub(crate) remaining_tx: watch::Sender<Vec<BlockId>>,
     pub(crate) result_tx: watch::Sender<Option<TransferResult>>,
 }
@@ -488,5 +515,96 @@ mod tests {
 
         assert_eq!(result.status, TransferStatus::Complete);
         assert_eq!(result.completed_blocks, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_mark_failed_removes_from_in_flight() {
+        let id = TransferId::new();
+        let blocks = vec![1, 2, 3];
+        let (mut state, handle) = TransferState::new(id, blocks);
+
+        state.add_passed(vec![1, 2, 3]);
+        state.mark_in_flight(vec![1, 2, 3]);
+        assert_eq!(state.in_flight_count(), 3);
+
+        state.mark_failed(vec![2]);
+        assert_eq!(state.in_flight_count(), 2);
+        assert_eq!(handle.failed_blocks(), vec![2]);
+        assert!(handle.completed_blocks().is_empty());
+    }
+
+    #[test]
+    fn test_mark_failed_updates_remaining() {
+        let id = TransferId::new();
+        let blocks = vec![1, 2, 3];
+        let (mut state, handle) = TransferState::new(id, blocks);
+
+        state.add_passed(vec![1, 2, 3]);
+        state.mark_in_flight(vec![1, 2, 3]);
+
+        // Fail block 2 — remaining should exclude it
+        state.mark_failed(vec![2]);
+        let remaining = handle.remaining_blocks();
+        assert!(remaining.contains(&1));
+        assert!(!remaining.contains(&2));
+        assert!(remaining.contains(&3));
+    }
+
+    #[test]
+    fn test_partial_failure_result() {
+        let id = TransferId::new();
+        let blocks = vec![1, 2, 3, 4, 5];
+        let (mut state, _handle) = TransferState::new(id, blocks);
+
+        state.add_passed(vec![1, 2, 3]);
+        state.add_filtered(vec![4, 5]);
+        state.mark_in_flight(vec![1, 2, 3]);
+
+        // Block 1 succeeds, block 2 fails, block 3 succeeds
+        state.mark_completed(vec![1, 3]);
+        state.mark_failed(vec![2]);
+
+        assert_eq!(state.completed, vec![1, 3]);
+        assert_eq!(state.failed, vec![2]);
+        assert_eq!(state.in_flight_count(), 0);
+
+        // Simulate the pipeline's terminal state logic
+        let total = state.passed_blocks.len() + state.filtered_out.len();
+        let done = state.completed.len() + state.failed.len() + state.filtered_out.len();
+        assert_eq!(done, total);
+
+        // With failures, should set_error not set_complete
+        let failed_count = state.failed.len();
+        assert!(failed_count > 0);
+        state.set_error(format!(
+            "{failed_count} blocks failed to transfer to object storage",
+        ));
+        assert_eq!(state.status, TransferStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_partial_failure_wait_result() {
+        let id = TransferId::new();
+        let blocks = vec![1, 2, 3];
+        let (mut state, mut handle) = TransferState::new(id, blocks);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            state.add_passed(vec![1, 2, 3]);
+            state.mark_in_flight(vec![1, 2, 3]);
+            state.mark_completed(vec![1, 3]);
+            state.mark_failed(vec![2]);
+            state.set_error("1 blocks failed to transfer to object storage".to_string());
+        });
+
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), handle.wait())
+            .await
+            .expect("Should complete within timeout")
+            .expect("Should succeed");
+
+        assert_eq!(result.status, TransferStatus::Failed);
+        assert_eq!(result.completed_blocks, vec![1, 3]);
+        assert_eq!(result.failed_blocks, vec![2]);
+        assert!(result.error.is_some());
     }
 }
