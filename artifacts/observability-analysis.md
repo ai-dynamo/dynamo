@@ -170,6 +170,9 @@ NIXL moves KV cache blocks between prefill/decode workers. Transfer latency dire
 | No vLLM or SGLang NIXL transfer metrics         | Only TRT-LLM has application-level KV transfer metrics                                            |
 | NIXL telemetry isolated from Dynamo metrics     | Different port, registry, scrape target; can't correlate with request traces                      |
 | No frontend-level transfer latency              | [#6181](https://github.com/ai-dynamo/dynamo/issues/6181) (tagged `Dynamo 1.0.0`)            |
+| **Transport selection is opaque to Dynamo**      | NIXL's API (`XferRequest`, `XferStatus`) returns only success/in-progress — no information about which transport (RDMA, TCP, CUDA IPC, GDS) was chosen. `agent.backends()` lists available backends but not which one was selected for a specific transfer. If NIXL silently falls back to TCP when RDMA is misconfigured, Dynamo has no way to detect it. UCX is adding transport/device table introspection (branch `print-transports-devices`), but this info does not yet flow through NIXL's API to Dynamo. |
+| **No per-transfer transport annotation**         | NIXL can select different transports for different block ranges within the same logical transfer (e.g., CUDA IPC for same-node blocks, RDMA for cross-node). Even if transport metadata is eventually exposed, per-descriptor transport breakdown would require additional API surface. |
+| **Dynamo does not surface NIXL/UCX transport info via structured logging** | UCX is adding transport/device tables at context and endpoint creation. Even once available, Dynamo has no mechanism to capture this info from NIXL and emit it through Dynamo's structured logging system. Dynamo should expose transport selection as structured log events so operators can see which transports are active without enabling UCX debug logs. |
 
 
 ---
