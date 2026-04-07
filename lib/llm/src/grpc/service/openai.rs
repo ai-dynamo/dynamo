@@ -23,7 +23,7 @@ use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
+use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::Status;
 
@@ -89,10 +89,12 @@ pub async fn completion_response_stream(
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Completions, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Completions,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
