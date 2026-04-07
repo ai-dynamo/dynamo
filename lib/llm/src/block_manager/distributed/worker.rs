@@ -22,10 +22,10 @@ use crate::block_manager::{
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
-use validator::Validate;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use validator::Validate;
 
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -397,7 +397,9 @@ impl Handler for BlockTransferDispatch {
 
 fn validate_page_size(value: usize) -> Result<(), validator::ValidationError> {
     if !value.is_power_of_two() {
-        return Err(validator::ValidationError::new("page_size_not_power_of_two"));
+        return Err(validator::ValidationError::new(
+            "page_size_not_power_of_two",
+        ));
     }
     Ok(())
 }
@@ -563,14 +565,13 @@ impl KvbmWorker {
                             // Standard layout: outer_dim is encoded in the shape.
                             //   outer_contiguous=true:  [outer_dim, n_blocks, page_size, inner_dim]
                             //   outer_contiguous=false: [n_blocks, outer_dim, page_size, inner_dim]
-                            let inner_dim =
-                                shape[2..].iter().product::<usize>() / config.page_size;
+                            let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
                             (candidate, inner_dim)
                         } else {
                             // MLA-style: no explicit K/V split, treat as outer_dim=1.
                             let dims_start = if outer_contiguous { 2 } else { 1 };
-                            let inner_dim = shape[dims_start..].iter().product::<usize>()
-                                / config.page_size;
+                            let inner_dim =
+                                shape[dims_start..].iter().product::<usize>() / config.page_size;
                             (1, inner_dim)
                         }
                     }
@@ -914,7 +915,10 @@ mod tests {
         cfg.outer_dim = Some(3);
         cfg.inner_dim = Some(64);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("outer_dim") && err.contains("range"), "got: {err}");
+        assert!(
+            err.contains("outer_dim") && err.contains("range"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -923,7 +927,10 @@ mod tests {
         cfg.outer_dim = Some(0);
         cfg.inner_dim = Some(64);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("outer_dim") && err.contains("range"), "got: {err}");
+        assert!(
+            err.contains("outer_dim") && err.contains("range"),
+            "got: {err}"
+        );
     }
 
     // --- inner_dim ---
@@ -934,7 +941,10 @@ mod tests {
         cfg.outer_dim = Some(2);
         cfg.inner_dim = Some(0);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("inner_dim") && err.contains("range"), "got: {err}");
+        assert!(
+            err.contains("inner_dim") && err.contains("range"),
+            "got: {err}"
+        );
     }
 
     // --- coupling ---
