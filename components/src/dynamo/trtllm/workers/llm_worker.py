@@ -109,6 +109,23 @@ def build_kv_connector_config(config: Config):
     return None
 
 
+def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
+    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
+    for key, new_val in source.items():
+        full_key = f"{path}.{key}" if path else key
+        if key in target:
+            old_val = target[key]
+            if isinstance(new_val, dict) and isinstance(old_val, dict):
+                _warn_override_collisions(old_val, new_val, full_key)
+            elif old_val != new_val:
+                logging.warning(
+                    "override_engine_args will replace %s: %r -> %r",
+                    full_key,
+                    old_val,
+                    new_val,
+                )
+
+
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -206,6 +223,7 @@ async def init_llm_worker(
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
 
+            _warn_override_collisions(arg_map, overrides)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")

@@ -18,6 +18,7 @@ fallback and any associated polyfills.
 import ipaddress
 import logging
 import socket
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +99,42 @@ except ImportError:
             return f"tcp://{self.host}:{self.port}"
 
 
+def enable_disjoint_streaming_output(server_args: Any) -> None:
+    """
+    Enable SGLang's disjoint streaming output across ServerArgs field renames.
+
+    Covers sglang <= 0.5.x (`stream_output`) and newer releases
+    (`incremental_streaming_output`).
+    """
+    fields = getattr(type(server_args), "__dataclass_fields__", None)
+    if isinstance(fields, dict):
+        if "incremental_streaming_output" in fields:
+            server_args.incremental_streaming_output = True
+            return
+        if "stream_output" in fields:
+            server_args.stream_output = True
+            return
+        raise AttributeError(
+            "SGLang ServerArgs has neither 'incremental_streaming_output' nor "
+            "'stream_output'"
+        )
+
+    if hasattr(server_args, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
+        return
+    if hasattr(server_args, "stream_output"):
+        server_args.stream_output = True
+        return
+
+    logger.debug(
+        "Skipping streaming output compatibility for non-ServerArgs object: %s",
+        type(server_args).__name__,
+    )
+
+
 __all__ = [
     "NetworkAddress",
+    "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
     "_SGLANG_HAS_NETWORK_MODULE",

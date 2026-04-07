@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+// Deprecated: Package namespace_scope implements the lease-based coordination mechanism for the
+// deprecated namespace-restricted operator mode. It will be removed in a future release.
 package namespace_scope
 
 import (
@@ -37,7 +39,8 @@ const (
 	LeaseName = "dynamo-operator-namespace-scope"
 )
 
-// LeaseManager manages the namespace scope marker lease
+// Deprecated: LeaseManager manages the namespace scope marker lease for the deprecated
+// namespace-restricted operator mode.
 type LeaseManager struct {
 	client          kubernetes.Interface
 	namespace       string

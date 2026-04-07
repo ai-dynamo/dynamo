@@ -27,6 +27,15 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
+use dynamo_runtime::error::ErrorType as DynamoErrorType;
+
+/// Check whether an error chain indicates the request was rejected.
+pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    const NON_REJECTION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -257,6 +266,7 @@ pub struct Metrics {
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
+    model_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -283,6 +293,7 @@ pub struct InflightGuard {
     status: Status,
     error_type: ErrorType,
     timer: Instant,
+    request_id: String,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -371,6 +382,10 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
+    isl: usize,
+    ttft_ms: Option<f64>,
+    itl_sum_secs: f64,
+    itl_count: u64,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
     // we track if tokenize latency has been observed to ensure we only increment once per request
@@ -674,6 +689,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
+                "Total number of requests rejected due to resource exhaustion",
+            ),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -695,6 +719,7 @@ impl Metrics {
             model_migration_limit,
             model_migration_total,
             model_cancellation_total,
+            model_rejection_total,
         }
     }
 
@@ -800,6 +825,7 @@ impl Metrics {
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
+        registry.register(Box::new(self.model_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -897,6 +923,20 @@ impl Metrics {
             .get()
     }
 
+    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current rejection count for a model and endpoint
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .get()
+    }
+
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
     /// and the kind of endpoint that was hit
     ///
@@ -914,6 +954,7 @@ impl Metrics {
         model: &str,
         endpoint: Endpoint,
         streaming: bool,
+        request_id: &str,
     ) -> InflightGuard {
         let request_type = if streaming {
             RequestType::Stream
@@ -926,6 +967,7 @@ impl Metrics {
             model.to_string().to_lowercase(),
             endpoint,
             request_type,
+            request_id.to_string(),
         )
     }
 
@@ -965,14 +1007,21 @@ impl InflightGuard {
         model: String,
         endpoint: Endpoint,
         request_type: RequestType,
+        request_id: String,
     ) -> Self {
-        // Start the timer
         let timer = Instant::now();
-
-        // Increment the inflight gauge when the guard is created
         metrics.inc_inflight_gauge(&model);
 
-        // Return the RAII Guard
+        tracing::Span::current().record("model", model.as_str());
+
+        tracing::info!(
+            request_id = %request_id,
+            model = %model,
+            endpoint = %endpoint,
+            request_type = %request_type,
+            "request received"
+        );
+
         InflightGuard {
             metrics,
             model,
@@ -981,7 +1030,27 @@ impl InflightGuard {
             status: Status::Error,
             error_type: ErrorType::Internal,
             timer,
+            request_id,
         }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+    pub fn request_type(&self) -> &RequestType {
+        &self.request_type
+    }
+    pub fn error_type(&self) -> &ErrorType {
+        &self.error_type
+    }
+    pub fn elapsed_ms(&self) -> u128 {
+        self.timer.elapsed().as_millis()
     }
 
     pub(crate) fn mark_ok(&mut self) {
@@ -998,13 +1067,7 @@ impl InflightGuard {
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         let duration = self.timer.elapsed().as_secs_f64();
-
-        // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
-
-        // the frequency on incrementing the full request counter is relatively low
-        // if we were incrementing the counter on every forward pass, we'd use static CounterVec or
-        // discrete counter object without the more costly lookup required for the following calls
         self.metrics.inc_request_counter(
             &self.model,
             &self.endpoint,
@@ -1012,12 +1075,48 @@ impl Drop for InflightGuard {
             &self.status,
             &self.error_type,
         );
-
-        // Record the duration of the request
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
             .observe(duration);
+
+        let elapsed_ms = (duration * 1000.0) as u64;
+        let status_str = self.status.as_str();
+        match self.status {
+            Status::Error => {
+                let detail = match self.error_type {
+                    ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::Internal => "internal server error during processing",
+                    ErrorType::Validation => "invalid request parameters",
+                    ErrorType::NotFound => "model or resource not found",
+                    ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::None => "unknown error",
+                };
+                tracing::error!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    error_type = %self.error_type,
+                    error_detail = %detail,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            Status::Success => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+        }
     }
 }
 
@@ -1062,6 +1161,12 @@ impl RequestType {
     }
 }
 
+impl std::fmt::Display for RequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Status {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -1085,6 +1190,12 @@ impl ErrorType {
     }
 }
 
+impl std::fmt::Display for ErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
         ResponseMetricCollector {
@@ -1094,6 +1205,10 @@ impl ResponseMetricCollector {
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
+            isl: 0,
+            ttft_ms: None,
+            itl_sum_secs: 0.0,
+            itl_count: 0,
             cached_tokens_observed: false,
             tokenize_latency_observed: false,
             detokenize_latency_total: Duration::ZERO,
@@ -1194,6 +1309,9 @@ impl ResponseMetricCollector {
             return;
         }
 
+        // Store ISL for span recording on drop
+        self.isl = isl;
+
         // Increment the real-time output tokens counter
         self.metrics
             .output_tokens_counter
@@ -1205,8 +1323,9 @@ impl ResponseMetricCollector {
             // we use the full response time as TTFT and ignore the ITL
             self.is_first_token = false;
 
-            // Publish TTFT
+            // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
+            self.ttft_ms = Some(ttft * 1000.0);
             self.metrics
                 .time_to_first_token
                 .with_label_values(&[&self.model])
@@ -1247,6 +1366,8 @@ impl ResponseMetricCollector {
         if let Some(last_response_time) = self.last_response_time {
             let response_duration = current_duration - last_response_time;
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            self.itl_sum_secs += itl * num_tokens as f64;
+            self.itl_count += num_tokens as u64;
             for _ in 0..num_tokens {
                 self.metrics
                     .inter_token_latency
@@ -1292,6 +1413,25 @@ impl Drop for ResponseMetricCollector {
             .output_sequence_length
             .with_label_values(&[&self.model])
             .observe(self.osl as f64);
+
+        // Record request summary on the enclosing span.
+        // InflightGuard::Drop and on_response logs will inherit these.
+        let span = tracing::Span::current();
+        span.record("input_tokens", self.isl as u32);
+        span.record("output_tokens", self.osl as u32);
+        if let Some(ttft_ms) = self.ttft_ms {
+            span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+        }
+        if self.itl_count > 0 {
+            let avg_ms = (self.itl_sum_secs / self.itl_count as f64) * 1000.0;
+            span.record("avg_itl_ms", format!("{:.2}", avg_ms).as_str());
+        }
+        if let Some(worker_id) = self.prefill_worker_id {
+            span.record("prefill_worker_id", worker_id);
+        }
+        if let Some(worker_id) = self.decode_worker_id {
+            span.record("decode_worker_id", worker_id);
+        }
     }
 }
 
@@ -2087,7 +2227,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_ok();
         } // guard drops here
 
@@ -2117,7 +2257,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
         } // guard drops here
 
@@ -2147,7 +2287,7 @@ mod tests {
             let _guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
         } // guard drops with default error_type=Internal
 
@@ -2187,7 +2327,7 @@ mod tests {
         for error_type in &error_types {
             let mut guard = metrics
                 .clone()
-                .create_inflight_guard(model, endpoint, false);
+                .create_inflight_guard(model, endpoint, false, "");
             guard.mark_error(error_type.clone());
             drop(guard);
         }
@@ -2226,7 +2366,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
             drop(guard);
         }
@@ -2235,7 +2375,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::Completions, false);
+                    .create_inflight_guard(model, Endpoint::Completions, false, "");
             guard.mark_error(ErrorType::Internal);
             drop(guard);
         }
@@ -2244,7 +2384,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::Embeddings, false);
+                    .create_inflight_guard(model, Endpoint::Embeddings, false, "");
             guard.mark_ok();
             drop(guard);
         }
