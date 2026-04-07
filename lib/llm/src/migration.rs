@@ -113,19 +113,20 @@ impl RetryManager {
         metrics: Arc<Metrics>,
     ) -> Result<Self> {
         // Disable migration for structured-output (guided-decoding) requests.
-        // vLLM initializes its guided-decoding FSM fresh for every new request and
-        // only advances it on newly-generated tokens, not on context/prompt tokens.
-        // Migrating a partial structured-output response would replay already-generated
-        // tokens as context, causing the FSM to restart from the schema root and
-        // producing duplicated or nested JSON output. Propagate the error cleanly instead.
+        // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
+        // for every new request and only advance it on newly-generated tokens, not on
+        // context/prompt tokens. Migrating a partial structured-output response would replay
+        // already-generated tokens as context, causing the FSM to restart from the schema
+        // root and producing duplicated or nested JSON. This applies to all backends
+        // (vLLM, SGLang, TRT-LLM) equally. Propagate the error cleanly instead.
         let effective_retries = if preprocessed_request
             .sampling_options
             .guided_decoding
             .is_some()
         {
             tracing::warn!(
-                "Guided-decoding request detected: disabling migration to prevent \
-                     FSM corruption (guided_decoding + token replay = corrupted output)"
+                "Guided-decoding request: migration disabled —
+                     guided-decoding FSM state is not transferable (applies to all backends)"
             );
             0
         } else {
@@ -866,10 +867,10 @@ mod tests {
 
     /// Test case 8: No migration for guided-decoding (structured-output) requests
     ///
-    /// Bug (#7634): When a vLLM worker crashes mid-stream during a structured-output
+    /// Bug (#7634): When a worker crashes mid-stream during a structured-output
     /// (json_schema) request, migration appends already-generated token IDs back onto
-    /// token_ids and replays the request to a new worker. However, vLLM initializes its
-    /// guided-decoding FSM fresh for every new request and only advances it on newly-
+    /// token_ids and replays the request to a new worker. However, backends initialize
+    /// the guided-decoding FSM fresh for every new request and only advance it on newly-
     /// generated tokens — not on context/prompt tokens. This causes the FSM to restart
     /// from the schema root while treating already-generated tokens as context, producing
     /// duplicated or nested JSON in the final response.
