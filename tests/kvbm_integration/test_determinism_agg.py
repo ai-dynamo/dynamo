@@ -58,8 +58,10 @@ _CACHE_RESET_TIMEOUT = 2 * (_KVBM_MAX_ITERATIONS * 4 + 50)
 _CONCURRENT_TIMEOUT = 2 * ((_KVBM_NUM_ITERATIONS - 1) * _KVBM_REQUEST_DELAY + 150)
 
 # Test markers to align with repository conventions
-# Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
+    pytest.mark.kvbm,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
