@@ -4,10 +4,10 @@
 name: PR
 
 on:
-  push:
-    branches:
-      - "pull-request/[0-9]+"
-      # Note: release/* branches are handled by release.yml workflow
+  # push:
+  #   branches:
+  #     - "pull-request/[0-9]+"
+  #     # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
     inputs:
       run_deploy_operator:
