@@ -306,7 +306,8 @@ def send_mla_completion_request(
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.e2e
-@pytest.mark.pre_merge
+@pytest.mark.nightly
+@pytest.mark.slow
 @pytest.mark.gpu_4
 @pytest.mark.mla
 @pytest.mark.model(MLA_MODEL)
