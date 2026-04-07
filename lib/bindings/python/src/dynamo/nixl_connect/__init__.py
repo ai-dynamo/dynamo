@@ -450,7 +450,7 @@ class ActiveOperation(AbstractOperation):
         iteration_count = 0
         sleep_time = min_poll_ms
         while True:
-            if iteration_count & 10 == 0:
+            if iteration_count % 10 == 0:
                 logger.debug(
                     f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}."
                 )
@@ -459,6 +459,7 @@ class ActiveOperation(AbstractOperation):
                 case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
                     await asyncio.sleep(sleep_time / 1000)
                     sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
+                    iteration_count += 1
                 # Any other state indicates completion or error.
                 case _:
                     return
