@@ -665,7 +665,9 @@ vllm_configs = {
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
-            pytest.mark.profiled_vram_gib(19.9),  # align with multimodal_agg_qwen (7B VLM)
+            pytest.mark.profiled_vram_gib(
+                19.9
+            ),  # align with multimodal_agg_qwen (7B VLM)
             pytest.mark.requested_vllm_kv_cache_bytes(
                 922_354_000
             ),  # KV cache cap (2x safety over min=461_176_832)
