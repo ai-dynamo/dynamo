@@ -344,6 +344,7 @@ mod integration_tests {
             dynamo_llm::entrypoint::RouterConfig::default(),
             0, // migration_limit
             None,
+            None,
             service.state().metrics_clone(),
         );
         // Start watching for model registrations via discovery interface
