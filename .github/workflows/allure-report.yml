@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Allure Test Report
+
+on:
+  workflow_run:
+    workflows:
+      - 'Post-Merge CI Pipeline'
+      - 'Nightly CI Pipeline'
+      - 'Release Pipeline'
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to download allure-results artifacts from'
+        required: true
+        type: string
+      report_subdir:
+        description: 'Subdirectory on gh-pages for the report'
+        required: false
+        type: string
+        default: 'dev'
+
+jobs:
+  resolve-params:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion != 'skipped'
+    outputs:
+      run_id: ${{ steps.params.outputs.run_id }}
+      subdir: ${{ steps.params.outputs.subdir }}
+      workflow_label: ${{ steps.params.outputs.workflow_label }}
+    steps:
+      - name: Determine report parameters
+        id: params
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run_id=${{ inputs.run_id }}" >> $GITHUB_OUTPUT
+            echo "subdir=${{ inputs.report_subdir }}" >> $GITHUB_OUTPUT
+            echo "workflow_label=${{ inputs.report_subdir }}" >> $GITHUB_OUTPUT
+          else
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+            echo "workflow_label=${WORKFLOW_NAME}" >> $GITHUB_OUTPUT
+            case "$WORKFLOW_NAME" in
+              *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
+              *"Nightly"*)    echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+              *"Release"*)    echo "subdir=release" >> $GITHUB_OUTPUT ;;
+              *)
+                echo "::error::Unknown workflow name: '${WORKFLOW_NAME}'"
+                echo "::error::If this is a new workflow, update: (1) this case statement, (2) allurerc.mjs plugin filters, (3) the allure-all unified dashboard config."
+                echo "::error::If an existing workflow was renamed, also update the gh-pages subdir and dashboard-results path to preserve history trends."
+                exit 1
+                ;;
+            esac
+          fi
+
+  generate-report:
+    needs: resolve-params
+    uses: ./.github/workflows/generate-allure-report.yml
+    with:
+      run_id: ${{ needs.resolve-params.outputs.run_id }}
+      subdir: ${{ needs.resolve-params.outputs.subdir }}
+      workflow_label: ${{ needs.resolve-params.outputs.workflow_label }}
+    permissions:
+      contents: write
+      actions: read

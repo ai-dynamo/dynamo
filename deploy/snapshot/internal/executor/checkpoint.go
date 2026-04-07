@@ -28,10 +28,19 @@ type CheckpointRequest struct {
 	ContainerName      string
 	CheckpointID       string
 	CheckpointLocation string
+	StartedAt          time.Time
 	NodeName           string
 	PodName            string
 	PodNamespace       string
 	Clientset          kubernetes.Interface
+}
+
+type checkpointPhaseTimings struct {
+	PrepareDuration        time.Duration
+	CUDADuration           time.Duration
+	CRIUDumpDuration       time.Duration
+	OverlayCaptureDuration time.Duration
+	FinalizeDuration       time.Duration
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -42,6 +51,8 @@ type CheckpointRequest struct {
 // renamed into place at the base path root.
 func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
+	phaseTimings := checkpointPhaseTimings{}
+	prepareStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
 	if strings.TrimSpace(req.CheckpointID) == "" {
@@ -73,26 +84,46 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	if err != nil {
 		return err
 	}
+	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
-	criuDumpDuration, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
 	if err != nil {
 		return err
 	}
+	phaseTimings.CUDADuration = captureTimings.CUDADuration
+	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
+	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Remove any previous checkpoint with the same identity hash before finalizing
+	// Remove any previous checkpoint with the same identity hash, then
+	// promote the staged checkpoint directory into place.
+	finalizeStart := time.Now()
 	if err := os.RemoveAll(finalDir); err != nil {
 		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
+	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
 	totalDuration := time.Since(checkpointStart)
-	log.Info("=== Checkpoint operation completed ===",
-		"total_duration", totalDuration,
-		"criu_dump_duration", criuDumpDuration,
+	log.Info("Checkpoint timing summary",
+		"checkpoint", map[string]any{
+			"duration": totalDuration.String(),
+			"phases": map[string]string{
+				"prepare_duration":         phaseTimings.PrepareDuration.String(),
+				"cuda_duration":            phaseTimings.CUDADuration.String(),
+				"criu_dump_duration":       phaseTimings.CRIUDumpDuration.String(),
+				"overlay_capture_duration": phaseTimings.OverlayCaptureDuration.String(),
+				"finalize_duration":        phaseTimings.FinalizeDuration.String(),
+			},
+		},
 	)
+	if !req.StartedAt.IsZero() {
+		log.Info("Checkpoint wall time from agent detection",
+			"started_to_checkpoint_complete", time.Since(req.StartedAt),
+		)
+	}
 
 	return nil
 }
@@ -156,7 +187,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
 	}
 	if len(cudaHostPIDs) > 0 {
-		log.Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
+		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpuUUIDs []string
 	if len(cudaHostPIDs) > 0 {
@@ -218,30 +249,37 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (time.Duration, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+	timings := &checkpointPhaseTimings{}
+
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log); err != nil {
-			return 0, fmt.Errorf("CUDA checkpoint failed: %w", err)
+		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
+		if err != nil {
+			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
+		timings.CUDADuration = cudaTimings.TotalDuration
 	}
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
+	timings.CRIUDumpDuration = criuDumpDuration
 
 	// Overlay rootfs diff capture is best-effort. Failures are logged but not
 	// propagated — a checkpoint without overlay diffs is still valid for restore
 	// (the base container image provides the filesystem).
 	if state.UpperDir != "" {
+		overlayCaptureStart := time.Now()
 		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
 			log.Error(err, "Failed to capture rootfs diff")
 		}
 		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
 			log.Error(err, "Failed to capture deleted files")
 		}
+		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
 
-	return criuDumpDuration, nil
+	return timings, nil
 }

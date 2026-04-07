@@ -8,7 +8,9 @@ use dynamo_kv_router::config::KvRouterConfig;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{Trace, WorkloadDriver};
-use crate::replay::{ReplayRouterMode, TraceSimulationReport, normalize_trace_requests};
+use crate::replay::{
+    ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport, normalize_trace_requests,
+};
 
 use super::live_runtime::LiveRuntime;
 use super::state::{LiveReplayMode, LiveRuntimeStats};
@@ -24,6 +26,7 @@ fn total_turns(trace: &Trace) -> usize {
 fn run_live_runtime(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     pending: VecDeque<DirectRequest>,
     num_workers: usize,
     mode: LiveReplayMode,
@@ -35,15 +38,25 @@ fn run_live_runtime(
         .map_err(|e| anyhow!("failed to create online replay runtime: {e}"))?;
 
     runtime.block_on(async move {
-        LiveRuntime::new(args, router_config, pending, num_workers, mode, router_mode)?
-            .run()
-            .await
+        LiveRuntime::new(
+            args,
+            router_config,
+            prefill_load_estimator,
+            pending,
+            num_workers,
+            mode,
+            router_mode,
+        )?
+        .run()
+        .await
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_live_workload_runtime(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     driver: WorkloadDriver,
     total_turns: usize,
     num_workers: usize,
@@ -59,6 +72,7 @@ fn run_live_workload_runtime(
         LiveRuntime::new(
             args,
             router_config,
+            prefill_load_estimator,
             VecDeque::new(),
             num_workers,
             mode,
@@ -72,6 +86,7 @@ fn run_live_workload_runtime(
 pub(crate) fn simulate_trace_requests(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -82,6 +97,7 @@ pub(crate) fn simulate_trace_requests(
     let (report, _) = run_live_runtime(
         args,
         router_config,
+        prefill_load_estimator,
         pending,
         num_workers,
         LiveReplayMode::Trace,
@@ -93,6 +109,7 @@ pub(crate) fn simulate_trace_requests(
 pub(crate) fn simulate_concurrency_requests(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -107,6 +124,7 @@ pub(crate) fn simulate_concurrency_requests(
     let (report, _) = run_live_runtime(
         args,
         router_config,
+        prefill_load_estimator,
         pending,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
@@ -118,16 +136,19 @@ pub(crate) fn simulate_concurrency_requests(
 pub(crate) fn simulate_trace_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     let (report, _) = run_live_workload_runtime(
         args,
         router_config,
-        trace.into_trace_driver()?,
+        prefill_load_estimator,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Trace,
@@ -139,17 +160,20 @@ pub(crate) fn simulate_trace_workload(
 pub(crate) fn simulate_concurrency_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     let (report, _) = run_live_workload_runtime(
         args,
         router_config,
-        trace.into_concurrency_driver()?,
+        prefill_load_estimator,
+        trace.into_concurrency_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
@@ -171,6 +195,7 @@ pub(super) fn simulate_trace_requests_with_stats(
     run_live_runtime(
         args,
         None,
+        None,
         pending,
         num_workers,
         LiveReplayMode::Trace,
@@ -191,6 +216,7 @@ pub(super) fn simulate_concurrency_requests_with_stats(
     run_live_runtime(
         args,
         None,
+        None,
         pending,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
@@ -206,11 +232,13 @@ pub(super) fn simulate_trace_workload_with_stats(
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         args,
         None,
-        trace.into_trace_driver()?,
+        None,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Trace,
@@ -227,11 +255,13 @@ pub(super) fn simulate_concurrency_workload_with_stats(
     router_mode: ReplayRouterMode,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
+    let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         args,
         None,
-        trace.into_concurrency_driver()?,
+        None,
+        trace.into_concurrency_driver_with_block_size(engine_block_size)?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },

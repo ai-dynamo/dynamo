@@ -27,7 +27,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + LMCache + Multiproc (1 GPU)" "$MODEL" "$HTTP_PORT"

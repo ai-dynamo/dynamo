@@ -42,6 +42,9 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
+REMOTE_VIDEO_TEST_URI = (
+    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+)
 
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
@@ -302,6 +305,45 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_agg_qwen": SGLangConfig(
+        # Tests aggregated video inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker).
+        # Reuses agg_vision.sh because image and video share the same aggregated
+        # multimodal SGLang request path.
+        name="video_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(13.3),  # same as multimodal_e_pd_qwen
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2-VL-7B-Instruct",
+            "--mem-fraction-static",
+            "0.8",
+        ],
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
                 temperature=0.0,
                 max_tokens=100,
             )
