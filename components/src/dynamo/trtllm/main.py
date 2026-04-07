@@ -46,8 +46,8 @@ def _make_drain_callback(
             "NIXL KV transfers to complete before GPU memory is freed",
             _DRAIN_TIMEOUT_S,
         )
-        deadline = asyncio.get_event_loop().time() + _DRAIN_TIMEOUT_S
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
+        while asyncio.get_running_loop().time() < deadline:
             try:
                 stats_iter = engine.llm.get_stats_async(timeout=2)
                 stat = await anext(stats_iter)

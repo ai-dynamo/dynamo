@@ -130,5 +130,5 @@ async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
         ]
     )
 
-    with pytest.raises(RuntimeError, match="ERRORED|errored|error"):
+    with pytest.raises(RuntimeError, match=r"ERRORED|errored|error"):
         await op.wait_for_completion()
