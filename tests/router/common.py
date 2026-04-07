@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
 from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
@@ -871,14 +871,14 @@ def _test_router_indexers_sync(
             router_event_threads=router_event_threads,
         )
 
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
             tmp_runtime = get_runtime(store_backend, request_plane)
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
-            await engine_workers.launch_mockers_with_indexer(tmp_endpoint)
+            await engine_workers.launch_workers_with_indexer(tmp_endpoint)
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1260,6 +1260,7 @@ def _test_router_decisions_disagg(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     durable_kv_events: bool = False,
+    router_aic_config: Optional[dict[str, Any]] = None,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1282,6 +1283,7 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for frontend KV routing.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -1297,6 +1299,7 @@ def _test_router_decisions_disagg(
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
+        router_aic_config=router_aic_config,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
@@ -1479,6 +1482,7 @@ def _test_router_decisions(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    router_aic_config: Optional[dict[str, Any]] = None,
 ):
     """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
 
@@ -1503,6 +1507,7 @@ def _test_router_decisions(
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix/tiebreak logic
@@ -1511,10 +1516,10 @@ def _test_router_decisions(
     # Create KvRouterConfig with lower snapshot threshold for testing
     # Use async to manage the test flow
     async def test_sync():
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # Must happen before KvRouter creation since KvRouter blocks until workers appear.
         if standalone_indexer_url:
-            await engine_workers.launch_mockers_with_indexer(endpoint)
+            await engine_workers.launch_workers_with_indexer(endpoint)
 
         # Workers register one instance per process (not per dp_rank)
         expected_num_instances = engine_workers.num_workers
@@ -1524,12 +1529,22 @@ def _test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            router_track_prefill_tokens=True,
+            router_prefill_load_model=(
+                "aic" if router_aic_config is not None else "none"
+            ),
+        )
+        aic_perf_config = (
+            AicPerfConfig(**router_aic_config)
+            if router_aic_config is not None
+            else None
         )
         with min_initial_workers_env(expected_num_instances):
             kv_router = KvRouter(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
+                aic_perf_config=aic_perf_config,
             )
 
         # Wait for workers to be ready and get their instance IDs
@@ -1690,30 +1705,40 @@ def _test_router_decisions(
             events_by_key[key] = []
         events_by_key[key].append(event)
 
+    def count_stored_blocks(events: list[Any]) -> int:
+        total = 0
+        for event in events:
+            stored = event.get("event", {}).get("data", {}).get("stored")
+            if stored is None:
+                continue
+            total += len(stored.get("blocks", []))
+        return total
+
     logger.info(
-        f"Events by (worker_id, dp_rank): {[(key, len(evts)) for key, evts in events_by_key.items()]}"
+        "Stored blocks by (worker_id, dp_rank): "
+        f"{[(key, count_stored_blocks(evts)) for key, evts in events_by_key.items()]}"
     )
 
-    # Worker a key: 5 events (A, B from req1; C, D from req2; F from req4)
+    # Worker a key: 5 stored blocks (A, B from req1; C, D from req2; F from req4)
     worker_a_key = (worker_a_id, dp_rank_a if dp_rank_a is not None else 0)
-    worker_a_events = len(events_by_key.get(worker_a_key, []))
-    assert worker_a_events == 5, (
-        f"Expected worker_a {worker_a_key} to have 5 events (A,B + C,D + F), "
-        f"but found {worker_a_events}"
+    worker_a_blocks = count_stored_blocks(events_by_key.get(worker_a_key, []))
+    assert worker_a_blocks == 5, (
+        f"Expected worker_a {worker_a_key} to have 5 stored blocks (A,B + C,D + F), "
+        f"but found {worker_a_blocks}"
     )
 
-    # Worker b key: 4 events (A, C, E from req3; G from req5)
+    # Worker b key: 4 stored blocks (A, C, E from req3; G from req5)
     worker_b_key = (worker_b_id, dp_rank_b if dp_rank_b is not None else 0)
-    worker_b_events = len(events_by_key.get(worker_b_key, []))
-    assert worker_b_events == 4, (
-        f"Expected worker_b {worker_b_key} to have 4 events (A,C,E + G), "
-        f"but found {worker_b_events}"
+    worker_b_blocks = count_stored_blocks(events_by_key.get(worker_b_key, []))
+    assert worker_b_blocks == 4, (
+        f"Expected worker_b {worker_b_key} to have 4 stored blocks (A,C,E + G), "
+        f"but found {worker_b_blocks}"
     )
 
     logger.info(
         f"Successfully verified cross-worker routing: "
-        f"worker_a {worker_a_key} has {worker_a_events} events, "
-        f"worker_b {worker_b_key} has {worker_b_events} events"
+        f"worker_a {worker_a_key} has {worker_a_blocks} stored blocks, "
+        f"worker_b {worker_b_key} has {worker_b_blocks} stored blocks"
     )
 
     # Verify standalone indexer scores via HTTP POST /query

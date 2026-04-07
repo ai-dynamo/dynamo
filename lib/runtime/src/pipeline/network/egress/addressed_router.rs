@@ -241,6 +241,7 @@ where
         // Prepare trace headers using shared helper
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.clone());
 
         // Stamp send time right before the transport write so the network
         // transit metric excludes serialization/encoding overhead.

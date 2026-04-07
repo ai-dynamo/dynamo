@@ -428,14 +428,6 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -536,11 +528,11 @@ vllm_configs = {
             ),
         ],
     ),
-    # Video multimodal tests for CI using the vLLM video launch scripts.
+    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory=vllm_dir,
-        script_name="video_agg.sh",
+        script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
@@ -568,7 +560,7 @@ vllm_configs = {
     "multimodal_video_disagg": VLLMConfig(
         name="multimodal_video_disagg",
         directory=vllm_dir,
-        script_name="video_disagg.sh",
+        script_name="disagg_multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
@@ -904,6 +896,65 @@ def test_multimodal_b64(
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
         timeout=360,
+        request_payloads=[b64_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.pre_merge
+@pytest.mark.timeout(220)
+def test_multimodal_b64_frontend_decoding(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """
+    Test multimodal inference with base64 images through frontend decoding path.
+
+    This exercises the Rust frontend image decode + NIXL RDMA transfer path
+    with inline base64 data: URIs (not HTTP URLs). Verifies that the
+    strip_inline_data_urls optimization does not break correctness.
+    """
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["green"],
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+    config = VLLMConfig(
+        name="test_multimodal_b64_frontend_decoding",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        delayed_start=0,
+        timeout=220,
         request_payloads=[b64_payload],
     )
 
