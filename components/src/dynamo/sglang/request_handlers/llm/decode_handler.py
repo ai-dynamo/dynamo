@@ -223,7 +223,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if output_top:
             new_top = output_top[num_output_logprobs_so_far:]
             if new_top:
-                top_logprobs = []
+                top_logprobs: list[list[dict[str, Any]]] = []
                 for position_entries in new_top:
                     if position_entries is None:
                         top_logprobs.append([])
