@@ -76,6 +76,10 @@ DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_PREFILL_WORKER_GPU=0
+    DYN_DECODE_WORKER_GPU=0
+    DYN_PREFILL_GPU_MEM=0.45
+    DYN_DECODE_GPU_MEM=0.45
     EXTRA_ARGS="--enforce-eager"
     PD_EXTRA_ARGS="--max-model-len 4096 \
 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES \
