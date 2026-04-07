@@ -97,6 +97,7 @@ impl Backend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn decoder(
         &self,
         stream: ManyOut<ExecutionOutputStream>,
@@ -117,7 +118,7 @@ impl Backend {
                 tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
                 stop_conditions.clone(),
                 include_stop_str_in_output,
-                tracker.as_ref().map(|t| Arc::clone(t)),
+                tracker.as_ref().map(Arc::clone),
             );
             decoders.insert(i, decoder);
         }
