@@ -216,7 +216,7 @@ vllm_configs = {
             pytest.mark.xpu_2,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
-        ], 
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
