@@ -770,7 +770,7 @@ impl JailedStream {
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
         match &self.jail_mode {
             JailMode::MarkerBased => {
-                // Path 1: End sequence detected
+                // Path 1: End sequence detected via naive string search.
                 let end_marker_info = if !self.jail_end_sequences.is_empty() {
                     self.jail_end_sequences.iter().find_map(|seq| {
                         accumulated_content
@@ -784,9 +784,11 @@ impl JailedStream {
                 // Path 2: Complete tool call(s) can be parsed (early exit)
                 let early_exit = self.should_exit_jail_early(accumulated_content).await;
 
-                if let Some((end_pos, _)) = end_marker_info {
-                    (true, end_pos)
-                } else if early_exit {
+                // When a tool_call_parser is active, prefer Path 2 over Path 1 so
+                // that `find_tool_call_end_position` advances past all consecutive
+                // parallel tool calls instead of splitting at the first end tag.
+                // Fall back to Path 1 when parsing fails (e.g. malformed content).
+                if early_exit {
                     // For early exit, find where the complete tool call ends
                     if let Some(parser) = &self.tool_call_parser {
                         let tools_slice = self.tool_definitions.as_deref();
@@ -806,6 +808,8 @@ impl JailedStream {
                     } else {
                         (false, accumulated_content.len())
                     }
+                } else if let Some((end_pos, _)) = end_marker_info {
+                    (true, end_pos)
                 } else {
                     (false, accumulated_content.len())
                 }

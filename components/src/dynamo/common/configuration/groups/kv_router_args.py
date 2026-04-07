@@ -27,6 +27,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_prefill_load_model",
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
@@ -51,6 +52,7 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_prefill_load_model: str
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
@@ -185,6 +187,18 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-prefill-load-model",
+            env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
+            default="none",
+            choices=["none", "aic"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
+                "'none' keeps static prompt load accounting. "
+                "'aic' decays the oldest active prefill request using AIC-predicted duration."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--router-snapshot-threshold",
             env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
             default=1000000,
@@ -242,7 +256,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be > 0."
+                "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
+                "queueing sensitivity (queue as soon as any tokens are active)."
             ),
             arg_type=float,
         )
