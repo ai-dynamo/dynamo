@@ -51,6 +51,10 @@ from gpu_memory_service.client._gms_storage_restore import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SHARD_SIZE_BYTES = 1024**3
+DEFAULT_SAVE_WORKERS = 8
+DEFAULT_RESTORE_WORKERS = 8
+
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
@@ -143,7 +147,7 @@ class GMSStorageClient:
         device: int = 0,
         *,
         timeout_ms: Optional[int] = None,
-        shard_size_bytes: int = 4 * 1024**3,
+        shard_size_bytes: int = DEFAULT_SHARD_SIZE_BYTES,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -156,7 +160,7 @@ class GMSStorageClient:
             socket_path = get_socket_path(device)
         self._socket_path = socket_path
 
-    def save(self, max_workers: int = 4) -> SaveManifest:
+    def save(self, max_workers: int = DEFAULT_SAVE_WORKERS) -> SaveManifest:
         """Connect to GMS in RO mode and save all allocations + metadata to disk."""
         self._validate_save_request()
         output_dir, shards_dir = self._prepare_output_dir()
@@ -343,9 +347,8 @@ class GMSStorageClient:
     def _prepare_restore_pipeline(
         self,
         manifest: SaveManifest,
-        groups: Dict[str, List[AllocationEntry]],
+        read_groups: Dict[str, List[Tuple[str, str, List[AllocationEntry]]]],
         worker_count: int,
-        input_dir: str,
     ) -> _RestorePipelineResources:
         ctx = _RestorePipelineContext.build(
             manifest.allocations,
@@ -358,14 +361,13 @@ class GMSStorageClient:
         disk_pool = ThreadPoolExecutor(max_workers=worker_count)
         disk_futures = {
             disk_pool.submit(
-                _read_shard_to_queue,
-                os.path.join(input_dir, rel_path),
-                sorted_entries,
+                self._read_restore_group_to_queue,
+                shard_group,
                 ctx.work_q,
                 pin_memory=ctx.use_streams,
                 cancel_event=ctx.cancel_event,
-            ): rel_path
-            for rel_path, sorted_entries in groups.items()
+            ): label
+            for label, shard_group in read_groups.items()
         }
         return _RestorePipelineResources(
             ctx=ctx,
@@ -393,15 +395,86 @@ class GMSStorageClient:
         )
         return id_map
 
+    @staticmethod
+    def _build_restore_read_groups(
+        input_dir: str,
+        allocations: List[AllocationEntry],
+    ) -> Dict[str, List[Tuple[str, str, List[AllocationEntry]]]]:
+        groups = _group_entries_by_shard(allocations)
+        shard_items = [
+            (rel_path, os.path.join(input_dir, rel_path), sorted_entries)
+            for rel_path, sorted_entries in sorted(groups.items())
+        ]
+        if len(shard_items) <= 1:
+            return {
+                rel_path: [(rel_path, abs_path, sorted_entries)]
+                for rel_path, abs_path, sorted_entries in shard_items
+            }
+
+        device_groups: Dict[int, List[Tuple[str, str, List[AllocationEntry]]]] = (
+            defaultdict(list)
+        )
+        for rel_path, abs_path, sorted_entries in shard_items:
+            try:
+                device_id = os.stat(abs_path).st_dev
+            except OSError as exc:
+                logger.debug(
+                    "Falling back to per-shard restore groups after stat(%s) failed: %s",
+                    abs_path,
+                    exc,
+                )
+                return {
+                    rel_path: [(rel_path, abs_path, entries)]
+                    for rel_path, abs_path, entries in shard_items
+                }
+            device_groups[device_id].append((rel_path, abs_path, sorted_entries))
+
+        if len(device_groups) <= 1:
+            return {
+                rel_path: [(rel_path, abs_path, entries)]
+                for rel_path, abs_path, entries in shard_items
+            }
+
+        return {
+            f"device:{device_id}": shard_group
+            for device_id, shard_group in sorted(device_groups.items())
+        }
+
+    def _read_restore_group_to_queue(
+        self,
+        shard_group: List[Tuple[str, str, List[AllocationEntry]]],
+        work_q: "queue.Queue[Optional[Tuple[AllocationEntry, 'torch.Tensor']]]",
+        *,
+        pin_memory: bool,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> int:
+        loaded = 0
+        for rel_path, abs_path, sorted_entries in shard_group:
+            try:
+                loaded += _read_shard_to_queue(
+                    abs_path,
+                    sorted_entries,
+                    work_q,
+                    pin_memory=pin_memory,
+                    cancel_event=cancel_event,
+                )
+            except CancelledError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"Failed to load shard {rel_path}: {exc}") from exc
+        return loaded
+
     def _await_disk_reads(self, disk_futures: Dict[Future[int], str]) -> None:
         for future in as_completed(disk_futures):
-            rel_path = disk_futures[future]
+            label = disk_futures[future]
             try:
                 future.result()
             except CancelledError:
                 pass
             except Exception as exc:
-                raise RuntimeError(f"Failed to load shard {rel_path}: {exc}") from exc
+                raise RuntimeError(
+                    f"Failed to load restore read group {label}: {exc}"
+                ) from exc
 
     def _stop_restore_copy_threads(
         self,
@@ -506,7 +579,7 @@ class GMSStorageClient:
         self,
         input_dir: str,
         *,
-        max_workers: int = 4,
+        max_workers: int = DEFAULT_RESTORE_WORKERS,
         clear_existing: bool = True,
     ) -> Dict[str, str]:
         if not _GMS_IMPORTS_AVAILABLE:
@@ -515,8 +588,8 @@ class GMSStorageClient:
             )
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        groups = _group_entries_by_shard(manifest.allocations)
-        worker_count = max(1, min(max_workers, len(groups) or 1))
+        read_groups = self._build_restore_read_groups(input_dir, manifest.allocations)
+        worker_count = max(1, min(max_workers, len(read_groups) or 1))
 
         with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
             mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
@@ -527,9 +600,8 @@ class GMSStorageClient:
 
             resources = self._prepare_restore_pipeline(
                 manifest,
-                groups,
+                read_groups,
                 worker_count,
-                input_dir,
             )
             try:
                 id_map = self._allocate_restore_mappings(mm, manifest, resources.ctx)
@@ -573,36 +645,51 @@ class GMSStorageClient:
         input_dir: str,
         device: int = 0,
         *,
-        max_workers: int = 4,
+        max_workers: int = DEFAULT_RESTORE_WORKERS,
     ) -> Tuple[Dict[str, "torch.Tensor"], Dict[str, Dict[str, Any]]]:
         if not _TORCH_AVAILABLE:
             raise RuntimeError("PyTorch is required for load_tensors()")
 
         manifest, metadata = _load_manifest_and_metadata(input_dir)
-        groups = _group_entries_by_shard(manifest.allocations)
+        read_groups = GMSStorageClient._build_restore_read_groups(
+            input_dir, manifest.allocations
+        )
         tensors: Dict[str, "torch.Tensor"] = {}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        worker_count = max(1, min(max_workers, len(read_groups) or 1))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
             futures = {
                 pool.submit(
-                    _read_shard_sequential,
-                    os.path.join(input_dir, rel_path),
-                    sorted_entries,
+                    GMSStorageClient._load_tensor_group,
+                    shard_group,
                     device,
-                ): rel_path
-                for rel_path, sorted_entries in groups.items()
+                ): label
+                for label, shard_group in read_groups.items()
             }
             for future in as_completed(futures):
-                rel_path = futures[future]
+                label = futures[future]
                 try:
                     tensors.update(future.result())
                 except Exception as exc:
                     raise RuntimeError(
-                        f"Failed to load shard {rel_path}: {exc}"
+                        f"Failed to load read group {label}: {exc}"
                     ) from exc
 
         logger.info("Loaded %d allocations from %s", len(tensors), input_dir)
         return tensors, metadata
+
+    @staticmethod
+    def _load_tensor_group(
+        shard_group: List[Tuple[str, str, List[AllocationEntry]]],
+        device: int,
+    ) -> Dict[str, "torch.Tensor"]:
+        tensors: Dict[str, "torch.Tensor"] = {}
+        for rel_path, abs_path, sorted_entries in shard_group:
+            try:
+                tensors.update(_read_shard_sequential(abs_path, sorted_entries, device))
+            except Exception as exc:
+                raise RuntimeError(f"Failed to load shard {rel_path}: {exc}") from exc
+        return tensors
 
     def _save_metadata(self, mm: Any) -> Dict[str, Any]:
         result: Dict[str, Any] = {}

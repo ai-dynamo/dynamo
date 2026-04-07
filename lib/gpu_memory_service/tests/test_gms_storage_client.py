@@ -59,6 +59,9 @@ _CUDA_AVAILABLE = _TORCH_AVAILABLE and torch.cuda.is_available()
 
 from gpu_memory_service.client.gms_storage_client import (  # noqa: E402
     _CURRENT_VERSION,
+    DEFAULT_RESTORE_WORKERS,
+    DEFAULT_SAVE_WORKERS,
+    DEFAULT_SHARD_SIZE_BYTES,
     AllocationEntry,
     GMSStorageClient,
     SaveManifest,
@@ -66,6 +69,7 @@ from gpu_memory_service.client.gms_storage_client import (  # noqa: E402
     _RestorePipelineContext,
     _ShardWriter,
 )
+from gpu_memory_service.cli.storage_runner import _build_parser  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -617,6 +621,103 @@ class TestGMSStorageClientInit:
             socket_path="/tmp/fake.sock", shard_size_bytes=128 * 1024 * 1024
         )
         assert client._shard_size == 128 * 1024 * 1024
+
+    def test_default_shard_size_is_multi_nvme_friendly(self):
+        client = GMSStorageClient(socket_path="/tmp/fake.sock")
+        assert client._shard_size == DEFAULT_SHARD_SIZE_BYTES
+
+
+class TestStorageRunnerDefaults:
+    def test_parser_uses_multi_nvme_defaults(self):
+        parser = _build_parser()
+
+        save_args = parser.parse_args(["save", "--output-dir", "/tmp/save"])
+        load_args = parser.parse_args(["load", "--input-dir", "/tmp/save"])
+
+        assert save_args.shard_size_bytes == DEFAULT_SHARD_SIZE_BYTES
+        assert save_args.save_workers == DEFAULT_SAVE_WORKERS
+        assert load_args.workers == DEFAULT_RESTORE_WORKERS
+
+
+class TestRestoreReadGrouping:
+    def test_groups_shards_by_storage_device(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard_specs = [
+                ("shards/shard_0000.bin", 10),
+                ("shards/shard_0001.bin", 11),
+                ("shards/shard_0002.bin", 10),
+                ("shards/shard_0003.bin", 11),
+            ]
+            entries = []
+            device_by_path = {}
+
+            for index, (rel_path, device_id) in enumerate(shard_specs):
+                abs_path = os.path.join(tmpdir, rel_path)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "wb"):
+                    pass
+                device_by_path[abs_path] = device_id
+                entries.append(_make_entry(alloc_id=f"a{index}", tensor_file=rel_path))
+
+            def _fake_stat(path):
+                return SimpleNamespace(st_dev=device_by_path[path])
+
+            with patch(
+                "gpu_memory_service.client.gms_storage_client.os.stat",
+                side_effect=_fake_stat,
+            ):
+                groups = GMSStorageClient._build_restore_read_groups(tmpdir, entries)
+
+        assert list(groups) == ["device:10", "device:11"]
+        assert [item[0] for item in groups["device:10"]] == [
+            "shards/shard_0000.bin",
+            "shards/shard_0002.bin",
+        ]
+        assert [item[0] for item in groups["device:11"]] == [
+            "shards/shard_0001.bin",
+            "shards/shard_0003.bin",
+        ]
+
+    def test_single_device_layout_falls_back_to_per_shard_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries = [
+                _make_entry(alloc_id="a0", tensor_file="shards/shard_0000.bin"),
+                _make_entry(alloc_id="a1", tensor_file="shards/shard_0001.bin"),
+            ]
+            for entry in entries:
+                abs_path = os.path.join(tmpdir, entry.tensor_file)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "wb"):
+                    pass
+
+            with patch(
+                "gpu_memory_service.client.gms_storage_client.os.stat",
+                return_value=SimpleNamespace(st_dev=10),
+            ):
+                groups = GMSStorageClient._build_restore_read_groups(tmpdir, entries)
+
+        assert list(groups) == [
+            "shards/shard_0000.bin",
+            "shards/shard_0001.bin",
+        ]
+
+    def test_stat_failure_falls_back_to_per_shard_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries = [
+                _make_entry(alloc_id="a0", tensor_file="shards/shard_0000.bin"),
+                _make_entry(alloc_id="a1", tensor_file="shards/shard_0001.bin"),
+            ]
+
+            with patch(
+                "gpu_memory_service.client.gms_storage_client.os.stat",
+                side_effect=OSError("stat failed"),
+            ):
+                groups = GMSStorageClient._build_restore_read_groups(tmpdir, entries)
+
+        assert list(groups) == [
+            "shards/shard_0000.bin",
+            "shards/shard_0001.bin",
+        ]
 
 
 # ===========================================================================
