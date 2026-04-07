@@ -72,6 +72,7 @@ def build_conversation(
     config: dict[str, Any],
     rng: random.Random,
     image_pools: dict[tuple[int, int], list[str]],
+    system_texts: list[str],
     wrap_sys_to_user: bool = False,
 ) -> list[dict[str, Any]]:
     model = config["defaults"]["model"]
@@ -79,7 +80,7 @@ def build_conversation(
     lines: list[dict[str, Any]] = []
 
     for turn_idx, phase in enumerate(config["phases"]):
-        system_text = generate_filler(rng, phase["system_tokens"])
+        system_text = system_texts[turn_idx]
 
         images: list[str] = []
         imgs = phase.get("images")
@@ -169,9 +170,15 @@ def main() -> None:
         args.coco_annotations,
     )
 
+    system_texts = [
+        generate_filler(rng, phase["system_tokens"]) for phase in config["phases"]
+    ]
+
     total_bytes = 0
     for i in range(args.num_conversations):
-        lines = build_conversation(config, rng, image_pools, args.wrap_sys_to_user)
+        lines = build_conversation(
+            config, rng, image_pools, system_texts, args.wrap_sys_to_user
+        )
         path = args.output_dir / f"session_{i + 1:06d}.jsonl"
         total_bytes += write_conversation(path, lines)
 
