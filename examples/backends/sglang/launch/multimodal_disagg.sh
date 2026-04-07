@@ -9,7 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
@@ -99,7 +99,7 @@ DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
-GPU_MEM_ARGS=$(build_gpu_mem_args sglang --workers-per-gpu 3)
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 ENCODE_EXTRA_ARGS=""
 PREFILL_EXTRA_ARGS=""
