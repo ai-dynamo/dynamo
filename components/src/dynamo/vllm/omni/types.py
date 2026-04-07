@@ -41,6 +41,7 @@ class StageOutput(BaseModel):
     shm_meta: dict | None = None
     original_prompt: dict | None = None
     stage_connector_refs: dict | None = None
+    sampling_params_list: dict | None = None
     finished: bool | None = None
     error: str | None = None
 
@@ -50,7 +51,7 @@ class StageOutput(BaseModel):
         shm_meta is intentionally excluded — it is final-stage → router only.
         """
         fields = self.model_dump(
-            include={"original_prompt", "stage_connector_refs"},
+            include={"original_prompt", "stage_connector_refs", "sampling_params_list"},
             exclude_none=True,
         )
         fields["request_id"] = request_id
@@ -73,6 +74,7 @@ class StageRequest(BaseModel):
     original_prompt: dict | None = None
     # String keys from JSON — caller must normalize with _int_keyed().
     stage_connector_refs: dict | None = None
+    sampling_params_list: dict | None = None
 
 
 def _int_keyed(d: dict | None) -> dict[int, Any]:

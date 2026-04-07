@@ -20,7 +20,9 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
-from dynamo.vllm.omni.tts_utils import (
+from dynamo.vllm.omni.stage_router import init_omni_stage_router
+from dynamo.vllm.omni.stage_worker import init_omni_stage
+from dynamo.vllm.omni.utils import (
     cleanup_dummy_tokenizer_for_tts,
     ensure_dummy_tokenizer_for_tts,
 )
@@ -146,13 +148,9 @@ async def worker():
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     if config.stage_id is not None:
-        from dynamo.vllm.omni.stage_worker import init_omni_stage
-
         await init_omni_stage(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
     elif config.omni_router:
-        from dynamo.vllm.omni.stage_router import init_omni_stage_router
-
         await init_omni_stage_router(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage_router completed")
     else:

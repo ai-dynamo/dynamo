@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
+from dynamo.vllm.omni.utils import _build_sampling_params
 
 pytestmark = [
     pytest.mark.unit,
@@ -27,11 +28,13 @@ class _MockEngine:
     def __init__(self, output=None):
         self.received_prompt = None
         self.received_request_id = None
+        self.received_sampling_params_list = None
         self._output = output or {"output": "mock", "finished": True}
 
     def generate(self, prompt, request_id="", *, sampling_params_list=None):
         self.received_prompt = prompt
         self.received_request_id = request_id
+        self.received_sampling_params_list = sampling_params_list
 
         async def _gen():
             yield self._output
@@ -75,14 +78,15 @@ def _make_worker(engine=None, stage_config=None, connectors=None, stage_id=0):
 
 @pytest.mark.asyncio
 async def test_direct_input_path():
-    """Stage 0: engine receives request['engine_inputs'] as prompt."""
+    """Stage 0 direct path: engine receives the full request dict as prompt."""
     engine = _MockEngine()
     worker = _make_worker(engine=engine)
     request = {"engine_inputs": {"prompt": "hello"}, "sampling_params_list": None}
 
     chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
 
-    assert engine.received_prompt == {"prompt": "hello"}
+    # Direct path (no request_id, no stage_connector_refs) passes the whole request as prompt.
+    assert engine.received_prompt == request
     assert any("shm_meta" in c for c in chunks)
 
 
@@ -251,3 +255,106 @@ def test_fetch_stage_inputs_returns_none_on_missing_ref():
     )
     result = worker._fetch_stage_inputs({}, "r1")  # ref for stage 0 missing
     assert result is None
+
+
+# ── issue-007: sampling params merging ────────────────────────────────
+
+
+def test_build_sampling_params_user_overrides_yaml_defaults():
+    """User overrides applied on top of YAML defaults via setattr; unspecified keys preserved."""
+    stage_config = SimpleNamespace(
+        stage_type="diffusion",
+        default_sampling_params={
+            "num_inference_steps": 20,
+            "guidance_scale": 5.0,
+            "height": 480,
+            "width": 832,
+        },
+    )
+    result = _build_sampling_params(
+        stage_config,
+        {"num_inference_steps": 50},
+    )
+    assert result is not None
+    sp = result[0]
+    assert sp.num_inference_steps == 50  # user override wins
+    assert sp.guidance_scale == 5.0  # YAML default preserved
+
+
+def test_build_sampling_params_no_defaults_returns_none():
+    """No default_sampling_params on stage_config -> returns None."""
+    stage_config = SimpleNamespace(stage_type="llm")
+    assert _build_sampling_params(stage_config, None) is None
+    assert _build_sampling_params(stage_config, {}) is None
+
+
+@pytest.mark.asyncio
+async def test_image_request_with_default_sampling_params():
+    """Image stage with default_sampling_params builds typed params from YAML defaults + overrides."""
+    engine = _MockEngine()
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(
+            stage_type="diffusion",
+            final_output=True,
+            default_sampling_params={
+                "num_inference_steps": 20,
+                "guidance_scale": 1.5,
+                "height": 1024,
+                "width": 1024,
+            },
+        ),
+        connectors={},
+        stage_id=0,
+        output_modalities=["image"],
+    )
+    request = {
+        "request_id": "img-req-1",
+        "prompt": "a red apple",
+        "size": "1024x1024",
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert not any("error" in c for c in chunks)
+    assert engine.received_sampling_params_list is not None
+
+
+@pytest.mark.asyncio
+async def test_sampling_params_propagate_in_stage_output():
+    """Non-final stage must include sampling_params_list in its output for downstream stages."""
+    engine = _MockEngine()
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [1, 2]}}
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    # Stage 1: non-final, receives stage_connector_refs from stage 0
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+        stage_config=_make_stage_config(final_output=False),
+    )
+    request = {
+        "request_id": "req-sp",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "sampling_params_list": {
+            "num_inference_steps": 42,
+            "height": 480,
+            "width": 832,
+        },
+    }
+
+    with patch(
+        "dynamo.vllm.omni.stage_worker._build_sampling_params", return_value=None
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert chunks[0].get("sampling_params_list") == {
+        "num_inference_steps": 42,
+        "height": 480,
+        "width": 832,
+    }

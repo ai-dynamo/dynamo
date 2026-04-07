@@ -57,13 +57,8 @@ def _make_router(stage_configs, stage_clients, formatter=None):
 
 def _patched_generate(router, request, request_id="req-1", request_type="chat"):
     return (
-        patch.object(
-            stage_router,
-            "_parse_engine_inputs",
-            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
-        ),
         patch(
-            "dynamo.common.utils.output_modalities.parse_request_type",
+            "dynamo.vllm.omni.stage_router.parse_request_type",
             return_value=(None, request_type),
         ),
         patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
@@ -100,8 +95,8 @@ async def test_generate_passes_stage_connector_refs_opaquely():
         formatter=mock_formatter,
     )
 
-    p1, p2, p3 = _patched_generate(router, {"prompt": "x"})
-    with p1, p2, p3:
+    p1, p2 = _patched_generate(router, {"prompt": "x"})
+    with p1, p2:
         with patch.object(
             stage_router, "_shm_deserialize", return_value=SimpleNamespace()
         ):
@@ -152,22 +147,17 @@ async def test_generate_concurrent_requests_have_independent_connector_refs():
     )
 
     async def run_one(request_id):
-        with patch.object(
-            stage_router,
-            "_parse_engine_inputs",
-            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
+        with patch(
+            "dynamo.vllm.omni.stage_router.parse_request_type",
+            return_value=(None, "chat"),
         ):
             with patch(
-                "dynamo.common.utils.output_modalities.parse_request_type",
-                return_value=(None, "chat"),
+                "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id
             ):
-                with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id
+                with patch.object(
+                    stage_router, "_shm_deserialize", return_value=SimpleNamespace()
                 ):
-                    with patch.object(
-                        stage_router, "_shm_deserialize", return_value=SimpleNamespace()
-                    ):
-                        return [c async for c in router.generate({"prompt": "x"}, None)]
+                    return [c async for c in router.generate({"prompt": "x"}, None)]
 
     await asyncio.gather(run_one("req-A"), run_one("req-B"))
 
@@ -196,8 +186,8 @@ async def test_generate_stage_error_stops_pipeline():
         },
     )
 
-    p1, p2, p3 = _patched_generate(router, {"prompt": "x"})
-    with p1, p2, p3:
+    p1, p2 = _patched_generate(router, {"prompt": "x"})
+    with p1, p2:
         chunks = [c async for c in router.generate({"prompt": "x"}, None)]
 
     assert chunks == [{"error": "thinker exploded", "finished": True}]
@@ -225,19 +215,14 @@ async def test_generate_delegates_formatting_to_output_formatter():
 
     request = {"prompt": "x", "response_format": "b64_json"}
     with patch.object(stage_router, "_shm_deserialize", return_value=fake_result):
-        with patch.object(
-            stage_router,
-            "_parse_engine_inputs",
-            return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
+        with patch(
+            "dynamo.vllm.omni.stage_router.parse_request_type",
+            return_value=(None, "image_generation"),
         ):
             with patch(
-                "dynamo.common.utils.output_modalities.parse_request_type",
-                return_value=(None, "image_generation"),
+                "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
             ):
-                with patch(
-                    "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
-                ):
-                    chunks = [c async for c in router.generate(request, context=None)]
+                chunks = [c async for c in router.generate(request, context=None)]
 
     assert chunks == [{"data": [{"b64_json": "abc"}]}]
     mock_formatter.format.assert_awaited_once_with(
@@ -260,70 +245,52 @@ async def test_generate_yields_error_when_no_shm_meta():
         stage_clients={"stage0": _StageClient(stage0_handler)},
     )
 
-    with patch.object(
-        stage_router,
-        "_parse_engine_inputs",
-        return_value={"engine_inputs": "x", "original_prompt": {"prompt": "x"}},
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "chat"),
     ):
-        with patch(
-            "dynamo.common.utils.output_modalities.parse_request_type",
-            return_value=(None, "chat"),
-        ):
-            with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
-                chunks = [
-                    c async for c in router.generate({"prompt": "x"}, context=None)
-                ]
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
+            chunks = [c async for c in router.generate({"prompt": "x"}, context=None)]
 
     assert chunks == [{"error": "No SHM output from final stage", "finished": True}]
 
 
-# ── issue-002: _parse_engine_inputs builds original_prompt ────────────
+# ── issue-007: router forwards raw request to stage 0 ────────────
 
 
-class TestParseEngineInputsOriginalPrompt:
-    """_parse_engine_inputs must return original_prompt with all fields
-    that processor functions (ar2diffusion etc.) read from prompt."""
+@pytest.mark.asyncio
+async def test_generate_forwards_raw_request_to_stage0():
+    """Stage 0 must receive the raw request fields + request_id (no router parsing)."""
+    stage0_received = {}
 
-    def test_video_request_builds_original_prompt(self):
-        """original_prompt carries geometry/params for processors; engine_inputs is just text."""
-        from unittest.mock import MagicMock
+    async def stage0_handler(request):
+        stage0_received.update(request)
+        return {"shm_meta": {"x": 1}, "finished": True}
 
-        from dynamo.common.utils.output_modalities import RequestType
-        from dynamo.vllm.omni.stage_router import _parse_engine_inputs
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=mock_formatter,
+    )
 
-        config = MagicMock()
-        config.default_video_fps = 16
-        request = {
-            "prompt": "a dog running",
-            "size": "832x480",
-            "nvext": {"num_frames": 30, "num_inference_steps": 20, "seed": 42},
-        }
-        result = _parse_engine_inputs(request, RequestType.VIDEO_GENERATION, config)
+    request = {
+        "prompt": "a dog",
+        "size": "832x480",
+        "nvext": {"num_inference_steps": 30},
+    }
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "video_generation"),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-raw"):
+            with patch.object(
+                stage_router, "_shm_deserialize", return_value=SimpleNamespace()
+            ):
+                [c async for c in router.generate(request, None)]
 
-        assert result["engine_inputs"]["prompt"] == "a dog running"
-        op = result["original_prompt"]
-        assert op["prompt"] == "a dog running"
-        assert op["height"] == 480
-        assert op["width"] == 832
-        assert op["num_inference_steps"] == 20
-        assert op["seed"] == 42
-
-    def test_image_request_builds_original_prompt(self):
-        from unittest.mock import MagicMock
-
-        from dynamo.common.utils.output_modalities import RequestType
-        from dynamo.vllm.omni.stage_router import _parse_engine_inputs
-
-        config = MagicMock()
-        request = {
-            "prompt": "a red apple",
-            "size": "1024x1024",
-            "nvext": {"num_inference_steps": 50},
-        }
-        result = _parse_engine_inputs(request, RequestType.IMAGE_GENERATION, config)
-
-        op = result["original_prompt"]
-        assert op["prompt"] == "a red apple"
-        assert op["height"] == 1024
-        assert op["width"] == 1024
-        assert op["num_inference_steps"] == 50
+    assert stage0_received["request_id"] == "req-raw"
+    assert stage0_received["prompt"] == "a dog"
+    assert stage0_received["size"] == "832x480"
+    assert stage0_received["nvext"] == {"num_inference_steps": 30}

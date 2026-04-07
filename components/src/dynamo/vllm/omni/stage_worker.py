@@ -8,16 +8,23 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, cast
+from typing import Any, AsyncGenerator
 
 import yaml
+from omegaconf import OmegaConf
+from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
+from vllm_omni.entrypoints.async_omni import AsyncOmni
+from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
+from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 
 from dynamo import prometheus_names
 from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
+from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +58,16 @@ class OmniStageWorker:
         stage_config: Any,
         connectors: dict,
         stage_id: int,
+        output_modalities: list | None = None,
+        default_video_fps: int = 16,
     ) -> None:
         self.engine = engine
         self.stage_id = stage_id
         self.connectors = connectors  # {(from_stage, to_stage): vllm_omni connector}
         self.final_output: bool = getattr(stage_config, "final_output", False)
-
-        # TODO: use per-request sampling_params_list from request when the router
-        # forwards it (see router TODO). Until then, YAML defaults apply for all requests.
-        self._default_sp = _build_default_sampling_params(stage_config)
+        self._output_modalities = output_modalities or []
+        self._default_video_fps = default_video_fps
+        self.stage_config = stage_config
 
         func_path = getattr(stage_config, "custom_process_input_func", None)
         self._processor = _load_processor(func_path)
@@ -71,8 +79,6 @@ class OmniStageWorker:
         )
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
-        from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-
         req = StageRequest.model_validate(request)
         request_id = req.request_id or context.id()
         original_prompt = req.original_prompt
@@ -80,8 +86,10 @@ class OmniStageWorker:
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
 
         # --- Resolve engine inputs ---
+        sampling_params_list_override: dict | None = None
         if stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
+            sampling_params_list_override = req.sampling_params_list
             stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
             if stage_list is None:
                 yield {
@@ -102,9 +110,14 @@ class OmniStageWorker:
             else:
                 # No processor: use the most recent fetched stage output directly.
                 prompt = stage_list[-1].engine_outputs[0]
-        elif req.engine_inputs is not None:
-            # Stage 0: engine inputs come directly from the router.
-            prompt = req.engine_inputs
+        elif req.request_id is not None:
+            # Stage 0 via router: raw request forwarded with request_id — parse it.
+            parsed = parse_omni_request(
+                request, self._output_modalities, self._default_video_fps
+            )
+            prompt = parsed["engine_inputs"]
+            original_prompt = parsed["original_prompt"]
+            sampling_params_list_override = parsed["sampling_params_list"]
         else:
             # Direct frontend → stage (single-stage, no router).
             prompt = request
@@ -116,11 +129,12 @@ class OmniStageWorker:
             type(prompt).__name__,
         )
 
-        # --- Run engine ---
+        sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
         last_result = None
+
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id, sampling_params_list=self._default_sp
+                prompt, request_id, sampling_params_list=sp
             ):
                 last_result = chunk
         except Exception as e:
@@ -156,7 +170,7 @@ class OmniStageWorker:
                 if not ok:
                     yield {"error": "connector.put() failed", "finished": True}
                     return
-                yield {
+                out: dict = {
                     "original_prompt": original_prompt,
                     "stage_connector_refs": {
                         **{str(k): v for k, v in stage_connector_refs.items()},
@@ -164,6 +178,9 @@ class OmniStageWorker:
                     },
                     "finished": True,
                 }
+                if sampling_params_list_override is not None:
+                    out["sampling_params_list"] = sampling_params_list_override
+                yield out
                 return
             logger.warning(
                 "Stage %d: no connector found for edge (%s→%s), falling through to SHM",
@@ -243,11 +260,6 @@ async def init_omni_stage(
 
     Mirrors init_omni() setup pattern exactly to avoid routing/handler issues.
     """
-    from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-    from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
-
-    from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
-
     assert config.stage_id is not None  # dispatch in main.py guarantees this
     stage_id: int = config.stage_id
     stage_configs = load_stage_configs_from_yaml(config.stage_configs_path)  # type: ignore[arg-type]
@@ -275,6 +287,8 @@ async def init_omni_stage(
         engine=engine,
         stage_config=my_config,
         connectors=connectors,
+        output_modalities=config.output_modalities,
+        default_video_fps=getattr(config, "default_video_fps", 16),
         stage_id=stage_id,
     )
 
@@ -324,35 +338,8 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _build_default_sampling_params(stage_config: Any) -> list | None:
-    """Construct typed sampling params from YAML default_sampling_params."""
-    defaults = getattr(stage_config, "default_sampling_params", None)
-    if not defaults:
-        return None
-
-    from omegaconf import OmegaConf
-
-    if OmegaConf.is_config(defaults):
-        params = OmegaConf.to_container(defaults, resolve=True)
-    else:
-        params = dict(defaults)
-    params_dict = cast(dict[str, Any], params)
-
-    stage_type = getattr(stage_config, "stage_type", "llm")
-    if stage_type == "diffusion":
-        from vllm_omni.inputs.data import OmniDiffusionSamplingParams
-
-        return [OmniDiffusionSamplingParams(**params_dict)]
-
-    from vllm.sampling_params import SamplingParams
-
-    return [SamplingParams(**params_dict)]
-
-
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
-    from vllm_omni.entrypoints.async_omni import AsyncOmni
-
     single_stage_config = {
         "stage_args": [_stage_config_to_dict(stage_config, stage_type)],
         "runtime": {"edges": []},
@@ -370,7 +357,6 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
     """Convert a parsed stage config to a single-stage YAML dict."""
-    from omegaconf import OmegaConf
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):
