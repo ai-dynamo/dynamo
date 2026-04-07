@@ -24,27 +24,21 @@ upgradeCRD: true
 # Environment variables to pass to operator Deployment.
 env: []
 
-# Namespace restriction configuration for the operator
-# If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
-# If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
-# If enabled: false, the operator will run with cluster-wide permissions
+# -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
 namespaceRestriction:
-  # Whether to restrict the operator to a single namespace
+  # -- DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated.
   enabled: false
-  # The target namespace to restrict to. If empty, defaults to the release namespace
+  # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
   targetNamespace: ""
-  # Namespace scope marker lease configuration (used to prevent conflicts when running both cluster-wide and namespace-restricted operators)
+  # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
   lease:
-    # Duration before the namespace scope marker lease expires if not renewed (namespace-restricted mode only). When a namespace-restricted operator is running, it creates a lease in its namespace. The cluster-wide operator detects this lease and excludes that namespace from processing. If the namespace operator stops renewing the lease (e.g., crashes), the lease expires and the cluster-wide operator automatically resumes processing that namespace.
+    # -- DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated.
     duration: 30s
-    # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
+    # -- DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated.
     renewInterval: 10s
-# -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+# -- DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode.
 gpuDiscovery:
-  # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
-  # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
-  # Set to false if your installer lacks ClusterRole creation permissions; you must then provide
-  # hardware config manually in each DynamoGraphDeploymentRequest.
+  # -- DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated.
   enabled: true
 controllerManager:
   tolerations: []
@@ -148,42 +142,6 @@ checkpoint:
   # Path written by worker when model is loaded and ready for checkpointing
   # Must match the path expected by checkpoint-enabled runtime images
   readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-  # Storage configuration
-  # These settings tell the operator where to find checkpoint storage
-  # Must match the configuration in the snapshot chart
-  storage:
-    # Storage backend type: pvc, s3, or oci
-    type: pvc
-
-    # PVC configuration (used when type=pvc)
-    pvc:
-      # Name of the PVC created by the snapshot chart
-      # Must match the PVC name in the snapshot chart
-      pvcName: "snapshot-pvc"
-      # Base path within the PVC for storing checkpoints
-      basePath: "/checkpoints"
-
-    # S3 configuration (used when type=s3)
-    s3:
-      # S3 URI in format: s3://[endpoint/]bucket/prefix
-      # Examples:
-      #   - s3://my-bucket/checkpoints (AWS S3)
-      #   - s3://minio.example.com/my-bucket/checkpoints (MinIO/custom endpoint)
-      uri: ""
-      # Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION
-      # If not provided, uses IRSA/Workload Identity for authentication
-      credentialsSecretRef: ""
-
-    # OCI registry configuration (used when type=oci)
-    oci:
-      # OCI URI in format: oci://registry/repository
-      # Examples:
-      #   - oci://myregistry.io/checkpoints
-      #   - oci://ghcr.io/myorg/checkpoints
-      uri: ""
-      # Reference to a docker config secret for registry authentication
-      credentialsSecretRef: ""
 
 # Webhook configuration
 webhook:

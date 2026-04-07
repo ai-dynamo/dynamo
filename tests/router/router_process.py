@@ -28,6 +28,8 @@ class FrontendRouterProcess(ManagedProcess):
         request_plane: str = "nats",
         durable_kv_events: bool = False,
         router_mode: str = "kv",
+        min_initial_workers: int | None = None,
+        router_aic_config: dict[str, str | int] | None = None,
     ):
         command = [
             "python3",
@@ -63,8 +65,34 @@ class FrontendRouterProcess(ManagedProcess):
         if durable_kv_events:
             command.append("--router-durable-kv-events")
 
+        if router_aic_config is not None:
+            command.extend(
+                [
+                    "--router-track-prefill-tokens",
+                    "--router-prefill-load-model",
+                    "aic",
+                    "--aic-backend",
+                    str(router_aic_config["aic_backend"]),
+                    "--aic-system",
+                    str(router_aic_config["aic_system"]),
+                    "--aic-model-path",
+                    str(router_aic_config["aic_model_path"]),
+                    "--aic-tp-size",
+                    str(router_aic_config.get("aic_tp_size", 1)),
+                ]
+            )
+            if "aic_backend_version" in router_aic_config:
+                command.extend(
+                    [
+                        "--aic-backend-version",
+                        str(router_aic_config["aic_backend_version"]),
+                    ]
+                )
+
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if min_initial_workers is not None:
+            env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
 
         super().__init__(
             command=command,

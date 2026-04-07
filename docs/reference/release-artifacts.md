@@ -61,7 +61,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 |-------|-------------|-------------|-----------|
 | `dynamo-runtime@1.0.1` | Core distributed runtime library | `v1.82` | [link](https://crates.io/crates/dynamo-runtime/1.0.1) |
 | `dynamo-llm@1.0.1` | LLM inference engine | `v1.82` | [link](https://crates.io/crates/dynamo-llm/1.0.1) |
-| `dynamo-async-openai@1.0.1` | Async OpenAI-compatible API client | `v1.82` | [link](https://crates.io/crates/dynamo-async-openai/1.0.1) |
+| `dynamo-protocols@1.0.1` | Async OpenAI-compatible API client | `v1.82` | [link](https://crates.io/crates/dynamo-protocols/1.0.1) |
 | `dynamo-parsers@1.0.1` | Protocol parsers (SSE, JSON streaming) | `v1.82` | [link](https://crates.io/crates/dynamo-parsers/1.0.1) |
 | `dynamo-memory@1.0.1` | Memory management utilities | `v1.82` | [link](https://crates.io/crates/dynamo-memory/1.0.1) |
 | `dynamo-config@1.0.1` | Configuration management | `v1.82` | [link](https://crates.io/crates/dynamo-config/1.0.1) |
@@ -133,7 +133,7 @@ helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot
 ```bash
 cargo add dynamo-runtime@1.0.1
 cargo add dynamo-llm@1.0.1
-cargo add dynamo-async-openai@1.0.1
+cargo add dynamo-protocols@1.0.1
 cargo add dynamo-parsers@1.0.1
 cargo add dynamo-memory@1.0.1
 cargo add dynamo-config@1.0.1
@@ -185,11 +185,11 @@ For a complete list of known issues, refer to the release notes for each version
 | `v1.0.1` | Mar 16, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v1.0.0` | Mar 12, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v0.9.1` | Mar 4, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) |
-| `v0.9.0` | Feb 11, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo/v-0-9-0/) |
-| `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/v-0-8-1/) |
-| `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | [Docs](https://docs.nvidia.com/dynamo/v-0-8-0/) |
-| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | [Docs](https://docs.nvidia.com/dynamo/v-0-7-1/) |
-| `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | [Docs](https://docs.nvidia.com/dynamo/v-0-7-0/) |
+| `v0.9.0` | Feb 11, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) | Archived docs unavailable |
+| `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | Archived docs unavailable |
+| `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | Archived docs unavailable |
+| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | Archived docs unavailable |
+| `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | Archived docs unavailable |
 | `v0.6.1` | Nov 6, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) | — |
 | `v0.6.0` | Oct 28, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) | — |
 
@@ -419,7 +419,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 ### Rust Crates
 
-> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens)
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens)
 >
 > To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
@@ -453,20 +453,20 @@ For a complete list of known issues, refer to the release notes for each version
 | `dynamo-llm@0.6.1` | `v1.82` | |
 | `dynamo-llm@0.6.0` | `v1.82` | |
 
-#### dynamo-async-openai (crate)
+#### dynamo-protocols (crate)
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
-| `dynamo-async-openai@1.0.1` | `v1.82` | |
-| `dynamo-async-openai@1.0.0` | `v1.82` | |
-| `dynamo-async-openai@0.9.1` | `v1.82` | |
-| `dynamo-async-openai@0.9.0` | `v1.82` | |
-| `dynamo-async-openai@0.8.1` | `v1.82` | |
-| `dynamo-async-openai@0.8.0` | `v1.82` | |
-| `dynamo-async-openai@0.7.1` | `v1.82` | |
-| `dynamo-async-openai@0.7.0` | `v1.82` | |
-| `dynamo-async-openai@0.6.1` | `v1.82` | |
-| `dynamo-async-openai@0.6.0` | `v1.82` | |
+| `dynamo-protocols@1.0.1` | `v1.82` | |
+| `dynamo-protocols@1.0.0` | `v1.82` | |
+| `dynamo-protocols@0.9.1` | `v1.82` | |
+| `dynamo-protocols@0.9.0` | `v1.82` | |
+| `dynamo-protocols@0.8.1` | `v1.82` | |
+| `dynamo-protocols@0.8.0` | `v1.82` | |
+| `dynamo-protocols@0.7.1` | `v1.82` | |
+| `dynamo-protocols@0.7.0` | `v1.82` | |
+| `dynamo-protocols@0.6.1` | `v1.82` | |
+| `dynamo-protocols@0.6.0` | `v1.82` | |
 
 #### dynamo-parsers (crate)
 

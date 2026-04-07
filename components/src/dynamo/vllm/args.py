@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
 import socket
-import warnings
 from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
@@ -41,6 +41,9 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     event_plane: str
     enable_local_indexer: bool = True
     use_kv_events: bool
+
+    # GMS configuration
+    gms_shadow_mode: bool = False
 
     # mirror vLLM
     model: str
@@ -126,6 +129,13 @@ def cross_validate_config(
             "bypassing vLLM's OutputProcessor buffering."
         )
 
+    # Validate --gms-shadow-mode requires --load-format gms
+    if dynamo_config.gms_shadow_mode and engine_config.load_format != "gms":
+        raise ValueError(
+            "--gms-shadow-mode requires --load-format gms. "
+            "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -143,21 +153,11 @@ def update_dynamo_config_with_engine(
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
 
-    if dynamo_config.route_to_encoder:
-        dynamo_config.component = "processor"
+    # Multi-modal related component/endpoint resolution
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        dynamo_config.component = "encode"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_encode_worker:
-        dynamo_config.component = "encoder"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_decode_worker:
-        dynamo_config.component = "decoder"
-        dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.multimodal_worker
-        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
-    ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
+    # Standard component/endpoint resolution
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"
@@ -227,9 +227,8 @@ def update_engine_config_with_dynamo(
         engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
-        engine_config.block_size = 16
         logger.debug(
-            f"Setting reasonable default of {engine_config.block_size} for block_size"
+            "block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend."
         )
 
     if _uses_nixl_connector(engine_config):
@@ -274,6 +273,41 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
 
+    if dynamo_config.benchmark_mode is not None:
+        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+            logger.warning(
+                "--benchmark-mode is not supported for multimodal workers. "
+                "Benchmark data will be collected but not served via endpoint."
+            )
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        elif existing_cls is not None and "InstrumentedScheduler" not in str(
+            existing_cls
+        ):
+            raise ValueError(
+                f"--benchmark-mode requires InstrumentedScheduler but "
+                f"--scheduler-cls is set to '{existing_cls}'. Either remove "
+                f"--scheduler-cls or use a subclass of InstrumentedScheduler."
+            )
+        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+            "mode": dynamo_config.benchmark_mode,
+            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
+            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
+            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
+            "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
+            "output_path": dynamo_config.benchmark_output_path,
+            "timeout": dynamo_config.benchmark_timeout,
+        }
+        logger.info(
+            "Benchmark mode=%s configured (output=%s)",
+            dynamo_config.benchmark_mode,
+            dynamo_config.benchmark_output_path,
+        )
+
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(engine_config, key):
@@ -311,28 +345,7 @@ def create_kv_events_config(
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
-    # Create default events config for prefix caching
-    # TODO: move this to configuration system.
-    port = envs.DYN_VLLM_KV_EVENT_PORT
-    warnings.warn(
-        "Automatic KV events configuration is deprecated and will be removed in "
-        "the next release. After that, KV events will be disabled by default "
-        "(matching upstream vLLM). To preserve current behavior, pass "
-        "--kv-events-config explicitly. For example:\n"
-        f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
-        "See docs/backends/vllm/README.md for details.",
-        FutureWarning,
-        stacklevel=2,
-    )
-    logger.info(
-        f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
-    )
-    dp_rank = engine_config.data_parallel_rank or 0
-    return KVEventsConfig(
-        enable_kv_cache_events=True,
-        publisher="zmq",
-        endpoint=f"tcp://*:{port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-    )
+    return None
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
@@ -471,32 +484,118 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
 
 
 def get_host_ip() -> str:
-    """Get the IP address of the host for side-channel coordination."""
+    """Get a routable IP address of the host for NIXL side-channel coordination.
+
+    Tries multiple strategies to find a usable (non-loopback, non-link-local) IP:
+    1. Resolve hostname via DNS (tries IPv4 first, then IPv6)
+    2. UDP connect trick (finds the default outbound interface IP; IPv4, then IPv6)
+
+    On multi-NIC clusters (e.g. SLURM with InfiniBand), auto-detection picks
+    the default egress interface which may not be correct. Set
+    VLLM_NIXL_SIDE_CHANNEL_HOST explicitly in those environments.
+
+    Raises:
+        RuntimeError: If no usable IP can be determined.
+    """
+    # Strategy 1: hostname resolution (IPv4 first, then IPv6)
+    host_ip = _try_hostname_resolution()
+    if host_ip and _is_routable(host_ip):
+        logger.info(
+            "NIXL side-channel host determined via hostname resolution: %s",
+            host_ip,
+        )
+        return host_ip
+
+    # Strategy 2: UDP connect trick — finds the IP of the interface
+    # that would route to an external address (no data is sent).
+    # Try IPv4 first, then IPv6.
+    host_ip = _try_udp_connect(socket.AF_INET, ("8.8.8.8", 80))
+    if host_ip and _is_routable(host_ip):
+        logger.info(
+            "NIXL side-channel host determined via outbound interface detection (IPv4): %s",
+            host_ip,
+        )
+        return host_ip
+
+    host_ip = _try_udp_connect(socket.AF_INET6, ("2001:4860:4860::8888", 80))
+    if host_ip and _is_routable(host_ip):
+        logger.info(
+            "NIXL side-channel host determined via outbound interface detection (IPv6): %s",
+            host_ip,
+        )
+        return host_ip
+
+    raise RuntimeError(
+        "Unable to determine a routable host IP for NIXL side-channel. "
+        "Hostname resolution and outbound interface detection both failed or "
+        "returned a non-routable address (loopback, link-local, etc.). "
+        "Please set the VLLM_NIXL_SIDE_CHANNEL_HOST environment variable to "
+        "the IP address that peer nodes can reach this host on."
+    )
+
+
+def _is_routable(ip_str: str) -> bool:
+    """Return True if the IP is usable for cross-node communication.
+
+    Rejects loopback (127.x / ::1), link-local (169.254.x / fe80::),
+    unspecified (0.0.0.0 / ::), and multicast addresses.
+    RFC1918 private addresses (10.x, 172.16-31.x, 192.168.x) are allowed.
+    """
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return not (
+            addr.is_loopback
+            or addr.is_link_local
+            or addr.is_unspecified
+            or addr.is_multicast
+        )
+    except ValueError:
+        return False
+
+
+def _try_hostname_resolution() -> str | None:
+    """Resolve hostname to a routable, bindable IP.
+
+    Uses getaddrinfo with AF_UNSPEC to support both IPv4 and IPv6.
+    Returns the first routable and bindable address, or None on failure.
+    """
     try:
         host_name = socket.gethostname()
-    except socket.error as exc:
-        logger.warning("Failed to get hostname: %s, falling back to 127.0.0.1", exc)
-        return "127.0.0.1"
+        infos = socket.getaddrinfo(
+            host_name, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        for family, socktype, _, _, sockaddr in infos:
+            host_ip = sockaddr[0]
+            if not isinstance(host_ip, str):
+                continue
+            if not _is_routable(host_ip):
+                continue
+            try:
+                with socket.socket(family, socktype) as s:
+                    s.bind((host_ip, 0))
+                return host_ip
+            except OSError:
+                continue
+        return None
+    except OSError as exc:
+        logger.debug("Hostname resolution failed: %s", exc)
+        return None
 
+
+def _try_udp_connect(family: socket.AddressFamily, target: tuple) -> str | None:
+    """Use UDP connect to find the outbound interface IP. Returns None on failure.
+
+    Args:
+        family: socket.AF_INET or socket.AF_INET6
+        target: (address, port) tuple to "connect" to (no data is sent)
+    """
     try:
-        host_ip = socket.gethostbyname(host_name)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-            test_socket.bind((host_ip, 0))
-        return host_ip
-    except socket.gaierror as exc:
-        logger.warning(
-            "Hostname %s cannot be resolved: %s, falling back to 127.0.0.1",
-            host_name,
-            exc,
-        )
-        return "127.0.0.1"
-    except socket.error as exc:
-        logger.warning(
-            "Hostname %s is not usable for binding: %s, falling back to 127.0.0.1",
-            host_name,
-            exc,
-        )
-        return "127.0.0.1"
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.connect(target)
+            return s.getsockname()[0]
+    except OSError as exc:
+        logger.debug("UDP connect detection failed (family=%s): %s", family, exc)
+        return None
 
 
 def ensure_side_channel_host():
@@ -504,11 +603,9 @@ def ensure_side_channel_host():
 
     existing_host = os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST")
     if existing_host:
-        logger.debug(
-            "Preserving existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host
-        )
+        logger.info("Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host)
         return
 
     host_ip = get_host_ip()
     os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
-    logger.debug("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s", host_ip)
+    logger.info("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s (auto-detected)", host_ip)

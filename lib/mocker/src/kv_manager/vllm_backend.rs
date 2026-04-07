@@ -36,7 +36,7 @@
 //! implementation of the main block manager.
 use crate::cache::HashCache;
 use crate::common::kv_cache_trace;
-use crate::common::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
+use crate::common::protocols::{KvEventPublishers, MoveBlock, PrefillCost};
 use crate::common::sequence::ActiveSequence;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -44,30 +44,29 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use std::collections::HashMap;
-use std::sync::Arc;
+use rustc_hash::FxHashMap;
 
 pub struct KvManager {
     cache: HashCache,
     block_size: usize,
-    kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+    kv_event_publishers: KvEventPublishers,
     dp_rank: u32,
     next_event_id: u64,
 }
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self::new_with_event_sink(max_capacity, block_size, None, 0)
+        Self::new_with_event_sink(max_capacity, block_size, KvEventPublishers::default(), 0)
     }
 
     pub fn new_with_event_sink(
         max_capacity: usize,
         block_size: usize,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        kv_event_publishers: KvEventPublishers,
         dp_rank: u32,
     ) -> Self {
         debug_assert!(max_capacity > 0, "max_capacity must be > 0");
-        if kv_event_sink.is_some() {
+        if !kv_event_publishers.is_empty() {
             tracing::info!(
                 "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
             );
@@ -76,7 +75,7 @@ impl KvManager {
         KvManager {
             cache: HashCache::new(max_capacity),
             block_size,
-            kv_event_sink,
+            kv_event_publishers,
             dp_rank,
             next_event_id: 0,
         }
@@ -104,9 +103,9 @@ impl KvManager {
             self.cache.max_capacity(),
         );
 
-        let Some(ref sink) = self.kv_event_sink else {
+        if self.kv_event_publishers.is_empty() {
             return;
-        };
+        }
 
         let event_data = if is_store {
             let num_blocks = full_blocks.len();
@@ -145,7 +144,10 @@ impl KvManager {
             dp_rank: self.dp_rank,
         };
 
-        if let Err(e) = sink.publish(event, token_ids.as_deref()) {
+        if let Err(e) = self
+            .kv_event_publishers
+            .publish(event, token_ids.as_deref())
+        {
             tracing::warn!("Failed to publish KV event: {e}");
         }
     }
@@ -349,7 +351,7 @@ impl KvManager {
     }
 
     /// Direct access to active blocks map (for tests).
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+    pub fn active_blocks(&self) -> &FxHashMap<UniqueBlock, usize> {
         self.cache.active_blocks()
     }
 
@@ -376,6 +378,7 @@ impl KvManager {
         PrefillCost {
             new_blocks,
             new_tokens,
+            cached_tokens,
         }
     }
 }
@@ -383,6 +386,9 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::common::protocols::KvCacheEventSink;
 
     #[test]
     fn test_failure_on_max_capacity() {
@@ -547,11 +553,7 @@ mod tests {
         }
 
         impl KvCacheEventSink for CapturingSink {
-            fn publish(
-                &self,
-                event: KvCacheEvent,
-                _block_token_ids: Option<&[Vec<u32>]>,
-            ) -> anyhow::Result<()> {
+            fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
                 self.events.lock().unwrap().push(event);
                 Ok(())
             }
@@ -562,8 +564,12 @@ mod tests {
         let mut seq = ActiveSequence::new(tokens, 100, Some(block_size), true, false);
 
         let sink = Arc::new(CapturingSink::default());
-        let mut manager =
-            KvManager::new_with_event_sink(256, block_size, Some(sink.clone() as _), 0);
+        let mut manager = KvManager::new_with_event_sink(
+            256,
+            block_size,
+            KvEventPublishers::new(Some(sink.clone() as _), None),
+            0,
+        );
 
         // Chunk 1: allocate blocks 0-3
         let signal = seq.prepare_allocation(256).unwrap();
@@ -601,5 +607,43 @@ mod tests {
             Some(ExternalSequenceBlockHash(expected_hash)),
             "second chunk's parent should be block 3's seq_hash"
         );
+    }
+
+    #[test]
+    fn test_repreempt_after_partial_recompute_only_frees_reallocated_blocks() {
+        let mut seq = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
+        let mut manager = KvManager::new(16, 4);
+
+        let signal = seq.take_creation_signal().unwrap();
+        assert_eq!(manager.process(&signal), 2);
+
+        for _ in 0..3 {
+            let signals = seq.generate();
+            for signal in &signals {
+                manager.process(signal);
+            }
+            if seq.generated_tokens() < seq.max_output_tokens() {
+                seq.commit_allocation(seq.len());
+            }
+        }
+        assert_eq!(manager.num_active_blocks(), 3);
+
+        let first_reset = seq.reset_with_signal();
+        for signal in &first_reset {
+            manager.process(signal);
+        }
+        assert_eq!(manager.num_active_blocks(), 0);
+
+        let prompt_only = seq.prepare_allocation(seq.num_input_tokens()).unwrap();
+        assert_eq!(manager.process(&prompt_only), 2);
+        seq.commit_allocation(seq.num_input_tokens());
+        assert_eq!(manager.num_active_blocks(), 2);
+
+        let second_reset = seq.reset_with_signal();
+        for signal in &second_reset {
+            manager.process(signal);
+        }
+
+        assert_eq!(manager.num_active_blocks(), 0);
     }
 }

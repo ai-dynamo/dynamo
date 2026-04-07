@@ -46,10 +46,12 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
+    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
     Direct,
+    LeastLoaded,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -57,14 +59,17 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
+            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
+            RouterMode::LeastLoaded => Self::LeastLoaded,
         }
     }
 }
 
 mod context;
 mod engine;
+pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -149,8 +154,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
-        llm::entrypoint::run_mocker_trace_replay,
+        llm::replay::run_mocker_synthetic_trace_replay,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -163,8 +169,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
+    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
+    m.add_class::<llm::replay::ReasoningConfig>()?;
+    m.add_class::<llm::replay::SglangArgs>()?;
+    m.add_class::<llm::replay::MockEngineArgs>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
@@ -190,6 +200,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
@@ -773,6 +784,17 @@ impl DistributedRuntime {
             .engine_routes()
             .register(&route_name, rust_callback);
         tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
+    }
+
+    /// Set the system-level health status (Ready / NotReady).
+    fn set_health_status(&self, ready: bool) -> PyResult<()> {
+        let status = if ready {
+            config::HealthStatus::Ready
+        } else {
+            config::HealthStatus::NotReady
+        };
+        self.inner.system_health().lock().set_health_status(status);
         Ok(())
     }
 

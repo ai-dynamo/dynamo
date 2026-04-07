@@ -134,13 +134,12 @@ impl ActiveSequence {
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
-            let all_token_ids: Vec<Vec<u32>> = self
-                .tokens
-                .blocks()
-                .iter()
-                .map(|b| b.tokens().to_vec())
-                .collect();
-            Some(all_token_ids[hash_start..hash_end].to_vec())
+            Some(
+                self.tokens.blocks()[hash_start..hash_end]
+                    .iter()
+                    .map(|b| b.tokens().to_vec())
+                    .collect(),
+            )
         } else {
             None
         };
@@ -276,13 +275,15 @@ impl ActiveSequence {
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal());
+        signals.extend(self.free_signal_for_tokens(self.len()));
         signals
     }
 
-    /// Free all blocks, generating appropriate signals for each block type
-    pub fn free_signal(&self) -> Vec<MoveBlock> {
-        self.unique_blocks
+    fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
+        let active_blocks = active_tokens
+            .div_ceil(self.block_size)
+            .min(self.unique_blocks.len());
+        self.unique_blocks[..active_blocks]
             .iter()
             .rev()
             .map(|block| match block {
@@ -294,6 +295,11 @@ impl ActiveSequence {
                 }
             })
             .collect()
+    }
+
+    /// Free the currently active allocation footprint.
+    pub fn free_signal(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.num_allocated_tokens)
     }
 
     /// Move the request to a preempted state and return the free signals from freeing current blocks.
