@@ -185,7 +185,15 @@ fn convert_input_content_to_user_content(
                 ));
             }
             InputContent::InputImage(img) => {
-                let url_str = img.image_url.as_deref().unwrap_or_default();
+                if img.file_id.is_some() && img.image_url.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "Image input by file_id is not yet supported"
+                    ));
+                }
+                let url_str = img
+                    .image_url
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("input_image requires image_url"))?;
                 let url = url::Url::parse(url_str)
                     .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
@@ -198,6 +206,7 @@ fn convert_input_content_to_user_content(
                     },
                 ));
             }
+            // TODO: handle InputVideo / InputAudio when upstream adds them
             InputContent::InputFile(_) => {
                 return Err(anyhow::anyhow!("File input content is not yet supported"));
             }
@@ -1683,5 +1692,43 @@ thinking
         let params = ResponseParams::default();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
+    }
+
+    /// Validate the JSON wire shape of NvResponse.
+    ///
+    /// The migration to upstream async-openai v0.34 removed fields that were
+    /// incorrectly present on our old local Response type (they belong on the
+    /// request, not the response, per the OpenAI Responses API spec).
+    #[test]
+    fn test_response_wire_format_shape() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams::default();
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // Fields that were on our old local type but are NOT in the OpenAI
+        // Responses API spec -- they are request-level, not response-level.
+        assert!(json.get("frequency_penalty").is_none());
+        assert!(json.get("presence_penalty").is_none());
+        assert!(json.get("store").is_none());
+        assert!(json.get("max_tool_calls").is_none());
+
+        // Fields that should be present with expected values
+        assert_eq!(json["object"], "response");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["metadata"], serde_json::json!({}));
+        assert!(json["output"].is_array());
+        assert!(json["output"][0].get("id").is_some());
+        assert!(json["output"][0].get("status").is_some());
+
+        // Optional fields with None should be omitted (upstream uses skip_serializing_if)
+        assert!(json.get("error").is_none());
+        assert!(json.get("incomplete_details").is_none());
+        assert!(json.get("billing").is_none());
+        assert!(json.get("conversation").is_none());
+        assert!(json.get("safety_identifier").is_none());
+
+        // nvext should be omitted when None
+        assert!(json.get("nvext").is_none());
     }
 }
