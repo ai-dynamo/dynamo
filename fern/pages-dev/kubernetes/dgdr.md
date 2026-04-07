@@ -109,7 +109,7 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 [Profiler Guide](../components/profiler/profiler-guide.md).
 
 <Info>
-If you are using a **namespace-scoped operator** with GPU discovery disabled, you must also
+If you are using a **namespace-scoped operator** (deprecated) with GPU discovery disabled, you must also
 provide explicit hardware info or the DGDR will be rejected at admission:
 
 ```yaml
@@ -121,8 +121,10 @@ spec:
     vramMb: 81920
 ```
 
-See the [installation guide](installation-guide.md#gpu-discovery-for-dynamographdeploymentrequests-with-namespace-scoped-operators)
+See the [installation guide](installation-guide.md#gpu-discovery-for-dynamographdeploymentrequests-deprecated-namespace-scoped-mode)
 for details.
+
+**Note:** Namespace-scoped mode is deprecated. Use cluster-wide mode for new deployments.
 </Info>
 
 ## Step 3: Monitor Profiling Progress
@@ -273,7 +275,7 @@ kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
 
 Common causes: no available GPU nodes, image pull failure (check image tag; NGC credentials are
 optional but may be needed if you hit rate limits pulling from public NGC), missing `hardware`
-config for a namespace-scoped operator.
+config for a namespace-scoped operator (deprecated).
 
 <Tip>
 **GPU node taints** are a frequent cause of pods staying `Pending`. Many clusters (including
