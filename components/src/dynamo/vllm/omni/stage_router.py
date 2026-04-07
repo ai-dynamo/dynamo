@@ -8,8 +8,6 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
-from vllm_omni.entrypoints.stage_utils import shm_read_bytes
 from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 
 from dynamo import prometheus_names
@@ -26,13 +24,9 @@ from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.stage_worker import _resolve_model_type
 from dynamo.vllm.omni.types import StageOutput
+from dynamo.vllm.omni.utils import shm_deserialize
 
 logger = logging.getLogger(__name__)
-
-
-def _shm_deserialize(shm_meta: dict) -> Any:
-    """Read and deserialize an OmniRequestOutput from shared memory."""
-    return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
 
 
 class OmniStageRouter:
@@ -139,7 +133,7 @@ class OmniStageRouter:
             logger.warning("Router: no shm_meta in stage output")
             return
 
-        result = _shm_deserialize(shm_meta)
+        result = shm_deserialize(shm_meta)
         chunk = await self._formatter.format(
             result, request_id, request_type=request_type, **ctx
         )
@@ -157,11 +151,7 @@ async def init_omni_stage_router(
     config: OmniConfig,
     shutdown_endpoints: list,
 ) -> None:
-    """Initialize OmniStageRouter as a Dynamo backend endpoint.
-
-    Mirrors init_omni() setup pattern exactly.
-    """
-    # Mirror init_omni: create endpoint FIRST
+    """Initialize OmniStageRouter as a Dynamo backend endpoint."""
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint or 'generate'}"
     )
@@ -182,37 +172,36 @@ async def init_omni_stage_router(
         await client.wait_for_instances()
         router.set_stage_client(model_stage, client)
 
-    if not getattr(config.engine_args, "data_parallel_rank", 0):
-        final_cfg = router.stage_configs[-1]
-        final_output_type = getattr(final_cfg, "final_output_type", "image")
-        model_type = get_output_modalities(config.output_modalities, config.model)
-        if model_type is None:
-            model_type = _resolve_model_type(final_output_type)
+    final_cfg = router.stage_configs[-1]
+    final_output_type = getattr(final_cfg, "final_output_type", "image")
+    model_type = get_output_modalities(config.output_modalities, config.model)
+    if model_type is None:
+        model_type = _resolve_model_type(final_output_type)
 
-        await register_model(
-            ModelInput.Text,
-            model_type,
-            generate_endpoint,
-            config.model,
-            config.served_model_name,
+    await register_model(
+        ModelInput.Text,
+        model_type,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+    )
+    logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            router.generate,
+            graceful_shutdown=True,
+            metrics_labels=[
+                (
+                    prometheus_names.labels.MODEL,
+                    config.served_model_name or config.model,
+                ),
+                (
+                    prometheus_names.labels.MODEL_NAME,
+                    config.served_model_name or config.model,
+                ),
+            ],
         )
-        logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
-
-        try:
-            await generate_endpoint.serve_endpoint(
-                router.generate,
-                graceful_shutdown=True,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-            )
-        except Exception as e:
-            logger.error("OmniStageRouter endpoint failed: %s", e)
-            raise
+    except Exception as e:
+        logger.error("OmniStageRouter endpoint failed: %s", e)
+        raise

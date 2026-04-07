@@ -243,21 +243,18 @@ def test_fetch_stage_inputs_calls_correct_connector():
     assert result[0].engine_outputs == [{"tok": [1, 2]}]
 
 
-def test_fetch_stage_inputs_returns_none_on_missing_connector():
+def test_fetch_stage_inputs_raises_on_missing_connector():
     worker = _make_worker_at_stage(1, connectors={}, engine_input_source=[0])
-    result = worker._fetch_stage_inputs({0: {"name": "ref0"}}, "r1")
-    assert result is None
+    with pytest.raises(RuntimeError, match="no connector for edge"):
+        worker._fetch_stage_inputs({0: {"name": "ref0"}}, "r1")
 
 
-def test_fetch_stage_inputs_returns_none_on_missing_ref():
+def test_fetch_stage_inputs_raises_on_missing_ref():
     worker = _make_worker_at_stage(
         1, connectors={("0", "1"): MagicMock()}, engine_input_source=[0]
     )
-    result = worker._fetch_stage_inputs({}, "r1")  # ref for stage 0 missing
-    assert result is None
-
-
-# ── issue-007: sampling params merging ────────────────────────────────
+    with pytest.raises(RuntimeError, match="no connector ref"):
+        worker._fetch_stage_inputs({}, "r1")  # ref for stage 0 missing
 
 
 def test_build_sampling_params_user_overrides_yaml_defaults():

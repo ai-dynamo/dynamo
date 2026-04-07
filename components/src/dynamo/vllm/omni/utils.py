@@ -11,6 +11,8 @@ from typing import Any, cast
 from huggingface_hub import scan_cache_dir
 from omegaconf import OmegaConf
 from vllm.sampling_params import SamplingParams
+from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
+from vllm_omni.entrypoints.stage_utils import shm_read_bytes
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -18,6 +20,11 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+
+
+def shm_deserialize(shm_meta: dict) -> Any:
+    """Read and deserialize an OmniRequestOutput from shared memory."""
+    return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
 
 
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
@@ -46,7 +53,7 @@ def parse_omni_request(
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):
         is_video = request_type == RequestType.VIDEO_GENERATION
         nvext = request.get("nvext") or {}
-        default_size = "832x480" if is_video else "1024x1024"
+        default_size = DEFAULT_VIDEO_SIZE if is_video else DEFAULT_IMAGE_SIZE
         size_kwargs = {} if is_video else {"default_w": 1024, "default_h": 1024}
         width, height = parse_size(request.get("size", default_size), **size_kwargs)
         sp: dict = {"height": height, "width": width, **nvext}

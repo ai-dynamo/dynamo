@@ -90,13 +90,21 @@ class OmniStageWorker:
         if stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
-            stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
-            if stage_list is None:
-                yield {
-                    "error": "Failed to fetch inputs from connectors",
-                    "finished": True,
-                }
+            try:
+                stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
+            except RuntimeError as e:
+                yield {"error": str(e), "finished": True}
                 return
+
+            if len(stage_list) != len(
+                self._engine_input_source or stage_connector_refs
+            ):
+                logger.warning(
+                    "Stage %d: expected %d stage inputs, got %d",
+                    self.stage_id,
+                    len(self._engine_input_source or stage_connector_refs),
+                    len(stage_list),
+                )
 
             if self._processor is not None:
                 prompt = self._processor(
@@ -189,59 +197,51 @@ class OmniStageWorker:
                 to_s,
             )
 
-        # Final stage → router: write to SHM (no YAML edge for this leg).
+        # Final stage → router: write output to shared memory and return the SHM handle.
+        # The router reads it back via shm_deserialize() to format the response.
+        #
+        # NOTE: This is a single-node-only workaround — SHM requires the final stage
+        # worker and the router to reside on the same machine. A proper multi-node
+        # solution would use a connector edge (like inter-stage connectors) instead.
+        # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
         yield {"shm_meta": shm_meta, "finished": True}
 
     def _fetch_stage_inputs(
         self, stage_connector_refs: dict[int, Any], request_id: str
-    ) -> list[_Proxy] | None:
+    ) -> list[_Proxy]:
         """Fetch previous stage outputs from connectors for the processor/engine.
 
         Fetches only the stages listed in engine_input_source (or all refs if empty).
-        Returns _Proxy objects in engine_input_source order, or None on any error.
+        Returns _Proxy objects in engine_input_source order.
+        Raises RuntimeError on any failure so the caller can propagate it as an error chunk.
         """
         sources = self._engine_input_source or sorted(stage_connector_refs.keys())
         stage_list = []
         for stage_k in sources:
             if (meta_k := stage_connector_refs.get(stage_k)) is None:
-                logger.error(
-                    "Stage %d: no connector ref for source stage %d",
-                    self.stage_id,
-                    stage_k,
+                raise RuntimeError(
+                    f"Stage {self.stage_id}: no connector ref for source stage {stage_k}"
                 )
-                return None
             if (
                 connector := self.connectors.get(_connector_key(stage_k, self.stage_id))
             ) is None:
-                logger.error(
-                    "Stage %d: no connector for edge (%s→%s)",
-                    self.stage_id,
-                    stage_k,
-                    self.stage_id,
+                raise RuntimeError(
+                    f"Stage {self.stage_id}: no connector for edge ({stage_k}→{self.stage_id})"
                 )
-                return None
             try:
                 payload = connector.get(
                     str(stage_k), str(self.stage_id), request_id, metadata=meta_k
                 )
             except Exception as e:
-                logger.error(
-                    "Stage %d: connector.get() failed: %s",
-                    self.stage_id,
-                    e,
-                    exc_info=True,
-                )
-                return None
+                raise RuntimeError(
+                    f"Stage {self.stage_id}: connector.get() failed: {e}"
+                ) from e
             payload_data = payload[0] if isinstance(payload, tuple) else payload
             if not payload_data:
-                logger.error(
-                    "Stage %d: empty payload from connector (%s→%s)",
-                    self.stage_id,
-                    stage_k,
-                    self.stage_id,
+                raise RuntimeError(
+                    f"Stage {self.stage_id}: empty payload from connector ({stage_k}→{self.stage_id})"
                 )
-                return None
             engine_inputs = (
                 payload_data.get("engine_inputs")
                 if isinstance(payload_data, dict)

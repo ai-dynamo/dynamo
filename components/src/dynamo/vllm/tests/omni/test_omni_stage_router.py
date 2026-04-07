@@ -98,7 +98,7 @@ async def test_generate_passes_stage_connector_refs_opaquely():
     p1, p2 = _patched_generate(router, {"prompt": "x"})
     with p1, p2:
         with patch.object(
-            stage_router, "_shm_deserialize", return_value=SimpleNamespace()
+            stage_router, "shm_deserialize", return_value=SimpleNamespace()
         ):
             [c async for c in router.generate({"prompt": "x"}, None)]
 
@@ -155,7 +155,7 @@ async def test_generate_concurrent_requests_have_independent_connector_refs():
                 "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id
             ):
                 with patch.object(
-                    stage_router, "_shm_deserialize", return_value=SimpleNamespace()
+                    stage_router, "shm_deserialize", return_value=SimpleNamespace()
                 ):
                     return [c async for c in router.generate({"prompt": "x"}, None)]
 
@@ -214,7 +214,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
     )
 
     request = {"prompt": "x", "response_format": "b64_json"}
-    with patch.object(stage_router, "_shm_deserialize", return_value=fake_result):
+    with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
         with patch(
             "dynamo.vllm.omni.stage_router.parse_request_type",
             return_value=(None, "image_generation"),
@@ -286,7 +286,7 @@ async def test_generate_forwards_raw_request_to_stage0():
     ):
         with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-raw"):
             with patch.object(
-                stage_router, "_shm_deserialize", return_value=SimpleNamespace()
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
                 [c async for c in router.generate(request, None)]
 
