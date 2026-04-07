@@ -64,76 +64,13 @@ def nixl_mocks():
         yield nixl_api_mock, nixl_bindings_mock, agent_instance
 
 
-@pytest.mark.asyncio
-async def test_wait_for_completion_raises_on_errored_status(nixl_mocks):
-    """ActiveOperation._wait_for_completion_ must raise RuntimeError when ERRORED.
+@pytest.fixture
+def testable_active_op(nixl_mocks):
+    """Factory fixture: returns a function that creates a _TestableActiveOp with a given status sequence.
 
-    Before fix: silently returned, leaving caller unaware the transfer failed.
-    After fix: raises RuntimeError so the caller can handle the failure (e.g.,
-    convert it to a retryable RequestError instead of propagating a segfault).
-
-    This is the core decode-side fix for issue #7319.
+    The subclass short-circuits ActiveOperation.__init__ to avoid NIXL hardware
+    calls, while preserving the real _wait_for_completion_() logic under test.
     """
-    # Import inside fixture so mocks are active
-    from dynamo.nixl_connect import (
-        ActiveOperation,
-        OperationStatus,
-    )
-
-    # Build a minimal ActiveOperation subclass without needing real NIXL calls.
-    # We just want to test the _wait_for_completion_ logic.
-    class _TestableActiveOp(ActiveOperation):
-        """Subclass that short-circuits __init__ to avoid NIXL hardware calls."""
-
-        def __init__(self, status_sequence):
-            # Do NOT call super().__init__; set attrs manually
-            self._status = OperationStatus.INITIALIZED
-            self._status_sequence = iter(status_sequence)
-            self._remote = MagicMock()
-            self._remote.name = "mock-prefill-worker"
-            self._xfer_hndl = MagicMock()
-            self._connection = MagicMock()
-            self._local_desc_list = MagicMock()
-            self._local_desc_tlist = []
-            self._remote_desc_tlist = []
-            self._local_device_kind = MagicMock()
-            self._remote_device_kind = MagicMock()
-            self._notification_key = "test-key"
-            self._operation_kind = MagicMock()
-
-        @property
-        def status(self):
-            try:
-                self._status = next(self._status_sequence)
-            except StopIteration:
-                pass
-            return self._status
-
-        def cancel(self):
-            pass
-
-        async def wait_for_completion(self):
-            await self._wait_for_completion_()
-
-        def _release(self):
-            pass
-
-    # Simulate: INITIALIZED → IN_PROGRESS → ERRORED (remote agent disappeared)
-    op = _TestableActiveOp(
-        [
-            OperationStatus.INITIALIZED,
-            OperationStatus.IN_PROGRESS,
-            OperationStatus.ERRORED,
-        ]
-    )
-
-    with pytest.raises(RuntimeError, match="ERRORED|errored|error"):
-        await op.wait_for_completion()
-
-
-@pytest.mark.asyncio
-async def test_wait_for_completion_does_not_raise_on_complete(nixl_mocks):
-    """ActiveOperation._wait_for_completion_ must not raise when COMPLETE."""
     from dynamo.nixl_connect import ActiveOperation, OperationStatus
 
     class _TestableActiveOp(ActiveOperation):
@@ -169,14 +106,29 @@ async def test_wait_for_completion_does_not_raise_on_complete(nixl_mocks):
         def _release(self):
             pass
 
-    # Simulate: INITIALIZED → IN_PROGRESS → COMPLETE (success path)
-    op = _TestableActiveOp(
+    return _TestableActiveOp
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
+    """ActiveOperation._wait_for_completion_ must raise RuntimeError when ERRORED.
+
+    Before fix: silently returned, leaving caller unaware the transfer failed.
+    After fix: raises RuntimeError so the caller can handle the failure (e.g.,
+    convert it to a retryable RequestError instead of propagating a segfault).
+
+    This is the core decode-side fix for issue #7319.
+    """
+    from dynamo.nixl_connect import OperationStatus
+
+    # Simulate: INITIALIZED -> IN_PROGRESS -> ERRORED (remote agent disappeared)
+    op = testable_active_op(
         [
             OperationStatus.INITIALIZED,
             OperationStatus.IN_PROGRESS,
-            OperationStatus.COMPLETE,
+            OperationStatus.ERRORED,
         ]
     )
 
-    # Should return without raising
-    await op.wait_for_completion()
+    with pytest.raises(RuntimeError, match="ERRORED|errored|error"):
+        await op.wait_for_completion()
