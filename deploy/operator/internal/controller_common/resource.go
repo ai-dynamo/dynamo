@@ -215,56 +215,82 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 }
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
+
+// kubeEnvelopeFields are standard top-level Kubernetes fields that don't
+// represent the resource's desired state. Everything else (spec, data,
+// rules, roleRef, subjects, etc.) is considered content.
+var kubeEnvelopeFields = map[string]bool{
+	"apiVersion": true,
+	"kind":       true,
+	"metadata":   true,
+	"status":     true,
+}
+
+// getContentFields returns all content fields from an unstructured object,
+// i.e. everything except the Kubernetes envelope (apiVersion, kind, metadata, status).
+// For resources with a "spec" field, it returns the spec directly for
+// backward-compatible hashing. For spec-less resources (ConfigMaps, Secrets,
+// Roles, etc.), it returns a map of all content fields.
+func getContentFields(u *unstructured.Unstructured) (any, bool) {
+	if spec, found, err := unstructured.NestedFieldCopy(u.Object, "spec"); err == nil && found {
+		return spec, true
+	}
+
+	content := make(map[string]interface{})
+	for k, v := range u.Object {
+		if kubeEnvelopeFields[k] {
+			continue
+		}
+		content[k] = v
+	}
+	if len(content) == 0 {
+		return nil, false
+	}
+	return content, true
+}
+
 func CopySpec(source, destination client.Object) error {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
 	if err != nil {
 		return err
 	}
-	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
+	srcU := &unstructured.Unstructured{Object: sourceMap}
 
-	// Convert destination to unstructured
 	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
 	if err != nil {
 		return err
 	}
-	destUnstructured := &unstructured.Unstructured{Object: destMap}
+	dstU := &unstructured.Unstructured{Object: destMap}
 
-	// Extract only the spec from source
-	sourceSpec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("spec not found in source object")
+	if spec, found, err := unstructured.NestedFieldCopy(srcU.Object, "spec"); err == nil && found {
+		if err := unstructured.SetNestedField(dstU.Object, spec, "spec"); err != nil {
+			return err
+		}
+		return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
 	}
 
-	// Set the spec in the destination
-	err = unstructured.SetNestedField(destUnstructured.Object, sourceSpec, "spec")
-	if err != nil {
-		return err
+	for k, v := range srcU.Object {
+		if kubeEnvelopeFields[k] {
+			continue
+		}
+		dstU.Object[k] = v
 	}
 
-	// Convert back to the original object
-	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
 }
 
 func getSpec(obj client.Object) (any, error) {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return nil, err
 	}
-	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
-	// Extract only the spec from source
-	spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
-	if err != nil {
-		return nil, err
-	}
+	u := &unstructured.Unstructured{Object: sourceMap}
+
+	content, found := getContentFields(u)
 	if !found {
 		return nil, nil
 	}
-	return spec, nil
+	return content, nil
 }
 
 // SpecChangeResult contains the result of spec change detection
