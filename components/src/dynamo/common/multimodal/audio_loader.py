@@ -58,6 +58,8 @@ class AudioLoader:
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
     ) -> None:
+        if http_timeout <= 0:
+            raise ValueError(f"http_timeout must be positive, got {http_timeout}")
         self._http_timeout = http_timeout
         self._enable_frontend_decoding = enable_frontend_decoding
         self._nixl_connector = None
@@ -159,7 +161,7 @@ class AudioLoader:
         """
         audio_futures: List[Awaitable[tuple[np.ndarray, float]]] = []
 
-        for item in audio_mm_items:
+        for idx, item in enumerate(audio_mm_items):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 audio_futures.append(self.load_audio(url))
@@ -175,7 +177,7 @@ class AudioLoader:
                     )
             else:
                 raise ValueError(
-                    f"Invalid audio multimodal item at index {audio_mm_items.index(item)}. "
+                    f"Invalid audio multimodal item at index {idx}. "
                     "Expected dict with 'Url' or 'Decoded' key."
                 )
 
