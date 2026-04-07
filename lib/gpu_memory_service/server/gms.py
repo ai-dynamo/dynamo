@@ -13,6 +13,7 @@ from typing import Callable, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AllocateAndExportRequest,
     AllocateRequest,
     AllocateResponse,
     CommitRequest,
@@ -272,6 +273,33 @@ class GMS:
                     layout_slot=info.layout_slot,
                 ),
                 -1,
+                False,
+            )
+
+        if msg_type is AllocateAndExportRequest:
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
+            info = await self._allocations.allocate(
+                size=msg.size,
+                tag=msg.tag,
+                is_connected=is_connected,
+                on_oom=lambda: self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocation_oom",
+                        allocation_count=self._allocations.allocation_count,
+                    )
+                ),
+            )
+            fd = self._allocations.export_allocation(info.allocation_id)
+            return (
+                AllocateResponse(
+                    allocation_id=info.allocation_id,
+                    size=info.size,
+                    aligned_size=info.aligned_size,
+                    layout_slot=info.layout_slot,
+                ),
+                fd,
                 False,
             )
 
