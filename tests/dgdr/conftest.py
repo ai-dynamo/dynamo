@@ -388,7 +388,7 @@ def dgdr_factory(
     """
     A factory fixture that applies a DGDR manifest and ensures cleanup.
 
-    When ``--dgdr-use-mocker`` CLI flag is set, the factory automatically
+    When mocker mode is enabled (the default), the factory automatically
     injects mocker config into every manifest before applying it.  This
     makes the injection transparent to individual test functions.
 
@@ -466,6 +466,7 @@ def deployed_dgdr(
     dgdr_use_mocker: bool,
     dgdr_profiling_timeout: int,
     dgdr_deploy_timeout: int,
+    dgdr_test_label: str,
 ) -> Generator[str, None, None]:
     """
     Session-scoped fixture: deploys a single DGDR once for the entire test
@@ -491,6 +492,9 @@ def deployed_dgdr(
     )
     manifest.setdefault("metadata", {})
     manifest["metadata"].setdefault("labels", {})
+    # Stamp session DGDR with the per-session test label so it is cleaned up
+    # together with other test-managed resources.
+    manifest["metadata"]["labels"][DGDR_TEST_LABEL_KEY] = dgdr_test_label
     if dgdr_use_mocker:
         _inject_mocker_config(manifest)
         # Ensure no stale mocker-disagg DGD from a previous test so the session DGDR
