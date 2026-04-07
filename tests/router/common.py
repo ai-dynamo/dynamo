@@ -14,6 +14,7 @@ import nats
 import requests
 
 from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
@@ -608,7 +609,7 @@ def _test_router_query_instance_id(
 def _parse_frontend_rejection_metric(
     metrics_text: str, model_name: str, endpoint: str
 ) -> int:
-    """Parse dynamo_frontend_model_rejection_total from Prometheus metrics text.
+    """Parse frontend model_rejection_total from Prometheus metrics text.
 
     Args:
         metrics_text: Raw Prometheus metrics text
@@ -618,8 +619,9 @@ def _parse_frontend_rejection_metric(
     Returns:
         The metric count, or 0 if not found
     """
+    metric_name = f"{name_prefix.FRONTEND}_{frontend_service.MODEL_REJECTION_TOTAL}"
     for line in metrics_text.splitlines():
-        if not line.startswith("dynamo_frontend_model_rejection_total{"):
+        if not line.startswith(f"{metric_name}{{"):
             continue
         if f'model="{model_name}"' in line and f'endpoint="{endpoint}"' in line:
             parts = line.rsplit(None, 1)
