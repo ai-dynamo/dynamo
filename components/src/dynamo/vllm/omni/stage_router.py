@@ -6,7 +6,7 @@
 import json
 import logging
 import uuid
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, List
 
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -68,10 +68,11 @@ class OmniStageRouter:
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
 
-        # --- Call each stage in order ---
-        raw: Dict[str, Any] = {}
-        for i, stage_cfg in enumerate(self.stage_configs):
-            model_stage = getattr(stage_cfg.engine_args, "model_stage", f"stage{i}")
+        stage_outputs: List[StageOutput] = []
+        for stage_idx, stage_cfg in enumerate(self.stage_configs):
+            model_stage = getattr(
+                stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
+            )
             client = self.stage_clients.get(model_stage)
             if client is None:
                 yield {
@@ -80,32 +81,32 @@ class OmniStageRouter:
                 }
                 return
 
-            if i == 0:
-                # Stage 0: forward raw request — worker owns all parsing.
+            if stage_idx == 0:
+                # This is a workaround for now to pass in the raw request to stage 0. StageRequest validates it but ignores any unknown keys, so it gets passed through.
                 stage_request = {"request_id": request_id, **request}
             else:
-                # Subsequent stages: validate + filter to known protocol fields only.
-                # StageOutput drops unknown keys; router never inspects stage_connector_refs.
-                stage_request = StageOutput.model_validate(raw).to_next_stage_request(
-                    request_id
-                )
+                stage_request = stage_outputs[-1].to_next_stage_request(request_id)
 
-            raw = {}
+            raw_stage_output = {}
             logger.info(
-                "Router: stage %d request keys=%s", i, list(stage_request.keys())
+                "Router: stage %d request keys=%s",
+                stage_idx,
+                list(stage_request.keys()),
             )
+            # For now, it is just one chunk output from the stage. Keeping the loop style in mind if in future we decide to stream multiple chunks from the stage.
             async for chunk in await client.round_robin(stage_request):
                 data = chunk.data()
                 if isinstance(data, (str, bytes)):
                     data = json.loads(data)
-                raw.update(data)
+                raw_stage_output.update(data)
+            stage_outputs.append(StageOutput.model_validate(raw_stage_output))
 
-            if "error" in raw:
-                yield raw
+            if stage_outputs[-1].error:
+                yield {"error": stage_outputs[-1].error, "finished": True}
                 return
 
-        # --- Format final output ---
-        if not raw.get("shm_meta"):
+        final = stage_outputs[-1]
+        if not final.shm_meta:
             yield {"error": "No SHM output from final stage", "finished": True}
             return
 
@@ -119,14 +120,16 @@ class OmniStageRouter:
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
 
-        async for chunk in self._format_output(raw, request_id, request_type, fmt_ctx):
+        async for chunk in self._format_output(
+            final, request_id, request_type, fmt_ctx
+        ):
             yield chunk
 
     async def _format_output(
-        self, raw: dict, request_id: str, request_type: Any, ctx: dict
+        self, stage_output: StageOutput, request_id: str, request_type: Any, ctx: dict
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from SHM and format via OutputFormatter."""
-        shm_meta = raw.get("shm_meta")
+        shm_meta = stage_output.shm_meta
         if not shm_meta:
             logger.warning("Router: no shm_meta in stage output")
             return

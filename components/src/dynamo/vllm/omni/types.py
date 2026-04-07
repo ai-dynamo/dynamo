@@ -5,9 +5,10 @@
 """
 
 import dataclasses
+import logging
 from typing import Any, AsyncGenerator, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 @runtime_checkable
@@ -37,7 +38,28 @@ class StageOutput(BaseModel):
     """
 
     model_config = ConfigDict(extra="ignore")
-    # TODO: shm_meta should move to a YAML-configured connector edge (issue-005)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_dropped_keys(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            known = {
+                "shm_meta",
+                "original_prompt",
+                "stage_connector_refs",
+                "sampling_params_list",
+                "finished",
+                "error",
+            }
+            dropped = set(values.keys()) - known
+            if dropped:
+                logging.warning(
+                    "StageOutput: dropping unexpected keys from stage response: %s",
+                    sorted(dropped),
+                )
+        return values
+
+    # TODO: shm_meta should be gone, its a WAR right now to send final output to the router via shm
     shm_meta: dict | None = None
     original_prompt: dict | None = None
     stage_connector_refs: dict | None = None
