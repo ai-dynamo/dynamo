@@ -382,15 +382,66 @@ class GMSStorageClient:
         manifest: SaveManifest,
         ctx: _RestorePipelineContext,
     ) -> Dict[str, str]:
+        phase_a_started = time.monotonic()
         id_map: Dict[str, str] = {}
-        for entry in manifest.allocations:
-            old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.get_allocation_id(va)
-            ctx.vas[old_id] = va
-            ctx.va_events[old_id].set()
+        pending: "queue.SimpleQueue[Optional[Tuple[AllocationEntry, Any, int]]]" = (
+            queue.SimpleQueue()
+        )
+        producer_error: list[BaseException] = []
+        stop_producer = threading.Event()
+
+        def produce_allocations() -> None:
+            try:
+                for entry in manifest.allocations:
+                    if stop_producer.is_set():
+                        return
+                    response, fd = mm._client_rpc.allocate_and_export_info(
+                        int(entry.aligned_size), entry.tag
+                    )
+                    if int(response.aligned_size) != int(entry.aligned_size):
+                        raise RuntimeError(
+                            "GMS allocation alignment mismatch: "
+                            f"{entry.aligned_size} vs {response.aligned_size}"
+                        )
+                    pending.put((entry, response, fd))
+            except BaseException as exc:  # noqa: BLE001
+                producer_error.append(exc)
+            finally:
+                pending.put(None)
+
+        producer = threading.Thread(target=produce_allocations, daemon=True)
+        producer.start()
+        try:
+            while True:
+                item = pending.get()
+                if item is None:
+                    break
+                entry, response, fd = item
+                old_id = entry.allocation_id
+                va = mm.reserve_va(int(response.aligned_size))
+                mm.map_va(
+                    fd,
+                    va,
+                    entry.size,
+                    response.allocation_id,
+                    entry.tag,
+                    int(response.layout_slot),
+                )
+                id_map[old_id] = response.allocation_id
+                ctx.vas[old_id] = va
+                ctx.va_events[old_id].set()
+        except Exception:
+            stop_producer.set()
+            raise
+        finally:
+            stop_producer.set()
+            producer.join()
+        if producer_error:
+            raise producer_error[0]
+        phase_a_seconds = time.monotonic() - phase_a_started
         logger.info(
-            "Phase A complete: allocated %d GMS VAs; waiting for disk/copy pipeline",
+            "Phase A complete: %.3fs  (%d GMS VAs allocated); waiting for disk/copy pipeline",
+            phase_a_seconds,
             len(ctx.vas),
         )
         return id_map
