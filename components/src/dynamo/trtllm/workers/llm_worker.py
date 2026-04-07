@@ -131,6 +131,7 @@ async def init_llm_worker(
     config: Config,
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
+    engine_holder: Optional[list] = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -141,6 +142,8 @@ async def init_llm_worker(
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
+        engine_holder: Optional mutable list; when provided, the TensorRTLLMEngine
+            is appended so that the drain callback can reference it at shutdown time.
     """
 
     encode_client = None
@@ -241,9 +244,9 @@ async def init_llm_worker(
             arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
-            current_kv_config[
-                "event_buffer_max_size"
-            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            current_kv_config["event_buffer_max_size"] = (
+                DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            )
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -363,6 +366,11 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
+        # Expose engine to the drain callback installed by main.py (#7319).
+        # The callback uses this to poll active request count during shutdown.
+        if engine_holder is not None:
+            engine_holder.append(engine)
+
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
