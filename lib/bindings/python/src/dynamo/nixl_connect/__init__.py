@@ -495,7 +495,11 @@ class ActiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         if self._xfer_hndl is None:
@@ -1472,7 +1476,11 @@ class PassiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         old_status = self._status
