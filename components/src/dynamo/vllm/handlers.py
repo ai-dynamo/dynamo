@@ -1612,6 +1612,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id,
                     )
                 elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
+                    # Guard is on IMAGE_URL_KEY (not just has_mm_data) so
+                    # text-only requests pass through and video/audio fall
+                    # through to re-download below (TODO: proper support).
                     msg = (
                         "Decode worker received multimodal request without "
                         "prefill result"
