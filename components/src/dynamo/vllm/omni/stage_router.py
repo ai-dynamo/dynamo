@@ -15,6 +15,7 @@ from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
+    RequestType,
     get_output_modalities,
     parse_request_type,
 )
@@ -126,7 +127,11 @@ class OmniStageRouter:
             yield chunk
 
     async def _format_output(
-        self, stage_output: StageOutput, request_id: str, request_type: Any, ctx: dict
+        self,
+        stage_output: StageOutput,
+        request_id: str,
+        request_type: RequestType,
+        ctx: dict,
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from SHM and format via OutputFormatter."""
         shm_meta = stage_output.shm_meta

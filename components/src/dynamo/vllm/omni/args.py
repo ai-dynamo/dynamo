@@ -309,10 +309,11 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ring-degree must be > 0")
         if not (0 < self.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
-        if self.stage_id is not None and self.stage_configs_path is None:
-            raise ValueError("--stage-id requires --stage-configs-path")
-        if self.omni_router and self.stage_configs_path is None:
-            raise ValueError("--omni-router requires --stage-configs-path")
+        if self.stage_configs_path is None:
+            if self.stage_id is not None:
+                raise ValueError("--stage-id requires --stage-configs-path")
+            if self.omni_router:
+                raise ValueError("--omni-router requires --stage-configs-path")
         if self.stage_id is not None and self.omni_router:
             raise ValueError("--stage-id and --omni-router are mutually exclusive")
 

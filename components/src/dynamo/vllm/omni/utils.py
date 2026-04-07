@@ -16,6 +16,9 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
+DEFAULT_IMAGE_SIZE = "1024x1024"
+DEFAULT_VIDEO_SIZE = "832x480"
+
 
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
