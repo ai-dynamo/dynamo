@@ -62,7 +62,15 @@ class StageOutput(BaseModel):
     # TODO: shm_meta should be gone, its a WAR right now to send final output to the router via shm
     shm_meta: dict | None = None
     original_prompt: dict | None = None
-    stage_connector_refs: dict | None = None
+    # stage_connector_refs maps stage_id (str key from JSON) → opaque connector metadata
+    # returned by connector.put(). This metadata is an address ticket passed to
+    # connector.get(metadata=...) by the next stage to locate and fetch the data.
+    # The format is connector-specific and opaque to the router:
+    #   SHM connector:     {"shm": {"name": "<block_name>", "size": N}, "size": N}
+    #                   or {"inline_bytes": b"...", "size": N}  (small payloads)
+    #   Mooncake (RDMA):   {"source_host": "...", "source_port": N, "data_size": N, ...}
+    # Keys arrive as strings from JSON; workers normalize them to int via _int_keyed().
+    stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
     finished: bool | None = None
     error: str | None = None
@@ -85,7 +93,7 @@ class StageRequest(BaseModel):
 
     extra="ignore" handles all three request shapes:
       Stage 0:   {request_id, engine_inputs, original_prompt, stage_connector_refs: {}}
-      Stage N>0: {request_id, original_prompt, stage_connector_refs: {0: ref0, ...}}
+      Stage N>0: {request_id, original_prompt, stage_connector_refs: {"0": ref0, ...}}
       Direct:    raw frontend request (no router, single-stage deployment)
     """
 
@@ -94,8 +102,9 @@ class StageRequest(BaseModel):
     request_id: str | None = None
     engine_inputs: Any = None
     original_prompt: dict | None = None
-    # String keys from JSON — caller must normalize with _int_keyed().
-    stage_connector_refs: dict | None = None
+    # stage_connector_refs: address tickets from previous stages (same format as
+    # StageOutput.stage_connector_refs). Callers normalize string keys to int via _int_keyed().
+    stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
 
 
