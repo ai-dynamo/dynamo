@@ -449,12 +449,14 @@ class ActiveOperation(AbstractOperation):
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
         start = time.monotonic()
+        next_log_time = start
         sleep_time = min_poll_ms
         while True:
-            elapsed = time.monotonic() - start
-            if int(elapsed) % 10 == 0:
+            now = time.monotonic()
+            if now >= next_log_time:
+                next_log_time = now + 10.0
                 logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={elapsed:.1f}s }}."
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={now - start:.1f}s }}."
                 )
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
