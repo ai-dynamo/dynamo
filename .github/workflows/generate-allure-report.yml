@@ -149,9 +149,8 @@ jobs:
           for dir in pr post-merge nightly release; do
             if [ "$dir" = "$SUBDIR" ]; then continue; fi
             if git show "gh-pages:dashboard-results/${dir}" 2>/dev/null; then
-              mkdir -p "unified-workspace/allure-results/${dir}-imported"
               git archive gh-pages "dashboard-results/${dir}" | tar -x -C /tmp/
-              cp -r "/tmp/dashboard-results/${dir}/"* "unified-workspace/allure-results/${dir}-imported/" 2>/dev/null || true
+              cp -r "/tmp/dashboard-results/${dir}/"* "unified-workspace/allure-results/" 2>/dev/null || true
             fi
           done
 
