@@ -21,19 +21,21 @@ URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
 
-def _require_vllm_audio_media() -> tuple[Any, Any]:
-    """Lazily import vLLM's audio media components.
+try:
+    from vllm.multimodal.media import MediaConnector
+    from vllm.multimodal.media.audio import AudioMediaIO
+except ImportError:
+    MediaConnector = None  # type: ignore[assignment]
+    AudioMediaIO = None  # type: ignore[assignment]
 
-    Raises RuntimeError if vLLM multimodal media is not installed.
-    """
-    try:
-        from vllm.multimodal.media import MediaConnector
-        from vllm.multimodal.media.audio import AudioMediaIO
-    except ImportError as exc:
+
+def _require_vllm_audio_media() -> tuple[Any, Any]:
+    """Return vLLM's audio media components, raising if not installed."""
+    if MediaConnector is None or AudioMediaIO is None:
         raise RuntimeError(
             "vLLM multimodal media components are required to decode `audio_url` "
             "inputs in the vLLM backend."
-        ) from exc
+        )
     return MediaConnector, AudioMediaIO
 
 
@@ -56,7 +58,7 @@ class AudioLoader:
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
     ) -> None:
-        self._http_timeout = int(http_timeout)
+        self._http_timeout = http_timeout
         self._enable_frontend_decoding = enable_frontend_decoding
         self._nixl_connector = None
         self._vllm_media_connector = None
@@ -171,11 +173,16 @@ class AudioLoader:
                         "Received decoded audio data but enable_frontend_decoding=False. "
                         "Enable frontend decoding to transfer decoded audio via NIXL."
                     )
+            else:
+                raise ValueError(
+                    f"Invalid audio multimodal item at index {audio_mm_items.index(item)}. "
+                    "Expected dict with 'Url' or 'Decoded' key."
+                )
 
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
-        for media_item, result in zip(audio_mm_items, results):
+        for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result

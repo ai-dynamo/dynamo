@@ -91,6 +91,13 @@ async def test_load_audio_batch_uses_url_loader():
 
 
 @pytest.mark.asyncio
+async def test_load_audio_batch_rejects_malformed_items():
+    loader = AudioLoader(enable_frontend_decoding=False)
+
+    with pytest.raises(ValueError, match="Invalid audio multimodal item"):
+        await loader.load_audio_batch([{"bad_key": "value"}])
+
+
 async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decoding():
     loader = AudioLoader(enable_frontend_decoding=False)
 
