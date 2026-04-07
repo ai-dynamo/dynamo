@@ -1826,11 +1826,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # PIL images in the P/D path (no separate encode worker).
         if is_qwen_vl_model(config.model):
             self._qwen_grid_params = load_qwen_grid_params(config.model)
-            if (
-                self._qwen_grid_params is None
-                and self.embedding_loader is None
-                and config.disaggregation_mode == DisaggregationMode.PREFILL
-            ):
+            if self._qwen_grid_params is None and self.embedding_loader is None:
                 logger.error(
                     "Qwen VL grid params failed to load and no encode worker "
                     "is configured. P/D multimodal requests will fail because "
