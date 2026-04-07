@@ -174,7 +174,7 @@ pub struct NcclCollectives {
     cuda_context: Arc<CudaContext>,
 
     /// Event system for completion notifications (used for borrowed stream fallback)
-    event_system: Arc<LocalEventSystem>,
+    event_system: EventManager,
 
     /// CUDA event registrar for efficient completion notification
     event_registrar: Arc<dyn CudaEventRegistrar>,
@@ -210,7 +210,7 @@ impl NcclCollectives {
         bootstrap: &NcclBootstrap,
         rank: usize,
         cuda_context: Arc<CudaContext>,
-        event_system: Arc<LocalEventSystem>,
+        event_system: EventManager,
         event_registrar: Arc<dyn CudaEventRegistrar>,
         layout_resolver: Arc<dyn LayoutResolver>,
     ) -> Result<Self> {
@@ -293,7 +293,7 @@ impl NcclCollectives {
         rank: usize,
         world_size: usize,
         cuda_context: Arc<CudaContext>,
-        event_system: Arc<LocalEventSystem>,
+        event_system: EventManager,
         event_registrar: Arc<dyn CudaEventRegistrar>,
         layout_resolver: Arc<dyn LayoutResolver>,
     ) -> Self {

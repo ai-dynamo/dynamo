@@ -7,7 +7,6 @@
 //! and single-worker scenarios where no actual collective communication is needed.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 use anyhow::Result;
 use velo::EventManager;
@@ -47,7 +46,7 @@ use super::CollectiveOps;
 /// )?;
 /// ```
 pub struct StubCollectiveOps {
-    events: Arc<LocalEventSystem>,
+    events: EventManager,
     rank: usize,
     world_size: usize,
 }
@@ -59,7 +58,7 @@ impl StubCollectiveOps {
     /// * `events` - The event system for creating completion notifications
     /// * `rank` - The rank of this worker in the collective group
     /// * `world_size` - The total number of workers in the collective group
-    pub fn new(events: Arc<LocalEventSystem>, rank: usize, world_size: usize) -> Self {
+    pub fn new(events: EventManager, rank: usize, world_size: usize) -> Self {
         Self {
             events,
             rank,
@@ -68,7 +67,7 @@ impl StubCollectiveOps {
     }
 
     /// Create a stub for single-worker scenarios (rank 0, world_size 1).
-    pub fn single_worker(events: Arc<LocalEventSystem>) -> Self {
+    pub fn single_worker(events: EventManager) -> Self {
         Self::new(events, 0, 1)
     }
 }

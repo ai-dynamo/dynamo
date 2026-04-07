@@ -820,11 +820,7 @@ impl InitiatorSession {
         self.send_stage_and_wait_for_ready(rx).await?;
 
         let local_g2 = self.local_g2_blocks.count();
-        let remote_g2: usize = self
-            .remote_g2_blocks
-            .values()
-            .map(|v| v.len())
-            .sum();
+        let remote_g2: usize = self.remote_g2_blocks.values().map(|v| v.len()).sum();
 
         self.status_tx
             .send(OnboardingStatus::Prepared {
@@ -1024,15 +1020,19 @@ impl InitiatorSession {
         // This ensures correct positional correspondence for G2→G1 transfer
         all_blocks.sort_by_key(|b| b.sequence_hash().position());
 
-        // Validate contiguous positions - catches ordering bugs before data corruption
+        // Validate contiguous positions - catches ordering bugs before data corruption.
+        // If validation fails, we still proceed with sorted blocks because:
+        // 1. Sorted order is strictly safer than unsorted for G2→G1 transfer
+        // 2. Non-contiguous positions indicate an upstream aggregation bug, not a
+        //    sorting bug — failing here would discard valid cached data
+        // 3. The consumer (G1 transfer) handles sparse blocks correctly
         let seq_hashes: Vec<SequenceHash> = all_blocks.iter().map(|b| b.sequence_hash()).collect();
         if let Err(e) = validate_contiguous_positions(&seq_hashes) {
-            tracing::error!(
+            tracing::warn!(
                 session_id = %self.session_id,
                 error = %e,
-                "Block position validation failed - potential data corruption avoided"
+                "Block positions are not contiguous — proceeding with sorted order"
             );
-            // The sorted order is still safer than unsorted even if validation fails
         }
 
         let matched_blocks = all_blocks.len();

@@ -49,6 +49,11 @@ pub fn is_numa_enabled() -> bool {
     !dynamo_config::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
 }
 
+/// Convenience inverse of [`is_numa_enabled`].
+pub fn is_numa_disabled() -> bool {
+    !is_numa_enabled()
+}
+
 /// Represents a NUMA node identifier.
 ///
 /// NUMA nodes are typically numbered 0, 1, 2, etc. corresponding to physical
@@ -287,21 +292,6 @@ fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
     }
 }
 
-/// Get NUMA node for a GPU by looking up its PCI address in sysfs.
-///
-/// Reads `/sys/bus/pci/devices/<pci_addr>/numa_node`.
-fn get_numa_node_from_sysfs(pci_address: &str) -> Option<u32> {
-    let path = format!("/sys/bus/pci/devices/{pci_address}/numa_node");
-    let content = fs::read_to_string(&path).ok()?;
-    let node: i32 = content.trim().parse().ok()?;
-    // -1 means NUMA info not available
-    if node < 0 {
-        None
-    } else {
-        Some(node as u32)
-    }
-}
-
 /// GPU info with PCI address and NUMA node, used for CPU set subdivision.
 #[derive(Debug, Clone)]
 struct GpuTopoInfo {
@@ -319,7 +309,7 @@ fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
     (0..count as u32)
         .filter_map(|i| {
             let pci = get_pci_bus_address_from_cuda(i)?;
-            let numa = get_numa_node_from_sysfs(&pci);
+            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
             Some(GpuTopoInfo {
                 pci_address: pci,
                 numa_node: numa,
@@ -342,7 +332,7 @@ fn enumerate_all_gpus() -> Vec<GpuTopoInfo> {
             return nvml_gpus
                 .into_iter()
                 .map(|g| {
-                    let numa = get_numa_node_from_sysfs(&g.pci_address);
+                    let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
                     GpuTopoInfo {
                         pci_address: g.pci_address,
                         numa_node: numa,
@@ -408,7 +398,7 @@ fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
     let mut cuda_devices: Vec<(u32, String, Option<u32>)> = Vec::new();
     for i in 0..cuda_count as u32 {
         if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-            let numa = get_numa_node_from_sysfs(&pci);
+            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
             cuda_devices.push((i, pci, numa));
         }
     }

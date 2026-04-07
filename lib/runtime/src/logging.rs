@@ -949,7 +949,7 @@ pub fn init() {
 }
 
 #[cfg(feature = "tokio-console")]
-fn setup_logging() {
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
         .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
@@ -967,6 +967,7 @@ fn setup_logging() {
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
         .init();
+    Ok(())
 }
 
 #[cfg(not(feature = "tokio-console"))]

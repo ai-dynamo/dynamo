@@ -10,6 +10,7 @@
 #[cfg(feature = "collectives")]
 mod replicated;
 #[cfg(feature = "collectives")]
+#[allow(unused_imports)]
 pub use replicated::ReplicatedDataWorker;
 
 use std::collections::HashMap;

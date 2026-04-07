@@ -38,24 +38,10 @@ use super::{
     StagingMode,
     accessor::{BlockAccessor, PolicyContext},
     session::{
-        BlockHolder,
-        ControllableSessionOptions,
-        ControllableSessionResult,
-        ControlRole,
-        InitiatorSession,
-        MessageTransport,
-        OnboardMessage,
-        OnboardSessionTx,
-        ResponderSession,
-        ServerSession,
-        ServerSessionHandle,
-        ServerSessionOptions,
-        SessionHandle,
-        SessionMessage,
-        SessionMessageTx,
-        SessionPhase,
-        create_server_session,
-        session_handle_state_channel,
+        BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
+        InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, ResponderSession,
+        ServerSession, ServerSessionHandle, ServerSessionOptions, SessionHandle, SessionMessage,
+        SessionMessageTx, SessionPhase, create_server_session, session_handle_state_channel,
         session_message_channel,
     },
     velo::{ExportMetadataCallback, VeloLeaderService},
@@ -555,7 +541,7 @@ impl InstanceLeader {
 
                 tokio::spawn(async move {
                     if let Err(e) = session.run(rx, sequence_hashes).await {
-                        eprintln!("ResponderSession error: {e}");
+                        tracing::warn!(error = %e, "ResponderSession error");
                     }
                 });
 
@@ -714,7 +700,7 @@ impl InstanceLeader {
         tokio::spawn(async move {
             let _handle = _handle; // move handle into task to keep cmd channel open
             if let Err(e) = session.run().await {
-                eprintln!("ServerSession error: {e}");
+                tracing::warn!(error = %e, "ServerSession error");
             }
             // Clean up when session completes
             session_sessions.remove(&session_id);
@@ -862,7 +848,7 @@ impl InstanceLeader {
         let session_sessions = self.session_sessions.clone();
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
-                eprintln!("ServerSession error: {e}");
+                tracing::warn!(error = %e, "ServerSession error");
             }
             // Clean up when session completes
             session_sessions.remove(&session_id);
@@ -918,7 +904,7 @@ impl InstanceLeader {
         let session_sessions = self.session_sessions.clone();
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
-                eprintln!("ServerSession error: {e}");
+                tracing::warn!(error = %e, "ServerSession error");
             }
             // Clean up when session completes
             session_sessions.remove(&session_id);
@@ -946,7 +932,7 @@ impl InstanceLeader {
                     state_tx.add_staged_blocks(staged_blocks, remaining, layer_range);
                 }
                 SessionMessage::Error { message, .. } => {
-                    eprintln!("Session error: {}", message);
+                    tracing::warn!(%message, "Session error");
                     state_tx.set_failed();
                     break;
                 }
@@ -1258,7 +1244,7 @@ impl Leader for InstanceLeader {
 
         handle.spawn(async move {
             if let Err(e) = session.run(rx, remote_leaders, sequence_hashes).await {
-                eprintln!("InitiatorSession error: {e}");
+                tracing::warn!(error = %e, "InitiatorSession error");
                 // Try to update status to indicate error
                 status_tx
                     .send(OnboardingStatus::Complete { matched_blocks: 0 })

@@ -42,7 +42,12 @@
 //! let comm = bootstrap.init_communicator(rank, stream)?;
 //! ```
 
+use std::ffi::c_char;
 use std::mem::MaybeUninit;
+
+/// Platform-neutral byte type for NCCL's `ncclUniqueId::internal` field.
+/// `c_char` is `i8` on x86_64 and `u8` on aarch64.
+type NcclByte = c_char;
 
 use anyhow::{Context, Result};
 use cudarc::driver::sys::CUstream;
@@ -88,6 +93,12 @@ impl NcclBootstrap {
     /// # Errors
     /// Returns an error if NCCL fails to generate a unique ID.
     pub fn generate(world_size: usize) -> Result<Self> {
+        anyhow::ensure!(
+            world_size > 0 && world_size <= i32::MAX as usize,
+            "world_size must be in 1..={}, got {}",
+            i32::MAX,
+            world_size
+        );
         let mut nccl_id = MaybeUninit::<ncclUniqueId>::uninit();
 
         // SAFETY: ncclGetUniqueId initializes the ncclUniqueId struct
@@ -119,7 +130,7 @@ impl NcclBootstrap {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(8 + 128);
         bytes.extend_from_slice(&(self.world_size as u64).to_le_bytes());
-        // Convert i8 array to u8 for serialization
+        // Convert NcclByte array to u8 for serialization
         for &byte in &self.nccl_id.internal {
             bytes.push(byte as u8);
         }
@@ -148,11 +159,11 @@ impl NcclBootstrap {
         let world_size = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
 
         let mut nccl_id = ncclUniqueId {
-            internal: [0i8; 128],
+            internal: [0 as NcclByte; 128],
         };
         // Copy bytes into internal array
         for (i, &byte) in bytes[8..].iter().enumerate() {
-            nccl_id.internal[i] = byte as i8;
+            nccl_id.internal[i] = byte as NcclByte;
         }
 
         Ok(Self {
@@ -190,6 +201,11 @@ impl NcclBootstrap {
                 self.world_size
             );
         }
+        anyhow::ensure!(
+            self.world_size <= i32::MAX as usize,
+            "world_size {} exceeds i32::MAX",
+            self.world_size
+        );
 
         let mut comm = MaybeUninit::<ncclComm_t>::uninit();
 
@@ -240,7 +256,7 @@ mod tests {
         // Create a bootstrap with a dummy ID (we can't call ncclGetUniqueId without NCCL)
         let original = NcclBootstrap {
             nccl_id: ncclUniqueId {
-                internal: [42i8; 128],
+                internal: [42 as NcclByte; 128],
             },
             world_size,
         };

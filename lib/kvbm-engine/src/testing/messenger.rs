@@ -29,7 +29,10 @@ pub async fn create_messenger_tcp() -> Result<Arc<Messenger>> {
             .build()?,
     );
 
-    let messenger = Messenger::new(vec![transport], None).await?;
+    let messenger = Messenger::builder()
+        .add_transport(transport)
+        .build()
+        .await?;
 
     // Give transport a moment to bind
     tokio::time::sleep(Duration::from_millis(100)).await;

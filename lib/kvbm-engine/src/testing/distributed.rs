@@ -1547,13 +1547,10 @@ mod tests {
             .expect("Should attach");
 
         // Wait for initial state
-        let state = timeout(
-            Duration::from_secs(5),
-            prefill_handle.wait_for_ready(),
-        )
-        .await
-        .expect("Timeout waiting for initial state")
-        .expect("Should get initial state");
+        let state = timeout(Duration::from_secs(5), prefill_handle.wait_for_ready())
+            .await
+            .expect("Timeout waiting for initial state")
+            .expect("Should get initial state");
         println!(
             "Prefill sees {} G2 blocks from Decode",
             state.g2_blocks.len()

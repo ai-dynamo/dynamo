@@ -58,8 +58,7 @@ impl NvmlHandle {
             let lib = Library::new("libnvidia-ml.so.1").ok()?;
 
             // Initialize NVML
-            let init: Symbol<unsafe extern "C" fn() -> u32> =
-                lib.get(b"nvmlInit_v2\0").ok()?;
+            let init: Symbol<unsafe extern "C" fn() -> u32> = lib.get(b"nvmlInit_v2\0").ok()?;
             if init() != NVML_SUCCESS {
                 tracing::warn!("nvmlInit_v2 failed");
                 return None;

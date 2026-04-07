@@ -654,10 +654,8 @@ pub fn create_server_session(
 ) -> (ServerSession, ServerSessionHandle) {
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
 
-    let block_metadata: HashMap<SequenceHash, LayoutHandle> = sequence_hashes
-        .into_iter()
-        .zip(layout_handles)
-        .collect();
+    let block_metadata: HashMap<SequenceHash, LayoutHandle> =
+        sequence_hashes.into_iter().zip(layout_handles).collect();
 
     let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
 
@@ -757,8 +755,7 @@ mod tests {
         let peer_id = InstanceId::new_v4();
 
         // Create transport with a session channel to capture responses
-        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> =
-            Arc::new(DashMap::new());
+        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> = Arc::new(DashMap::new());
         let transport = Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             session_sessions.clone(),
@@ -773,7 +770,8 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(16);
 
         let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
-        let session = ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
+        let session =
+            ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
 
         // Spawn session
         let session_task = tokio::spawn(session.run());
@@ -789,13 +787,10 @@ mod tests {
             .unwrap();
 
         // Read the StateResponse
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            peer_rx.recv(),
-        )
-        .await
-        .expect("timeout")
-        .expect("channel closed");
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), peer_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
 
         match response {
             SessionMessage::StateResponse { state, .. } => {
@@ -811,11 +806,9 @@ mod tests {
             .await
             .unwrap();
 
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), session_task)
-            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), session_task).await;
 
-        // Clean up
-        drop(peer_session_id);
+        let _ = peer_session_id;
     }
 
     #[tokio::test]
@@ -824,8 +817,7 @@ mod tests {
         let instance_id = InstanceId::new_v4();
         let peer_id = InstanceId::new_v4();
 
-        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> =
-            Arc::new(DashMap::new());
+        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> = Arc::new(DashMap::new());
         let transport = Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             session_sessions.clone(),
@@ -839,7 +831,8 @@ mod tests {
 
         let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
         // G2-only mode, no G3 blocks
-        let session = ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
+        let session =
+            ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
 
         let session_task = tokio::spawn(session.run());
 
@@ -852,13 +845,10 @@ mod tests {
             .await
             .unwrap();
 
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            peer_rx.recv(),
-        )
-        .await
-        .expect("timeout")
-        .expect("channel closed");
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), peer_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
 
         // G2-only with no blocks → Ready phase immediately
         match response {
@@ -869,7 +859,10 @@ mod tests {
             other => panic!("Expected StateResponse, got {:?}", other),
         }
 
-        msg_tx.send(SessionMessage::Close { session_id }).await.unwrap();
+        msg_tx
+            .send(SessionMessage::Close { session_id })
+            .await
+            .unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), session_task).await;
     }
 
@@ -879,8 +872,7 @@ mod tests {
         let instance_id = InstanceId::new_v4();
         let peer_id = InstanceId::new_v4();
 
-        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> =
-            Arc::new(DashMap::new());
+        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> = Arc::new(DashMap::new());
         let transport = Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             session_sessions.clone(),
@@ -893,7 +885,8 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(16);
 
         let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
-        let session = ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
+        let session =
+            ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
 
         let session_task = tokio::spawn(session.run());
 
@@ -919,7 +912,10 @@ mod tests {
             .unwrap();
 
         // Close and check no extra messages were sent
-        msg_tx.send(SessionMessage::Close { session_id }).await.unwrap();
+        msg_tx
+            .send(SessionMessage::Close { session_id })
+            .await
+            .unwrap();
 
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), session_task).await;
     }
@@ -930,8 +926,7 @@ mod tests {
         let instance_id = InstanceId::new_v4();
         let peer_id = InstanceId::new_v4();
 
-        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> =
-            Arc::new(DashMap::new());
+        let session_sessions: Arc<DashMap<SessionId, SessionMessageTx>> = Arc::new(DashMap::new());
         let transport = Arc::new(MessageTransport::local(
             Arc::new(DashMap::new()),
             session_sessions.clone(),
@@ -944,7 +939,8 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(16);
 
         let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
-        let session = ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
+        let session =
+            ServerSession::new_g2_only(endpoint, BlockHolder::empty(), HashMap::new(), cmd_rx);
 
         let session_task = tokio::spawn(session.run());
 

@@ -10,9 +10,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::leader::session::{
-    OnboardMessage, OnboardSessionTx, SessionId,
-    SessionMessage, SessionMessageTx, dispatch_onboard_message,
-    dispatch_session_message,
+    OnboardMessage, OnboardSessionTx, SessionId, SessionMessage, SessionMessageTx,
+    dispatch_onboard_message, dispatch_session_message,
 };
 use kvbm_physical::manager::SerializedLayout;
 
@@ -125,24 +124,24 @@ impl VeloLeaderService {
 
                 let session_id = message.session_id();
 
-                eprintln!(
-                    "[HANDLER] Received message: {} for session {}",
-                    message.variant_name(),
-                    session_id
+                tracing::debug!(
+                    variant = message.variant_name(),
+                    %session_id,
+                    "Received onboard message"
                 );
 
                 // If this is a CreateSession and no session exists, spawn responder
                 if matches!(message, OnboardMessage::CreateSession { .. })
                     && !sessions.contains_key(&session_id)
                 {
-                    eprintln!("[HANDLER] Spawning new ResponderSession for {}", session_id);
+                    tracing::debug!(%session_id, "Spawning new ResponderSession");
                     if let Some(ref spawner) = spawn_responder {
                         spawner(message.clone()).ok(); // Best-effort spawn
                     }
                 }
 
                 // Dispatch to session channel (will create if needed by spawner above)
-                eprintln!("[HANDLER] Dispatching message to session {}", session_id);
+                tracing::debug!(%session_id, "Dispatching message to session");
                 dispatch_onboard_message(&sessions, message).await?;
 
                 Ok(())
@@ -174,10 +173,10 @@ impl VeloLeaderService {
 
                 let session_id = message.session_id();
 
-                eprintln!(
-                    "[HANDLER] Received session message: {} for session {}",
-                    message.variant_name(),
-                    session_id
+                tracing::debug!(
+                    variant = message.variant_name(),
+                    %session_id,
+                    "Received session message"
                 );
 
                 // Dispatch to session endpoint
@@ -207,7 +206,7 @@ impl VeloLeaderService {
             let export_metadata = export_metadata.clone();
 
             async move {
-                eprintln!("[HANDLER] Received export_metadata request");
+                tracing::debug!("Received export_metadata request");
 
                 // Call the async callback to get metadata from all workers
                 let metadata_vec = export_metadata().await?;
@@ -215,9 +214,9 @@ impl VeloLeaderService {
                 // Serialize the Vec<SerializedLayout> for transport
                 let serialized = serde_json::to_vec(&metadata_vec)?;
 
-                eprintln!(
-                    "[HANDLER] Returning {} worker metadata entries",
-                    metadata_vec.len()
+                tracing::debug!(
+                    count = metadata_vec.len(),
+                    "Returning worker metadata entries"
                 );
 
                 Ok(Some(Bytes::from(serialized)))

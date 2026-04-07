@@ -36,18 +36,12 @@ use serde::{Deserialize, Serialize};
 use kvbm_engine::{
     BlockId, G1, G2, G3, LogicalLayoutHandle,
     leader::InstanceLeader,
-    offload::{
-        ExternalBlock, OffloadEngine, PipelineBuilder, PresenceFilter, SourceBlocks,
-    },
+    offload::{ExternalBlock, OffloadEngine, PipelineBuilder, PresenceFilter, SourceBlocks},
     testing::{
-        TestRegistryBuilder, TestManagerBuilder,
-        create_messenger_tcp,
-        token_blocks,
-        managers::populate_manager_with_blocks,
+        TestManagerBuilder, TestRegistryBuilder, create_messenger_tcp,
+        managers::populate_manager_with_blocks, token_blocks,
     },
-    worker::{
-        DirectWorker, Worker, WorkerTransfers,
-    },
+    worker::{DirectWorker, Worker, WorkerTransfers},
 };
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
@@ -57,7 +51,10 @@ use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "bench_engine", about = "KVBM transfer bandwidth benchmark (leader+worker architecture)")]
+#[command(
+    name = "bench_engine",
+    about = "KVBM transfer bandwidth benchmark (leader+worker architecture)"
+)]
 struct Cli {
     /// GPU device IDs (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = "0")]
@@ -350,8 +347,7 @@ fn spawn_worker_thread(
                 );
                 pin_thread_to_cpus(&cpus);
             } else {
-                let node = dynamo_memory::numa::get_device_numa_node(device_id);
-                if !node.is_unknown() {
+                if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
                     eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
                     let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
                 } else {
@@ -553,7 +549,9 @@ impl BenchInstance {
 
             // Configure G1→G2 pipeline with a pass-through presence filter
             let g1_to_g2_config = PipelineBuilder::<G1, G2>::new()
-                .policy(Arc::new(PresenceFilter::<G1, G2>::new(Arc::new(registry.clone()))))
+                .policy(Arc::new(PresenceFilter::<G1, G2>::new(Arc::new(
+                    registry.clone(),
+                ))))
                 .batch_size(64)
                 .max_concurrent_transfers(4)
                 .build();
@@ -562,7 +560,9 @@ impl BenchInstance {
             // Configure G2→G3 pipeline if disk enabled
             if g3_manager.is_some() {
                 let g2_to_g3_config = PipelineBuilder::<G2, G3>::new()
-                    .policy(Arc::new(PresenceFilter::<G2, G3>::new(Arc::new(registry.clone()))))
+                    .policy(Arc::new(PresenceFilter::<G2, G3>::new(Arc::new(
+                        registry.clone(),
+                    ))))
                     .batch_size(64)
                     .max_concurrent_transfers(4)
                     .build();
@@ -591,17 +591,26 @@ impl BenchInstance {
         let mut results = Vec::new();
 
         if !self.config.bidir_only {
-            eprintln!("=== Phase 1: Isolated Transfers (page_size={}) ===", self.page_size);
+            eprintln!(
+                "=== Phase 1: Isolated Transfers (page_size={}) ===",
+                self.page_size
+            );
             results.extend(self.bench_isolated_transfers().await?);
         }
 
         if !self.config.isolated_only {
-            eprintln!("=== Phase 2: Bidirectional Contention (page_size={}) ===", self.page_size);
+            eprintln!(
+                "=== Phase 2: Bidirectional Contention (page_size={}) ===",
+                self.page_size
+            );
             results.extend(self.bench_bidir_transfers().await?);
         }
 
         if self.config.offload && self.offload_engine.is_some() {
-            eprintln!("=== Phase 3: Offload Pipeline (page_size={}) ===", self.page_size);
+            eprintln!(
+                "=== Phase 3: Offload Pipeline (page_size={}) ===",
+                self.page_size
+            );
             results.extend(self.bench_offload_pipeline().await?);
         }
 
@@ -613,39 +622,56 @@ impl BenchInstance {
     async fn bench_isolated_transfers(&self) -> Result<Vec<BenchResult>> {
         let mut results = Vec::new();
         let device_id = self.config.devices[0]; // Report results under first device
-        let parallel_worker = self.leader.parallel_worker()
+        let parallel_worker = self
+            .leader
+            .parallel_worker()
             .ok_or_else(|| anyhow::anyhow!("No parallel worker available"))?;
 
         for &conc in &self.config.concurrency {
             let bpb = self.config.blocks_per_batch;
-            let block_ids: Arc<[BlockId]> = Arc::from(
-                (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
-            );
+            let block_ids: Arc<[BlockId]> =
+                Arc::from((0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>());
 
             // G1→G2 (D2H offload)
-            let latencies = self.bench_transfer(
-                &*parallel_worker,
-                LogicalLayoutHandle::G1,
-                LogicalLayoutHandle::G2,
-                block_ids.clone(),
-                block_ids.clone(),
-            ).await?;
+            let latencies = self
+                .bench_transfer(
+                    &*parallel_worker,
+                    LogicalLayoutHandle::G1,
+                    LogicalLayoutHandle::G2,
+                    block_ids.clone(),
+                    block_ids.clone(),
+                )
+                .await?;
             let r = make_result(
-                "g1_to_g2", device_id, self.page_size, conc, None, &self.config, latencies,
+                "g1_to_g2",
+                device_id,
+                self.page_size,
+                conc,
+                None,
+                &self.config,
+                latencies,
             );
             print_result_stderr(&r);
             results.push(r);
 
             // G2→G1 (H2D onboard)
-            let latencies = self.bench_transfer(
-                &*parallel_worker,
-                LogicalLayoutHandle::G2,
-                LogicalLayoutHandle::G1,
-                block_ids.clone(),
-                block_ids.clone(),
-            ).await?;
+            let latencies = self
+                .bench_transfer(
+                    &*parallel_worker,
+                    LogicalLayoutHandle::G2,
+                    LogicalLayoutHandle::G1,
+                    block_ids.clone(),
+                    block_ids.clone(),
+                )
+                .await?;
             let r = make_result(
-                "g2_to_g1", device_id, self.page_size, conc, None, &self.config, latencies,
+                "g2_to_g1",
+                device_id,
+                self.page_size,
+                conc,
+                None,
+                &self.config,
+                latencies,
             );
             print_result_stderr(&r);
             results.push(r);
@@ -653,29 +679,45 @@ impl BenchInstance {
             // G2↔G3 tests (if disk enabled)
             if !self.config.skip_disk {
                 // G2→G3
-                let latencies = self.bench_transfer(
-                    &*parallel_worker,
-                    LogicalLayoutHandle::G2,
-                    LogicalLayoutHandle::G3,
-                    block_ids.clone(),
-                    block_ids.clone(),
-                ).await?;
+                let latencies = self
+                    .bench_transfer(
+                        &*parallel_worker,
+                        LogicalLayoutHandle::G2,
+                        LogicalLayoutHandle::G3,
+                        block_ids.clone(),
+                        block_ids.clone(),
+                    )
+                    .await?;
                 let r = make_result(
-                    "g2_to_g3", device_id, self.page_size, conc, None, &self.config, latencies,
+                    "g2_to_g3",
+                    device_id,
+                    self.page_size,
+                    conc,
+                    None,
+                    &self.config,
+                    latencies,
                 );
                 print_result_stderr(&r);
                 results.push(r);
 
                 // G3→G2
-                let latencies = self.bench_transfer(
-                    &*parallel_worker,
-                    LogicalLayoutHandle::G3,
-                    LogicalLayoutHandle::G2,
-                    block_ids.clone(),
-                    block_ids.clone(),
-                ).await?;
+                let latencies = self
+                    .bench_transfer(
+                        &*parallel_worker,
+                        LogicalLayoutHandle::G3,
+                        LogicalLayoutHandle::G2,
+                        block_ids.clone(),
+                        block_ids.clone(),
+                    )
+                    .await?;
                 let r = make_result(
-                    "g3_to_g2", device_id, self.page_size, conc, None, &self.config, latencies,
+                    "g3_to_g2",
+                    device_id,
+                    self.page_size,
+                    conc,
+                    None,
+                    &self.config,
+                    latencies,
                 );
                 print_result_stderr(&r);
                 results.push(r);
@@ -688,22 +730,29 @@ impl BenchInstance {
             if !self.config.skip_gds {
                 for &conc in &self.config.concurrency {
                     let bpb = self.config.blocks_per_batch;
-                    let block_ids: Arc<[BlockId]> = Arc::from(
-                        (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
-                    );
+                    let block_ids: Arc<[BlockId]> =
+                        Arc::from((0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>());
 
                     // G1→G3 direct (GDS)
-                    match self.bench_transfer(
-                        &*parallel_worker,
-                        LogicalLayoutHandle::G1,
-                        LogicalLayoutHandle::G3,
-                        block_ids.clone(),
-                        block_ids.clone(),
-                    ).await {
+                    match self
+                        .bench_transfer(
+                            &*parallel_worker,
+                            LogicalLayoutHandle::G1,
+                            LogicalLayoutHandle::G3,
+                            block_ids.clone(),
+                            block_ids.clone(),
+                        )
+                        .await
+                    {
                         Ok(latencies) => {
                             let r = make_result(
-                                "g1_to_g3_gds", device_id, self.page_size, conc,
-                                None, &self.config, latencies,
+                                "g1_to_g3_gds",
+                                device_id,
+                                self.page_size,
+                                conc,
+                                None,
+                                &self.config,
+                                latencies,
                             );
                             print_result_stderr(&r);
                             results.push(r);
@@ -714,17 +763,25 @@ impl BenchInstance {
                     }
 
                     // G3→G1 direct (GDS)
-                    match self.bench_transfer(
-                        &*parallel_worker,
-                        LogicalLayoutHandle::G3,
-                        LogicalLayoutHandle::G1,
-                        block_ids.clone(),
-                        block_ids.clone(),
-                    ).await {
+                    match self
+                        .bench_transfer(
+                            &*parallel_worker,
+                            LogicalLayoutHandle::G3,
+                            LogicalLayoutHandle::G1,
+                            block_ids.clone(),
+                            block_ids.clone(),
+                        )
+                        .await
+                    {
                         Ok(latencies) => {
                             let r = make_result(
-                                "g3_to_g1_gds", device_id, self.page_size, conc,
-                                None, &self.config, latencies,
+                                "g3_to_g1_gds",
+                                device_id,
+                                self.page_size,
+                                conc,
+                                None,
+                                &self.config,
+                                latencies,
                             );
                             print_result_stderr(&r);
                             results.push(r);
@@ -745,10 +802,13 @@ impl BenchInstance {
     async fn bench_bidir_transfers(&self) -> Result<Vec<BenchResult>> {
         let mut results = Vec::new();
         let device_id = self.config.devices[0];
-        let parallel_worker = self.leader.parallel_worker()
+        let parallel_worker = self
+            .leader
+            .parallel_worker()
             .ok_or_else(|| anyhow::anyhow!("No parallel worker available"))?;
 
-        let bidir_concurrencies: Vec<usize> = self.config
+        let bidir_concurrencies: Vec<usize> = self
+            .config
             .concurrency
             .iter()
             .copied()
@@ -768,23 +828,30 @@ impl BenchInstance {
             }
 
             // D2H block range: [0..conc*bpb)
-            let d2h_ids: Arc<[BlockId]> = Arc::from(
-                (0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
-            );
+            let d2h_ids: Arc<[BlockId]> =
+                Arc::from((0..conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>());
             // H2D block range: [conc*bpb..2*conc*bpb)
             let h2d_ids: Arc<[BlockId]> = Arc::from(
-                (conc * bpb..2 * conc * bpb).map(|i| i as BlockId).collect::<Vec<_>>(),
+                (conc * bpb..2 * conc * bpb)
+                    .map(|i| i as BlockId)
+                    .collect::<Vec<_>>(),
             );
 
             // Warmup
             for _ in 0..self.config.warmup {
                 let d2h_notif = parallel_worker.execute_local_transfer(
-                    LogicalLayoutHandle::G1, LogicalLayoutHandle::G2,
-                    d2h_ids.clone(), d2h_ids.clone(), TransferOptions::default(),
+                    LogicalLayoutHandle::G1,
+                    LogicalLayoutHandle::G2,
+                    d2h_ids.clone(),
+                    d2h_ids.clone(),
+                    TransferOptions::default(),
                 )?;
                 let h2d_notif = parallel_worker.execute_local_transfer(
-                    LogicalLayoutHandle::G2, LogicalLayoutHandle::G1,
-                    h2d_ids.clone(), h2d_ids.clone(), TransferOptions::default(),
+                    LogicalLayoutHandle::G2,
+                    LogicalLayoutHandle::G1,
+                    h2d_ids.clone(),
+                    h2d_ids.clone(),
+                    TransferOptions::default(),
                 )?;
                 d2h_notif.await?;
                 h2d_notif.await?;
@@ -798,12 +865,18 @@ impl BenchInstance {
                 let start = Instant::now();
 
                 let d2h_notif = parallel_worker.execute_local_transfer(
-                    LogicalLayoutHandle::G1, LogicalLayoutHandle::G2,
-                    d2h_ids.clone(), d2h_ids.clone(), TransferOptions::default(),
+                    LogicalLayoutHandle::G1,
+                    LogicalLayoutHandle::G2,
+                    d2h_ids.clone(),
+                    d2h_ids.clone(),
+                    TransferOptions::default(),
                 )?;
                 let h2d_notif = parallel_worker.execute_local_transfer(
-                    LogicalLayoutHandle::G2, LogicalLayoutHandle::G1,
-                    h2d_ids.clone(), h2d_ids.clone(), TransferOptions::default(),
+                    LogicalLayoutHandle::G2,
+                    LogicalLayoutHandle::G1,
+                    h2d_ids.clone(),
+                    h2d_ids.clone(),
+                    TransferOptions::default(),
                 )?;
 
                 d2h_notif.await?;
@@ -816,15 +889,25 @@ impl BenchInstance {
             }
 
             let r = make_result(
-                "bidir_g1_to_g2", device_id, self.page_size, conc,
-                None, &self.config, d2h_latencies,
+                "bidir_g1_to_g2",
+                device_id,
+                self.page_size,
+                conc,
+                None,
+                &self.config,
+                d2h_latencies,
             );
             print_result_stderr(&r);
             results.push(r);
 
             let r = make_result(
-                "bidir_g2_to_g1", device_id, self.page_size, conc,
-                None, &self.config, h2d_latencies,
+                "bidir_g2_to_g1",
+                device_id,
+                self.page_size,
+                conc,
+                None,
+                &self.config,
+                h2d_latencies,
             );
             print_result_stderr(&r);
             results.push(r);
@@ -838,13 +921,14 @@ impl BenchInstance {
     async fn bench_offload_pipeline(&self) -> Result<Vec<BenchResult>> {
         let mut results = Vec::new();
         let device_id = self.config.devices[0];
-        let engine = self.offload_engine.as_ref()
+        let engine = self
+            .offload_engine
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("OffloadEngine not configured"))?;
 
         // Populate G2 manager with test blocks so the registry has entries
-        let token_seq = token_blocks::create_token_sequence(
-            self.config.num_blocks, self.page_size, 0,
-        );
+        let token_seq =
+            token_blocks::create_token_sequence(self.config.num_blocks, self.page_size, 0);
         let seq_hashes = populate_manager_with_blocks(&self.g2_manager, token_seq.blocks())?;
 
         for &batch_size in &self.config.offload_batch_sizes {
@@ -857,9 +941,7 @@ impl BenchInstance {
             }
 
             for &conc in &self.config.offload_concurrency {
-                eprintln!(
-                    "Offload G1→G2 pipeline: batch_size={batch_size} concurrency={conc}"
-                );
+                eprintln!("Offload G1→G2 pipeline: batch_size={batch_size} concurrency={conc}");
 
                 // Warmup
                 for _ in 0..self.config.warmup {
@@ -915,18 +997,15 @@ impl BenchInstance {
                 }
 
                 for &conc in &self.config.offload_concurrency {
-                    eprintln!(
-                        "Offload G2→G3 pipeline: batch_size={batch_size} concurrency={conc}"
-                    );
+                    eprintln!("Offload G2→G3 pipeline: batch_size={batch_size} concurrency={conc}");
 
                     // Get immutable blocks from g2_manager for SourceBlocks::Strong
                     let matched = self.g2_manager.match_blocks(&seq_hashes[..batch_size]);
 
                     // Warmup
                     for _ in 0..self.config.warmup {
-                        let mut handle = engine.enqueue_g2_to_g3(
-                            SourceBlocks::Strong(matched.clone()),
-                        )?;
+                        let mut handle =
+                            engine.enqueue_g2_to_g3(SourceBlocks::Strong(matched.clone()))?;
                         handle.wait().await?;
                     }
 
@@ -934,9 +1013,8 @@ impl BenchInstance {
                     let mut latencies = Vec::with_capacity(self.config.iterations);
                     for _ in 0..self.config.iterations {
                         let start = Instant::now();
-                        let mut handle = engine.enqueue_g2_to_g3(
-                            SourceBlocks::Strong(matched.clone()),
-                        )?;
+                        let mut handle =
+                            engine.enqueue_g2_to_g3(SourceBlocks::Strong(matched.clone()))?;
                         handle.wait().await?;
                         latencies.push(start.elapsed());
                     }
@@ -981,9 +1059,14 @@ impl BenchInstance {
         dst_block_ids: Arc<[BlockId]>,
     ) -> Result<Vec<Duration>> {
         self.bench_transfer_with_options(
-            parallel_worker, src, dst, src_block_ids, dst_block_ids,
+            parallel_worker,
+            src,
+            dst,
+            src_block_ids,
+            dst_block_ids,
             TransferOptions::default(),
-        ).await
+        )
+        .await
     }
 
     /// Benchmark a transfer with custom TransferOptions (e.g., bounce buffer).
@@ -999,8 +1082,10 @@ impl BenchInstance {
         // Warmup
         for _ in 0..self.config.warmup {
             let notif = parallel_worker.execute_local_transfer(
-                src, dst,
-                src_block_ids.clone(), dst_block_ids.clone(),
+                src,
+                dst,
+                src_block_ids.clone(),
+                dst_block_ids.clone(),
                 options.clone(),
             )?;
             notif.await?;
@@ -1011,8 +1096,10 @@ impl BenchInstance {
         for _ in 0..self.config.iterations {
             let start = Instant::now();
             let notif = parallel_worker.execute_local_transfer(
-                src, dst,
-                src_block_ids.clone(), dst_block_ids.clone(),
+                src,
+                dst,
+                src_block_ids.clone(),
+                dst_block_ids.clone(),
                 options.clone(),
             )?;
             notif.await?;
@@ -1164,11 +1251,19 @@ fn main() -> Result<()> {
     );
     eprintln!(
         "  Disk: {}",
-        if config.skip_disk { "disabled" } else { "enabled" }
+        if config.skip_disk {
+            "disabled"
+        } else {
+            "enabled"
+        }
     );
     eprintln!(
         "  GDS: {}",
-        if config.skip_gds { "disabled" } else { "enabled" }
+        if config.skip_gds {
+            "disabled"
+        } else {
+            "enabled"
+        }
     );
     if config.offload {
         eprintln!("  Offload: enabled");

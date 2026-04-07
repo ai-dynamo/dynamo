@@ -276,7 +276,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tokio::task::yield_now;
-    use velo_events::EventStatus;
+    use velo::EventStatus;
 
     // ── Mock notification source ────────────────────────────────────
 

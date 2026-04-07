@@ -566,10 +566,7 @@ impl S3ObjectBlockClient {
     /// - `Ok(Some((bytes, etag)))` if the object exists
     /// - `Ok(None)` if the object does not exist
     /// - `Err(...)` for other errors
-    pub async fn get_object_with_etag(
-        &self,
-        key: &str,
-    ) -> Result<Option<(Bytes, Option<String>)>> {
+    pub async fn get_object_with_etag(&self, key: &str) -> Result<Option<(Bytes, Option<String>)>> {
         match self
             .client
             .get_object()
@@ -612,12 +609,7 @@ impl S3ObjectBlockClient {
     /// - `Ok(true)` if the write succeeded (ETag matched)
     /// - `Ok(false)` if the ETag did not match (412 PreconditionFailed — lost the race)
     /// - `Err(...)` for other errors
-    pub async fn put_object_if_match(
-        &self,
-        key: &str,
-        data: Bytes,
-        etag: &str,
-    ) -> Result<bool> {
+    pub async fn put_object_if_match(&self, key: &str, data: Bytes, etag: &str) -> Result<bool> {
         match self
             .client
             .put_object()
@@ -982,7 +974,7 @@ mod bounds_check_tests {
     }
 }
 
-#[cfg(feature = "testing-s3")]
+#[cfg(all(test, feature = "testing-s3"))]
 pub mod s3_integration {
     use super::*;
 

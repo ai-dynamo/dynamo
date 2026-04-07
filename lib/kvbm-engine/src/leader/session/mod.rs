@@ -52,8 +52,8 @@ pub use server_session::{
 };
 
 // Backwards-compatible aliases for the former EndpointSession types.
-pub use server_session::ServerSessionHandle as EndpointSessionHandle;
 pub use server_session::ServerSessionCommand as EndpointSessionCommand;
+pub use server_session::ServerSessionHandle as EndpointSessionHandle;
 
 /// Unified handle for controlling remote sessions.
 pub use handle::{SessionHandle, SessionHandleStateTx, session_handle_state_channel};

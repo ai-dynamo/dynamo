@@ -265,16 +265,15 @@ impl ObjectLockManager for S3LockManager {
     }
 }
 
-#[cfg(feature = "testing-s3")]
+#[cfg(all(test, feature = "testing-s3"))]
 mod s3_integration {
     use super::*;
-    use crate::object::ObjectLockManager;
     use crate::object::s3::client::s3_integration::create_test_client;
 
     #[tokio::test]
     async fn test_lock_expired_takeover_is_atomic() {
         let client = Arc::new(create_test_client("test-lock-atomic").await);
-        let hash = SequenceHash::from(0xDEAD_BEEF_u64);
+        let hash = SequenceHash::new(0xDEAD_BEEF_u64, None, 0);
 
         // Create a lock manager with an already-expired timeout (1ms)
         let manager_a = S3LockManager::new(client.clone(), "instance-a".into())

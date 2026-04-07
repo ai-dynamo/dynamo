@@ -182,7 +182,10 @@ impl LocalTransport {
     pub async fn send_session(&self, _target: InstanceId, message: SessionMessage) -> Result<()> {
         let session_id = message.session_id();
 
-        let sender = self.session_sessions.get(&session_id).map(|entry| entry.value().clone());
+        let sender = self
+            .session_sessions
+            .get(&session_id)
+            .map(|entry| entry.value().clone());
         if let Some(sender) = sender {
             sender
                 .send(message)

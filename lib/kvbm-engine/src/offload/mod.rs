@@ -72,7 +72,7 @@
 //!         println!("Completed: {:?}", result?.completed_blocks);
 //!     }
 //!     _ = shutdown_signal => {
-//!         handle.cancel().await;
+//!         handle.cancel().wait().await;
 //!         println!("Cancelled");
 //!     }
 //! }

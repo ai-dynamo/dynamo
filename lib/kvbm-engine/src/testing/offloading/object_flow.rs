@@ -239,21 +239,20 @@ mod tests {
                 }
 
                 // Lock exists, check if we own it or if it's expired
-                if let Some(existing_data) = storage.get_object(&lock_key) {
-                    if let Ok(existing_lock) =
+                if let Some(existing_data) = storage.get_object(&lock_key)
+                    && let Ok(existing_lock) =
                         serde_json::from_slice::<LockFileContent>(&existing_data)
-                    {
-                        // Check if we own the lock
-                        if existing_lock.instance_id == our_instance_id {
-                            return Ok(true);
-                        }
+                {
+                    // Check if we own the lock
+                    if existing_lock.instance_id == our_instance_id {
+                        return Ok(true);
+                    }
 
-                        // Check if expired
-                        if is_expired_timestamp(&existing_lock.deadline) {
-                            // Expired, overwrite
-                            storage.put_object(&lock_key, Bytes::from(lock_data));
-                            return Ok(true);
-                        }
+                    // Check if expired
+                    if is_expired_timestamp(&existing_lock.deadline) {
+                        // Expired, overwrite
+                        storage.put_object(&lock_key, Bytes::from(lock_data));
+                        return Ok(true);
                     }
                 }
 

@@ -56,10 +56,7 @@ mod tests {
     use anyhow::Result;
     use rstest::*;
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     use dynamo_runtime::logging::init as init_logging;

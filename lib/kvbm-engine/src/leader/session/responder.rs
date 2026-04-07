@@ -175,9 +175,17 @@ impl ResponderSession {
                     // BlockHolder's retain keeps only matching hashes
                     self.held_g3_blocks.retain(&stage_hashes);
 
-                    if !self.held_g3_blocks.is_empty() && self.parallel_worker.is_some() {
-                        // Execute G3->G2 transfer
-                        self.stage_g3_to_g2().await?;
+                    if !self.held_g3_blocks.is_empty() {
+                        if self.parallel_worker.is_some() {
+                            // Execute G3->G2 transfer
+                            self.stage_g3_to_g2().await?;
+                        } else {
+                            tracing::warn!(
+                                session_id = %self.session_id,
+                                g3_blocks = self.held_g3_blocks.count(),
+                                "G3 blocks cannot be staged: no parallel worker configured"
+                            );
+                        }
                     }
 
                     // Don't exit - wait for CloseSession in Hold/Prepare modes
@@ -248,8 +256,11 @@ impl ResponderSession {
         .await?;
 
         // Extract sequence hashes and block IDs for newly staged blocks
-        let new_sequence_hashes: Vec<SequenceHash> =
-            result.new_g2_blocks.iter().map(|b| b.sequence_hash()).collect();
+        let new_sequence_hashes: Vec<SequenceHash> = result
+            .new_g2_blocks
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect();
         let new_block_ids: Vec<BlockId> =
             result.new_g2_blocks.iter().map(|b| b.block_id()).collect();
 

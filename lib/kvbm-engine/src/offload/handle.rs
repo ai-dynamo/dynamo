@@ -158,7 +158,7 @@ impl TransferHandle {
     /// # Example
     /// ```ignore
     /// // Request cancellation and wait for confirmation
-    /// handle.cancel().await;
+    /// handle.cancel().wait().await;
     /// // All blocks are now released
     /// ```
     pub fn cancel(&self) -> CancelConfirmation {
