@@ -355,7 +355,7 @@ class StreamingPostProcessor:
                 "role": "assistant",
                 "tool_calls": self._dump_in_progress_tool_calls(),
             },
-            "finish_reason": output.finish_reason,
+            "finish_reason": "tool_calls",
             "logprobs": output.logprobs,
         }
         self.in_progress_tool_calls.clear()
@@ -524,11 +524,14 @@ class StreamingPostProcessor:
                 delta["content"] = content
             if delta_message.reasoning:
                 delta["reasoning_content"] = delta_message.reasoning
-            if self.in_progress_tool_calls:
+            has_tool_calls = bool(self.in_progress_tool_calls)
+            if has_tool_calls:
                 delta["tool_calls"] = self._dump_in_progress_tool_calls()
                 self.in_progress_tool_calls.clear()
             if len(delta) > 1:
                 choice = self._build_choice(output, delta)
+                if has_tool_calls:
+                    choice["finish_reason"] = "tool_calls"
         elif self.in_progress_tool_calls:
             choice = self._emit_tool_calls_choice(output)
         elif output.finish_reason:

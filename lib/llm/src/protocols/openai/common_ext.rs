@@ -74,6 +74,14 @@ pub struct CommonExt {
     #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
 
+    /// If specified, structural tag format for mixed free-text and constrained regions.
+    /// Used for combining reasoning (free text) with structured output (JSON schema).
+    /// Format: {"type": "sequence", "elements": [...]} or {"type": "triggered_tags", ...}
+    /// Supported by xgrammar backend only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_structural_tag: Option<serde_json::Value>,
+
     /// Whether to skip special tokens in the decoded output.
     /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
     /// When false, special tokens are included in the output text.
@@ -102,6 +110,7 @@ pub trait CommonExtProvider {
     fn get_guided_decoding_backend(&self) -> Option<String>;
     #[allow(unused)] // Not used
     fn get_guided_whitespace_pattern(&self) -> Option<String>;
+    fn get_guided_structural_tag(&self) -> Option<serde_json::Value>;
 
     /// Other sampling Options
     fn get_top_k(&self) -> Option<i32>;
@@ -111,6 +120,12 @@ pub trait CommonExtProvider {
 
     /// Output Options
     fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    /// Get enable_thinking from chat_template_args for mode-aware structural_tag generation.
+    /// Default implementation returns None. Override in types that have chat_template_args.
+    fn get_enable_thinking(&self) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +220,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            guided_structural_tag: None,
             skip_special_tokens: None,
         };
         assert!(common_ext.validate().is_ok());

@@ -239,6 +239,10 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
         self.common.guided_whitespace_pattern.clone()
     }
 
+    fn get_guided_structural_tag(&self) -> Option<serde_json::Value> {
+        self.common.guided_structural_tag.clone()
+    }
+
     fn get_top_k(&self) -> Option<i32> {
         self.common.top_k
     }
@@ -257,6 +261,17 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
+    }
+
+    /// Get enable_thinking from chat_template_args for mode-aware structural_tag generation.
+    /// Returns Some(true) if chat_template_args contains "enable_thinking": true.
+    /// Returns Some(false) if chat_template_args contains "enable_thinking": false.
+    /// Returns None if enable_thinking is not specified.
+    fn get_enable_thinking(&self) -> Option<bool> {
+        self.chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("enable_thinking"))
+            .and_then(|v| v.as_bool())
     }
 }
 

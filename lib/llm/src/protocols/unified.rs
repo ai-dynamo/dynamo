@@ -369,6 +369,14 @@ impl CommonExtProvider for UnifiedRequest {
         self.inner.common.guided_whitespace_pattern.clone()
     }
 
+    fn get_guided_structural_tag(&self) -> Option<serde_json::Value> {
+        self.inner.common.guided_structural_tag.clone()
+    }
+
+    fn get_enable_thinking(&self) -> Option<bool> {
+        CommonExtProvider::get_enable_thinking(&self.inner)
+    }
+
     fn get_top_k(&self) -> Option<i32> {
         self.inner.common.top_k
     }

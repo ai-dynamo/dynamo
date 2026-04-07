@@ -14,6 +14,32 @@ from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 
+def _parse_optional_bool(value: str) -> Optional[bool]:
+    """Parse a CLI/env string to Optional[bool]; raises on unrecognized values."""
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "none":
+        return None
+    raise argparse.ArgumentTypeError(
+        f"Invalid value {value!r}: expected one of true, false, none"
+    )
+
+
+def _parse_bool(value: str) -> bool:
+    """Parse a CLI/env string to bool; raises on unrecognized values."""
+    lowered = value.lower()
+    if lowered in {"true", "1", "yes"}:
+        return True
+    if lowered in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Invalid value {value!r}: expected one of true, false, 1, 0, yes, no"
+    )
+
+
 class DynamoRuntimeConfig(ConfigBase):
     """Configuration for Dynamo runtime (common across all backends)."""
 
@@ -29,6 +55,12 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
+    # Server-level default for enable_thinking when combining reasoning with guided decoding.
+    # - True: Model generates <think>...</think> before the final answer (thinking-on)
+    # - False: Model skips the thinking phase (thinking-off)
+    # - None: No auto-generation; require explicit enable_thinking per request
+    dyn_enable_thinking_default: Optional[bool] = None
+    dyn_prompt_injects_thinking_tag: bool = False
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -154,6 +186,33 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=True,
             help="Exclude tool definitions from the chat template when tool_choice='none'. "
             "Prevents models from generating raw XML tool calls in the content field.",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-enable-thinking-default",
+            env_var="DYN_ENABLE_THINKING_DEFAULT",
+            default=None,
+            help=(
+                "Server-level default for thinking mode when combining reasoning with guided decoding. "
+                "Set to 'true' if the model generates <think>...</think> before the final answer "
+                "(thinking-on, e.g., DeepSeek-R1, Qwen3). Set to 'false' if the model skips the "
+                "thinking phase (thinking-off). If not set, guided decoding is applied without any "
+                "reasoning-aware structural_tag wrapping."
+            ),
+            type=_parse_optional_bool,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-prompt-injects-thinking-tag",
+            env_var="DYN_PROMPT_INJECTS_THINKING_TAG",
+            default=False,
+            help=(
+                "Set to true when the model's chat template already appends <think> to the end "
+                "of the prompt. Prevents the structural_tag from adding a duplicate <think> that "
+                "causes model degeneration with guided decoding. Applies to any model whose "
+                "template injects the reasoning start tag (e.g., GLM-4.7, Qwen3)."
+            ),
+            type=_parse_bool,
         )
         add_argument(
             g,
