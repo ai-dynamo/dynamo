@@ -164,6 +164,7 @@ def cuda_set_current_device(device: int) -> None:
 
     ctx = _primary_contexts.get(device)
     if ctx is None:
+        cuda_ensure_initialized()
         result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
         cuda_check_result(result, "cuDevicePrimaryCtxRetain")
         _primary_contexts[device] = ctx

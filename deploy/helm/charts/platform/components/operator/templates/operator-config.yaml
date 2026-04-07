@@ -130,32 +130,36 @@ data:
       sshSecretNamespace: {{ .Release.Namespace | quote }}
     {{- end }}
     {{- if .Values.checkpoint.enabled }}
+    {{- $checkpointStorage := (.Values.checkpoint.storage | default dict) }}
+    {{- $checkpointPVC := ($checkpointStorage.pvc | default dict) }}
+    {{- $checkpointS3 := ($checkpointStorage.s3 | default dict) }}
+    {{- $checkpointOCI := ($checkpointStorage.oci | default dict) }}
     checkpoint:
       enabled: true
       {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
       readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
       {{- end }}
       storage:
-        {{- if and .Values.checkpoint.storage.type (ne (.Values.checkpoint.storage.type | toString) "pvc") }}
-        type: {{ .Values.checkpoint.storage.type | quote }}
+        {{- if and $checkpointStorage.type (ne ($checkpointStorage.type | toString) "pvc") }}
+        type: {{ $checkpointStorage.type | quote }}
         {{- end }}
-        {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
+        {{- if or (eq ($checkpointStorage.type | toString) "pvc") (not $checkpointStorage.type) }}
         pvc:
-          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "chrek-pvc") | quote }}
-          basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
+          pvcName: {{ ($checkpointPVC.pvcName | default "snapshot-pvc") | quote }}
+          basePath: {{ ($checkpointPVC.basePath | default "/checkpoints") | quote }}
         {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "s3" }}
+        {{- if eq $checkpointStorage.type "s3" }}
         s3:
-          uri: {{ .Values.checkpoint.storage.s3.uri | quote }}
-          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.s3.credentialsSecretRef | quote }}
+          uri: {{ $checkpointS3.uri | quote }}
+          {{- if $checkpointS3.credentialsSecretRef }}
+          credentialsSecretRef: {{ $checkpointS3.credentialsSecretRef | quote }}
           {{- end }}
         {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "oci" }}
+        {{- if eq $checkpointStorage.type "oci" }}
         oci:
-          uri: {{ .Values.checkpoint.storage.oci.uri | quote }}
-          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.oci.credentialsSecretRef | quote }}
+          uri: {{ $checkpointOCI.uri | quote }}
+          {{- if $checkpointOCI.credentialsSecretRef }}
+          credentialsSecretRef: {{ $checkpointOCI.credentialsSecretRef | quote }}
           {{- end }}
         {{- end }}
     {{- end }}

@@ -143,6 +143,13 @@ checkpoint:
   # Must match the path expected by checkpoint-enabled runtime images
   readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
 
+  # Storage used by restore-time checkpoint injection.
+  storage:
+    type: pvc
+    pvc:
+      pvcName: snapshot-pvc
+      basePath: /checkpoints
+
 # Webhook configuration
 webhook:
   # Certificate configuration
