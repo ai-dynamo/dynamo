@@ -125,9 +125,11 @@ jobs:
           mkdir -p allure-v3-workspace/allure-results
           # Copy results but exclude Allure 2 history dir to avoid format confusion
           rsync -a --exclude='history' allure-results/ allure-v3-workspace/allure-results/
-          # Restore Allure 3 history.jsonl into the workspace
+          # Restore Allure 3 history.jsonl into the workspace (or seed empty file)
           if [ -f allure-v3-history.jsonl ]; then
             cp allure-v3-history.jsonl allure-v3-workspace/history.jsonl
+          else
+            touch allure-v3-workspace/history.jsonl
           fi
           # historyPath requires a config file
           echo 'export default { historyPath: "./history.jsonl" };' > allure-v3-workspace/allurerc.mjs
@@ -154,12 +156,13 @@ jobs:
             fi
           done
 
-          # Restore unified dashboard history for trend charts
+          # Restore unified dashboard history for trend charts (or seed empty file)
           if git show "gh-pages:allure/history.jsonl" 2>/dev/null; then
             git show "gh-pages:allure/history.jsonl" > unified-workspace/history.jsonl
             echo "Restored unified dashboard history from gh-pages"
           else
             echo "No previous unified dashboard history found"
+            touch unified-workspace/history.jsonl
           fi
 
           # Generate unified dashboard using allurerc.mjs
