@@ -27,6 +27,7 @@ use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
 };
+use crate::scheduler::AdmissionEvent;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -625,6 +626,7 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
             let payload = self.prefill_engine.on_scheduled_completion(payload)?;
@@ -639,6 +641,13 @@ impl DisaggRuntime {
             push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
         }
         Ok(())
+    }
+
+    fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
+        for admission in admissions {
+            self.collector
+                .on_admit(admission.uuid, self.now_ms, admission.reused_input_tokens);
+        }
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
@@ -968,6 +977,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_hidden_prefill_reports_reused_tokens_even_when_decode_prefix_caching_is_disabled() {
+        let mut config = disagg_config();
+        config.num_prefill_workers = 1;
+        config.num_decode_workers = 1;
+        config.decode_args.enable_prefix_caching = false;
+
+        let requests = vec![request(1, 128, 2, 0.0), request(2, 128, 2, 100.0)];
+        let (collector, _) = run_trace_collect(
+            &config,
+            requests,
+            Some(router_config()),
+            1.0,
+            ReplayRouterMode::KvRouter,
+        );
+
+        let request_2 = collector.snapshot(Uuid::from_u128(2)).unwrap();
+        let report = collector.finish();
+
+        assert!(request_2.reused_input_tokens > 0);
+        assert!(report.prefix_cache_reused_ratio > 0.0);
     }
 
     #[rstest::rstest]

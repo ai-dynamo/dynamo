@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::super::runtime_utils::WorkerCompletionPayload;
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestHashes;
+use crate::scheduler::AdmissionEvent;
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::replay::offline) enum ReplayMode {
@@ -34,6 +35,7 @@ pub(in crate::replay::offline) struct ScheduledWorkerCompletion {
 
 #[derive(Debug, Default)]
 pub(in crate::replay::offline) struct EngineEffects {
+    pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
     pub(in crate::replay::offline) pass_start_kv_events: Vec<RouterEvent>,
     pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload>,
     pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion>,
@@ -41,7 +43,8 @@ pub(in crate::replay::offline) struct EngineEffects {
 
 impl EngineEffects {
     pub(in crate::replay::offline) fn is_empty(&self) -> bool {
-        self.pass_start_kv_events.is_empty()
+        self.admissions.is_empty()
+            && self.pass_start_kv_events.is_empty()
             && self.immediate_completions.is_empty()
             && self.scheduled_completions.is_empty()
     }

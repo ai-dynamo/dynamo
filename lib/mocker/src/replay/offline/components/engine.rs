@@ -62,7 +62,10 @@ impl EngineComponent {
                 EnginePassMode::Hidden => self.workers[worker_idx].execute_hidden_pass(now_ms),
             };
 
-            let mut effects = EngineEffects::default();
+            let mut effects = EngineEffects {
+                admissions: executed.admissions,
+                ..EngineEffects::default()
+            };
             let completion_kv_events =
                 if executed.router_event_visibility == RouterEventVisibility::PassStart {
                     effects.pass_start_kv_events = executed.kv_events;
