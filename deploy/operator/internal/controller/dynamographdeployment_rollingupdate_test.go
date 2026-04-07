@@ -653,7 +653,7 @@ func TestContinueRollingUpdate_UpdatedServicesPartialCompletion(t *testing.T) {
 	ctx := context.Background()
 
 	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Prefill is updated (new ready >= desired, old gone), decode is not
@@ -736,8 +736,8 @@ func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, newPrefillDCD, newDecodeDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Only prefill is updated; decode has 0 ready replicas
@@ -801,8 +801,7 @@ func TestCompleteRollingUpdate_UpdatedServicesContainsAllWorkers(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Check dgd.Status.RollingUpdate directly because r.Update() inside completeRollingUpdate
@@ -885,8 +884,7 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, newPrefillDCD, newDecodeDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Rolling update should complete, and all services should be listed.
@@ -2443,11 +2441,11 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, genADCD, genBDCD, genCDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Both A and B have ready replicas, C has 0 — rolling update not complete
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
 	assert.Empty(t, rollingUpdateStatus.UpdatedServices, "No services should be fully updated yet")
 }

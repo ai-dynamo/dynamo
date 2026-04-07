@@ -204,8 +204,7 @@ func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 }
 
 // needsRollingUpdateReconciliation returns true if the rolling update state machine
-// needs to run. This includes active rolling updates, pending triggers, and the
-// Completed phase (for GC sweep of old DCDs).
+// needs to run.
 func (r *DynamoGraphDeploymentReconciler) needsRollingUpdateReconciliation(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
@@ -213,7 +212,7 @@ func (r *DynamoGraphDeploymentReconciler) needsRollingUpdateReconciliation(
 		phase := dgd.Status.RollingUpdate.Phase
 		if phase == nvidiacomv1alpha1.RollingUpdatePhasePending ||
 			phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress ||
-			phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted {
+			phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted { // clean up orphaned DCDs
 			return true
 		}
 	}
@@ -227,10 +226,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Get or create rollingUpdate status
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
-	// Compute hash information
 	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
@@ -261,23 +258,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 
 	if prevWorkerHash == newWorkerHash &&
 		rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress {
-		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress, force-completing",
+		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
 			"hash", newWorkerHash,
 			"phase", rollingUpdateStatus.Phase)
-		// Hashes already match — annotation is correct, just fix the phase in memory.
-		// Deferred function in Reconcile() persists status; GC sweep on next reconcile handles cleanup.
-		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
-		now := metav1.Now()
-		rollingUpdateStatus.EndTime = &now
-		var allWorkerServices []string
-		for serviceName, spec := range dgd.Spec.Services {
-			if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) {
-				allWorkerServices = append(allWorkerServices, serviceName)
-			}
-		}
-		sort.Strings(allWorkerServices)
-		rollingUpdateStatus.UpdatedServices = allWorkerServices
-		return nil
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
 	switch rollingUpdateStatus.Phase {
@@ -289,23 +273,20 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		return nil // deferred function in Reconcile() persists status
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
-		return r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
-		// GC sweep: ensure stale old worker DCDs are cleaned up.
-		// This handles both normal post-completion cleanup and retry after previous failures.
+		// ensure stale old worker DCDs are cleaned up.
 		oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
 		if err != nil {
 			return fmt.Errorf("failed to list old worker DCDs for GC: %w", err)
 		}
 		if len(oldDCDs) > 0 {
-			logger.Info("GC sweep: deleting orphaned old worker DCDs",
+			logger.Info("Deleting orphaned old worker DCDs",
 				"count", len(oldDCDs), "newWorkerHash", newWorkerHash)
 			if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-				return fmt.Errorf("GC sweep failed to delete old worker DCDs: %w", err)
+				return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 			}
-			r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "GCSweepCompleted",
-				"Cleaned up %d old worker DCDs", len(oldDCDs))
 		}
 		return nil
 	}
@@ -343,7 +324,6 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -391,6 +371,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		}
 	}
 	sort.Strings(updatedServices)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.UpdatedServices = updatedServices
 
 	// Count total worker services
@@ -403,46 +384,31 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 
 	// Rolling update is complete when every worker service is individually updated
 	if len(updatedServices) == totalWorkerServices && totalWorkerServices > 0 {
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
 	return nil // deferred function in Reconcile() persists UpdatedServices
 }
 
-// completeRollingUpdate cleans up old worker DCDs, updates the worker hash annotation,
-// and marks the rolling update as completed. Delete failures are NOT swallowed — they
-// return errors to trigger requeue, so the next continueRollingUpdate re-detects
-// completion and retries. The GC sweep in the Completed phase provides a safety net
-// for edge cases (e.g., orphaned DCDs from operator restarts).
+// completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
+// This performs all cleanup atomically to avoid race conditions with subsequent reconciles.
 func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	_ *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Delete old worker DCDs first. If this fails, the error propagates back to
-	// continueRollingUpdate → reconcileRollingUpdate → Reconcile, triggering a requeue.
-	// On the next reconcile, continueRollingUpdate re-detects completion and retries.
+	// Delete all non-current worker DCDs (any number of old generations)
 	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
 		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
-		"Rolling update completed, worker hash %s", newWorkerHash)
-
-	// Update the current worker hash annotation — the ONE metadata write per reconcile.
-	// This must happen BEFORE setting status fields because r.Update() decodes the
-	// API server response back into dgd, overwriting any in-memory status changes.
 	r.setCurrentWorkerHash(dgd, newWorkerHash)
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update current worker hash: %w", err)
 	}
 
-	// Set status in memory AFTER r.Update() — the API server response overwrites
-	// the in-memory object, so status must be set after the annotation write.
-	// The deferred function in Reconcile() persists these changes.
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
@@ -457,6 +423,9 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	}
 	sort.Strings(allWorkerServices)
 	rollingUpdateStatus.UpdatedServices = allWorkerServices
+
+	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
+		"Rolling update completed, worker hash %s", newWorkerHash)
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
