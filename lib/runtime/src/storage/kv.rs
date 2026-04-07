@@ -324,8 +324,8 @@ impl Manager {
         tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        // Use a larger channel capacity so that a slow consumer during the
-        // initial KV-store replay phase cannot cause events to be dropped.
+        // Use a larger channel capacity to reduce the chance that a slow consumer
+        // during the initial KV-store replay phase triggers send timeouts/dropped events.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
