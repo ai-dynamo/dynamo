@@ -306,10 +306,15 @@ def send_mla_completion_request(
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.e2e
-@pytest.mark.pre_merge
+@pytest.mark.nightly
+@pytest.mark.slow
 @pytest.mark.gpu_1
 @pytest.mark.mla
 @pytest.mark.model(MLA_MODEL)
+@pytest.mark.skip(
+    reason="TRT-LLM does not yet support deepseek_v3 architecture "
+    "(silence09/DeepSeek-R1-Small-2layers). Re-enable when TRT-LLM adds MLA model support."
+)
 @pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_mla_kvbm_trtllm(request, runtime_services):
     """
