@@ -1482,34 +1482,49 @@ class TestGMSStorageClientLoadMock:
 
     @staticmethod
     def _build_mock_rw_mm(_alloc_ids_iter):
-        """Mock that simulates allocate_and_map, _mappings, metadata_put, commit."""
+        """Mock that simulates allocate/export, map, metadata_put, and commit."""
 
         mm = MagicMock()
         mm.__enter__ = MagicMock(return_value=mm)
         mm.__exit__ = MagicMock(return_value=False)
 
-        # Each call to allocate_and_map returns a fake VA; new allocation IDs
-        # are stored in mm._mappings keyed by that VA.
         call_count = [0]
         va_base = 0x1000_0000
 
         new_ids = [f"new-{i}" for i in range(10)]  # pool of new IDs
 
-        def _alloc_and_map(size, tag="default"):
+        def _allocate_and_export_info(size, tag="default"):
             idx = call_count[0]
             call_count[0] += 1
-            va = va_base + idx * 0x100_0000
+            return (
+                AllocateResponse(
+                    allocation_id=new_ids[idx],
+                    size=size,
+                    aligned_size=size,
+                    layout_slot=idx,
+                ),
+                1000 + idx,
+            )
 
-            # Build a LocalMapping-like namedtuple
+        def _reserve_va(size):
+            idx = len(mm._mappings)
+            va = va_base + idx * 0x100_0000
+            return va
+
+        def _map_va(fd, va, size, allocation_id, tag, layout_slot):
+            del fd, tag, layout_slot
             mapping = MagicMock()
-            mapping.allocation_id = new_ids[idx]
+            mapping.allocation_id = allocation_id
             mapping.aligned_size = size
             mm._mappings[va] = mapping
 
-            return va
-
         mm._mappings = {}
-        mm.create_mapping = MagicMock(side_effect=_alloc_and_map)
+        mm._client_rpc = MagicMock()
+        mm._client_rpc.allocate_and_export_info = MagicMock(
+            side_effect=_allocate_and_export_info
+        )
+        mm.reserve_va = MagicMock(side_effect=_reserve_va)
+        mm.map_va = MagicMock(side_effect=_map_va)
         mm.get_allocation_id = MagicMock(
             side_effect=lambda va: mm._mappings[va].allocation_id
         )
@@ -1642,15 +1657,17 @@ class TestGMSStorageClientLoadMock:
         with tempfile.TemporaryDirectory() as tmpdir:
             self._build_dump_dir(tmpdir, num_allocs=1)
             mock_mm, _ = self._build_mock_rw_mm(None)
-            mapping_called = threading.Event()
+            allocation_called = threading.Event()
 
-            original_create_mapping = mock_mm.create_mapping.side_effect
+            original_allocate = mock_mm._client_rpc.allocate_and_export_info.side_effect
 
-            def _create_mapping(*args, **kwargs):
-                mapping_called.set()
-                return original_create_mapping(*args, **kwargs)
+            def _allocate_and_export_info(*args, **kwargs):
+                allocation_called.set()
+                return original_allocate(*args, **kwargs)
 
-            mock_mm.create_mapping.side_effect = _create_mapping
+            mock_mm._client_rpc.allocate_and_export_info.side_effect = (
+                _allocate_and_export_info
+            )
 
             def _blocking_read(
                 abs_path,
@@ -1661,7 +1678,7 @@ class TestGMSStorageClientLoadMock:
                 cancel_event=None,
             ):
                 del abs_path, sorted_entries, work_q, pin_memory, cancel_event
-                assert mapping_called.wait(timeout=1), (
+                assert allocation_called.wait(timeout=1), (
                     "load_to_gms waited for disk staging to finish before starting "
                     "Phase A allocation"
                 )
