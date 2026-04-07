@@ -288,7 +288,42 @@ impl HttpService {
         tokio::spawn(async move { this.run(cancel_token).await })
     }
 
+    /// Like [`spawn`](Self::spawn), but uses a pre-bound TCP listener instead
+    /// of binding a new one in non-TLS mode.
+    ///
+    /// When TLS is enabled, the provided listener is ignored and the service
+    /// binds its own TLS socket.
+    pub fn spawn_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> JoinHandle<Result<()>> {
+        let this = self.clone();
+        tokio::spawn(async move { this.run_with_listener(cancel_token, listener).await })
+    }
+
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
+        self.run_inner(cancel_token, None).await
+    }
+
+    /// Like [`run`](Self::run), but uses a pre-bound TCP listener instead of
+    /// binding a new one in non-TLS mode.
+    ///
+    /// When TLS is enabled, the provided listener is ignored and the service
+    /// binds its own TLS socket.
+    pub async fn run_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> Result<()> {
+        self.run_inner(cancel_token, Some(listener)).await
+    }
+
+    async fn run_inner(
+        &self,
+        cancel_token: CancellationToken,
+        listener: Option<tokio::net::TcpListener>,
+    ) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -303,6 +338,12 @@ impl HttpService {
             .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
 
         if self.enable_tls {
+            if listener.is_some() {
+                tracing::warn!(
+                    "Pre-bound listener ignored when TLS is enabled; the server will bind its own socket"
+                );
+            }
+
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -345,27 +386,30 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                tracing::error!(
-                    protocol = %protocol,
-                    address = %address,
-                    error = %e,
-                    "Failed to bind server to address"
-                );
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                        protocol,
-                        self.port
-                    ),
-                    _ => anyhow::anyhow!(
-                        "Failed to start {} server on {}: {}",
-                        protocol,
-                        address,
-                        e
-                    ),
-                }
-            })?;
+            let listener = match listener {
+                Some(l) => l,
+                None => tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                    tracing::error!(
+                        protocol = %protocol,
+                        address = %address,
+                        error = %e,
+                        "Failed to bind server to address"
+                    );
+                    match e.kind() {
+                        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                            "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                            protocol,
+                            self.port
+                        ),
+                        _ => anyhow::anyhow!(
+                            "Failed to start {} server on {}: {}",
+                            protocol,
+                            address,
+                            e
+                        ),
+                    }
+                })?,
+            };
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
