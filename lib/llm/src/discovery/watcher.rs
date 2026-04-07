@@ -255,7 +255,6 @@ impl ModelWatcher {
                     // await the in-flight put before attempting cleanup.
                     let instance_key = mcid.to_path();
                     let watcher = Arc::clone(&self);
-                    let pending_puts = Arc::clone(&self).pending_puts.clone();
                     let key_for_cleanup = instance_key.clone();
                     let handle = tokio::spawn(async move {
                         match watcher.handle_put(&mcid, &mut card).await {
@@ -277,7 +276,7 @@ impl ModelWatcher {
                             }
                         }
                         // Remove ourselves from pending_puts once complete
-                        pending_puts.remove(&key_for_cleanup);
+                        watcher.pending_puts.remove(&key_for_cleanup);
                     });
                     self.pending_puts.insert(instance_key, handle);
                 }
