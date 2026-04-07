@@ -124,10 +124,11 @@ impl RetryManager {
             .guided_decoding
             .is_some()
         {
-            tracing::warn!(
-                "Guided-decoding request: migration disabled —
-                     guided-decoding FSM state is not transferable (applies to all backends)"
-            );
+            if retries_left > 0 {
+                tracing::warn!(
+                    "Guided-decoding request: migration disabled — FSM state is not transferable (applies to all backends)"
+                );
+            }
             0
         } else {
             retries_left
