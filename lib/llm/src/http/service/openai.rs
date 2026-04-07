@@ -2025,11 +2025,29 @@ async fn images(
     Ok(Json(response).into_response())
 }
 
+/// Handler for `/v1/images/edits` (I2I). Requires `input_reference`.
+async fn images_edits(
+    state: State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    if request.input_reference.is_none() {
+        let code = StatusCode::BAD_REQUEST;
+        return Err((
+            code,
+            Json(ErrorMessage {
+                message: "input_reference is required for /v1/images/edits".to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+            }),
+        ));
+    }
+    images(state, headers, Json(request)).await
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
-/// Registers both `/v1/images/generations` (T2I) and `/v1/images/edits` (I2I).
-/// Both routes use the same handler — I2I vs T2I is determined by the
-/// presence of `input_reference` in the request body, not by the route.
-/// `/edits` is registered for OpenAI API compatibility.
+/// `/v1/images/generations` accepts optional `input_reference` (T2I or TI2I).
+/// `/v1/images/edits` requires `input_reference` (I2I).
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -2040,7 +2058,7 @@ pub fn images_router(
     let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
         .route(&generations_path, post(images))
-        .route(&edits_path, post(images))
+        .route(&edits_path, post(images_edits))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
