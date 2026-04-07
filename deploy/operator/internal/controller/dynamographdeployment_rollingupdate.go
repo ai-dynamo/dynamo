@@ -266,7 +266,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1alpha1.RollingUpdatePhaseNone:
-		return r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.startRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseInProgress
@@ -276,17 +276,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
-		// ensure stale old worker DCDs are cleaned up.
-		oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
-		if err != nil {
-			return fmt.Errorf("failed to list old worker DCDs for GC: %w", err)
-		}
-		if len(oldDCDs) > 0 {
-			logger.Info("Deleting orphaned old worker DCDs",
-				"count", len(oldDCDs), "newWorkerHash", newWorkerHash)
-			if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-				return fmt.Errorf("failed to delete old worker DCDs: %w", err)
-			}
+		if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
+			return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 		}
 		return nil
 	}
@@ -298,7 +289,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -310,6 +300,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"newHash", newWorkerHash)
 
 	now := metav1.Now()
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedServices = nil

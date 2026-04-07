@@ -765,10 +765,10 @@ func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, testNewWorkerHash)
+	err := r.startRollingUpdate(ctx, dgd, testNewWorkerHash)
 	require.NoError(t, err)
 
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	assert.Nil(t, rollingUpdateStatus.UpdatedServices)
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, rollingUpdateStatus.Phase)
 }
