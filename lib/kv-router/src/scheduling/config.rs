@@ -1,18 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use derive_builder::Builder;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use crate::protocols::{
+    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 
-const fn default_min_initial_workers() -> usize {
-    1
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
+pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
+    match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
+        Ok(value) => value.parse::<usize>().map_err(|error| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_MIN_INITIAL_WORKERS} must be a non-negative integer, got {value:?}: {error}"
+            )
+        }),
+        Err(VarError::NotPresent) => Ok(0),
+        Err(VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_ROUTER_MIN_INITIAL_WORKERS} must be valid unicode")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +51,43 @@ impl fmt::Display for RouterQueuePolicy {
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterPrefillLoadModel {
+    #[default]
+    None,
+    Aic,
+}
+
+impl fmt::Display for RouterPrefillLoadModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Aic => f.write_str("aic"),
+        }
+    }
+}
+
+impl FromStr for RouterPrefillLoadModel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "aic" => Ok(Self::Aic),
+            _ => Err(format!(
+                "unknown prefill load model: {s:?}, expected 'none' or 'aic'"
+            )),
+        }
+    }
+}
+
+impl RouterPrefillLoadModel {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 
@@ -61,6 +118,9 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
+
+    #[builder(default)]
+    pub track_prefill_tokens: Option<bool>,
 }
 
 /// KV Router configuration parameters
@@ -96,6 +156,15 @@ pub struct KvRouterConfig {
     /// When false, generates random hashes (assuming no KV cache reuse).
     pub router_assume_kv_reuse: bool,
 
+    /// Whether to include prompt-side prefill tokens in active load accounting (default: true).
+    /// When false, prompt tokens are excluded from active prefill token tracking, queue pressure,
+    /// and potential prefill-token load calculations.
+    #[serde(default = "default_track_prefill_tokens")]
+    pub router_track_prefill_tokens: bool,
+
+    /// Optional model for estimating effective prompt-side prefill load over time.
+    pub router_prefill_load_model: RouterPrefillLoadModel,
+
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     #[validate(range(min = 1))]
     pub router_snapshot_threshold: Option<u32>,
@@ -128,22 +197,7 @@ pub struct KvRouterConfig {
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
-    /// Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint.
-    /// When true, the router creates a cache_control client and honors nvext.cache_control on
-    /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
-    /// When false (default), cache_control is ignored and no cache_control client is created.
-    pub router_enable_cache_control: bool,
-
-    /// Skip blocking for workers at init time (default: false).
-    /// When true, the router starts immediately without waiting for discovery-based
-    /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
-
-    /// Minimum number of workers that must be discovered before router startup continues.
-    /// Default: 1. Ignored when skip_initial_worker_wait=true.
-    #[serde(default = "default_min_initial_workers")]
-    #[validate(range(min = 1))]
-    pub min_initial_workers: usize,
 
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
@@ -169,6 +223,8 @@ impl Default for KvRouterConfig {
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
+            router_track_prefill_tokens: default_track_prefill_tokens(),
+            router_prefill_load_model: RouterPrefillLoadModel::default(),
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
@@ -176,9 +232,7 @@ impl Default for KvRouterConfig {
             router_prune_target_ratio: 0.8,
             router_queue_threshold: Some(4.0),
             router_event_threads: 4,
-            router_enable_cache_control: false,
             skip_initial_worker_wait: false,
-            min_initial_workers: default_min_initial_workers(),
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
         }
@@ -202,10 +256,45 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_track_output_blocks requires router_track_active_blocks=true",
         ));
     }
+    if config.router_prefill_load_model.is_enabled() && !config.router_track_prefill_tokens {
+        return Err(ValidationError::new(
+            "router_prefill_load_model requires router_track_prefill_tokens=true",
+        ));
+    }
+    if config.router_prefill_load_model.is_enabled()
+        && !matches!(config.router_queue_policy, RouterQueuePolicy::Fcfs)
+    {
+        return Err(ValidationError::new(
+            "router_prefill_load_model currently requires router_queue_policy='fcfs'",
+        ));
+    }
     Ok(())
 }
 
 impl KvRouterConfig {
+    pub fn router_queue_recheck_interval(&self) -> Duration {
+        const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+        const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+        if self.router_prefill_load_model.is_enabled() && self.router_queue_threshold.is_some() {
+            return PREFILL_LOAD_RECHECK_INTERVAL;
+        }
+
+        DEFAULT_RECHECK_INTERVAL
+    }
+
+    pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse)
+    }
+
+    pub fn track_prefill_tokens(&self, config_override: Option<&RouterConfigOverride>) -> bool {
+        config_override
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.router_track_prefill_tokens)
+    }
+
     /// Compute sequence hashes for active block tracking based on configuration.
     ///
     /// Returns:
@@ -217,7 +306,8 @@ impl KvRouterConfig {
         tokens: &[u32],
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
-        lora_name: Option<&str>,
+        hash_options: BlockHashOptions<'_>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -228,13 +318,17 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        let assume_kv_reuse = config_override
-            .and_then(|cfg| cfg.assume_kv_reuse)
-            .unwrap_or(self.router_assume_kv_reuse);
+        let assume_kv_reuse = self.assume_kv_reuse(config_override);
 
         if assume_kv_reuse {
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
-            Some(compute_seq_hash_for_block(&block_hashes))
+            let block_hashes = match precomputed_block_hashes {
+                Some(block_hashes) => block_hashes,
+                None => {
+                    let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
+                    return Some(compute_seq_hash_for_block(&computed));
+                }
+            };
+            Some(compute_seq_hash_for_block(block_hashes))
         } else {
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
@@ -257,35 +351,55 @@ impl KvRouterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
     #[test]
-    fn router_queue_policy_display_and_parse_support_lcfs() {
-        assert_eq!(RouterQueuePolicy::Lcfs.to_string(), "lcfs");
-        assert_eq!(
-            "lcfs".parse::<RouterQueuePolicy>().unwrap(),
-            RouterQueuePolicy::Lcfs
+    fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
+        let cfg = KvRouterConfig::default();
+        let tokens = vec![1, 2, 3, 4];
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![],
+                }],
+            }),
+            None,
+        ];
+
+        let without_mm = cfg
+            .compute_seq_hashes_for_tracking(&tokens, 2, None, BlockHashOptions::default(), None)
+            .unwrap();
+        let with_mm = cfg
+            .compute_seq_hashes_for_tracking(
+                &tokens,
+                2,
+                None,
+                BlockHashOptions {
+                    block_mm_infos: Some(&mm_infos),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(without_mm, with_mm);
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
+        let config = KvRouterConfig::default();
+        let tokens: Vec<u32> = (0..8).collect();
+        let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
+
+        let seq_hashes = config.compute_seq_hashes_for_tracking(
+            &tokens,
+            4,
+            None,
+            BlockHashOptions::default(),
+            Some(&precomputed),
         );
-    }
 
-    #[test]
-    fn router_queue_policy_serde_round_trip_supports_lcfs() {
-        let serialized = serde_json::to_string(&RouterQueuePolicy::Lcfs).unwrap();
-        assert_eq!(serialized, "\"lcfs\"");
-        let deserialized: RouterQueuePolicy = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, RouterQueuePolicy::Lcfs);
-    }
-
-    #[test]
-    fn kv_router_config_defaults_to_one_initial_worker() {
-        assert_eq!(KvRouterConfig::default().min_initial_workers, 1);
-    }
-
-    #[test]
-    fn kv_router_config_rejects_zero_initial_workers() {
-        let cfg = KvRouterConfig {
-            min_initial_workers: 0,
-            ..KvRouterConfig::default()
-        };
-        assert!(cfg.validate().is_err());
+        assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
     }
 }

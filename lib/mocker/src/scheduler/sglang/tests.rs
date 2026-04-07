@@ -94,7 +94,7 @@ mod scheduling {
             .build()
             .unwrap();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler =
             SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None);
 
@@ -117,8 +117,8 @@ mod scheduling {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    received += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    received += output_batch.len();
                     if received >= expected_signals {
                         break;
                     }
@@ -535,7 +535,7 @@ mod core_behavior {
 
 async fn assert_sglang_scheduler_completes_all(
     scheduler: &SglangScheduler,
-    output_rx: &mut mpsc::UnboundedReceiver<OutputSignal>,
+    output_rx: &mut mpsc::UnboundedReceiver<Vec<OutputSignal>>,
     num_requests: usize,
     prompt_len: usize,
     max_output_tokens: usize,
@@ -561,18 +561,18 @@ async fn assert_sglang_scheduler_completes_all(
 
     let expected_tokens = num_requests * max_output_tokens;
     let mut received_tokens = 0;
-    let timeout = tokio::time::sleep(Duration::from_secs(2));
+    let timeout = tokio::time::sleep(Duration::from_millis(200));
     tokio::pin!(timeout);
 
     loop {
         tokio::select! {
             biased;
-            Some(_) = output_rx.recv() => {
-                received_tokens += 1;
+            Some(output_batch) = output_rx.recv() => {
+                received_tokens += output_batch.len();
                 if received_tokens >= expected_tokens {
                     break;
                 }
-                timeout.set(tokio::time::sleep(Duration::from_secs(2)));
+                timeout.set(tokio::time::sleep(Duration::from_millis(200)));
             }
             _ = &mut timeout => break,
         }
@@ -580,7 +580,6 @@ async fn assert_sglang_scheduler_completes_all(
 
     assert_eq!(received_tokens, expected_tokens);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let metrics = scheduler.metrics_receiver().borrow().clone();
     assert!(metrics.active_decode_blocks > 0);
     assert!(metrics.total_blocks > 0);
@@ -605,11 +604,11 @@ mod router_events {
         #[case] schedule_policy: &str,
         #[case] page_size: usize,
     ) {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(500)
             .block_size(64)
-            .speedup_ratio(10.0)
+            .speedup_ratio(1000.0)
             .sglang(Some(SglangArgs {
                 schedule_policy: Some(schedule_policy.to_string()),
                 page_size: Some(page_size),
@@ -819,7 +818,7 @@ mod router_events {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let (sink, forward_task) = harness.spawn_forwarder();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler = SglangScheduler::new(
             MockEngineArgs::builder()
                 .engine_type(EngineType::Sglang)
@@ -850,8 +849,8 @@ mod router_events {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    seen += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    seen += output_batch.len();
                     if seen == expected {
                         break;
                     }
@@ -861,7 +860,6 @@ mod router_events {
                 }
             }
         }
-
         assert_eq!(seen, expected);
         drop(scheduler);
         drop(sink);
@@ -871,5 +869,42 @@ mod router_events {
         harness.assert_no_event_errors();
         assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
         harness.shutdown();
+    }
+
+    #[test]
+    fn test_prefill_completion_emits_handoff_delay() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(64)
+            .block_size(4)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        core.receive(DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(91)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let signal = pass
+            .output_signals
+            .first()
+            .expect("prefill pass should emit one completed signal");
+
+        assert!(signal.completed);
+        assert_eq!(signal.handoff_delay_ms, Some(8.0));
     }
 }

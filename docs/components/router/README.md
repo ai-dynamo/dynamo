@@ -23,6 +23,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
 | `--router-queue-threshold` | `4.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
 
 ### Standalone Router
 
@@ -45,7 +46,7 @@ For all CLI arguments, environment variables, K8s deployment examples, and tunin
 **Limitations:**
 - Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
 
-For basic model registration without KV routing, use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
+For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, or `--router-mode least-loaded` with both static and dynamic endpoints.
 
 ## Next Steps
 

@@ -2,69 +2,132 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::core::ReplayWorkerCore;
-use super::normalize_trace_requests;
+use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::replay::{TraceCollector, TraceSimulationReport};
+use crate::loadgen::WorkloadDriver;
+use crate::replay::TraceCollector;
 use anyhow::bail;
 use std::collections::VecDeque;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
-enum SingleReplayMode {
+pub(super) enum SingleReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
 }
 
-struct SingleRuntime {
+enum AdmissionSource {
+    Requests(VecDeque<DirectRequest>),
+    Workload(WorkloadDriver),
+}
+
+pub(super) struct SingleRuntime {
     current_time_ms: f64,
-    pending: VecDeque<DirectRequest>,
+    admission: AdmissionSource,
     worker: ReplayWorkerCore,
     collector: TraceCollector,
     mode: SingleReplayMode,
+    progress: ReplayProgress,
 }
 
 impl SingleRuntime {
-    fn new(args: MockEngineArgs, pending: VecDeque<DirectRequest>, mode: SingleReplayMode) -> Self {
+    pub(super) fn new(
+        args: MockEngineArgs,
+        pending: VecDeque<DirectRequest>,
+        mode: SingleReplayMode,
+    ) -> Self {
+        Self::new_with_source(args, AdmissionSource::Requests(pending), mode)
+    }
+
+    pub(super) fn new_workload(
+        args: MockEngineArgs,
+        driver: WorkloadDriver,
+        mode: SingleReplayMode,
+    ) -> Self {
+        Self::new_with_source(args, AdmissionSource::Workload(driver), mode)
+    }
+
+    fn new_with_source(
+        args: MockEngineArgs,
+        admission: AdmissionSource,
+        mode: SingleReplayMode,
+    ) -> Self {
+        let total_requests = match &admission {
+            AdmissionSource::Requests(pending) => pending.len(),
+            AdmissionSource::Workload(driver) => driver.total_turns(),
+        };
         Self {
             current_time_ms: 0.0,
-            pending,
+            admission,
             worker: ReplayWorkerCore::new(args),
             collector: TraceCollector::default(),
             mode,
+            progress: ReplayProgress::new(total_requests, "offline replay"),
         }
     }
 
     fn enqueue_trace_arrivals(&mut self) {
-        loop {
-            let Some(next_arrival_ms) = self
-                .pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
-            if next_arrival_ms > self.current_time_ms {
-                break;
-            }
+        let mut ready_requests = Vec::new();
+        match &mut self.admission {
+            AdmissionSource::Requests(pending) => loop {
+                let Some(next_arrival_ms) = pending
+                    .front()
+                    .and_then(|request| request.arrival_timestamp_ms)
+                else {
+                    break;
+                };
+                if next_arrival_ms > self.current_time_ms {
+                    break;
+                }
 
-            let request = self
-                .pending
-                .pop_front()
-                .expect("front request must exist when arrival is available");
-            let arrival_ms = request
-                .arrival_timestamp_ms
-                .expect("trace replay requests must have an arrival timestamp");
+                let request = pending
+                    .pop_front()
+                    .expect("front request must exist when arrival is available");
+                let arrival_ms = request
+                    .arrival_timestamp_ms
+                    .expect("trace replay requests must have an arrival timestamp");
+                ready_requests.push((request, arrival_ms));
+            },
+            AdmissionSource::Workload(driver) => {
+                ready_requests.extend(
+                    driver
+                        .pop_ready(self.current_time_ms, usize::MAX)
+                        .into_iter()
+                        .map(|ready| (ready.request, ready.scheduled_ready_at_ms)),
+                );
+            }
+        }
+
+        for (request, arrival_ms) in ready_requests {
             self.record_arrival(request, arrival_ms);
         }
     }
 
     fn enqueue_concurrency_arrivals(&mut self, max_in_flight: usize) {
-        while self.worker.num_requests() < max_in_flight {
-            let Some(mut request) = self.pending.pop_front() else {
-                break;
-            };
+        let available = max_in_flight.saturating_sub(self.worker.num_requests());
+        let mut ready_requests = Vec::new();
 
-            request.arrival_timestamp_ms = Some(self.current_time_ms);
+        match &mut self.admission {
+            AdmissionSource::Requests(pending) => {
+                for _ in 0..available {
+                    let Some(mut request) = pending.pop_front() else {
+                        break;
+                    };
+                    request.arrival_timestamp_ms = Some(self.current_time_ms);
+                    ready_requests.push(request);
+                }
+            }
+            AdmissionSource::Workload(driver) => {
+                ready_requests.extend(
+                    driver
+                        .pop_ready(self.current_time_ms, available)
+                        .into_iter()
+                        .map(|ready| ready.request),
+                );
+            }
+        }
+
+        for request in ready_requests {
             self.record_arrival(request, self.current_time_ms);
         }
     }
@@ -79,15 +142,21 @@ impl SingleRuntime {
     }
 
     fn is_done(&self) -> bool {
-        self.pending.is_empty() && self.worker.is_empty()
+        self.worker.is_empty()
+            && match &self.admission {
+                AdmissionSource::Requests(pending) => pending.is_empty(),
+                AdmissionSource::Workload(driver) => driver.is_drained(),
+            }
     }
 
     fn advance_to_next_trace_arrival(&mut self) -> anyhow::Result<()> {
-        let Some(next_arrival_ms) = self
-            .pending
-            .front()
-            .and_then(|request| request.arrival_timestamp_ms)
-        else {
+        let next_arrival_ms = match &mut self.admission {
+            AdmissionSource::Requests(pending) => pending
+                .front()
+                .and_then(|request| request.arrival_timestamp_ms),
+            AdmissionSource::Workload(driver) => driver.next_ready_time_ms(),
+        };
+        let Some(next_arrival_ms) = next_arrival_ms else {
             bail!("trace replay reached an idle state without a pending arrival");
         };
         self.current_time_ms = next_arrival_ms;
@@ -99,12 +168,27 @@ impl SingleRuntime {
             .worker
             .execute_pass(&mut self.collector, self.current_time_ms);
         self.current_time_ms = pass.end_ms;
+        if let AdmissionSource::Workload(driver) = &mut self.admission {
+            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+                driver
+                    .on_complete(signal.uuid, self.current_time_ms)
+                    .expect("completed workload request must belong to a session");
+            }
+        }
+        let completed_requests = pass
+            .output_signals
+            .iter()
+            .filter(|signal| signal.completed)
+            .count();
+        for _ in 0..completed_requests {
+            self.progress.inc_completed();
+        }
         if admit_arrivals_between_steps {
             self.enqueue_trace_arrivals();
         }
     }
 
-    fn run(mut self) -> anyhow::Result<TraceCollector> {
+    pub(super) fn run(mut self) -> anyhow::Result<TraceCollector> {
         while !self.is_done() {
             match self.mode {
                 SingleReplayMode::Trace => {
@@ -119,74 +203,30 @@ impl SingleRuntime {
                 SingleReplayMode::Concurrency { max_in_flight } => {
                     self.enqueue_concurrency_arrivals(max_in_flight);
                     if self.worker.is_empty() {
-                        break;
+                        if self.is_done() {
+                            break;
+                        }
+                        self.advance_to_next_trace_arrival()?;
+                        continue;
                     }
                     self.drive_worker(false);
                 }
             }
         }
 
+        self.progress.finish();
         Ok(self.collector)
     }
 }
 
-pub(crate) fn simulate_trace_single(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    arrival_speedup_ratio: f64,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
-    Ok(collector.finish())
-}
-
-pub(crate) fn simulate_concurrency_single(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let pending = VecDeque::from(requests);
-    let collector = SingleRuntime::new(
-        args,
-        pending,
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()?;
-    Ok(collector.finish())
-}
-
-#[cfg(test)]
-pub(super) fn run_trace_single_collect(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    arrival_speedup_ratio: f64,
-) -> TraceCollector {
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
-    SingleRuntime::new(args, pending, SingleReplayMode::Trace)
-        .run()
-        .unwrap()
-}
-
-#[cfg(test)]
-pub(super) fn run_concurrency_single_collect(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-) -> TraceCollector {
-    SingleRuntime::new(
-        args,
-        VecDeque::from(requests),
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()
-    .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::entrypoints::{
+        run_concurrency_workload_single_collect, run_trace_workload_single_collect,
+        simulate_concurrency_single, simulate_trace_single,
+    };
     use super::*;
+    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
@@ -293,6 +333,42 @@ mod tests {
                 arrival_timestamp_ms: Some(500.0),
             },
         ]
+    }
+
+    fn multiturn_trace_fixture() -> Trace {
+        Trace {
+            block_size: 1,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 3,
+                            max_output_tokens: 2,
+                            hash_ids: vec![1, 2, 3],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 5,
+                            max_output_tokens: 2,
+                            hash_ids: vec![4, 5, 6, 7, 8],
+                            delay_after_previous_ms: 5.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(1.0),
+                    turns: vec![TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 2,
+                        hash_ids: vec![9, 10, 11, 12],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
     }
 
     fn run_trace_manually(
@@ -673,5 +749,45 @@ mod tests {
         assert_eq!(manual.report.request_counts.total_output_tokens, 6);
 
         assert_report_close(&replay_report, &manual.report);
+    }
+
+    #[test]
+    fn test_trace_workload_single_unlocks_follow_up_turn_after_completion() {
+        let args = replay_args(false, true);
+        let collector = run_trace_workload_single_collect(args, multiturn_trace_fixture());
+        let snapshots = collector.snapshots();
+
+        let first = snapshots
+            .iter()
+            .find(|stats| stats.input_length == 3)
+            .unwrap();
+        let second = snapshots
+            .iter()
+            .find(|stats| stats.input_length == 5)
+            .unwrap();
+        let other = snapshots
+            .iter()
+            .find(|stats| stats.input_length == 4)
+            .unwrap();
+
+        assert_eq!(first.arrival_time_ms, 0.0);
+        assert_eq!(other.arrival_time_ms, 1.0);
+        assert!(second.arrival_time_ms >= first.last_token_ms.unwrap() + 5.0);
+    }
+
+    #[test]
+    fn test_concurrency_workload_single_ignores_first_turn_timestamps_but_keeps_delay() {
+        let args = replay_args(false, true);
+        let collector = run_concurrency_workload_single_collect(args, multiturn_trace_fixture(), 1);
+        let arrival_times = collector
+            .snapshots()
+            .into_iter()
+            .map(|stats| stats.arrival_time_ms)
+            .collect::<Vec<_>>();
+        let report = collector.finish();
+
+        assert!(arrival_times.contains(&0.0));
+        assert!(arrival_times.iter().all(|arrival| *arrival >= 0.0));
+        assert_eq!(report.request_counts.completed_requests, 3);
     }
 }

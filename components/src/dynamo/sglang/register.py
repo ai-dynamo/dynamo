@@ -3,16 +3,15 @@
 
 import asyncio
 import logging
-import socket
 from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import DynamoConfig
 
 
@@ -88,56 +87,27 @@ def _get_bootstrap_info_for_config(
             return None, None
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-                addr_family = infos[0][0]
-                logging.info(
-                    f"Resolved bootstrap host '{host_core}' -> '{resolved}' "
-                    f"({'IPv6' if addr_family == socket.AF_INET6 else 'IPv4'})"
-                )
-            except socket.gaierror as e:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
-                logging.warning(
-                    f"Failed to resolve bootstrap host '{host_core}': {e}, using as-is"
-                )
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            resolved = dist_init.resolved()
+            bootstrap_host = (
+                NetworkAddress(resolved.host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
+            logging.info(
+                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
+                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
+            )
         else:
             # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
             # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
-            bootstrap_host = get_local_ip_auto()
-            is_ipv6 = ":" in bootstrap_host
+            local_ip = get_local_ip_auto()
+            local_addr = NetworkAddress(local_ip, bootstrap_port)
+            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
             logging.info(
-                f"Using auto-detected local IP: {bootstrap_host} "
-                f"({'IPv6' if is_ipv6 else 'IPv4'})"
+                f"Using auto-detected local IP: {local_ip} "
+                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
             )
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
-            logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
 
         return bootstrap_host, bootstrap_port
     except Exception as e:
@@ -162,6 +132,9 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        dynamo_args.exclude_tools_when_tool_choice_none
+    )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -193,6 +166,9 @@ async def _get_runtime_config(
     max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
+
+    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+        runtime_config.enable_eagle = True
 
     try:
         # Try to check if the engine has a scheduler attribute with the computed values

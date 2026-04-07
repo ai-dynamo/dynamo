@@ -45,9 +45,9 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
-# TODO: Now that these tests use dynamic ports and each config has a max_vram_gib marker,
+# TODO: Now that these tests use dynamic ports and each config has a profiled_vram_gib marker,
 # optimize the runtime by bin-packing multiple engine deployments in parallel on the same GPU.
-# A future collector/launcher can sum max_vram_gib values to decide how many tests fit
+# A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
 # concurrently without exceeding available VRAM.
 sglang_configs = {
     "aggregated": SGLangConfig(
@@ -58,8 +58,13 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(6.1),  # observed peak 5.6 GiB (+10% safety)
-            pytest.mark.timeout(240),  # profiled 34.4s on A6000
+            pytest.mark.profiled_vram_gib(
+                3.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                96
+            ),  # KV cache cap (2x safety over min=48)
+            pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -160,7 +165,8 @@ sglang_configs = {
         script_name="template_verifier.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.timeout(240),  # profiled 11.7s on A6000 (no GPU model load)
+            pytest.mark.profiled_vram_gib(0.0),  # no GPU model load
+            pytest.mark.timeout(120),  # profiled 12s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -175,8 +181,8 @@ sglang_configs = {
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
     # NOTE: multimodal_epd.sh uses explicit --mem-fraction-static via DYN_ENCODE_GPU_MEM
-    # / DYN_WORKER_GPU_MEM env vars, so _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE has no effect.
-    # Regardless of fraction overrides, the workers combined consistently use ~23.6 GiB.
+    # / DYN_WORKER_GPU_MEM env vars. The profiler override distributes proportionally
+    # but workers combined consistently use ~23.6 GiB regardless of fraction overrides.
     "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_e_pd_qwen",
@@ -184,16 +190,15 @@ sglang_configs = {
         script_name="multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(13.3),  # observed peak 12.1 GiB (+10% safety)
-            pytest.mark.timeout(360),  # profiled 31.0s on A6000
+            # No profiled_vram_gib: uses hard-coded --mem-fraction-static via
+            # DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM, so VRAM scales with GPU size.
+            pytest.mark.timeout(210),  # profiled 35s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
         env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_WORKER_GPU": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
         },
@@ -226,8 +231,11 @@ sglang_configs = {
         script_name="multimodal_disagg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(17.7),  # observed peak 16.1 GiB (+10% safety)
-            pytest.mark.timeout(360),  # profiled 36.0s on A6000
+            pytest.mark.profiled_vram_gib(16.1),  # actual profiled peak
+            pytest.mark.requested_sglang_kv_tokens(
+                1024
+            ),  # KV cache cap (2x safety over min=512)
+            pytest.mark.timeout(222),  # profiled 37s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -261,8 +269,13 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(21.0),  # observed peak 19.1 GiB (+10% safety)
-            pytest.mark.timeout(300),  # profiled 41.3s on A6000
+            pytest.mark.profiled_vram_gib(
+                19.1
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                768
+            ),  # KV cache cap (2x safety over min=384)
+            pytest.mark.timeout(182),  # profiled 30s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -300,8 +313,13 @@ sglang_configs = {
         script_name="agg_embed.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(12.1),  # observed peak 11.0 GiB (+10% safety)
-            pytest.mark.timeout(270),  # profiled 25.5s on A6000
+            pytest.mark.profiled_vram_gib(
+                9.8
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                128
+            ),  # KV cache cap (2x safety over min=64)
+            pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -338,8 +356,13 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.max_vram_gib(16.2),  # observed peak 14.8 GiB (+10% safety)
-            pytest.mark.timeout(420),  # profiled 73s on A6000
+            pytest.mark.profiled_vram_gib(
+                14.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                64
+            ),  # KV cache cap (2x safety over min=32)
+            pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
             pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
@@ -362,7 +385,7 @@ sglang_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(240),
             pytest.mark.skip(reason="DYN-2261"),
-            # TODO: profile to get max_vram (currently skipped)
+            # TODO: profile once DYN-2261 is fixed (uses agg.sh, profiler works)
         ],
         model="Qwen/Qwen3-0.6B",
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},

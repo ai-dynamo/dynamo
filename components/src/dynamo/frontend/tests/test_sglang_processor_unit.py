@@ -13,6 +13,7 @@ Parallels test_vllm_unit.py for the vLLM backend.
 import pytest
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -23,6 +24,7 @@ from dynamo.frontend.sglang_prepost import (
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
     _build_dynamo_preproc,
+    _init_worker,
     _map_finish_reason,
 )
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
@@ -512,6 +514,94 @@ class TestPreprocessChatRequest:
         )
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
+
+    def test_tool_choice_none_strips_tools_from_template(self, tokenizer):
+        """When exclude flag is on and tool_choice=none, tools are excluded from template."""
+        tool_request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+        with_tools_auto = preprocess_chat_request(
+            {**tool_request, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=True,
+        )
+        with_tools_none = preprocess_chat_request(
+            {**tool_request, "tool_choice": "none"},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=True,
+        )
+        # tool_choice=none should produce fewer tokens (no tool defs in template)
+        assert len(with_tools_none.prompt_token_ids) < len(
+            with_tools_auto.prompt_token_ids
+        ), "tool_choice=none with exclude flag should strip tools from template"
+
+    def test_tool_choice_none_keeps_tools_when_flag_off(self, tokenizer):
+        """When exclude flag is off, tool_choice=none still includes tools in template."""
+        tool_request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+        with_auto = preprocess_chat_request(
+            {**tool_request, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=False,
+        )
+        with_none = preprocess_chat_request(
+            {**tool_request, "tool_choice": "none"},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=False,
+        )
+        # With flag off, both should have similar token counts (tools in template)
+        assert len(with_none.prompt_token_ids) == len(
+            with_auto.prompt_token_ids
+        ), "tool_choice=none with flag off should keep tools in template"
+
+    def test_init_worker_propagates_exclude_flag_true(self):
+        """_init_worker sets the worker-global exclude_tools flag to True."""
+        _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
+        assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is True
+
+    def test_init_worker_propagates_exclude_flag_false(self):
+        """_init_worker sets the worker-global exclude_tools flag to False."""
+        _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=False)
+        assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
+        # Reset to default
+        sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""

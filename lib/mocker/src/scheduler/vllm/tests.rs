@@ -176,6 +176,100 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_execute_pass_batches_two_ready_requests_together() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let r1 = Uuid::from_u128(101);
+        let r2 = Uuid::from_u128(202);
+        for (uuid, tokens) in [(r1, vec![1; 4]), (r2, vec![2; 4])] {
+            core.receive(DirectRequest {
+                tokens,
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        collector.on_arrival(r1, 0.0, 4, 1);
+        collector.on_arrival(r2, 0.0, 4, 1);
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let admitted = pass
+            .admissions
+            .iter()
+            .map(|admission| admission.uuid)
+            .collect::<Vec<_>>();
+        let first = collector.snapshot(r1).unwrap();
+        let second = collector.snapshot(r2).unwrap();
+
+        assert_eq!(pass.admissions.len(), 2);
+        assert!(admitted.contains(&r1));
+        assert!(admitted.contains(&r2));
+        assert!(
+            first.first_admit_ms.is_some(),
+            "r1 should have been admitted"
+        );
+        assert!(
+            second.first_admit_ms.is_some(),
+            "r2 should have been admitted"
+        );
+        assert!(
+            first.first_token_ms.is_some(),
+            "r1 should have emitted a token"
+        );
+        assert!(
+            second.first_token_ms.is_some(),
+            "r2 should have emitted a token"
+        );
+        assert_eq!(first.first_admit_ms, second.first_admit_ms);
+        assert_eq!(first.first_token_ms, second.first_token_ms);
+    }
+
+    #[test]
+    fn test_prefill_completion_emits_handoff_delay() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        core.receive(DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(81)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let signal = pass
+            .output_signals
+            .first()
+            .expect("prefill pass should emit one completed signal");
+
+        assert!(signal.completed);
+        assert_eq!(signal.handoff_delay_ms, Some(8.0));
+    }
+
+    #[test]
     fn test_first_token_can_arrive_on_prompt_completion_pass() {
         let mut core = VllmCore::new(make_args());
         let uuid = Uuid::from_u128(11);
@@ -472,12 +566,12 @@ mod live_scheduler {
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
     ) {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(500)
             .block_size(64)
-            .speedup_ratio(10.0)
+            .speedup_ratio(1000.0)
             .enable_prefix_caching(enable_prefix_caching)
             .enable_chunked_prefill(enable_chunked_prefill)
             .build()
@@ -505,7 +599,7 @@ mod live_scheduler {
         let num_requests = 10;
         let token_length = 65;
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(100)
@@ -542,8 +636,8 @@ mod live_scheduler {
                     let _metrics = metrics_rx.borrow().clone();
                     tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
                 }
-                Some(_signal) = output_rx.recv() => {
-                    received_tokens += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    received_tokens += output_batch.len();
                     timeout.set(tokio::time::sleep(Duration::from_millis(500)));
                 }
                 _ = &mut timeout => break,
@@ -558,7 +652,7 @@ mod live_scheduler {
 
     #[tokio::test]
     async fn test_receiver_drop_cleans_up_resources() {
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(10)
             .block_size(64)
@@ -578,8 +672,8 @@ mod live_scheduler {
 
         let mut received_count = 0;
         while received_count < 129 {
-            if output_rx.recv().await.is_some() {
-                received_count += 1;
+            if let Some(output_batch) = output_rx.recv().await {
+                received_count += output_batch.len();
                 continue;
             }
             panic!("Channel closed before receiving 129 tokens");
@@ -605,7 +699,7 @@ mod live_scheduler {
     #[tokio::test]
     async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
         let sink = Arc::new(CapturingKvSink::default());
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(12)
@@ -633,10 +727,14 @@ mod live_scheduler {
             arrival_timestamp_ms: None,
         });
 
-        let signal = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+        let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
             .await
             .expect("scheduler should emit output")
             .expect("output channel should stay open");
+        let signal = output_batch
+            .into_iter()
+            .next()
+            .expect("live scheduler should emit one output signal");
         assert!(signal.completed);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -657,7 +755,7 @@ mod live_scheduler {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let (sink, forward_task) = harness.spawn_forwarder();
 
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler = Scheduler::new(
             MockEngineArgs::builder()
                 .block_size(4)
@@ -692,8 +790,8 @@ mod live_scheduler {
 
         loop {
             tokio::select! {
-                Some(_) = output_rx.recv() => {
-                    seen += 1;
+                Some(output_batch) = output_rx.recv() => {
+                    seen += output_batch.len();
                     if seen == expected {
                         break;
                     }
