@@ -7,11 +7,26 @@ Receive ForwardPassMetrics via the Dynamo event plane.
 Auto-discovers engine publishers through the discovery plane (K8s CRD /
 etcd / file) and prints each metric message as JSON.
 
+Supports two modes:
+
+- **recv** (default): pull individual messages one at a time.
+- **tracking**: periodically poll ``get_recent_stats()`` to print the
+  latest snapshot keyed by ``(worker_id, dp_rank)``.
+
 Usage:
+    # recv mode (default)
+    python -m dynamo.common.recv_forward_pass_metrics \\
+        --namespace dynamo --component backend --endpoint generate
+
+    # tracking mode (poll every 2 seconds)
     python -m dynamo.common.recv_forward_pass_metrics \\
         --namespace dynamo --component backend --endpoint generate \\
-        [--discovery-backend etcd] [--request-plane nats] \\
-        [--save-plot metrics.png]
+        --mode tracking --poll-interval 2.0
+
+    # recv mode with plot saving
+    python -m dynamo.common.recv_forward_pass_metrics \\
+        --namespace dynamo --component backend --endpoint generate \\
+        --save-plot metrics.png
 """
 
 import argparse
@@ -95,10 +110,23 @@ def main() -> None:
         help="Request plane (default: nats)",
     )
     parser.add_argument(
+        "--mode",
+        choices=["recv", "tracking"],
+        default="recv",
+        help="Consumption mode: 'recv' for individual messages, "
+        "'tracking' for latest-snapshot polling (default: recv)",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds for tracking mode (default: 2.0)",
+    )
+    parser.add_argument(
         "--save-plot",
         metavar="PATH",
         default=None,
-        help="Save a time-series plot to the given PNG path on exit",
+        help="Save a time-series plot to the given PNG path on exit (recv mode only)",
     )
     args = parser.parse_args()
 
@@ -117,15 +145,29 @@ async def run(args: argparse.Namespace) -> None:
     endpoint = runtime.endpoint(f"{args.namespace}.{args.component}.{args.endpoint}")
 
     subscriber = FpmEventSubscriber(endpoint)
-    json_encoder = msgspec.json.Encoder()
 
     logger.info(
         "Subscribed to forward-pass-metrics via event plane "
-        "(namespace=%s, component=%s)  Ctrl+C to stop",
+        "(namespace=%s, component=%s, mode=%s)  Ctrl+C to stop",
         args.namespace,
         args.component,
+        args.mode,
     )
 
+    try:
+        if args.mode == "tracking":
+            await _run_tracking(subscriber, args)
+        else:
+            await _run_recv(subscriber, args)
+    except KeyboardInterrupt:
+        logger.info("Stopped.")
+    finally:
+        subscriber.shutdown()
+
+
+async def _run_recv(subscriber, args: argparse.Namespace) -> None:
+    """Pull individual FPM messages and print each as JSON."""
+    json_encoder = msgspec.json.Encoder()
     history: list[tuple[float, ForwardPassMetrics]] = []
     start_time: float | None = None
 
@@ -154,12 +196,42 @@ async def run(args: argparse.Namespace) -> None:
                 metrics.counter_id,
                 json.dumps(pretty, indent=2),
             )
-    except KeyboardInterrupt:
-        logger.info("Stopped.")
     finally:
-        subscriber.shutdown()
         if args.save_plot and history:
             _save_plot(args.save_plot, history)
+
+
+async def _run_tracking(subscriber, args: argparse.Namespace) -> None:
+    """Poll get_recent_stats() and print the latest snapshot periodically."""
+    json_encoder = msgspec.json.Encoder()
+    subscriber.start_tracking()
+    logger.info("Tracking mode started (poll every %.1fs)", args.poll_interval)
+
+    poll = 0
+    while True:
+        await asyncio.sleep(args.poll_interval)
+        stats = subscriber.get_recent_stats()
+
+        if not stats:
+            logger.info("[poll=%d] (no engines tracked)", poll)
+        else:
+            snapshot = {}
+            for (worker_id, dp_rank), raw_bytes in stats.items():
+                metrics = decode(raw_bytes)
+                if metrics is None:
+                    continue
+                key = f"{worker_id}:dp{dp_rank}"
+                snapshot[key] = json.loads(json_encoder.encode(metrics))
+
+            ts = time.strftime("%H:%M:%S")
+            logger.info(
+                "[poll=%d t=%s engines=%d] %s",
+                poll,
+                ts,
+                len(stats),
+                json.dumps(snapshot, indent=2),
+            )
+        poll += 1
 
 
 if __name__ == "__main__":

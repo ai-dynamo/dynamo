@@ -26,9 +26,9 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
@@ -107,14 +107,16 @@ fn load_test_data(file_path: &str) -> TestData {
             .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: id.clone(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: id.clone(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -231,7 +233,7 @@ fn aggregate_content_from_chunks(
 
     for chunk in chunks.iter() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 // Collect reasoning content
                 if let Some(ref reasoning) = choice.delta.reasoning_content {
                     reasoning_content.push_str(reasoning);
@@ -279,7 +281,7 @@ fn validate_finish_reason(
     // Count finish_reason occurrences and track position
     for (idx, chunk) in chunks.iter().enumerate() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 if let Some(reason) = choice.finish_reason {
                     finish_reason_count += 1;
                     last_chunk_index = Some(idx);

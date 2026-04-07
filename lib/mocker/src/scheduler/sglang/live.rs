@@ -36,7 +36,7 @@ impl SglangScheduler {
     pub fn new(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
@@ -53,7 +53,7 @@ impl SglangScheduler {
     pub(crate) fn new_with_admission(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
@@ -71,7 +71,7 @@ impl SglangScheduler {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
@@ -121,11 +121,12 @@ impl SglangScheduler {
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 }
-                flush_output_signals(&output_tx, &pass.output_signals);
+                let active_decode_blocks = pass.active_decode_blocks;
+                flush_output_signals(&output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
-                    pass.active_decode_blocks,
+                    active_decode_blocks,
                     total_blocks,
                 ));
             }
@@ -182,14 +183,16 @@ async fn receive_requests(
 }
 
 fn flush_output_signals(
-    output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
-    output_signals: &[OutputSignal],
+    output_tx: &Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+    output_signals: Vec<OutputSignal>,
 ) {
     let Some(tx) = output_tx.as_ref() else {
         return;
     };
 
-    for signal in output_signals {
-        let _ = tx.send(signal.clone());
+    if output_signals.is_empty() {
+        return;
     }
+
+    let _ = tx.send(output_signals);
 }

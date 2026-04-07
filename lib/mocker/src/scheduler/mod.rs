@@ -89,6 +89,13 @@ impl EngineCore {
             Self::Sglang(core) => core.execute_pass(collector, now_ms),
         }
     }
+
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        match self {
+            Self::Vllm(core) => core.execute_hidden_pass(now_ms),
+            Self::Sglang(core) => core.execute_hidden_pass(now_ms),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -101,7 +108,7 @@ impl EngineScheduler {
     pub(crate) fn new_with_admission(
         args: crate::common::protocols::MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
