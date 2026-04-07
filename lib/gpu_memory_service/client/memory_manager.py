@@ -432,7 +432,7 @@ class GMSClientMemoryManager:
         """Allocate or import a handle and map to a new VA.
 
         If allocation_id is None (allocate path):
-          allocate_handle -> export_handle -> reserve_va -> map_va
+          allocate_and_export -> reserve_va -> map_va
 
         If allocation_id given (import path, cached):
           Check cache -> get_handle_info -> export_handle -> reserve_va -> map_va
@@ -463,11 +463,22 @@ class GMSClientMemoryManager:
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
-        alloc_id, layout_slot = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
+        response, fd = self._client_rpc.allocate_and_export_info(aligned_size, tag)
+        if int(response.aligned_size) != aligned_size:
+            raise RuntimeError(
+                "GMS allocation alignment mismatch: "
+                f"{aligned_size} vs {response.aligned_size}"
+            )
         va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
+        self.map_va(
+            fd,
+            va,
+            size,
+            response.allocation_id,
+            tag,
+            int(response.layout_slot),
+        )
         return va
 
     def destroy_mapping(self, va: int) -> None:

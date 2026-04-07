@@ -69,6 +69,11 @@ class AllocateRequest(msgspec.Struct, tag="allocate_request"):
     tag: str = "default"
 
 
+class AllocateAndExportRequest(msgspec.Struct, tag="allocate_and_export_request"):
+    size: int
+    tag: str = "default"
+
+
 class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
@@ -205,6 +210,7 @@ Message = Union[
     GetAllocationStateRequest,
     GetAllocationStateResponse,
     AllocateRequest,
+    AllocateAndExportRequest,
     AllocateResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
