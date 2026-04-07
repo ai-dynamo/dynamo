@@ -226,6 +226,19 @@ var kubeEnvelopeFields = map[string]bool{
 	"status":     true,
 }
 
+// nonEnvelopeFields returns all top-level fields from an unstructured map
+// except the Kubernetes envelope (apiVersion, kind, metadata, status).
+func nonEnvelopeFields(obj map[string]interface{}) map[string]interface{} {
+	content := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		if kubeEnvelopeFields[k] {
+			continue
+		}
+		content[k] = v
+	}
+	return content
+}
+
 // getContentFields returns all content fields from an unstructured object,
 // i.e. everything except the Kubernetes envelope (apiVersion, kind, metadata, status).
 // For resources with a "spec" field, it returns the spec directly for
@@ -236,13 +249,7 @@ func getContentFields(u *unstructured.Unstructured) (any, bool) {
 		return spec, true
 	}
 
-	content := make(map[string]interface{})
-	for k, v := range u.Object {
-		if kubeEnvelopeFields[k] {
-			continue
-		}
-		content[k] = v
-	}
+	content := nonEnvelopeFields(u.Object)
 	if len(content) == 0 {
 		return nil, false
 	}
@@ -254,29 +261,26 @@ func CopySpec(source, destination client.Object) error {
 	if err != nil {
 		return err
 	}
-	srcU := &unstructured.Unstructured{Object: sourceMap}
+	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
 
 	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
 	if err != nil {
 		return err
 	}
-	dstU := &unstructured.Unstructured{Object: destMap}
+	destUnstructured := &unstructured.Unstructured{Object: destMap}
 
-	if spec, found, err := unstructured.NestedFieldCopy(srcU.Object, "spec"); err == nil && found {
-		if err := unstructured.SetNestedField(dstU.Object, spec, "spec"); err != nil {
+	if spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec"); err == nil && found {
+		if err := unstructured.SetNestedField(destUnstructured.Object, spec, "spec"); err != nil {
 			return err
 		}
-		return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
+		return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 	}
 
-	for k, v := range srcU.Object {
-		if kubeEnvelopeFields[k] {
-			continue
-		}
-		dstU.Object[k] = v
+	for k, v := range nonEnvelopeFields(sourceUnstructured.Object) {
+		destUnstructured.Object[k] = v
 	}
 
-	return runtime.DefaultUnstructuredConverter.FromUnstructured(dstU.Object, destination)
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 }
 
 func getSpec(obj client.Object) (any, error) {
@@ -284,9 +288,9 @@ func getSpec(obj client.Object) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := &unstructured.Unstructured{Object: sourceMap}
+	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
 
-	content, found := getContentFields(u)
+	content, found := getContentFields(sourceUnstructured)
 	if !found {
 		return nil, nil
 	}
