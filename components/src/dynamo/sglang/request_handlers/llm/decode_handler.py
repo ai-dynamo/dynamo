@@ -115,8 +115,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
-            bootstrap_info: Dict[str, Any] | None = request.get("bootstrap_info")
-        
+            bootstrap_info = request.get("bootstrap_info")
+
             if not bootstrap_info:
                 raise RuntimeError(
                     "bootstrap_info is required for disaggregated decode but was not provided"
@@ -179,7 +179,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            # 'bootstrap_room' parameter may be not None when it is going from the DP-aware health check task.
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,

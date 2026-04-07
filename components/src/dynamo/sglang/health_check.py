@@ -38,7 +38,9 @@ def _get_bos_token_id_from_engine(engine: Optional[sgl.Engine]) -> int:
             if tokenizer:
                 bos_token_id = getattr(tokenizer, "bos_token_id", None)
                 if bos_token_id is not None:
-                    logger.info(f"Using model's BOS token ID for health check: {bos_token_id}")
+                    logger.info(
+                        f"Using model's BOS token ID for health check: {bos_token_id}"
+                    )
                     return int(bos_token_id)
     except Exception as e:
         logger.debug(f"Failed to get BOS token from engine: {e}")
@@ -53,7 +55,9 @@ class SglangHealthCheckPayload(HealthCheckPayload):
     Provides SGLang defaults and inherits environment override support from base class.
     """
 
-    def __init__(self, engine: Optional[sgl.Engine] = None, use_text_input: bool = False) -> None:
+    def __init__(
+        self, engine: Optional[sgl.Engine] = None, use_text_input: bool = False
+    ) -> None:
         """Initialize SGLang health check payload with model-specific BOS token.
 
         Args:
@@ -116,7 +120,9 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         if engine is not None:
             try:
                 inner_tm = engine.tokenizer_manager
-                bootstrap_port = getattr(inner_tm.server_args, "disaggregation_bootstrap_port", 0)
+                bootstrap_port = getattr(
+                    inner_tm.server_args, "disaggregation_bootstrap_port", 0
+                )
             except Exception as e:
                 logger.warning(f"Failed to get bootstrap port from engine: {e}")
 
