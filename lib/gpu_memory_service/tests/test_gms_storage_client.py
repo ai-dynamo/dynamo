@@ -80,6 +80,10 @@ from gpu_memory_service.common.protocol.messages import (  # noqa: E402
 from gpu_memory_service.common.types import GrantedLockType, ServerState  # noqa: E402
 from gpu_memory_service.server.allocations import AllocationInfo  # noqa: E402
 from gpu_memory_service.server.gms import GMS  # noqa: E402
+from gpu_memory_service.server.session import (  # noqa: E402
+    GMSLocalFSM,
+    OperationNotAllowed,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -793,6 +797,16 @@ class TestAllocateAndExportRPC:
         )
         assert got_response == response
         assert got_fd == 123
+
+    def test_allocate_and_export_is_allowed_for_rw_sessions(self):
+        fsm = GMSLocalFSM()
+        rw_conn = SimpleNamespace(mode=GrantedLockType.RW, session_id="rw-session")
+        ro_conn = SimpleNamespace(mode=GrantedLockType.RO, session_id="ro-session")
+
+        fsm.check_operation(AllocateAndExportRequest, rw_conn)
+
+        with pytest.raises(OperationNotAllowed):
+            fsm.check_operation(AllocateAndExportRequest, ro_conn)
 
     def test_create_mapping_allocate_path_uses_fused_rpc(self):
         manager = object.__new__(GMSClientMemoryManager)
