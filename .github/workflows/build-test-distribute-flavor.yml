@@ -153,6 +153,10 @@ on:
         required: false
       HF_TOKEN:
         required: false
+      OTLP_ENDPOINT:
+        required: false
+      OTLP_TOKEN:
+        required: false
 jobs:
   # ============================================================================
   # BUILD
@@ -230,6 +234,16 @@ jobs:
           fresh_builder: ${{ inputs.fresh_builder }}
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
+      - name: Push Build Metrics
+        if: always()
+        uses: ./.github/actions/push-metrics
+        with:
+          otlp-endpoint: ${{ secrets.OTLP_ENDPOINT }}
+          otlp-token: ${{ secrets.OTLP_TOKEN }}
+          framework: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda-version: ${{ inputs.cuda_version }}
+          job-status: ${{ job.status }}
 
 
   # ============================================================================
@@ -248,6 +262,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
+      OTLP_ENDPOINT: ${{ secrets.OTLP_ENDPOINT }}
+      OTLP_TOKEN: ${{ secrets.OTLP_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -348,6 +364,8 @@ jobs:
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
+      OTLP_ENDPOINT: ${{ secrets.OTLP_ENDPOINT }}
+      OTLP_TOKEN: ${{ secrets.OTLP_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
