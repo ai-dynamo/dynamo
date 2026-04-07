@@ -365,7 +365,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.vllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -382,7 +382,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.sglang-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -399,7 +399,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.trtllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
