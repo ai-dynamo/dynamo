@@ -448,20 +448,19 @@ class ActiveOperation(AbstractOperation):
     ) -> None:
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
-        start_time = time.monotonic()
-        iteration_count = 0
+        start = time.monotonic()
         sleep_time = min_poll_ms
         while True:
-            if iteration_count % 10 == 0:
+            elapsed = time.monotonic() - start
+            if int(elapsed) % 10 == 0:
                 logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={time.monotonic() - start_time:.1f}s }}."
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={elapsed:.1f}s }}."
                 )
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
                 case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
                     await asyncio.sleep(sleep_time / 1000)
                     sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
-                    iteration_count += 1
                 # Any other state indicates completion or error.
                 case _:
                     return
