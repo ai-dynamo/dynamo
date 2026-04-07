@@ -410,7 +410,7 @@ class Publisher:
 
         # Publish initial metrics with 0 active blocks
         # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
-        self.metrics_publisher.publish(None, 0)
+        self.metrics_publisher.publish(None, kv_used_blocks=0)
         self.component_gauges.set_total_blocks("0", 0)
         self.component_gauges.set_gpu_cache_usage("0", 0.0)
 
@@ -478,7 +478,7 @@ class Publisher:
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
             # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             assert self.metrics_publisher is not None
-            self.metrics_publisher.publish(None, kv_active_blocks)
+            self.metrics_publisher.publish(None, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
             self.component_gauges.set_total_blocks("0", kv_total_blocks)

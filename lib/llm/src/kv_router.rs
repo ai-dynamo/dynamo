@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use dynamo_kv_router::{
+    PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, RouterEvent, RouterRequest, RouterResponse,
-        TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, PrefillLoadHint, RouterEvent, RouterRequest,
+        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -111,6 +113,7 @@ where
     scheduler: KvScheduler<Sel>,
     block_size: u32,
     kv_router_config: KvRouterConfig,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
     is_eagle: bool,
@@ -128,6 +131,7 @@ where
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
@@ -159,6 +163,7 @@ where
             workers_with_configs.clone(),
             selector,
             &kv_router_config,
+            prefill_load_estimator.clone(),
             worker_type,
         )
         .await?;
@@ -184,6 +189,7 @@ where
             scheduler,
             block_size,
             kv_router_config,
+            prefill_load_estimator,
             cancellation_token,
             client,
             is_eagle,
@@ -345,6 +351,8 @@ where
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
+        let prefill_load_hint =
+            self.prefill_load_hint_for(isl_tokens, overlap_blocks, track_prefill_tokens);
 
         if let Err(e) = self
             .scheduler
@@ -355,6 +363,7 @@ where
                 overlap: overlap_blocks,
                 track_prefill_tokens,
                 expected_output_tokens,
+                prefill_load_hint,
                 worker,
                 lora_name,
             })
@@ -375,6 +384,42 @@ where
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
         self.scheduler.pending_count()
+    }
+
+    fn prefill_load_hint_for(
+        &self,
+        isl_tokens: usize,
+        overlap_blocks: u32,
+        track_prefill_tokens: bool,
+    ) -> Option<PrefillLoadHint> {
+        if !track_prefill_tokens {
+            return None;
+        }
+
+        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let effective_isl = isl_tokens.saturating_sub(prefix);
+        if effective_isl == 0 {
+            return None;
+        }
+
+        let Some(estimator) = &self.prefill_load_estimator else {
+            return None;
+        };
+
+        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: effective_isl,
+                expected_prefill_duration: Some(expected_prefill_duration),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    effective_isl,
+                    prefix,
+                    "failed to predict prefill duration for direct add_request path: {error}"
+                );
+                None
+            }
+        }
     }
 
     /// Get the worker type for this router ("prefill" or "decode").
