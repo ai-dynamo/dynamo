@@ -37,8 +37,8 @@ from .common import (
 
 logger = logging.getLogger(__name__)
 
-# MLA model: DeepSeek V2 Lite with Multi-Latent Attention
-MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite"
+# MLA model: tiny 2-layer DeepSeek R1 with Multi-Latent Attention
+MLA_MODEL = "silence09/DeepSeek-R1-Small-2layers"
 
 # Module availability checks
 HAS_VLLM = check_module_available("vllm")
@@ -307,7 +307,7 @@ def send_mla_completion_request(
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.pre_merge
-@pytest.mark.gpu_1
+@pytest.mark.gpu_4
 @pytest.mark.mla
 @pytest.mark.model(MLA_MODEL)
 @pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
