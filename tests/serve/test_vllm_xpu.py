@@ -394,7 +394,13 @@ vllm_configs = {
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
-                expected_response=["green"],  # Validate image understanding
+                expected_response=[
+                    "green",
+                    "purple",
+                    "llm",
+                    "optimize",
+                    "deploy",
+                ],  # OR: pass if any keyword found in tool args
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )

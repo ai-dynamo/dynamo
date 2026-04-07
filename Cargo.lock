@@ -2018,6 +2018,7 @@ dependencies = [
  "derive_builder",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "indicatif 0.18.4",
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",

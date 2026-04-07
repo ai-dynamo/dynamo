@@ -2014,15 +2014,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Restricted is the namespace to restrict to. Empty = cluster-wide mode. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope holds namespace scope lease settings (namespace-restricted mode only) |  |  |
+| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
+Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
+mode and will be removed in a future release.
 
 
 

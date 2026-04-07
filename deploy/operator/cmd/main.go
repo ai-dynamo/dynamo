@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -262,6 +263,16 @@ func main() {
 			restrictedNamespace: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+
+		banner := strings.Repeat("=", 80)
+		setupLog.Error(nil, banner)
+		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated "+
+			"and will be removed in a future release.")
+		setupLog.Error(nil, "The operator is running in namespace-restricted mode",
+			"namespace", restrictedNamespace)
+		setupLog.Error(nil, "Please migrate to cluster-wide mode "+
+			"by removing the namespaceRestriction configuration.")
+		setupLog.Error(nil, banner)
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}

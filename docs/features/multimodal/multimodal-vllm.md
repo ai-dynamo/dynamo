@@ -109,7 +109,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### E/PD Serving (Encode + PD)
 
-Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments; use `agg_multimodal.sh` or `disagg_multimodal_epd.sh` for general video serving.
+Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
+
+<Warning>
+When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
+</Warning>
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
@@ -124,7 +128,11 @@ bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single
 
 ### E/P/D Serving (Full Disaggregation)
 
-Use the full disaggregated launcher when you want separate encode, prefill, and decode workers for image/video workloads:
+Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
+
+<Warning>
+In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
+</Warning>
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm

@@ -94,7 +94,9 @@ pub async fn prepare_engine(
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic {
-            model: local_model, ..
+            model: local_model,
+            prefill_load_estimator,
+            ..
         } => {
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
@@ -105,6 +107,7 @@ pub async fn prepare_engine(
                 RouterConfig::default(),
                 local_model.migration_limit(),
                 None,
+                prefill_load_estimator,
                 metrics,
             ));
             let discovery = distributed_runtime.discovery();
