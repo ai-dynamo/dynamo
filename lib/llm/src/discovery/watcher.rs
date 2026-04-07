@@ -4,9 +4,10 @@
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
+use tokio::task::JoinHandle;
 
 use anyhow::Context as _;
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use dynamo_kv_router::PrefillLoadEstimator;
 use futures::StreamExt;
 
@@ -79,6 +80,9 @@ pub struct ModelWatcher {
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
+    /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
+    /// can await a racing put before proceeding with cleanup.
+    pending_puts: DashMap<String, JoinHandle<()>>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -134,6 +138,7 @@ impl ModelWatcher {
             prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
+            pending_puts: DashMap::new(),
         }
     }
 
@@ -244,8 +249,15 @@ impl ModelWatcher {
                     // Spawn each handle_put into its own task so that a slow
                     // HuggingFace config download for one model cannot block
                     // discovery events for all subsequent models.
+                    //
+                    // The JoinHandle is stored in `pending_puts` so that a
+                    // subsequent `handle_delete` for the same instance can
+                    // await the in-flight put before attempting cleanup.
+                    let instance_key = mcid.to_path();
                     let watcher = Arc::clone(&self);
-                    tokio::spawn(async move {
+                    let pending_puts = Arc::clone(&self).pending_puts.clone();
+                    let key_for_cleanup = instance_key.clone();
+                    let handle = tokio::spawn(async move {
                         match watcher.handle_put(&mcid, &mut card).await {
                             Ok(()) => {
                                 tracing::info!(
@@ -264,7 +276,10 @@ impl ModelWatcher {
                                 );
                             }
                         }
+                        // Remove ourselves from pending_puts once complete
+                        pending_puts.remove(&key_for_cleanup);
                     });
+                    self.pending_puts.insert(instance_key, handle);
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
@@ -305,6 +320,17 @@ impl ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
+
+        // If there is an in-flight handle_put for this instance, wait for it
+        // to complete before we attempt cleanup. Without this, a Removed event
+        // arriving while handle_put is still downloading HF config would fail
+        // to find the model card, leaving a stale registration.
+        if let Some((_, handle)) = self.pending_puts.remove(&key) {
+            tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
+            // Ignore join errors (panic in the spawned task) — we still proceed
+            // with cleanup since the put may have partially registered the model.
+            let _ = handle.await;
+        }
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
