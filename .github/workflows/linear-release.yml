@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Linear Release Sync
+
+on:
+  push:
+    # Stable release branches/tags only. Prerelease forms (e.g.
+    # release/1.3.0-dev.1, v1.3.0-dev.1) are intentionally excluded: the tag
+    # filter cannot match them, so syncing the branch would leave a Linear
+    # release that the `complete` path never closes.
+    branches:
+      - 'release/[0-9]+.[0-9]+.[0-9]+'
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Linear Release command (sync or complete)'
+        required: true
+        type: choice
+        options:
+          - complete
+          - sync
+      version:
+        description: 'Release version (e.g., 1.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # First-time bootstrap: Linear's `complete` targets an *existing* release, so
+  # seed it first. Run this workflow manually once with command=sync and the
+  # latest shipped version to create the Linear release, then run it again with
+  # command=complete to set the baseline. After that, release-branch and tag
+  # pushes drive sync/complete automatically.
+  linear-release:
+    name: Linear Release Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine command and version
+        id: params
+        # User-controlled workflow_dispatch inputs are passed via env (not
+        # inlined as ${{ }}) to avoid shell injection. GITHUB_* are runner-set.
+        env:
+          INPUT_COMMAND: ${{ inputs.command }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid version '$INPUT_VERSION'; expected MAJOR.MINOR.PATCH (e.g. 1.0.1)"
+              exit 1
+            fi
+            COMMAND="$INPUT_COMMAND"
+            VERSION="$INPUT_VERSION"
+          elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
+            COMMAND="sync"
+            VERSION="${GITHUB_REF_NAME#release/}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            COMMAND="complete"
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            echo "::error::Unsupported trigger ref: $GITHUB_REF"
+            exit 1
+          fi
+          {
+            echo "command=${COMMAND}"
+            echo "version=${VERSION}"
+            echo "name=Dynamo v${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Linear Release
+        # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
+        # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
+        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f # v0.14.5
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: ${{ steps.params.outputs.command }}
+          version: ${{ steps.params.outputs.version }}
+          name: ${{ steps.params.outputs.name }}
