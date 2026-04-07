@@ -195,6 +195,8 @@ class LLMServerManager:
         self.env["VLLM_SERVER_DEV_MODE"] = "1"
         if model_config.batch_invariant:
             self.env["VLLM_BATCH_INVARIANT"] = "1"
+        else:
+            self.env.pop("VLLM_BATCH_INVARIANT", None)
 
         self.server_cmd = [
             "vllm",

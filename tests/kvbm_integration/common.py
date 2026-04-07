@@ -737,7 +737,7 @@ class TestDeterminism:
 
         model = llm_server.model_config.model_id
         # NOTE: with large models (e.g. DeepSeek-V2-Lite), vllm bench decodes all
-        # prompts through the tokenizer before sending requests.  2000 × 4000-token
+        # prompts through the tokenizer before sending requests.  2000 x 4000-token
         # prompts take ~160s to decode, exceeding KVBM_BENCH_STARTUP_WAIT (120s).
         # Reduce via KVBM_BENCH_NUM_PROMPTS / KVBM_BENCH_INPUT_LEN if needed.
         num_prompts = int(os.environ.get("KVBM_BENCH_NUM_PROMPTS", "2000"))
@@ -767,8 +767,10 @@ class TestDeterminism:
         ]
 
         print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
-        bench_log = os.path.join(tempfile.gettempdir(), "vllm_bench_semantic.log")
-        bench_file = open(bench_log, "w")
+        bench_fd, bench_log = tempfile.mkstemp(
+            suffix=".log", prefix="vllm_bench_semantic_"
+        )
+        bench_file = os.fdopen(bench_fd, "w")
         bench_process = subprocess.Popen(
             bench_cmd,
             stdout=bench_file,
