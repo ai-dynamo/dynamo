@@ -67,7 +67,9 @@ def _make_default_payload(
 
     parallel_config = {"dp_size": 1}
     if engine_client is not None:
-        parallel_config["dp_size"] = engine_client.vllm_config.parallel_config.data_parallel_size
+        parallel_config[
+            "dp_size"
+        ] = engine_client.vllm_config.parallel_config.data_parallel_size
 
     if use_text_input:
         return {

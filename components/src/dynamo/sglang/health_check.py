@@ -77,7 +77,9 @@ class SglangHealthCheckPayload(HealthCheckPayload):
             },
             "eos_token_ids": [],
             "annotations": [],
-            "dp_size": getattr(engine.server_args, "dp_size", 1) if engine is not None else 1,
+            "dp_size": getattr(engine.server_args, "dp_size", 1)
+            if engine is not None
+            else 1,
         }
 
         if use_text_input:
@@ -149,7 +151,9 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
             },
             "eos_token_ids": [],
             "annotations": [],
-            "dp_size": getattr(engine.server_args, "dp_size", 1) if engine is not None else 1,
+            "dp_size": getattr(engine.server_args, "dp_size", 1)
+            if engine is not None
+            else 1,
         }
 
         if use_text_input:
