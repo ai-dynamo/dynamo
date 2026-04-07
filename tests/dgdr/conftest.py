@@ -28,8 +28,8 @@ DGDR_KIND = "DynamoGraphDeploymentRequest"
 DGDR_SHORT_NAME = "dgdr"
 
 # Default timeout values (seconds)
-DEFAULT_PROFILING_TIMEOUT = 3600   # 1h for rapid, up to 4h for thorough
-DEFAULT_DEPLOY_TIMEOUT = 600       # 10 minutes for DGD rollout
+DEFAULT_PROFILING_TIMEOUT = 3600  # 1h for rapid, up to 4h for thorough
+DEFAULT_DEPLOY_TIMEOUT = 600  # 10 minutes for DGD rollout
 
 # Label applied to all test-managed DGDRs so they can be bulk-deleted on cleanup
 DGDR_TEST_LABEL_KEY = "test.dynamo/managed"
@@ -177,7 +177,9 @@ def dgdr_test_label_selector(dgdr_test_label: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def managed_dgdr(dgdr_namespace: str, _dgdr_event_loop: asyncio.AbstractEventLoop) -> Generator[ManagedDGDR, None, None]:
+def managed_dgdr(
+    dgdr_namespace: str, _dgdr_event_loop: asyncio.AbstractEventLoop
+) -> Generator[ManagedDGDR, None, None]:
     """Session-scoped async K8s client for DGDR operations."""
     mgr = ManagedDGDR(namespace=dgdr_namespace, loop=_dgdr_event_loop)
     mgr.run(mgr.init())
@@ -246,7 +248,9 @@ def _inject_mocker_config(manifest: Dict[str, Any]) -> None:
                 spec["hardware"],
             )
 
-    logger.info("Mocker mode enabled for DGDR %s", manifest.get("metadata", {}).get("name", "?"))
+    logger.info(
+        "Mocker mode enabled for DGDR %s", manifest.get("metadata", {}).get("name", "?")
+    )
 
 
 async def _cleanup_mocker_dgd(mgr: ManagedDGDR) -> None:
@@ -261,7 +265,11 @@ async def _cleanup_mocker_dgd(mgr: ManagedDGDR) -> None:
     """
     obj = await mgr.get_dgd(MOCKER_DGD_NAME)
     if obj is not None:
-        logger.info("Deleting shared mocker DGD %s/%s to prevent state pollution", mgr.namespace, MOCKER_DGD_NAME)
+        logger.info(
+            "Deleting shared mocker DGD %s/%s to prevent state pollution",
+            mgr.namespace,
+            MOCKER_DGD_NAME,
+        )
         await mgr.delete_dgd(MOCKER_DGD_NAME)
 
 
@@ -270,7 +278,9 @@ async def _cleanup_mocker_dgd(mgr: ManagedDGDR) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_kubectl(args: List[str], check: bool = True, input: Optional[str] = None) -> subprocess.CompletedProcess:
+def _run_kubectl(
+    args: List[str], check: bool = True, input: Optional[str] = None
+) -> subprocess.CompletedProcess:
     """Run a kubectl command, returning the CompletedProcess.
 
     This is intentionally kept for the small number of tests that validate
@@ -409,11 +419,15 @@ def dgdr_factory(
 
     def _cleanup_all_test_dgdrs() -> None:
         """Delete all DGDRs bearing the test-managed label (handles orphans from prior runs)."""
-        items = managed_dgdr.run(managed_dgdr.list(label_selector=dgdr_test_label_selector))
+        items = managed_dgdr.run(
+            managed_dgdr.list(label_selector=dgdr_test_label_selector)
+        )
         for item in items:
             item_name = item.get("metadata", {}).get("name", "")
             if item_name:
-                logger.info("Cleaning up test-managed DGDR %s/%s", dgdr_namespace, item_name)
+                logger.info(
+                    "Cleaning up test-managed DGDR %s/%s", dgdr_namespace, item_name
+                )
                 managed_dgdr.run(managed_dgdr.delete(item_name))
 
     # Pre-test: remove any orphaned DGDRs left by previously interrupted runs.
@@ -508,7 +522,8 @@ def deployed_dgdr(
         target_phase = PHASE_READY if dgdr_use_mocker else PHASE_DEPLOYED
         managed_dgdr.run(
             managed_dgdr.wait_for_phase(
-                name, target_phase,
+                name,
+                target_phase,
                 timeout=dgdr_profiling_timeout + dgdr_deploy_timeout,
             )
         )

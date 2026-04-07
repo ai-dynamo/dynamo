@@ -1207,7 +1207,11 @@ class ManagedDGDR:
 
     DEFAULT_POLL_INTERVAL = 10  # seconds
 
-    def __init__(self, namespace: str = "default", loop: Optional[asyncio.AbstractEventLoop] = None):
+    def __init__(
+        self,
+        namespace: str = "default",
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
         self.namespace = namespace
         self._custom_api: Optional[client.CustomObjectsApi] = None
         self._api_client: Optional[client.ApiClient] = None
@@ -1221,7 +1225,9 @@ class ManagedDGDR:
         fixtures and synchronous test methods).
         """
         if self._loop is None:
-            raise RuntimeError("No event loop set on ManagedDGDR; pass loop= at construction or call init() first")
+            raise RuntimeError(
+                "No event loop set on ManagedDGDR; pass loop= at construction or call init() first"
+            )
         return self._loop.run_until_complete(coro)
 
     async def init(self) -> None:
@@ -1242,7 +1248,8 @@ class ManagedDGDR:
             except Exception as e:
                 self._logger.warning(
                     "In-cluster config failed (%s: %s), falling back to default kubeconfig",
-                    type(e).__name__, e,
+                    type(e).__name__,
+                    e,
                 )
                 await config.load_kube_config()
 
