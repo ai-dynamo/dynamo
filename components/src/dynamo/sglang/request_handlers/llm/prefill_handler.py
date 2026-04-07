@@ -160,7 +160,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
-        await task
+        # Fire-and-forget: don't await task to allow prefill pipelining.
+        # _consume_tasks set handles lifecycle; errors logged via callback.
+        task.add_done_callback(
+            lambda t: None
+            if t.cancelled() or t.exception() is None
+            else logger.error("consume_results failed: %s", t.exception())
+        )
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
