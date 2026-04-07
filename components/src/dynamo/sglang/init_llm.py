@@ -13,7 +13,6 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
-from dynamo.sglang._compat import SamplingParams
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -34,11 +33,11 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     logging.info("Start of prefill disaggregation warmup ...")
     from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_new_tokens=8,
-        ignore_eos=True,
-    )
+    sampling_params = {
+        "temperature": 0.0,
+        "max_new_tokens": 8,
+        "ignore_eos": True,
+    }
 
     async def _do_warmup():
         results = await engine.async_generate(
