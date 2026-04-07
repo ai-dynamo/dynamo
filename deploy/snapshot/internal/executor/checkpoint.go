@@ -36,11 +36,11 @@ type CheckpointRequest struct {
 }
 
 type checkpointPhaseTimings struct {
-	PrepareDuration         time.Duration
-	CUDADuration            time.Duration
-	CRIUDumpDuration        time.Duration
-	ArtifactCaptureDuration time.Duration
-	PublishDuration         time.Duration
+	PrepareDuration        time.Duration
+	CUDADuration           time.Duration
+	CRIUDumpDuration       time.Duration
+	OverlayCaptureDuration time.Duration
+	FinalizeDuration       time.Duration
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -94,28 +94,29 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	}
 	phaseTimings.CUDADuration = captureTimings.CUDADuration
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
-	phaseTimings.ArtifactCaptureDuration = captureTimings.ArtifactCaptureDuration
+	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Remove any previous checkpoint with the same identity hash before finalizing
-	publishStart := time.Now()
+	// Remove any previous checkpoint with the same identity hash, then
+	// promote the staged checkpoint directory into place.
+	finalizeStart := time.Now()
 	if err := os.RemoveAll(finalDir); err != nil {
 		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
-	phaseTimings.PublishDuration = time.Since(publishStart)
+	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
 	totalDuration := time.Since(checkpointStart)
 	log.Info("Checkpoint timing summary",
 		"checkpoint", map[string]any{
 			"duration": totalDuration.String(),
 			"phases": map[string]string{
-				"prepare_duration":          phaseTimings.PrepareDuration.String(),
-				"cuda_duration":             phaseTimings.CUDADuration.String(),
-				"criu_dump_duration":        phaseTimings.CRIUDumpDuration.String(),
-				"artifact_capture_duration": phaseTimings.ArtifactCaptureDuration.String(),
-				"publish_duration":          phaseTimings.PublishDuration.String(),
+				"prepare_duration":         phaseTimings.PrepareDuration.String(),
+				"cuda_duration":            phaseTimings.CUDADuration.String(),
+				"criu_dump_duration":       phaseTimings.CRIUDumpDuration.String(),
+				"overlay_capture_duration": phaseTimings.OverlayCaptureDuration.String(),
+				"finalize_duration":        phaseTimings.FinalizeDuration.String(),
 			},
 		},
 	)
@@ -271,14 +272,14 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// propagated — a checkpoint without overlay diffs is still valid for restore
 	// (the base container image provides the filesystem).
 	if state.UpperDir != "" {
-		artifactCaptureStart := time.Now()
+		overlayCaptureStart := time.Now()
 		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
 			log.Error(err, "Failed to capture rootfs diff")
 		}
 		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
 			log.Error(err, "Failed to capture deleted files")
 		}
-		timings.ArtifactCaptureDuration = time.Since(artifactCaptureStart)
+		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
 
 	return timings, nil
