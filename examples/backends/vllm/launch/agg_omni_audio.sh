@@ -46,6 +46,9 @@ FRONTEND_PID=$!
 sleep 2
 
 echo "Starting Omni Audio worker..."
+# Upstream qwen3_tts stage configs still use a 65536 stage-1 max_model_len.
+# vLLM 0.19 validates that against the model config unless we opt in here.
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \

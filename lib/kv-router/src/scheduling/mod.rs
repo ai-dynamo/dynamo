@@ -4,9 +4,11 @@
 pub mod config;
 mod local;
 pub mod policy;
+pub mod prefill_load;
 pub mod queue;
 pub mod selector;
 
 mod types;
 pub use local::LocalScheduler;
+pub use prefill_load::PrefillLoadEstimator;
 pub use types::*;

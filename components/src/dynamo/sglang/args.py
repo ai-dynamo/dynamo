@@ -24,6 +24,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -374,12 +375,10 @@ async def parse_args(args: list[str]) -> Config:
         )
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens.
-    # sglang renamed stream_output -> incremental_streaming_output in PR #20614.
-    if hasattr(ServerArgs, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
-    else:
-        server_args.stream_output = True
+    # tokens since last output), not cumulative tokens. Modern SGLang gates this
+    # behavior behind incremental_streaming_output, while older releases used
+    # stream_output.
+    enable_disjoint_streaming_output(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(

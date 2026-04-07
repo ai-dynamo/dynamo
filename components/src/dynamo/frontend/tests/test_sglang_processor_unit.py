@@ -29,6 +29,14 @@ from dynamo.frontend.sglang_processor import (
 )
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
 
+# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 MODEL = "Qwen/Qwen3-0.6B"
 
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream};
-use crate::error::{BackendError, ErrorType, match_error_chain};
+use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 
 /// Check if an error chain indicates the worker should be reported as down.
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
@@ -518,10 +518,15 @@ where
                         total_workers = all_instances.len(),
                         "Rejecting request: all workers are busy"
                     );
-                    return Err(PipelineError::ServiceOverloaded(
+                    let cause = PipelineError::ServiceOverloaded(
                         "All workers are busy, please retry later".to_string(),
-                    )
-                    .into());
+                    );
+                    return Err(DynamoError::builder()
+                        .error_type(ErrorType::ResourceExhausted)
+                        .message("All workers are busy, please retry later")
+                        .cause(cause)
+                        .build()
+                        .into());
                 }
             }
         }
