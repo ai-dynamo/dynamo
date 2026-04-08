@@ -27,6 +27,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_prefill_load_model",
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
@@ -34,9 +35,9 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
-    "router_enable_cache_control",
     "router_queue_policy",
-    "remote_indexer_component",
+    "use_remote_indexer",
+    "serve_indexer",
 )
 
 
@@ -52,6 +53,7 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_prefill_load_model: str
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
@@ -59,9 +61,9 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
-    router_enable_cache_control: bool
     router_queue_policy: str
-    remote_indexer_component: Optional[str]
+    use_remote_indexer: bool = False
+    serve_indexer: bool = False
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -187,6 +189,18 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-prefill-load-model",
+            env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
+            default="none",
+            choices=["none", "aic"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
+                "'none' keeps static prompt load accounting. "
+                "'aic' decays the oldest active prefill request using AIC-predicted duration."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--router-snapshot-threshold",
             env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
             default=1000000,
@@ -244,7 +258,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be > 0."
+                "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
+                "queueing sensitivity (queue as soon as any tokens are active)."
             ),
             arg_type=float,
         )
@@ -260,18 +275,6 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=int,
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--enable-cache-control",
-            env_var="DYN_ENABLE_CACHE_CONTROL",
-            default=False,
-            dest="router_enable_cache_control",
-            help=(
-                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
-                "a cache_control service mesh client and fires pin_prefix after generation for "
-                "requests with nvext.cache_control."
-            ),
-        )
         add_argument(
             g,
             flag_name="--router-queue-policy",
@@ -285,15 +288,14 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=str,
             choices=["fcfs", "wspt"],
         )
-        add_argument(
+        add_negatable_bool_argument(
             g,
-            flag_name="--remote-indexer-component",
-            env_var="DYN_REMOTE_INDEXER_COMPONENT",
-            default=None,
+            flag_name="--use-remote-indexer",
+            env_var="DYN_USE_REMOTE_INDEXER",
+            default=False,
             help=(
-                "[EXPERIMENTAL] KV Router: Component name of a standalone KV indexer to use for overlap scoring. "
-                "When set, the router queries the standalone indexer via the request plane instead "
-                "of maintaining a local radix tree (e.g. 'kv-indexer')."
+                "[EXPERIMENTAL] KV Router: Query a remote KV indexer served from the worker "
+                "component via the request plane instead of maintaining a local radix tree."
             ),
-            arg_type=str,
+            dest="use_remote_indexer",
         )

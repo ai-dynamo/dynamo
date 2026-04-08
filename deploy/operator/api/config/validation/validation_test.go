@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -31,7 +32,10 @@ func validConfig() *configv1alpha1.OperatorConfiguration {
 	configv1alpha1.SetDefaultsOperatorConfiguration(cfg)
 	cfg.MPI.SSHSecretName = "mpi-ssh"
 	cfg.MPI.SSHSecretNamespace = "default"
+	// Cluster-wide validation requires chart-provided RBAC names.
 	cfg.RBAC.PlannerClusterRoleName = "planner-role"
+	cfg.RBAC.DGDRProfilingClusterRoleName = "dgdr-profiling-role"
+	cfg.RBAC.EPPClusterRoleName = "epp-role"
 	return cfg
 }
 
@@ -41,6 +45,8 @@ func validNamespaceScopedConfig() *configv1alpha1.OperatorConfiguration {
 	cfg.Namespace.Restricted = "my-namespace"
 	// RBAC not required in namespace mode
 	cfg.RBAC.PlannerClusterRoleName = ""
+	cfg.RBAC.DGDRProfilingClusterRoleName = ""
+	cfg.RBAC.EPPClusterRoleName = ""
 	return cfg
 }
 
@@ -120,45 +126,42 @@ func TestValidateOperatorConfiguration_NamespaceScopedLeaseRenewExceedsDuration(
 	}
 }
 
-func TestValidateOperatorConfiguration_CheckpointS3MissingURI(t *testing.T) {
+func TestValidateOperatorConfiguration_CheckpointEnabledRequiresNoStorageConfig(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeS3
-	cfg.Checkpoint.Storage.S3.URI = ""
 
 	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for missing S3 URI, got %d: %v", len(errs), errs)
+	if len(errs) != 0 {
+		t.Errorf("expected no errors for checkpoint config without storage settings, got: %v", errs)
 	}
 }
 
-func TestValidateOperatorConfiguration_CheckpointOCIMissingURI(t *testing.T) {
+func TestValidateOperatorConfiguration_CheckpointDeprecatedStorageConfigIsAccepted(t *testing.T) {
 	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = configv1alpha1.CheckpointStorageTypeOCI
-	cfg.Checkpoint.Storage.OCI.URI = ""
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for missing OCI URI, got %d: %v", len(errs), errs)
+	rawConfig := []byte(`{
+		"checkpoint": {
+			"enabled": true,
+			"storage": {
+				"type": "s3",
+				"s3": {
+					"uri": "s3://legacy-bucket/checkpoints"
+				}
+			}
+		}
+	}`)
+	if err := json.Unmarshal(rawConfig, cfg); err != nil {
+		t.Fatalf("failed to unmarshal compatibility config: %v", err)
 	}
-}
-
-func TestValidateOperatorConfiguration_CheckpointInvalidStorageType(t *testing.T) {
-	cfg := validConfig()
-	cfg.Checkpoint.Enabled = true
-	cfg.Checkpoint.Storage.Type = "nfs"
 
 	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for invalid storage type, got %d: %v", len(errs), errs)
+	if len(errs) != 0 {
+		t.Errorf("expected no errors for deprecated checkpoint storage config, got: %v", errs)
 	}
 }
 
 func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *testing.T) {
 	cfg := validConfig()
 	cfg.Checkpoint.Enabled = false
-	cfg.Checkpoint.Storage.Type = "invalid"
 
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 0 {

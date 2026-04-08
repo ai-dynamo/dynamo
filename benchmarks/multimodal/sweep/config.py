@@ -22,10 +22,15 @@ class BenchmarkConfig:
 
 @dataclass
 class SweepConfig:
-    """Top-level sweep configuration loaded from YAML with optional CLI overrides."""
+    """Top-level sweep configuration loaded from YAML with optional CLI overrides.
+
+    Exactly one of ``request_rates`` or ``concurrencies`` must be set.
+    The active mode is exposed via ``sweep_mode`` and ``sweep_values``.
+    """
 
     model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    concurrencies: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16, 32])
+    request_rates: Optional[List[int]] = None
+    concurrencies: Optional[List[int]] = None
     osl: int = 150
     request_count: int = 1000
     warmup_count: int = 5
@@ -37,6 +42,20 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def sweep_mode(self) -> str:
+        """Return ``'request_rate'`` or ``'concurrency'``."""
+        if self.concurrencies:
+            return "concurrency"
+        return "request_rate"
+
+    @property
+    def sweep_values(self) -> List[int]:
+        """Return the active sweep values (request_rates or concurrencies)."""
+        if self.concurrencies:
+            return self.concurrencies
+        return self.request_rates or []
 
     def validate(self, repo_root: Optional[Path] = None) -> None:
         """Validate that all referenced files and scripts exist."""
@@ -58,8 +77,17 @@ class SweepConfig:
                     f"Workflow script not found: {script} (config '{cfg.label}')"
                 )
 
-        if not self.concurrencies:
-            raise ValueError("At least one concurrency level is required.")
+        if self.request_rates and self.concurrencies:
+            raise ValueError(
+                "Cannot set both request_rates and concurrencies. Pick one."
+            )
+        if not self.request_rates and not self.concurrencies:
+            raise ValueError(
+                "At least one of request_rates or concurrencies is required."
+            )
+
+
+_DEFAULT_REQUEST_RATES: List[int] = [4, 8, 16, 32, 64]
 
 
 def _parse_benchmark_config(raw: Dict[str, Any]) -> BenchmarkConfig:
@@ -78,25 +106,36 @@ def load_config(
     with open(yaml_path) as f:
         raw = yaml.safe_load(f)
 
-    defaults = SweepConfig()
     configs = [_parse_benchmark_config(c) for c in raw.get("configs", [])]
 
+    # Resolve sweep mode from YAML — support both keys, default to request_rates.
+    yaml_request_rates = raw.get("request_rates")
+    yaml_concurrencies = raw.get("concurrencies")
+
+    if yaml_request_rates and yaml_concurrencies:
+        raise ValueError(
+            f"YAML config {yaml_path} sets both request_rates and concurrencies. "
+            "Pick one."
+        )
+
+    # Default to request_rates if neither is specified.
+    if not yaml_request_rates and not yaml_concurrencies:
+        yaml_request_rates = _DEFAULT_REQUEST_RATES
+
     cfg = SweepConfig(
-        model=raw.get("model", defaults.model),
-        concurrencies=raw.get("concurrencies", defaults.concurrencies),
-        osl=raw.get("osl", defaults.osl),
-        request_count=raw.get("request_count", defaults.request_count),
-        warmup_count=raw.get("warmup_count", defaults.warmup_count),
-        port=raw.get("port", defaults.port),
-        timeout=raw.get("timeout", defaults.timeout),
+        model=raw.get("model", "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"),
+        request_rates=yaml_request_rates,
+        concurrencies=yaml_concurrencies,
+        osl=raw.get("osl", 150),
+        request_count=raw.get("request_count", 1000),
+        warmup_count=raw.get("warmup_count", 5),
+        port=raw.get("port", 8000),
+        timeout=raw.get("timeout", 600),
         input_files=raw.get("input_files", []),
         configs=configs,
-        output_dir=raw.get("output_dir", defaults.output_dir),
+        output_dir=raw.get("output_dir", "benchmarks/results/multimodal_default"),
         skip_plots=raw.get("skip_plots", False),
-        restart_server_every_benchmark=raw.get(
-            "restart_server_every_benchmark",
-            defaults.restart_server_every_benchmark,
-        ),
+        restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
     )
 
@@ -106,6 +145,18 @@ def load_config(
                 continue
             if hasattr(cfg, key):
                 setattr(cfg, key, value)
+
+        # CLI sweep mode override clears the other (mutually exclusive) field.
+        if (
+            "request_rates" in cli_overrides
+            and cli_overrides["request_rates"] is not None
+        ):
+            cfg.concurrencies = None
+        elif (
+            "concurrencies" in cli_overrides
+            and cli_overrides["concurrencies"] is not None
+        ):
+            cfg.request_rates = None
 
     return cfg
 

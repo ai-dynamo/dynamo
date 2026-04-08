@@ -9,7 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Parse command line arguments
@@ -54,7 +54,7 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
@@ -84,9 +84,9 @@ python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
 OTEL_SERVICE_NAME=dynamo-worker-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER2:-8082} \
@@ -96,9 +96,9 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
