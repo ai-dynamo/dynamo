@@ -277,6 +277,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
     ) -> int:
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
+        max_tokens: int | None = None
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -289,12 +290,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
                         match = re.search(r"paged KV cache \((\d+)\)", line)
                         if match:
                             max_tokens = int(match.group(1))
-                            logger.info(
-                                f"Found TRT-LLM KV cache max tokens: {max_tokens}"
-                            )
-                            return max_tokens
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
+
+        if max_tokens is not None:
+            logger.info(f"Found TRT-LLM KV cache max tokens: {max_tokens}")
+            return max_tokens
 
         # Return a reasonable default if we couldn't find the KV cache size in logs
         logger.warning(
