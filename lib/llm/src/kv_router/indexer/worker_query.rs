@@ -756,35 +756,27 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
         };
 
         // Process the query with slow operation logging
-        let slow_query_token = tokio_util::sync::CancellationToken::new();
-        {
-            let token = slow_query_token.clone();
-            let worker_id = self.worker_id;
-            tokio::spawn(async move {
-                let mut elapsed_secs = 0u64;
-                loop {
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                            elapsed_secs += 5;
-                            tracing::warn!(
-                                worker_id,
-                                elapsed_secs,
-                                "Worker KV query still running after {}s - possible slow tree dump",
-                                elapsed_secs
-                            );
-                        }
-                    }
-                }
-            });
-        }
+        let worker_id = self.worker_id;
+        let slow_query_handle = tokio::spawn(async move {
+            let mut elapsed_secs = 0u64;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                elapsed_secs += 5;
+                tracing::warn!(
+                    worker_id,
+                    elapsed_secs,
+                    "Worker KV query still running after {}s - possible slow tree dump",
+                    elapsed_secs
+                );
+            }
+        });
 
         let response = self
             .local_indexer
             .get_events_in_id_range(request.start_event_id, request.end_event_id)
             .await;
 
-        slow_query_token.cancel();
+        slow_query_handle.abort();
 
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![response])),
