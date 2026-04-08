@@ -10,8 +10,7 @@ mod integration {
 
     use crate::core::{
         BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport, NoMetadata,
-        OffloadStatus, QueryType, Registry, RegistryCodec, RegistryTransport, ResponseType,
-        Storage, client, hub,
+        OffloadStatus, QueryType, Registry, RegistryCodec, ResponseType, Storage, client, hub,
     };
 
     /// Full end-to-end test: Client <-> Hub using in-process transport.
