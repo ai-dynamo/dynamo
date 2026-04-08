@@ -80,13 +80,6 @@ Standardize on:
   finish reasons.
 - `logger.error` only for unrecoverable failures.
 
-## What Does NOT Belong Here
-
-- Engine-specific sampling param classes (keep in each engine module)
-- Disaggregated serving, multimodal, LoRA, diffusion (added by engine leads)
-- Metrics/Prometheus setup (will be added to `DynamoPythonBackendModel` later)
-- Health check payloads, sleep/wake engine routes (engine-specific, added later)
-
 ## Key Files
 
 | File | What it does |
