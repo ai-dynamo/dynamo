@@ -650,7 +650,10 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     local_indexer: Arc<LocalKvIndexer>,
 ) {
     // Register metrics for this worker
-    if let Err(e) = WorkerQueryMetrics::register(&component.get_metrics_registry().get_prometheus_registry(), worker_id) {
+    if let Err(e) = WorkerQueryMetrics::register(
+        &component.get_metrics_registry().get_prometheus_registry(),
+        worker_id,
+    ) {
         tracing::warn!("Failed to register worker query metrics: {e}");
     }
     let metrics = WorkerQueryMetrics::get();
