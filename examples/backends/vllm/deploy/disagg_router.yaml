@@ -12,13 +12,12 @@ spec:
       replicas: 1
       resources:
         requests:
+          memory: "512Mi"
           custom:
-            memory: "512Mi"
             # Prevents eviction under node disk pressure (request=0 pods are evicted first)
             ephemeral-storage: "100Mi"
         limits:
-          custom:
-            memory: "1Gi"
+          memory: "1Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
