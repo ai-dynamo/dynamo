@@ -63,7 +63,8 @@ const (
 // --- Normalization helpers ---
 const (
 	strDash  = "-"
-	strSpace = ""
+	strSpace = " "
+	strNone  = "none"
 )
 
 // --- Form factor tokens ---
@@ -109,6 +110,40 @@ var gcpMachineSeries = []string{
 	"g2-", // L4 GPU machines
 }
 
+type gpuRule struct {
+	token     string
+	sxmSKU    nvidiacomv1beta1.GPUSKUType
+	pcieSKU   nvidiacomv1beta1.GPUSKUType
+	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+}
+
+var gpuRules = []gpuRule{
+	// Blackwell
+	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
+
+	// Hopper
+	{token: tokenH200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeH200SXM},
+	{token: tokenH100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeH100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeH100PCIe},
+
+	// Ampere
+	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+
+	// Ada
+	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
+	{token: tokenL40, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40},
+	{token: tokenL4, singleSKU: nvidiacomv1beta1.GPUSKUTypeL4},
+
+	// Volta / Turing
+	{token: tokenV100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeV100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeV100PCIe},
+	{token: tokenT4, singleSKU: nvidiacomv1beta1.GPUSKUTypeT4},
+
+	// AMD
+	{token: tokenMI300, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI300},
+	{token: tokenMI250, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI200},
+	{token: tokenMI200, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI200},
+}
+
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
 	NodeName         string                      // Name of the node with this GPU configuration
@@ -119,13 +154,14 @@ type GPUInfo struct {
 	System           nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
 	MIGEnabled       bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
 	MIGProfiles      map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
-	CloudProvider    string                      // NEW: aws | gcp | aks | other | unknown
-	RDMAEnabled      bool
-	RDMAType         string // "infiniband", "roce", "rdma", "sriov", "none"
-	Interconnect     string // "nvlink", "pcie"
-	InterconnectTier string
-	NVLinkLinks      int
+	CloudProvider    string                      // aws | gcp | aks | other | unknown
+	RDMAEnabled      bool                        // Indicates whether RDMA is enabled for this node (e.g., via InfiniBand, RoCE, or similar high-speed networking)
+	RDMAType         string                      // Type of RDMA transport detected (e.g., "infiniband", "roce", "rdma", "sriov", or "none")
+	Interconnect     string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
+	InterconnectTier string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
+	NVLinkLinks      int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
 }
+
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
 type GPUDiscoveryCache struct {
 	mu        sync.RWMutex
@@ -277,6 +313,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 	ib := detectIBPods(ctx, k8sClient)
 	if ib {
 		rdmaType = "infiniband"
+		rdmaDetected = true
 	}
 	// Infer cloud provider for the best node
 	cloudProvider, err := GetCloudProviderInfo(ctx, k8sClient)
@@ -576,7 +613,7 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 	}
 	// --- Determine interconnect type ---
 	interconnect := "pcie"
-	interconnectDetail := "none"
+	interconnectDetail := strNone
 	if nvlinkDetected {
 		switch {
 		case nvlinkLinks >= 12:
@@ -725,12 +762,18 @@ func extractGPUInfoFromNode(node *corev1.Node) (*GPUInfo, error) {
 	}, nil
 }
 
-// InferHardwareSystem maps GPU product name to hardware system identifier.
-// Returns empty string if the GPU model cannot be confidently mapped.
+// InferHardwareSystem attempts to infer a normalized GPU SKU type from a
+// free-form product string (e.g. "NVIDIA H100 SXM", "A100-PCIE").
 //
-// This is a best-effort mapping based on common NVIDIA datacenter GPU naming patterns.
-// The system identifier is used by the profiler for performance estimation and configuration.
+// The function performs three main steps:
+//  1. Normalize the input string to a consistent format.
+//  2. Detect the GPU form factor (SXM vs PCIe).
+//  3. Match the normalized string against known GPU tokens and return
+//     the corresponding SKU type.
 //
+// Matching is based on substring checks and is tolerant of variations
+// in formatting (case, spaces, dashes). If no known GPU is detected,
+// an empty SKU type is returned.
 // Limitations:
 //   - Cannot distinguish SXM vs. PCIe variants from labels alone (assumes SXM for datacenter GPUs)
 //   - New GPU models require code updates (gracefully returns empty string)
@@ -742,69 +785,56 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	if gpuProduct == "" {
 		return ""
 	}
-	// --- Normalize ---
-	normalized := strings.ToUpper(strings.ReplaceAll(gpuProduct, strDash, strSpace))
-	normalized = strings.ReplaceAll(normalized, " ", "")
-	// --- Detect form factor ---
-	formFactor := formFactorPCIe // safer default
+
+	normalized := normalize(gpuProduct)
+	formFactor := detectFormFactor(normalized)
+
+	for _, rule := range gpuRules {
+		if strings.Contains(normalized, rule.token) {
+			if rule.singleSKU != "" {
+				return rule.singleSKU
+			}
+			if formFactor == formFactorSXM && rule.sxmSKU != "" {
+				return rule.sxmSKU
+			}
+			if rule.pcieSKU != "" {
+				return rule.pcieSKU
+			}
+		}
+	}
+
+	return ""
+}
+
+// normalize standardizes a GPU product string to simplify matching.
+//
+// It converts the string to uppercase and removes common separators
+// such as spaces and dashes. This allows consistent substring matching
+// regardless of how the input is formatted (e.g. "H100-SXM",
+// "h100 sxm", and "H100SXM" all normalize to the same value).
+func normalize(input string) string {
+	s := strings.ToUpper(strings.ReplaceAll(input, strDash, strSpace))
+	return strings.ReplaceAll(s, " ", "")
+}
+
+// detectFormFactor determines the GPU form factor (e.g. SXM or PCIe)
+// from a normalized product string.
+//
+// The detection is based on the presence of known substrings such as
+// "SXM", "HGX", or "DGX" for SXM-based systems, and "PCIE" for PCIe.
+// If no explicit indicator is found, PCIe is used as the default since
+// it is the more common and safer assumption.
+func detectFormFactor(normalized string) string {
 	switch {
 	case strings.Contains(normalized, tokenSXM),
 		strings.Contains(normalized, tokenHGX),
 		strings.Contains(normalized, tokenDGX):
-		formFactor = formFactorSXM
+		return formFactorSXM
 	case strings.Contains(normalized, tokenPCIE):
-		formFactor = formFactorPCIe
+		return formFactorPCIe
+	default:
+		return formFactorPCIe
 	}
-	// --- GPU mapping ---
-	switch {
-	// --- Blackwell ---
-	case strings.Contains(normalized, tokenGB200):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeGB200SXM
-		}
-	case strings.Contains(normalized, tokenB200):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeB200SXM
-		}
-	// --- Hopper ---
-	case strings.Contains(normalized, tokenH200):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeH200SXM
-		}
-	case strings.Contains(normalized, tokenH100):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeH100SXM
-		}
-		return nvidiacomv1beta1.GPUSKUTypeH100PCIe
-	// --- Ampere ---
-	case strings.Contains(normalized, tokenA100):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeA100SXM
-		}
-		return nvidiacomv1beta1.GPUSKUTypeA100PCIe
-	// --- Ada ---
-	case strings.Contains(normalized, tokenL40S):
-		return nvidiacomv1beta1.GPUSKUTypeL40S
-	case strings.Contains(normalized, tokenL40):
-		return nvidiacomv1beta1.GPUSKUTypeL40
-	case strings.Contains(normalized, tokenL4):
-		return nvidiacomv1beta1.GPUSKUTypeL4
-	// --- Volta / Turing ---
-	case strings.Contains(normalized, tokenV100):
-		if formFactor == formFactorSXM {
-			return nvidiacomv1beta1.GPUSKUTypeV100SXM
-		}
-		return nvidiacomv1beta1.GPUSKUTypeV100PCIe
-	case strings.Contains(normalized, tokenT4):
-		return nvidiacomv1beta1.GPUSKUTypeT4
-	// --- AMD ---
-	case strings.Contains(normalized, tokenMI300):
-		return nvidiacomv1beta1.GPUSKUTypeMI300
-	case strings.Contains(normalized, tokenMI250),
-		strings.Contains(normalized, tokenMI200):
-		return nvidiacomv1beta1.GPUSKUTypeMI200
-	}
-	return ""
 }
 
 // GetCloudProviderInfo attempts to infer the cloud provider of the Kubernetes cluster.
@@ -927,7 +957,7 @@ func isAWSInstanceType(instanceType string) bool {
 func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName string) (bool, string) {
 	node := &corev1.Node{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-		return false, ""
+		return false, strNone
 	}
 	labels := node.Labels
 	if labels["nvidia.com/rdma.present"] == "true" {
@@ -936,7 +966,7 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 	if labels["feature.node.kubernetes.io/network-sriov.capable"] == "true" {
 		return true, "sriov"
 	}
-	return false, "none"
+	return false, strNone
 }
 
 // detectIBPods checks if there are any RDMA or InfiniBand-related pods deployed
@@ -954,7 +984,9 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 //   - true if any RDMA/IB pods are found, false otherwise.
 func detectIBPods(ctx context.Context, k8sClient client.Reader) bool {
 	podList := &corev1.PodList{}
-	_ = k8sClient.List(ctx, podList, client.InNamespace("nvidia-network-operator"))
+	if err := k8sClient.List(ctx, podList, client.InNamespace("nvidia-network-operator")); err != nil {
+		return false
+	}
 	for _, p := range podList.Items {
 		if strings.Contains(p.Name, "rdma") {
 			return true

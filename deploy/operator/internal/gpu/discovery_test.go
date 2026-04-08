@@ -402,6 +402,11 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeL40S,
 		},
 		{
+			name:     "L40S should not match L40",
+			input:    "L40S",
+			expected: nvidiacomv1beta1.GPUSKUTypeL40S,
+		},
+		{
 			name:     "L40",
 			input:    "L40",
 			expected: nvidiacomv1beta1.GPUSKUTypeL40,
@@ -502,6 +507,119 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 	for _, variant := range variants {
 		result := InferHardwareSystem(variant)
 		assert.Equal(t, "h100_sxm", string(result), "Should normalize spaces/dashes: %s", variant)
+	}
+}
+
+func TestNormalize(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "basic lowercase",
+			input:    "h100",
+			expected: "H100",
+		},
+		{
+			name:     "spaces removed",
+			input:    "H100 SXM",
+			expected: "H100SXM",
+		},
+		{
+			name:     "dashes replaced and removed",
+			input:    "H100-SXM",
+			expected: "H100SXM",
+		},
+		{
+			name:     "mixed spaces and dashes",
+			input:    "A100 - SXM",
+			expected: "A100SXM",
+		},
+		{
+			name:     "extra whitespace",
+			input:    "  H100   PCIe ",
+			expected: "H100PCIE",
+		},
+		{
+			name:     "complex string",
+			input:    "h100-sxm5-80gb",
+			expected: "H100SXM580GB",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalize(tt.input)
+			if result != tt.expected {
+				t.Errorf("normalize(%q) = %q, want %q",
+					tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDetectFormFactor(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string // already normalized
+		expected string
+	}{
+		{
+			name:     "detect SXM explicitly",
+			input:    "H100SXM",
+			expected: formFactorSXM,
+		},
+		{
+			name:     "detect HGX implies SXM",
+			input:    "HGXH100",
+			expected: formFactorSXM,
+		},
+		{
+			name:     "detect DGX implies SXM",
+			input:    "DGXH100",
+			expected: formFactorSXM,
+		},
+		{
+			name:     "detect PCIe explicitly",
+			input:    "H100PCIE",
+			expected: formFactorPCIe,
+		},
+		{
+			name:     "default to PCIe when unknown",
+			input:    "H100",
+			expected: formFactorPCIe,
+		},
+		{
+			name:     "SXM wins over PCIe if both present",
+			input:    "H100SXMPCIE",
+			expected: formFactorSXM,
+		},
+		{
+			name:     "random string defaults to PCIe",
+			input:    "RANDOMGPU",
+			expected: formFactorPCIe,
+		},
+		{
+			name:     "empty string defaults to PCIe",
+			input:    "",
+			expected: formFactorPCIe,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := detectFormFactor(tt.input)
+			if result != tt.expected {
+				t.Errorf("detectFormFactor(%q) = %v, want %v",
+					tt.input, result, tt.expected)
+			}
+		})
 	}
 }
 
