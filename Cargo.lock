@@ -9447,7 +9447,8 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "velo"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e0cc874c11ea3d03afd7adf90529bcf3df374039deff65bc02a26e71bb5814b"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9468,7 +9469,8 @@ dependencies = [
 [[package]]
 name = "velo-common"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc2824d7667c4ee992dfc58c30799518f504d39c91f1e83962d55cb8c44cfb67"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -9483,7 +9485,8 @@ dependencies = [
 [[package]]
 name = "velo-discovery"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41107947fe3d15972c56815e42fd2485ca4ba58a5a69ec1a6fd61c00966f8734"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -9504,7 +9507,8 @@ dependencies = [
 [[package]]
 name = "velo-events"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2504e857f1ed52ad96ce73792a724be880ba75f3579a27050395e81d38cb42d0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -9521,7 +9525,8 @@ dependencies = [
 [[package]]
 name = "velo-messenger"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ada8ea47ab39a82ef9101024452a3c605bcf5c0acad82c76afcf48a17c0450cf"
 dependencies = [
  "anyhow",
  "bs58",
@@ -9551,7 +9556,8 @@ dependencies = [
 [[package]]
 name = "velo-observability"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57813414b19b0f845744fcf158ed4b87afe4f5c59ee99d58872c8e5d5534d61b"
 dependencies = [
  "prometheus",
  "tracing",
@@ -9560,7 +9566,8 @@ dependencies = [
 [[package]]
 name = "velo-queue"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7bcce33f5710d87e33e1eacc5472300cbe6acdfb5f2cd6929c12f2e4908ef38"
 dependencies = [
  "bytes",
  "dashmap",
@@ -9576,7 +9583,8 @@ dependencies = [
 [[package]]
 name = "velo-rendezvous"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1eac77f329b0c3dba1b36114c969e0a7d680bb4a6436720754bef14a24fedde"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9593,7 +9601,8 @@ dependencies = [
 [[package]]
 name = "velo-streaming"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd6dc0d71f73c6f369302bb94b05341a807a5693f6c321fc208d9c9a974d918a"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9620,7 +9629,8 @@ dependencies = [
 [[package]]
 name = "velo-transports"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#dd52837c09c58bebd19176c0f726661f20004022"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb5a348cc2fe13fc560824f170d3bdc3d10ec3a11802bb32489a59f49eb12409"
 dependencies = [
  "anyhow",
  "async-nats",
