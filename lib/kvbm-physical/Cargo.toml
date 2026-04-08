@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-physical"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -13,17 +13,16 @@ repository.workspace = true
 dynamo-memory = { workspace = true }
 kvbm-common = { workspace = true }
 kvbm-kernels = { workspace = true }
-velo-events = { workspace = true }
+velo = { workspace = true }
 
 aligned-vec = "0.6.4"
 anyhow = { workspace = true }
 bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
-cudarc = { workspace = true }
+cudarc = { workspace = true, features = ["nccl"] }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 derive-getters = { version = "0.5" }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

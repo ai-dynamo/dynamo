@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, PrefillLoadHint,
+    WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -93,6 +94,7 @@ pub struct SequenceRequest {
     pub overlap: u32,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
+    pub prefill_load_hint: Option<PrefillLoadHint>,
     pub worker: WorkerWithDpRank,
     pub lora_name: Option<String>,
 }
@@ -177,6 +179,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             return;
         }
 
+        // TODO: Publish explicit prompt-load decay timestamps with these events so peer routers
+        // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         let publisher = Arc::clone(&self.publisher);
         tokio::spawn(async move {
             if let Err(e) = publisher.publish_event(&event).await {
@@ -228,6 +232,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         continue;
                     }
 
+                    // TODO: ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
+                    // Peer routers still approximate decay anchoring with local receive time.
+                    let decay_now = Instant::now();
                     match &event.data {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
@@ -235,6 +242,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             overlap,
                             track_prefill_tokens,
                             expected_output_tokens,
+                            prefill_load_hint,
                         } => {
                             self.request_to_worker
                                 .insert(event.request_id.clone(), event.worker);
@@ -253,6 +261,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     *overlap,
                                     *expected_output_tokens,
                                     *track_prefill_tokens,
+                                    *prefill_load_hint,
+                                    decay_now,
                                 );
                             } else {
                                 tracing::warn!(
@@ -267,7 +277,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
-                                    table.slots[idx].1.write().free(&event.request_id);
+                                    table.slots[idx].1.write().free(&event.request_id, decay_now);
                                 }
                             }
                             self.request_to_lora.remove(&event.request_id);
@@ -281,7 +291,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     table.slots[idx]
                                         .1
                                         .write()
-                                        .mark_prefill_completed(&event.request_id);
+                                        .mark_prefill_completed(&event.request_id, decay_now);
                                 }
                             }
                         }
@@ -381,7 +391,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn add_request_local(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+    fn add_request_local(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
         let SequenceRequest {
             request_id,
             token_sequence,
@@ -389,12 +403,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             overlap,
             track_prefill_tokens,
             expected_output_tokens,
+            prefill_load_hint,
             worker,
             lora_name,
         } = req;
 
         if !self.workers.read().index.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
+            // The selector already picked this worker from the discovery watch,
+            // but the slot tracker hasn't been updated yet. Lazily register it
+            // so we don't drop tracking for this request.
+            let mut table = self.workers.write();
+            if !table.index.contains_key(&worker) {
+                tracing::debug!(?worker, "Lazily registering worker in slot tracker");
+                let idx = table.slots.len();
+                table
+                    .slots
+                    .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+                table.index.insert(worker, idx);
+            }
         }
 
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
@@ -424,6 +450,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 overlap,
                 expected_output_tokens,
                 track_prefill_tokens,
+                prefill_load_hint,
+                decay_now,
             )
         };
 
@@ -432,12 +460,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.request_to_lora.remove(expired_id);
         }
 
-        self.publish_active_load_for_worker(worker);
+        self.publish_active_load_for_worker(worker, decay_now);
 
         Ok(())
     }
 
-    pub fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+    pub fn add_request(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: req.request_id.clone(),
             worker: req.worker,
@@ -447,11 +479,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 overlap: req.overlap,
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
+                prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
         });
-        self.add_request_local(req)
+        self.add_request_local(req, decay_now)
     }
 
     /// Send a mutation to the worker assigned to a request, optionally publishing
@@ -459,7 +492,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn mutate_request_worker_local(
         &self,
         request_id: &RequestId,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId),
+        decay_now: Instant,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self
@@ -477,7 +511,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
             let mut seq = table.slots[idx].1.write();
-            mutate_fn(&mut seq, request_id);
+            mutate_fn(&mut seq, request_id, decay_now);
         }
 
         if remove_mapping {
@@ -485,7 +519,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.request_to_lora.remove(request_id);
         }
 
-        self.publish_active_load_for_worker(worker);
+        self.publish_active_load_for_worker(worker, decay_now);
 
         Ok(())
     }
@@ -493,8 +527,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn mutate_request_worker(
         &self,
         request_id: &RequestId,
+        decay_now: Instant,
         event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId),
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self
@@ -517,7 +552,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         });
 
-        self.mutate_request_worker_local(request_id, mutate_fn, remove_mapping)
+        self.mutate_request_worker_local(request_id, decay_now, mutate_fn, remove_mapping)
     }
 
     /// Free all blocks associated with a request.
@@ -528,7 +563,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// This also performs the underlying prefill-complete cleanup via
     /// [`ActiveSequences::free`], so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
-    pub fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+    pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
         if !self.request_to_worker.contains_key(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
             return Ok(());
@@ -536,9 +571,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         self.mutate_request_worker(
             request_id,
+            decay_now,
             ActiveSequenceEventData::Free,
-            |seqs, rid| {
-                seqs.free(rid);
+            |seqs, rid, decay_now| {
+                seqs.free(rid, decay_now);
             },
             true,
         )
@@ -548,12 +584,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
     /// after the first call (idempotent).
-    pub fn mark_prefill_completed(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+    pub fn mark_prefill_completed(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
         self.mutate_request_worker(
             request_id,
+            decay_now,
             ActiveSequenceEventData::MarkPrefillCompleted,
-            |seqs, rid| {
-                seqs.mark_prefill_completed(rid);
+            |seqs, rid, decay_now| {
+                seqs.mark_prefill_completed(rid, decay_now);
             },
             false,
         )
@@ -594,13 +635,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             });
         }
 
-        self.publish_active_load_for_worker(worker);
+        self.publish_active_load_for_worker(worker, Instant::now());
 
         Ok(())
     }
 
     /// Read active blocks/tokens from a worker and publish ActiveLoad metrics.
-    fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
+    fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank, decay_now: Instant) {
         let (active_blocks, active_tokens) = {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
@@ -608,7 +649,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return;
             };
             let seq = table.slots[idx].1.read();
-            (seq.active_blocks(), seq.active_tokens())
+            (seq.active_blocks(), seq.active_tokens(decay_now))
         };
 
         self.publisher
@@ -619,6 +660,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             dp_rank: worker.dp_rank,
             active_decode_blocks: Some(active_blocks as u64),
             active_prefill_tokens: Some(active_tokens as u64),
+            kv_used_blocks: None,
         };
 
         self.publisher.publish_load(active_load);
@@ -663,11 +705,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
         overlaps: OverlapScores,
+        decay_now: Instant,
     ) -> (
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(token_sequence, isl, overlaps, true)
+        self.potential_blocks_and_tokens_with_prefill_tracking(
+            token_sequence,
+            isl,
+            overlaps,
+            true,
+            decay_now,
+        )
     }
 
     pub fn potential_blocks_and_tokens_with_prefill_tracking(
@@ -676,6 +725,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         isl: usize,
         overlaps: OverlapScores,
         track_prefill_tokens: bool,
+        decay_now: Instant,
     ) -> (
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
@@ -701,6 +751,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     isl,
                     overlap,
                     track_prefill_tokens,
+                    decay_now,
                 );
             potential_blocks.insert(*worker, blocks);
             potential_tokens.insert(*worker, tokens);
@@ -730,11 +781,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Query all workers for their current number of active tokens.
-    pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+    pub fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
         let table = self.workers.read();
         let mut results = HashMap::with_capacity(table.slots.len());
         for (worker, lock) in &table.slots {
-            results.insert(*worker, lock.read().active_tokens());
+            results.insert(*worker, lock.read().active_tokens(decay_now));
         }
         results
     }
@@ -742,11 +793,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Return true if any worker satisfies the provided predicate on active token count.
     pub fn any_worker_matches_active_tokens(
         &self,
+        decay_now: Instant,
         mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
     ) -> bool {
         let table = self.workers.read();
         for (worker, lock) in &table.slots {
-            if predicate(*worker, lock.read().active_tokens()) {
+            if predicate(*worker, lock.read().active_tokens(decay_now)) {
                 return true;
             }
         }
@@ -781,7 +833,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     self.request_to_lora.remove(expired_id);
                     removed_request_count += 1;
                 }
-                self.publish_active_load_for_worker(*worker);
+                self.publish_active_load_for_worker(*worker, now);
             }
         }
         let duration = now.elapsed();
@@ -824,8 +876,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use super::*;
+    use crate::protocols::{OverlapScores, PrefillLoadHint};
     use crate::test_utils::NoopSequencePublisher;
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
@@ -843,20 +897,74 @@ mod tests {
     async fn add_request_can_skip_prefill_token_tracking() {
         let sequences = make_sequences();
         let worker = WorkerWithDpRank::new(1, 0);
+        let decay_now = Instant::now();
 
         sequences
-            .add_request(SequenceRequest {
-                request_id: "req-1".to_string(),
-                token_sequence: Some(vec![1, 2, 3]),
-                isl: 12,
-                overlap: 0,
-                track_prefill_tokens: false,
-                expected_output_tokens: None,
-                worker,
-                lora_name: None,
-            })
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
             .unwrap();
 
-        assert_eq!(sequences.active_tokens().get(&worker).copied(), Some(0));
+        assert_eq!(
+            sequences.active_tokens(decay_now).get(&worker).copied(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn explicit_decay_time_drives_multi_worker_load_queries_consistently() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let start = Instant::now();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 100,
+                    overlap: 0,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: 100,
+                        expected_prefill_duration: Some(Duration::from_secs(10)),
+                    }),
+                    worker,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+
+        let decay_now = start + Duration::from_secs(5);
+        let active_tokens = sequences.active_tokens(decay_now);
+        assert_eq!(active_tokens.get(&worker).copied(), Some(50));
+
+        let (_, potential_tokens) = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+            None,
+            0,
+            OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        assert_eq!(potential_tokens.get(&worker).copied(), Some(50));
+
+        assert!(
+            sequences.any_worker_matches_active_tokens(decay_now, |candidate, tokens| {
+                candidate == worker && tokens == 50
+            })
+        );
     }
 }

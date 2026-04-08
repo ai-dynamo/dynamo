@@ -1,0 +1,74 @@
+name: Dynamo Enhancement Proposal (DEP)
+description: Propose a new feature, architecture change, or process improvement
+title: "DEP: "
+labels: ["dep:draft"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Primary area this DEP affects (determines PIC assignment)
+      options:
+        - external-api
+        - frontend
+        - router
+        - backend-vllm
+        - backend-trtllm
+        - backend-sglang
+        - kv-memory
+        - multimodal
+        - planner
+        - core-platform
+        - observability
+        - fault-tolerance
+        - gateway
+        - devops
+        - docs
+        - process
+        - k8s
+        - dgdr
+        - xpu
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-paragraph summary of the proposal
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change needed? What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Detailed description of the proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: alternates
+    attributes:
+      label: Alternate Solutions
+      description: What other approaches were considered and why were they not chosen?
+    validations:
+      required: false
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: Specific requirements (use MUST/SHOULD per RFC-2119)
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links to related documents, prior art, external resources
+    validations:
+      required: false

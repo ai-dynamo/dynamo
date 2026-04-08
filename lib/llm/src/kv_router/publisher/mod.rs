@@ -24,7 +24,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, worker_query::start_worker_kv_query_endpoint,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
 };
 
 mod event_processor;
@@ -40,11 +40,6 @@ use event_processor::{
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
-#[cfg(test)]
-use zmq_listener::{
-    INITIAL_BACKOFF_MS, MAX_BACKOFF_EXPONENT, MAX_BACKOFF_MS, MAX_CONSECUTIVE_ERRORS,
-    calculate_backoff_ms,
-};
 
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None;

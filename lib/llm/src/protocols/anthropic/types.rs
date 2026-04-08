@@ -3,15 +3,15 @@
 
 //! Anthropic Messages API conversion logic.
 //!
-//! Pure protocol types live in `dynamo_async_openai::types::anthropic`.
+//! Pure protocol types live in `dynamo_protocols::types::anthropic`.
 //! This module provides bidirectional conversion to/from the internal
 //! chat completions format used by the Dynamo engine.
 
 // Re-export all pure Anthropic protocol types so existing `use crate::protocols::anthropic::*`
 // continues to work throughout dynamo-llm.
-pub use dynamo_async_openai::types::anthropic::*;
+pub use dynamo_protocols::types::anthropic::*;
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
@@ -20,7 +20,7 @@ use dynamo_async_openai::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
-    FunctionObject, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -28,7 +28,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 use crate::protocols::openai::common_ext::CommonExt;
-use crate::protocols::openai::nvext::NvExt;
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -96,10 +96,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
-            .map(dynamo_async_openai::types::Stop::StringArray);
+            .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
-            inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
                 temperature: req.temperature,
@@ -109,7 +109,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
-                stream_options: Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
                     continuous_usage_stats: false,
                 }),
@@ -119,44 +119,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: {
-                // Lossy: collapse all per-block cache_control into a single
-                // last-one-wins value. Sufficient for backends with a single
-                // prefix cache boundary. Full per-block breakpoints are
-                // preserved in AnthropicContext::cache_breakpoints via UnifiedRequest.
-                let mut last_block_cc: Option<CacheControl> = None;
-                for msg in &req.messages {
-                    if let AnthropicMessageContent::Blocks { content } = &msg.content {
-                        for block in content {
-                            let block_cc = match block {
-                                AnthropicContentBlock::Text { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolUse { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolResult { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::Thinking { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                _ => None,
-                            };
-                            if let Some(cc) = block_cc {
-                                last_block_cc = Some(cc.clone());
-                            }
-                        }
-                    }
-                }
-                // Merge: top-level > per-block > system block cache_control
-                let system_cc = req.system.as_ref().and_then(|s| s.cache_control.clone());
-                let effective_cc = req.cache_control.clone().or(last_block_cc).or(system_cc);
-                effective_cc.map(|cc| NvExt {
-                    cache_control: Some(cc),
-                    ..Default::default()
-                })
-            },
+            nvext: None,
             // chat_template_args may be augmented by the Anthropic handler
             // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
             // when a reasoning parser is configured. The conversion layer only
@@ -349,8 +312,8 @@ fn convert_assistant_blocks(
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
-                    r#type: ChatCompletionToolType::Function,
-                    function: dynamo_async_openai::types::FunctionCall {
+                    r#type: FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
@@ -487,11 +450,11 @@ pub fn chat_completion_to_anthropic_response(
     if let Some(choice) = choice {
         // Map finish_reason
         stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_async_openai::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_async_openai::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
+            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
         // Extract tool calls
@@ -523,8 +486,8 @@ pub fn chat_completion_to_anthropic_response(
 
         // Extract text content
         let text = match choice.message.content {
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(t)) => Some(t),
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(t)) => Some(t),
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
                 tracing::warn!(
                     "Multimodal (Parts) content in chat completion response replaced with placeholder text in Anthropic conversion."
                 );
@@ -821,24 +784,22 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
-                choices: vec![dynamo_async_openai::types::ChatChoice {
+                choices: vec![dynamo_protocols::types::ChatChoice {
                     index: 0,
-                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                        content: Some(
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                "Hello!".to_string(),
-                            ),
-                        ),
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hello!".to_string(),
+                        )),
                         refusal: None,
                         tool_calls: None,
-                        role: dynamo_async_openai::types::Role::Assistant,
+                        role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
                         reasoning_content: None,
                     },
-                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
                     stop_reason: None,
                     logprobs: None,
                 }],
@@ -847,7 +808,7 @@ mod tests {
                 service_tier: None,
                 system_fingerprint: None,
                 object: "chat.completion".to_string(),
-                usage: Some(dynamo_async_openai::types::CompletionUsage {
+                usage: Some(dynamo_protocols::types::CompletionUsage {
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,
@@ -1421,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_cache_control_passthrough() {
-        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+        use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
 
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1452,18 +1413,11 @@ mod tests {
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 300);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
     fn test_cache_control_1h_ttl_passthrough() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1474,12 +1428,7 @@ mod tests {
         assert!(req.cache_control.is_some());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
@@ -1548,8 +1497,6 @@ mod tests {
 
     #[test]
     fn test_per_block_cache_control_last_wins() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1565,10 +1512,7 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600); // Last block's 1h TTL wins
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
@@ -1588,16 +1532,11 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        // Top-level (no TTL = 300s default) takes precedence over per-block (1h)
-        assert_eq!(cc.ttl_seconds(), 300);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]
     fn test_system_block_array_with_cache_control() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1614,11 +1553,7 @@ mod tests {
         assert!(system.cache_control.is_some());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req
-            .nvext
-            .expect("nvext should be set from system cache_control");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert!(chat_req.nvext.is_none());
     }
 
     #[test]

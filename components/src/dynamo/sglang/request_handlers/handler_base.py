@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+import json
 import logging
 import random
 from abc import ABC, abstractmethod
@@ -173,13 +174,13 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
-        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
+        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = config.server_args.enable_trace
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
-                if not self.skip_tokenizer_init
+                if self.use_sglang_tokenizer
                 else None
             )
             self._engine_supports_priority = (
@@ -380,47 +381,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
-    async def pin_prefix(self, body: dict) -> dict:
-        """Pin a prefix by token_ids to resist eviction.
-
-        Args:
-            body: Dict with "token_ids" list of token IDs and optional
-                  "ttl_seconds" (default 300).
-        """
-        token_ids = body.get("token_ids", [])
-        ttl_seconds = body.get("ttl_seconds", 300)
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
-        try:
-            result = await self.engine.tokenizer_manager.pin_prefix(
-                token_ids, ttl_seconds
-            )
-            return {
-                "status": "ok" if result.success else "error",
-                "nodes_pinned": result.nodes_pinned,
-                "message": result.message,
-            }
-        except Exception as e:
-            logging.error(f"Failed to pin prefix: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def cache_control(self, request, context=None):
-        """Service mesh endpoint for cache control operations.
-
-        Args:
-            request: Dict with "action" key and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "pin_prefix":
-            result = await self.pin_prefix(request)
-        else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
-
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -435,7 +395,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
-        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -472,12 +431,23 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
-            request, use_tokenizer=not self.skip_tokenizer_init
+            request, use_tokenizer=self.use_sglang_tokenizer
         )
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _get_guided_decoding_params(
+        guided_decoding: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                return {"json_schema": json.dumps(json_schema)}
+        return {}
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
