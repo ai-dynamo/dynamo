@@ -703,7 +703,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             let spec = DiscoverySpec::Endpoint {
-            device_type: None,
+                device_type: None,
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),

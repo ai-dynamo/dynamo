@@ -15,7 +15,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 use crate::{
-    component::{Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
+    component::{
+        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+    },
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
@@ -263,7 +265,9 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -298,7 +302,9 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -475,7 +481,10 @@ where
                 )
             })?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
-        let is_cpu = matches!(device_type_map.get(&instance_id), Some(Some(DeviceType::Cpu)));
+        let is_cpu = matches!(
+            device_type_map.get(&instance_id),
+            Some(Some(DeviceType::Cpu))
+        );
         tracing::info!(
             endpoint = %endpoint_id,
             selected_instance = instance_id,
@@ -544,7 +553,10 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted => None,
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::Direct
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
@@ -576,7 +588,10 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted => None,
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::Direct
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
@@ -1062,8 +1077,8 @@ mod tests {
         assert_eq!(candidates, vec![1, 2]);
 
         // Within selected CPU group, final choice should be the least-loaded instance (id=2).
-        let selected = futures::executor::block_on(state.select_exact_min_and_increment(&candidates))
-            .unwrap();
+        let selected =
+            futures::executor::block_on(state.select_exact_min_and_increment(&candidates)).unwrap();
         assert_eq!(selected, 2);
     }
 
