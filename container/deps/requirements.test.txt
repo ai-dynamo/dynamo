@@ -5,6 +5,8 @@
 
 # For deploy/utils async file IO used by deploy tests and profiler deployment helpers
 aiofiles<=25.1.0
+# For Allure test reporting in CI
+allure-pytest==2.15.3
 # For MinIO/S3 operations in LoRA tests (replaces AWS CLI dependency)
 boto3==1.42.4
 boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client

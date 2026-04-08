@@ -79,7 +79,7 @@ python -m dynamo.frontend &
 EXTRA_ARGS=""
 
 # GPU assignments (override via environment variables)
-# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
