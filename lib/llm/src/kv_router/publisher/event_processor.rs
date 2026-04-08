@@ -29,7 +29,7 @@ use super::{DEFAULT_MAX_BATCH_BLOCKS, kv_publisher_metrics};
 ///
 /// - **Store**: always passes through; increments refcount for the rank.
 /// - **Remove**: only passes through when refcount decrements to 0.
-/// - **Cleared**: resets refcounts for the affected rank only.
+/// - **Cleared**: resets refcounts for all ranks.
 pub(super) struct EventDedupFilter {
     /// Per-dp-rank refcounts.
     per_rank: HashMap<u32, HashMap<ExternalSequenceBlockHash, usize>>,
