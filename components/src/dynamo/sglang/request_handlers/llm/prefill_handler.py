@@ -137,9 +137,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
+        print(f"[DP_RANK_DEBUG] raw dp_rank from routing: {dp_rank} (type={type(dp_rank).__name__})", flush=True)
 
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
+
+        print(f"[DP_RANK_DEBUG] dp_rank after sentinel check: {dp_rank}", flush=True)
 
         trace_header = build_trace_headers(context) if self.enable_trace else None
 
