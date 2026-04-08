@@ -490,7 +490,7 @@ where
 
     async fn generate_with_fault_detection(
         &self,
-        instance_id: u64,
+        mut instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
@@ -580,6 +580,7 @@ where
                             fallback_instance = id,
                             "Instance disappeared during routing, reselecting"
                         );
+                        instance_id = id;
                         resolve_transport(id).ok_or_else(|| {
                             anyhow::anyhow!(
                                 "Fallback instance {} also not found for endpoint {}",
