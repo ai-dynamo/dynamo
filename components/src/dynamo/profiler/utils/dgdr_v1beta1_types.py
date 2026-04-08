@@ -69,8 +69,8 @@ class GPUSKUType(str, Enum):
 class XPUSKUType(str, Enum):
     """Intel XPU SKU types. Enum values are AIC system identifiers directly."""
 
-    # Intel Arc discrete GPUs (only b60 is currently supported by AIC)
-    IntelArcProB60 = "b60"  # Intel Arc Pro B60 (Xe2 Battlemage, 0xe211) — AIC system: b60
+    # Intel Arc discrete GPUs (only b60 is currently supported)
+    IntelArcProB60 = "b60"  # Intel Arc Pro B60 (Xe2 Battlemage, 0xe211)
 
     @property
     def aic_system(self) -> str:
