@@ -1794,8 +1794,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             output_options.get("return_tokens_as_token_ids")
         )
 
-        print(f"[DEBUG] output_options={output_options}, return_tokens_as_token_ids={return_tokens_as_token_ids}", flush=True)
-
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(

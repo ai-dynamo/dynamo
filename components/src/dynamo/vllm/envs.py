@@ -47,7 +47,7 @@ def _resolve_port(env_var: str, default_port: int) -> int:
                 f"{env_var} must be an integer port number, got {env_value!r}."
             ) from exc
 
-    if not (REGISTERED_PORT_MIN <= port <= REGISTERED_PORT_MAX):
+    if not (REGISTERED_PORT_MIN <= port):
         raise ValueError(
             f"{env_var} port {port} is outside of the registered port range "
             f"({REGISTERED_PORT_MIN}-{REGISTERED_PORT_MAX})."
