@@ -102,6 +102,7 @@ class TopologyConfig:
     delayed_start: int = 0
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
+    single_gpu: bool = False  # append --single-gpu to script_args
 
 
 @dataclass
@@ -148,7 +149,7 @@ def make_multimodal_configs(
     for topology, topo_cfg in profile.topologies.items():
         script_name = topology_scripts[topology]
         script_args = ["--model", profile.name] + profile.extra_vllm_args
-        if not topology.endswith("agg"):
+        if topo_cfg.single_gpu:
             script_args.append("--single-gpu")
 
         gpu = topo_cfg.gpu_marker or profile.gpu_marker

@@ -40,10 +40,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=340,
+                single_gpu=True,
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
+                single_gpu=True,
             ),
         },
         request_payloads=[make_image_payload(["green"])],
@@ -61,6 +63,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
                 delayed_start=60,
+                single_gpu=True,
             ),
         },
         request_payloads=[make_video_payload(["red", "static", "still"])],
