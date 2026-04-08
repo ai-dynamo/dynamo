@@ -21,6 +21,7 @@ use futures::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::Indexer;
+use crate::kv_router::metrics::WorkerQueryMetrics;
 use crate::kv_router::worker_kv_indexer_query_endpoint;
 use dynamo_kv_router::{
     indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},
@@ -647,11 +648,17 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
 ) {
+    // Register metrics for this worker
+    if let Err(e) = WorkerQueryMetrics::register(component.drt().prometheus_registry(), worker_id) {
+        tracing::warn!("Failed to register worker query metrics: {e}");
+    }
+    let metrics = WorkerQueryMetrics::get();
+
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
         local_indexer,
-        // only queue 1 request at a time, to not have consecu
         processing_semaphore: Semaphore::new(1),
+        metrics,
     });
 
     let ingress = match Ingress::for_engine(engine) {
@@ -689,6 +696,8 @@ struct WorkerKvQueryEngine {
     /// Semaphore limiting concurrent recovery request processing to 1.
     /// Prevents multiple routers from overwhelming the worker with heavy tree dump operations.
     processing_semaphore: Semaphore,
+    /// Optional metrics for tracking semaphore wait time and query duration.
+    metrics: Option<Arc<WorkerQueryMetrics>>,
 }
 
 #[async_trait]
@@ -717,6 +726,11 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 Box::pin(stream::iter(vec![response])),
                 ctx.context(),
             ));
+        }
+
+        // Track total queries
+        if let Some(metrics) = &self.metrics {
+            metrics.increment_queries();
         }
 
         // Acquire semaphore permit before processing - only one request at a time.

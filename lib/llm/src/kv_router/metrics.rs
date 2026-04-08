@@ -42,10 +42,10 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use dynamo_runtime::component::Component;
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, labels, name_prefix, router, router_request, routing_overhead,
 };
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
 fn router_metric(suffix: &str) -> String {
@@ -451,6 +451,50 @@ impl RemoteIndexerMetrics {
 
     pub fn increment_write_failures(&self) {
         self.write_failures_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker query metrics (simple counter)
+// ---------------------------------------------------------------------------
+
+/// Metrics for worker-side KV query operations.
+pub struct WorkerQueryMetrics {
+    pub queries_total: prometheus::IntCounter,
+}
+
+static WORKER_QUERY_METRICS: OnceLock<Arc<WorkerQueryMetrics>> = OnceLock::new();
+
+impl WorkerQueryMetrics {
+    pub fn get() -> Option<Arc<Self>> {
+        WORKER_QUERY_METRICS.get().cloned()
+    }
+
+    pub fn register(
+        registry: &prometheus::Registry,
+        worker_id: u64,
+    ) -> Result<(), prometheus::Error> {
+        let m = WORKER_QUERY_METRICS.get_or_init(|| {
+            let worker_id_str = worker_id.to_string();
+
+            let queries_total = prometheus::IntCounter::with_opts(
+                Opts::new(
+                    "dynamo_worker_query_requests_total",
+                    "Total number of KV query requests received",
+                )
+                .const_label("worker_id", &worker_id_str),
+            )
+            .expect("failed to create queries_total counter");
+
+            Arc::new(Self { queries_total })
+        });
+
+        registry.register(Box::new(m.queries_total.clone()))?;
+        Ok(())
+    }
+
+    pub fn increment_queries(&self) {
+        self.queries_total.inc();
     }
 }
 
