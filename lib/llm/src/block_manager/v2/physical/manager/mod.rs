@@ -239,11 +239,23 @@ impl TransportManager {
     }
 
     /// Helper to extract CUDA stream from DeviceStream (testing only).
+    ///
+    /// # Panics
+    /// Panics if the backend is not CUDA - this is a testing-only method that requires CUDA backend.
     #[cfg(all(test, feature = "testing-cuda"))]
     fn extract_cuda_stream(
         stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
     ) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        use crate::block_manager::v2::device::cuda::CudaStreamWrapper;
+        use crate::block_manager::v2::device::{DeviceBackend, cuda::CudaStreamWrapper};
+
+        // Validate backend is CUDA before performing unsafe downcast
+        assert_eq!(
+            stream.backend,
+            DeviceBackend::Cuda,
+            "extract_cuda_stream called on non-CUDA backend: {:?}",
+            stream.backend
+        );
+
         unsafe {
             let trait_ptr = &*stream.ops as *const dyn crate::block_manager::v2::device::DeviceStreamOps;
             let concrete_ptr = trait_ptr as *const CudaStreamWrapper;
@@ -252,11 +264,23 @@ impl TransportManager {
     }
 
     /// Helper to extract CUDA context from DeviceContext (testing only).
+    ///
+    /// # Panics
+    /// Panics if the backend is not CUDA - this is a testing-only method that requires CUDA backend.
     #[cfg(all(test, feature = "testing-cuda"))]
     fn extract_cuda_context(
         ctx: &std::sync::Arc<crate::block_manager::v2::device::DeviceContext>,
     ) -> &std::sync::Arc<cudarc::driver::CudaContext> {
-        use crate::block_manager::v2::device::cuda::CudaContext;
+        use crate::block_manager::v2::device::{DeviceBackend, cuda::CudaContext};
+
+        // Validate backend is CUDA before performing unsafe downcast
+        assert_eq!(
+            ctx.backend,
+            DeviceBackend::Cuda,
+            "extract_cuda_context called on non-CUDA backend: {:?}",
+            ctx.backend
+        );
+
         unsafe {
             let trait_ptr = &*ctx.ops as *const dyn crate::block_manager::v2::device::DeviceContextOps;
             let concrete_ptr = trait_ptr as *const CudaContext;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! XPU (Level-Zero) backend implementation
 //!
 //! Wraps Level-Zero API types with the device abstraction traits.
@@ -10,35 +13,23 @@ use std::collections::HashMap;
 
 /// Global initialization state for Level-Zero runtime
 fn ensure_ze_initialized() -> Result<()> {
-    static INIT_RESULT: OnceLock<Mutex<Result<(), String>>> = OnceLock::new();
+    static INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
-    let init_mutex = INIT_RESULT.get_or_init(|| Mutex::new(Ok(())));
-    let init_result = init_mutex.lock().unwrap();
-
-    // Check if already attempted
-    if let Err(ref err) = *init_result {
-        return Err(anyhow::anyhow!("Level-Zero initialization failed previously: {}", err));
-    }
-
-    // Check if already successful
-    if init_result.is_ok() {
-        return Ok(());
-    }
-
-    drop(init_result);
-
-    match ze::init() {
-        Ok(()) => {
-            eprintln!("[XPU] ✓ Level-Zero runtime initialized successfully");
-            *init_mutex.lock().unwrap() = Ok(());
-            Ok(())
+    // Use get_or_init to ensure ze::init() is called exactly once
+    match INIT_RESULT.get_or_init(|| {
+        match ze::init() {
+            Ok(()) => {
+                eprintln!("[XPU] ✓ Level-Zero runtime initialized successfully");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[XPU] ✗ Level-Zero runtime initialization FAILED: {:?}", e);
+                Err(format!("{:?}", e))
+            }
         }
-        Err(e) => {
-            eprintln!("[XPU] ✗ Level-Zero runtime initialization FAILED: {:?}", e);
-            let err_msg = format!("{:?}", e);
-            *init_mutex.lock().unwrap() = Err(err_msg.clone());
-            Err(anyhow::anyhow!("Failed to initialize Level-Zero runtime: {}", err_msg))
-        }
+    }) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(anyhow::anyhow!("Failed to initialize Level-Zero runtime: {}", err)),
     }
 }
 
@@ -161,15 +152,9 @@ impl DeviceContextOps for ZeContext {
         let cmd_list = self.cache.context.create_immediate_command_list(&self.cache.device.clone())
             .map_err(|e| anyhow::anyhow!("Failed to create immediate command list: {:?}", e))?;
 
-        // Track next event index for this stream
-        static EVENT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
         Ok(Box::new(ZeStreamWrapper {
             cmd_list: Arc::new(cmd_list),
             event_pool: Arc::clone(&self.cache.event_pool),
-            event_counter: Arc::new(std::sync::atomic::AtomicU32::new(
-                EVENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 1024
-            )),
             device_id: self.device_id,
         }))
     }
@@ -272,7 +257,6 @@ fn remove_host_buffer(ptr: u64) {
 struct ZeStreamWrapper {
     cmd_list: Arc<ze::ImmediateCommandList>,
     event_pool: Arc<ze::EventPool>,
-    event_counter: Arc<std::sync::atomic::AtomicU32>,
     device_id: u32,
 }
 
@@ -323,8 +307,12 @@ impl DeviceStreamOps for ZeStreamWrapper {
     }
 
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
-        // Allocate a new event from the pool
-        let event_idx = self.event_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 1024;
+        // Use a single global counter to allocate event indices across all streams
+        // This prevents collisions when multiple streams share the same event pool
+        static GLOBAL_EVENT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+        // Allocate a new event index from the pool (wraps at 1024)
+        let event_idx = GLOBAL_EVENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 1024;
 
         let event = self.event_pool.create_event(
             event_idx,
@@ -333,7 +321,7 @@ impl DeviceStreamOps for ZeStreamWrapper {
         )
         .map_err(|e| anyhow::anyhow!("Failed to create event: {:?}", e))?;
 
-        // Reset event first
+        // Reset event first to ensure it's in a clean state
         event.host_reset()
             .map_err(|e| anyhow::anyhow!("Failed to reset event: {:?}", e))?;
 

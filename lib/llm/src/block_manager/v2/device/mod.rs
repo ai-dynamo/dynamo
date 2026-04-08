@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Device abstraction layer for multi-backend support
 //!
 //! This module provides a unified interface for different hardware backends
@@ -24,9 +27,13 @@ pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps};
 
 /// Device backend type selector
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DeviceBackend {
+    #[serde(alias = "gpu", alias = "nvidia")]
     Cuda,
+    #[serde(alias = "xpu", alias = "intel", alias = "level-zero")]
     Ze,
+    #[serde(alias = "habana", alias = "gaudi", alias = "synapse")]
     Hpu,
 }
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! HPU (Synapse) backend implementation
 //!
 //! Wraps Synapse API types with the device abstraction traits.
@@ -13,38 +16,23 @@ use std::collections::HashMap;
 /// CRITICAL: The Context must remain alive for the lifetime of the program,
 /// as dropping it may invalidate the Synapse runtime state.
 fn ensure_synapse_initialized() -> Result<()> {
-    static INIT_RESULT: OnceLock<Mutex<Result<(), String>>> = OnceLock::new();
-    static SYNAPSE_CONTEXT: OnceLock<synapse::Context> = OnceLock::new();
+    static SYNAPSE_CONTEXT: OnceLock<std::result::Result<synapse::Context, String>> = OnceLock::new();
 
-    let init_mutex = INIT_RESULT.get_or_init(|| Mutex::new(Ok(())));
-    let init_result = init_mutex.lock().unwrap();
-
-    // Check if already attempted
-    if let Err(ref err) = *init_result {
-        return Err(anyhow::anyhow!("Synapse initialization failed previously: {}", err));
-    }
-
-    // Check if already successful
-    if SYNAPSE_CONTEXT.get().is_some() {
-        return Ok(());
-    }
-
-    // Try to initialize - Context will be kept alive for program lifetime
-    drop(init_result);  // Drop lock before potentially long-running init
-
-    match synapse::Context::new() {
-        Ok(ctx) => {
-            eprintln!("[HPU] ✓ Synapse runtime initialized successfully");
-            SYNAPSE_CONTEXT.get_or_init(|| ctx);
-            *init_mutex.lock().unwrap() = Ok(());
-            Ok(())
+    // Use get_or_init to ensure Context::new() is called exactly once with single-flight semantics
+    match SYNAPSE_CONTEXT.get_or_init(|| {
+        match synapse::Context::new() {
+            Ok(ctx) => {
+                eprintln!("[HPU] ✓ Synapse runtime initialized successfully");
+                Ok(ctx)
+            }
+            Err(e) => {
+                eprintln!("[HPU] ✗ Synapse runtime initialization FAILED: {}", e);
+                Err(e.to_string())
+            }
         }
-        Err(e) => {
-            eprintln!("[HPU] ✗ Synapse runtime initialization FAILED: {}", e);
-            let err_msg = e.to_string();
-            *init_mutex.lock().unwrap() = Err(err_msg.clone());
-            Err(anyhow::anyhow!("Failed to initialize Synapse runtime: {}", err_msg))
-        }
+    }) {
+        Ok(_ctx) => Ok(()),  // Context is stored in OnceLock and kept alive for program lifetime
+        Err(err) => Err(anyhow::anyhow!("Synapse initialization failed: {}", err)),
     }
 }
 
@@ -72,40 +60,44 @@ fn get_or_acquire_device(device_id: u32) -> Result<Device> {
     eprintln!("[HPU] Device {} NOT in cache, acquiring...", device_id);
 
     // Try acquiring the device for standalone applications
-    // Strategy: Try acquire_first() which works, then verify it matches requested device_id
+    // Strategy: Try acquire_first() or acquire_by_module_id and validate the device ID matches
     let device = if device_id == 0 {
         // For device 0, use acquire_first() which is most reliable
-        match Device::acquire_first() {
-            Ok(dev) => {
-                eprintln!("[HPU] Device acquired via acquire_first(), ID={}", dev.id());
-                // Cache the owned device
-                cache.insert(device_id, dev);
-                eprintln!("[HPU] Device {} cached successfully", device_id);
-                // Return unowned reference
-                Device::from_id_unowned(device_id)
-            }
-            Err(e) => {
-                eprintln!("[HPU] WARNING: acquire_first failed: {}, using unowned (may fail allocations!)", e);
-                // Device likely owned by PyTorch - use unowned reference
-                Device::from_id_unowned(device_id)
-            }
+        let dev = Device::acquire_first()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire HPU device {}: {}", device_id, e))?;
+
+        let actual_id = dev.id();
+        if actual_id != device_id {
+            anyhow::bail!(
+                "Requested HPU device {}, but acquire_first() returned device {}",
+                device_id,
+                actual_id
+            );
         }
+
+        eprintln!("[HPU] Device {} acquired via acquire_first()", actual_id);
+        // Cache the owned device
+        cache.insert(device_id, dev);
+        eprintln!("[HPU] Device {} cached successfully", device_id);
+        // Return unowned reference
+        Device::from_id_unowned(device_id)
     } else {
         // For non-zero device IDs, try acquire_by_module_id
-        match Device::acquire_by_module_id(device_id) {
-            Ok(dev) => {
-                tracing::info!("HPU device {} acquired by module_id", device_id);
-                cache.insert(device_id, dev);
-                Device::from_id_unowned(device_id)
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "HPU device {} acquire_by_module_id failed: {}, using unowned",
-                    device_id, e
-                );
-                Device::from_id_unowned(device_id)
-            }
+        let dev = Device::acquire_by_module_id(device_id)
+            .map_err(|e| anyhow::anyhow!("Failed to acquire HPU device {} by module_id: {}", device_id, e))?;
+
+        let actual_id = dev.id();
+        if actual_id != device_id {
+            anyhow::bail!(
+                "Requested HPU device {}, but acquire_by_module_id() returned device {}",
+                device_id,
+                actual_id
+            );
         }
+
+        eprintln!("[HPU] Device {} acquired by module_id", device_id);
+        cache.insert(device_id, dev);
+        Device::from_id_unowned(device_id)
     };
 
     Ok(device)

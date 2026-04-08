@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! CUDA backend implementation
 //!
 //! Wraps cudarc types with the device abstraction traits.
@@ -62,11 +65,26 @@ impl DeviceContextOps for CudaContext {
     }
 
     fn free_device(&self, ptr: u64) -> Result<()> {
-        // cudarc manages memory via RAII, but for explicit free we need to drop
-        // In practice, this is handled by the allocator dropping the buffer
-        // For now, we can't explicitly free without the buffer handle
-        // This will be addressed when we integrate with the actual allocation system
-        tracing::warn!("CUDA free_device called with raw pointer {} - memory managed by allocator", ptr);
+        // NOTE: CUDA memory management limitation
+        // cudarc manages device memory via RAII through typed buffer handles (CudaSlice).
+        // The allocate_device() method returns a raw pointer (u64) after calling malloc_sync,
+        // but we don't retain the buffer handle that cudarc would need for deallocation.
+        //
+        // This is a known limitation of the current abstraction layer design:
+        // - Level-Zero and HPU: Store buffers in global maps, free via context API calls
+        // - CUDA: Would need to either store buffer handles globally (like XPU/HPU) or
+        //         change the trait to return an opaque handle type instead of u64
+        //
+        // Current workaround: Memory is leaked from CUDA's perspective until process exit.
+        // This is acceptable for short-lived benchmark/test processes but would cause OOM
+        // in long-running production workloads.
+        //
+        // Future fix: Either adopt the Level-Zero pattern (global buffer registry) or
+        // change DeviceContextOps to return/accept typed handles instead of raw pointers.
+        tracing::warn!(
+            "CUDA free_device called with raw pointer {} - memory not freed (cudarc limitation)",
+            ptr
+        );
         Ok(())
     }
 

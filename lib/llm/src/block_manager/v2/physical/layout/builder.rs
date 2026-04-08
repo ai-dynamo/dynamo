@@ -268,8 +268,15 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     /// Allocate pinned (page-locked) host memory.
     ///
     /// # Arguments
-    /// * `device_id` - If `Some(id)`, enables NUMA-aware allocation on the device's NUMA node
-    ///   (disable with `DYN_MEMORY_DISABLE_NUMA=1`). If `None`, uses direct allocation.
+    /// * `device_id` - If `Some(id)`, sets the `numa_aware` flag and uses the specified device.
+    ///   If `None`, uses the builder's default device_id.
+    ///
+    /// # Note
+    /// **NUMA-aware allocation is not currently implemented.** The `numa_aware` flag is stored
+    /// but not used by the downstream allocator. All pinned allocations currently use the same
+    /// allocation strategy regardless of this flag. To implement NUMA-aware allocation, the flag
+    /// would need to be threaded through to `DeviceContextOps::allocate_pinned()` or the memory
+    /// allocator to select NUMA-local memory based on device topology.
     pub fn allocate_pinned(
         self,
         device_id: Option<u32>,

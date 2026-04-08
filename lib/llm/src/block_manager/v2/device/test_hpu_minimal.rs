@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Minimal test to isolate HPU allocation issue
 // Run with: cargo test --package dynamo-llm --lib --test test_hpu_minimal --features hpu
 

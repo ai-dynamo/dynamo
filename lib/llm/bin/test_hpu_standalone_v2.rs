@@ -1,4 +1,7 @@
-// Standalone HPU test - mimics the unit test but as a binary
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Standalone HPU test - mimics the unit test but as a binary
 
 use dynamo_llm::block_manager::v2::device::{DeviceBackend, DeviceContext};
 use std::sync::Arc;

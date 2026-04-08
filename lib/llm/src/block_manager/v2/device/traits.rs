@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Device abstraction traits for multi-backend support
 //!
 //! This module defines the core traits that all hardware backends
@@ -52,12 +55,45 @@ pub trait DeviceContextOps: Send + Sync + Debug {
 /// Device stream/queue operations - async execution interface
 pub trait DeviceStreamOps: Send + Sync + Debug {
     /// Copy host to device (async)
+    ///
+    /// # Safety Requirements
+    ///
+    /// **IMPORTANT**: This operation is asynchronous. The DMA transfer is queued and may not
+    /// complete until after this method returns. Callers MUST ensure that:
+    ///
+    /// 1. `src_host_data` remains valid and unmodified until the transfer completes
+    /// 2. Either call `synchronize()` on this stream before dropping/reusing the buffer, OR
+    /// 3. Use pinned memory allocated via `DeviceContextOps::allocate_pinned()` which has
+    ///    guaranteed lifetime semantics
+    ///
+    /// Violating these requirements results in undefined behavior (use-after-free or data races).
+    ///
+    /// **Future API consideration**: This method should ideally be marked `unsafe` or accept
+    /// owned/pinned buffer types to enforce safety at compile time.
     fn copy_h2d(&self, dst_device_ptr: u64, src_host_data: &[u8]) -> Result<()>;
 
     /// Copy device to host (async)
+    ///
+    /// # Safety Requirements
+    ///
+    /// **IMPORTANT**: This operation is asynchronous. The DMA transfer is queued and may not
+    /// complete until after this method returns. Callers MUST ensure that:
+    ///
+    /// 1. `dst_host_data` remains valid and is not read until the transfer completes
+    /// 2. Either call `synchronize()` on this stream before reading the buffer, OR
+    /// 3. Use pinned memory allocated via `DeviceContextOps::allocate_pinned()` which has
+    ///    guaranteed lifetime semantics
+    ///
+    /// Violating these requirements results in undefined behavior (reading uninitialized data
+    /// or data races).
+    ///
+    /// **Future API consideration**: This method should ideally be marked `unsafe` or accept
+    /// owned/pinned buffer types to enforce safety at compile time.
     fn copy_d2h(&self, dst_host_data: &mut [u8], src_device_ptr: u64) -> Result<()>;
 
     /// Copy device to device (async)
+    ///
+    /// Device-to-device copies are safe since both pointers are managed by the device runtime.
     fn copy_d2d(&self, dst_device_ptr: u64, src_device_ptr: u64, size: usize) -> Result<()>;
 
     /// Record an event on this stream
