@@ -153,6 +153,7 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    cleanup_inputs_json=config.cleanup_inputs_json,
                 )
             finally:
                 if config.restart_server_every_benchmark:

@@ -16,17 +16,24 @@ def generate_image_pool_base64(
     pool_size: int,
     image_dir: Path,
     image_size: tuple[int, int] = (512, 512),
+    overwrite: bool = False,
 ) -> list[str]:
     """Generate pool_size random PNG files and return their paths."""
     image_dir.mkdir(parents=True, exist_ok=True)
     pool: list[str] = []
+    skipped = 0
     for idx in range(pool_size):
         path = image_dir / f"img_{idx:04d}.png"
-        pixels = np_rng.integers(0, 256, (*image_size, 3), dtype=np.uint8)
-        Image.fromarray(pixels).save(path)
+        if not overwrite and path.exists():
+            skipped += 1
+        else:
+            pixels = np_rng.integers(0, 256, (*image_size, 3), dtype=np.uint8)
+            Image.fromarray(pixels).save(path)
         pool.append(str(path.resolve()))
+    generated = pool_size - skipped
     print(
-        f"  {pool_size} unique {image_size[0]}x{image_size[1]} images saved to {image_dir}"
+        f"  {pool_size} unique {image_size[0]}x{image_size[1]} images in {image_dir}"
+        f" ({generated} generated, {skipped} skipped)"
     )
     return pool
 

@@ -82,6 +82,6 @@ def parse_args(description: str = "") -> argparse.Namespace:
         "--seed",
         type=int,
         default=None,
-        help="Random seed for reproducible dataset generation (default: time-based)",
+        help="Random seed for reproducible dataset generation (default: wall clock)",
     )
     return parser.parse_args()
