@@ -49,12 +49,17 @@ pub const BACKEND_STREAM_TIMEOUT_ENV: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SE
 
 /// Read the backend stream inactivity timeout from the environment.
 /// Returns `None` if unset or zero (timeout disabled).
+///
+/// The HTTP-layer timeout uses a 2x multiplier over the configured value so that
+/// the request-plane timeout in `push_router` (which uses the raw value) always
+/// fires first and triggers `report_instance_down()` for worker quarantine.
+/// This layer is strictly a safety net for gauge cleanup.
 pub fn backend_stream_timeout() -> Option<Duration> {
     std::env::var(BACKEND_STREAM_TIMEOUT_ENV)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
-        .map(Duration::from_secs)
+        .map(|secs| Duration::from_secs(secs.saturating_mul(2)))
 }
 
 #[derive(Clone, Copy)]
@@ -349,15 +354,16 @@ mod tests {
     #[serial]
     async fn test_backend_inactivity_timeout_releases_inflight_gauge() {
         let model = "zombie-model";
+        // Config value "1" → HTTP-layer timeout is 2s (2x safety-net multiplier)
         let (metrics, guard, context, handle) = setup_test(model, "req-zombie", "1");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
         let monitored = monitor_for_disconnects(hanging_stream(), context, guard, handle);
         tokio::pin!(monitored);
 
-        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
 
-        let completed = tokio::time::timeout(Duration::from_secs(1), async move {
+        let completed = tokio::time::timeout(Duration::from_secs(2), async move {
             while monitored.next().await.is_some() {}
         })
         .await;
@@ -402,7 +408,8 @@ mod tests {
     async fn test_inactivity_timeout_resets_on_each_token() {
         let model = "reset-model";
 
-        // Phase 1: tokens arrive every 2s with a 5s timeout — stream completes normally.
+        // Phase 1: tokens arrive every 2s with a 5s config (10s HTTP timeout after 2x multiplier)
+        // — stream completes normally because each token resets the timer.
         let (metrics, guard_1, ctx_1, handle_1) = setup_test(model, "phase1", "5");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
@@ -444,7 +451,8 @@ mod tests {
         let monitored_2 = monitor_for_disconnects(hanging_stream(), ctx_2, guard_2, handle_2);
         tokio::pin!(monitored_2);
 
-        tokio::time::advance(Duration::from_secs(6)).await;
+        // Config "5" → HTTP timeout 10s (2x multiplier). Advance past it.
+        tokio::time::advance(Duration::from_secs(11)).await;
 
         let phase2 = tokio::time::timeout(Duration::from_secs(10), async {
             while monitored_2.next().await.is_some() {}
