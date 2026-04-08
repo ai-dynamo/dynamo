@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-import pytest
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver
+import pytest
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 

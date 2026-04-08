@@ -13,6 +13,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
+
 from tests.gms.harness.gms import GMSServerProcess
 
 torch = pytest.importorskip("torch", reason="torch is required")

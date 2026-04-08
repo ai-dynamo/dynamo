@@ -6,8 +6,8 @@ from __future__ import annotations
 import sys
 import types
 
-import pytest
 import gpu_memory_service.integrations.sglang.patches as sglang_patches
+import pytest
 
 torch = pytest.importorskip("torch", reason="torch is required")
 
