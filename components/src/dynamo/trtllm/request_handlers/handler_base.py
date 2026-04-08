@@ -21,7 +21,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -32,6 +32,13 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+
+
+class _Abortable(Protocol):
+    """Structural type for objects that support abort(). Satisfied by both
+    GenerationResult and _DeferredAbort."""
+
+    def abort(self) -> None: ...
 
 
 class _DeferredAbort:
@@ -47,11 +54,11 @@ class _DeferredAbort:
         self._generation_result = generation_result
         self._first_token_received = False
 
-    def signal_first_token(self):
+    def signal_first_token(self) -> None:
         """Called by generate_locally() when first generation result is yielded."""
         self._first_token_received = True
 
-    def abort(self):
+    def abort(self) -> None:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
             self._generation_result.abort()
@@ -62,7 +69,7 @@ class _DeferredAbort:
             )
             asyncio.create_task(self._wait_and_abort())
 
-    async def _wait_and_abort(self):
+    async def _wait_and_abort(self) -> None:
         """Background task: read from GenerationResult until first token, then abort."""
         try:
             async for _ in self._generation_result:
@@ -237,7 +244,7 @@ class HandlerBase(BaseGenerativeHandler):
 
     async def _handle_cancellation(
         self,
-        generation_result: GenerationResult,
+        generation_result: _Abortable,
         context: Context,
     ):
         """
@@ -267,17 +274,6 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
             # Abort the generation unless disabled
-            if shutdown_task in done:
-                generation_result.abort()
-                # Clean up pending tasks before raising
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                raise EngineShutdown("Engine was shut down during generation.")
-
             if self.disable_request_abort:
                 logging.debug(
                     f"Request ID {context.id()} cancelled but abort() skipped "
@@ -295,6 +291,10 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
+            if shutdown_task in done:
+                raise EngineShutdown("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
@@ -302,7 +302,7 @@ class HandlerBase(BaseGenerativeHandler):
     @asynccontextmanager
     async def _cancellation_monitor(
         self,
-        generation_result: GenerationResult,
+        generation_result: _Abortable,
         context: Context,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
