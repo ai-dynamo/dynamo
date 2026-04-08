@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -75,7 +75,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -130,7 +130,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
         args:
           - -m
           - dynamo.frontend
