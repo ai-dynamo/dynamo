@@ -141,8 +141,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
 
-        print("dprank", dp_rank)
-
         trace_header = build_trace_headers(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
