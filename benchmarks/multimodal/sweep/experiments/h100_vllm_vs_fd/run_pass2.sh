@@ -4,12 +4,15 @@
 #
 # Pass 2: re-run sweep with [PERF] patches and server.log capture.
 # Run inside container on dlcluster H100.
-set -euo pipefail
+set -eo pipefail
 
 cd /workspace
 
 # Init container env (NATS, etcd, HF_HOME, etc.)
+# Temporarily allow unbound vars — init_container.sh may reference unset PYTHONPATH
+set +u
 source /dynamo-toolbox/init_container.sh
+set -u
 
 # Rebuild Dynamo in release mode (editable install)
 bash /dynamo-toolbox/build.sh
