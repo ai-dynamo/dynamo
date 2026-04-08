@@ -114,6 +114,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name=f"dynamo-frontend-{router_mode}",
         )
         self.port = frontend_port
         self.router_mode = router_mode
@@ -170,6 +171,7 @@ class DirectRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name="dynamo-frontend-direct",
         )
         self.port = frontend_port
 

@@ -322,6 +322,7 @@ class MockerProcess:
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
+                display_name="dynamo-mocker",
             )
         logger.info(
             f"Created mocker process with {num_mockers} worker(s), endpoint: {self.endpoint}"
@@ -643,6 +644,7 @@ class DisaggMockerProcess:
             health_check_urls=[],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name=f"dynamo-mocker-{worker_type}",
         )
         logger.info(
             f"Created {worker_type} mocker process with {num_mockers} worker(s), "
