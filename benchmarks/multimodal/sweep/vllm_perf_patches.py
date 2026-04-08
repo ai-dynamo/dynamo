@@ -56,7 +56,7 @@ def _patch_input_processor() -> None:
 
 
 def _patch_openai_preprocess_chat() -> None:
-    """Wrap OpenAIServingChat._preprocess_chat to emit [PERF] hf_processor timing.
+    """Wrap OpenAIServingChat._preprocess/_preprocess_chat to emit [PERF] hf_processor timing.
 
     This fires for the vllm-baseline path (vllm serve) where vLLM's built-in
     OpenAI serving layer handles chat preprocessing including the HF processor.
@@ -70,18 +70,29 @@ def _patch_openai_preprocess_chat() -> None:
             logger.debug("OpenAIServingChat not found; skipping patch")
             return
 
-    original = OpenAIServingChat._preprocess_chat
+    # vLLM 0.19.0 uses _preprocess; older versions use _preprocess_chat
+    method_name = "_preprocess_chat"
+    if not hasattr(OpenAIServingChat, method_name):
+        method_name = "_preprocess"
+    if not hasattr(OpenAIServingChat, method_name):
+        logger.debug(
+            "OpenAIServingChat has neither _preprocess_chat nor _preprocess; "
+            "skipping patch"
+        )
+        return
+
+    original = getattr(OpenAIServingChat, method_name)
 
     @functools.wraps(original)
-    async def timed_preprocess_chat(self: Any, *args: Any, **kwargs: Any) -> Any:
+    async def timed_preprocess(self: Any, *args: Any, **kwargs: Any) -> Any:
         t0 = time.perf_counter()
         result = await original(self, *args, **kwargs)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.info(f"[PERF] hf_processor time_ms={elapsed_ms:.2f}")
         return result
 
-    OpenAIServingChat._preprocess_chat = timed_preprocess_chat  # type: ignore[method-assign]
-    logger.info("[PERF] Patched OpenAIServingChat._preprocess_chat")
+    setattr(OpenAIServingChat, method_name, timed_preprocess)
+    logger.info(f"[PERF] Patched OpenAIServingChat.{method_name}")
 
 
 _installed = False
