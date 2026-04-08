@@ -1832,10 +1832,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(2)),
 					},
 				},
 			},
@@ -1892,10 +1891,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(2)),
 					},
 				},
 			},
@@ -1952,22 +1950,19 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
 					},
 					"decode": {
-						ServiceName:     "decode",
-
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
 					},
 					"prefill": {
-						ServiceName:     "prefill",
-
-						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(3)),
+						ServiceName:   "prefill",
+						ComponentType: string(commonconsts.ComponentTypePrefill),
+						Replicas:      ptr.To(int32(3)),
 					},
 				},
 			},
@@ -2098,22 +2093,19 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
 					},
 					"decode": {
-						ServiceName:     "decode",
-
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
 					},
 					"prefill": {
-						ServiceName:     "prefill",
-
-						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(3)),
+						ServiceName:   "prefill",
+						ComponentType: string(commonconsts.ComponentTypePrefill),
+						Replicas:      ptr.To(int32(3)),
 					},
 				},
 			},
@@ -2244,16 +2236,14 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
 					},
 					"decode": {
-						ServiceName:     "decode",
-
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
 					},
 				},
 			},

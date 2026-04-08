@@ -77,7 +77,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								Replicas:        &[]int32{3}[0],
+								Replicas: &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -136,8 +136,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service2",
-							Replicas:        &[]int32{3}[0],
+							ServiceName: "service2",
+							Replicas:    &[]int32{3}[0],
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent:           "service2",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
@@ -168,8 +168,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								ComponentType:   "frontend",
-								Replicas:        &[]int32{3}[0],
+								ComponentType: "frontend",
+								Replicas:      &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -180,7 +180,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								Replicas:        &[]int32{3}[0],
+								Replicas: &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -207,9 +207,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:   "service1",
+							ComponentType: "frontend",
+							Replicas:      &[]int32{3}[0],
 							Resources: &v1alpha1.Resources{
 								Requests: &v1alpha1.ResourceItem{
 									CPU:    "1",
@@ -238,8 +238,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service2",
-							Replicas:        &[]int32{3}[0],
+							ServiceName: "service2",
+							Replicas:    &[]int32{3}[0],
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent:           "service2",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
@@ -270,8 +270,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								ComponentType:   "frontend",
-								Replicas:        &[]int32{3}[0],
+								ComponentType: "frontend",
+								Replicas:      &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -282,7 +282,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								Replicas:        &[]int32{3}[0],
+								Replicas: &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -313,9 +313,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:   "service1",
+							ComponentType: "frontend",
+							Replicas:      &[]int32{3}[0],
 							Resources: &v1alpha1.Resources{
 								Requests: &v1alpha1.ResourceItem{
 									CPU:    "1",
@@ -348,8 +348,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service2",
-							Replicas:        &[]int32{3}[0],
+							ServiceName: "service2",
+							Replicas:    &[]int32{3}[0],
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent:           "service2",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
@@ -386,8 +386,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								ComponentType:   "frontend",
-								Replicas:        &[]int32{3}[0],
+								ComponentType: "frontend",
+								Replicas:      &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -398,7 +398,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								Replicas:        &[]int32{3}[0],
+								Replicas: &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -425,9 +425,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:   "service1",
+							ComponentType: "frontend",
+							Replicas:      &[]int32{3}[0],
 							Resources: &v1alpha1.Resources{
 								Requests: &v1alpha1.ResourceItem{
 									CPU:    "2",
@@ -468,8 +468,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service2",
-							Replicas:        &[]int32{3}[0],
+							ServiceName: "service2",
+							Replicas:    &[]int32{3}[0],
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent:           "service2",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
@@ -507,8 +507,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								ComponentType:   "frontend",
-								Replicas:        &[]int32{3}[0],
+								ComponentType: "frontend",
+								Replicas:      &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -525,7 +525,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								Replicas:        &[]int32{3}[0],
+								Replicas: &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -559,9 +559,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						BackendFramework: string(BackendFrameworkSGLang),
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:   "service1",
+							ComponentType: "frontend",
+							Replicas:      &[]int32{3}[0],
 							Resources: &v1alpha1.Resources{
 								Requests: &v1alpha1.ResourceItem{
 									CPU:    "1",
@@ -603,8 +603,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						BackendFramework: string(BackendFrameworkSGLang),
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service2",
-							Replicas:        &[]int32{3}[0],
+							ServiceName: "service2",
+							Replicas:    &[]int32{3}[0],
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent:           "service2",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
@@ -646,8 +646,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								ComponentType:   "frontend",
-								Replicas:        &[]int32{3}[0],
+								ComponentType: "frontend",
+								Replicas:      &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
 										CPU:    "1",
@@ -679,9 +679,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeAnnotationEnableMetrics:          "false",
 								commonconsts.KubeAnnotationDynamoDiscoveryBackend: "test",
 							},
-							ServiceName:     "service1",
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:   "service1",
+							ComponentType: "frontend",
+							Replicas:      &[]int32{3}[0],
 							Resources: &v1alpha1.Resources{
 								Requests: &v1alpha1.ResourceItem{
 									CPU:    "1",
@@ -824,7 +824,7 @@ func TestGenerateComponentContext(t *testing.T) {
 		{
 			name: "nil dynamoNamespace field still computes correctly",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType:   commonconsts.ComponentTypePlanner,
+				ComponentType: commonconsts.ComponentTypePlanner,
 			},
 			parentGraphDeploymentName:  "test-dgd",
 			namespace:                  "default",
@@ -5372,7 +5372,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				Envs: []corev1.EnvVar{
 					{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 				},
-				ComponentType:   commonconsts.ComponentTypeWorker,
+				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
 						Command: []string{"python3"},
@@ -6827,7 +6827,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testing.T) {
 	labels, err := generateLabels(
 		&v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:   commonconsts.ComponentTypeWorker,
+			ComponentType: commonconsts.ComponentTypeWorker,
 			Labels: map[string]string{
 				"user-label":                          "keep",
 				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
@@ -6863,7 +6863,7 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
 	labels, err := generateLabels(
 		&v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:   commonconsts.ComponentTypeWorker,
+			ComponentType: commonconsts.ComponentTypeWorker,
 			Labels: map[string]string{
 				commonconsts.KubeLabelIsRestoreTarget: "false",
 			},
@@ -6893,7 +6893,7 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
 	labels, err := generateLabels(
 		&v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:   commonconsts.ComponentTypeWorker,
+			ComponentType: commonconsts.ComponentTypeWorker,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
