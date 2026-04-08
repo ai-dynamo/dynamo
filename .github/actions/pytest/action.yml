@@ -318,7 +318,7 @@ runs:
         docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Upload Test Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()  # Always upload test results, even if tests failed
       with:
         name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
@@ -326,7 +326,7 @@ runs:
         retention-days: 7
 
     - name: Upload Coverage Data
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always() && inputs.enable_coverage == 'true'
       with:
         name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}

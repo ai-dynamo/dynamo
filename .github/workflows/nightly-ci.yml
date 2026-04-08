@@ -180,7 +180,7 @@ jobs:
         SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
         echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
     - name: Upload Rust Coverage Data
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()
       with:
         name: ${{ env.RUST_COV_ARTIFACT_NAME }}
@@ -200,12 +200,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.11'
 
@@ -216,14 +216,14 @@ jobs:
           echo "✅ Coverage tools installed"
 
       - name: Download All Python Coverage Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: coverage-python-*
           path: coverage-artifacts/
           merge-multiple: false
 
       - name: Download All Rust Coverage Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:
           pattern: coverage-rust-*
@@ -377,7 +377,7 @@ jobs:
         run: cat coverage-summary.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Coverage Reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: coverage-reports-${{ github.run_id }}
