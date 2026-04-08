@@ -33,8 +33,6 @@ reviews:
       instructions: "Review against .ai/pytest-guidelines.md"
     - path: "**/launch/**/*.sh"
       instructions: "Review against .ai/bash-launch-guidelines.md"
-    - path: "**/tests/**/launch/**/*.sh"
-      instructions: "Review against .ai/bash-launch-guidelines.md"
 knowledge_base:
   code_guidelines:
     filePatterns:

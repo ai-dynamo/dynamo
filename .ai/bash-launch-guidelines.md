@@ -46,7 +46,7 @@ in a code comment.
 ### Source the shared utility libraries
 
 Launch scripts throughout the codebase source `gpu_utils.sh` and `launch_utils.sh`
-in order to share process management, VRAM budgeting, and banner logic from a single
+to share process management, VRAM budgeting, and banner logic from a single
 maintained location. New launch scripts should follow the same convention:
 
 ```bash
@@ -72,7 +72,7 @@ instead of calling the appropriate `build_*_gpu_mem_args` function.
 ### Use the engine-specific GPU memory functions for VRAM control
 
 Existing launch scripts call an engine-specific function from `gpu_utils.sh` and pass
-the result to the engine CLI in order to support GPU-parallel test execution. Without
+the result to the engine CLI to support GPU-parallel test execution. Without
 it, engines grab all available VRAM and concurrent tests OOM each other.
 
 Each engine has its own function because the CLI flag semantics differ:
@@ -101,7 +101,7 @@ fi
 ### Use `wait_any_exit` instead of bare `wait` or foreground processes
 
 Launch scripts across the codebase background all processes and call `wait_any_exit`
-as the last line in order to detect failures immediately. If any child process crashes,
+as the last line to detect failures immediately. If any child process crashes,
 the script exits with that error code and the EXIT trap tears down the rest.
 
 ```bash
@@ -305,5 +305,5 @@ generation prompt).
 - **[`tests/README.md`](../tests/README.md)** -- VRAM profiler (`profile_pytest.py`),
   pytest markers for VRAM budgets, and how the test framework sets the
   `_PROFILE_OVERRIDE_*` env vars that the GPU memory functions read.
-- **[`.ai/bash-launch-guidelines.md`](.ai/bash-launch-guidelines.md)** -- This file
+- **`.ai/bash-launch-guidelines.md`** -- This file
   (CodeRabbit reviews launch scripts against it).
