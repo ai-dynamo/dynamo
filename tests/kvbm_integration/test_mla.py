@@ -210,7 +210,7 @@ class MlaDynamoWorkerProcess(ManagedProcess):
             "--served-model-name",
             MLA_MODEL,
             "--tensor-parallel-size",
-            "4",
+            "2",
             "--connector",
             "kvbm",
             "--extra-engine-args",
@@ -334,7 +334,7 @@ def _precache_deepseek_remote_code():
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.pre_merge
-@pytest.mark.gpu_4
+@pytest.mark.gpu_2
 @pytest.mark.mla
 @pytest.mark.model(MLA_MODEL)
 @pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")

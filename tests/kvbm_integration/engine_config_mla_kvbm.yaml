@@ -4,7 +4,7 @@
 # MLA (Multi-Head Latent Attention) test config for KVBM NCCL replicated mode
 # Using DeepSeek-R1-Small-2layers with TP=4 for MLA architecture testing
 backend: pytorch
-tensor_parallel_size: 4
+tensor_parallel_size: 2
 pipeline_parallel_size: 1
 trust_remote_code: true
 enable_chunked_prefill: true
