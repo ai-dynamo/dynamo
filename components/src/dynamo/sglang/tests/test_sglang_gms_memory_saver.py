@@ -3,21 +3,15 @@
 
 from __future__ import annotations
 
-import importlib
 from contextlib import contextmanager
 
 import pytest
+import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 
 pytest.importorskip("gpu_memory_service", reason="gpu_memory_service is required")
 torch = pytest.importorskip("torch", reason="torch is required")
-
-gms_memory_saver = importlib.import_module(
-    "gpu_memory_service.integrations.sglang.memory_saver"
-)
-locks_module = importlib.import_module("gpu_memory_service.common.locks")
-GrantedLockType = locks_module.GrantedLockType
-RequestedLockType = locks_module.RequestedLockType
-GMSMemorySaverImpl = gms_memory_saver.GMSMemorySaverImpl
 
 pytestmark = [
     pytest.mark.pre_merge,
