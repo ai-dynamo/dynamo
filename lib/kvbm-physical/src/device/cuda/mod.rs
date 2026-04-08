@@ -80,7 +80,8 @@ impl DeviceContextOps for CudaContext {
     }
 
     fn bind_to_thread(&self) -> Result<()> {
-        Ok(())
+        self.context.bind_to_thread()
+            .context("Failed to bind CUDA context to thread")
     }
 
     unsafe fn disable_event_tracking(&self) -> Result<()> {
