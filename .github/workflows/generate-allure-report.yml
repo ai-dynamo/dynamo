@@ -214,7 +214,8 @@ jobs:
               echo "Deploy successful (attempt $attempt)"
               exit 0
             fi
-            echo "Push failed (attempt $attempt/3), retrying with latest gh-pages..."
+            echo "Push failed (attempt $attempt/3), waiting 5s before retrying..."
+            sleep 5
           done
           echo "::error::Deploy failed after 3 attempts"
           exit 1
