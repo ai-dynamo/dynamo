@@ -477,6 +477,7 @@ mod tests {
                 instance_id: i,
                 card_json: serde_json::json!({"model": "test"}),
                 model_suffix: None,
+                priority: 0,
             };
             metadata.register_model_card(instance).unwrap();
         }
@@ -561,6 +562,7 @@ mod tests {
             instance_id: 2,
             card_json: serde_json::json!({"model": "test"}),
             model_suffix: None,
+            priority: 0,
         };
         metadata.register_model_card(model).unwrap();
 

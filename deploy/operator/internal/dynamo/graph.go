@@ -1212,6 +1212,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
+		Priority:                       component.Priority,
 	}
 	return componentContext
 }

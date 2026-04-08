@@ -255,6 +255,7 @@ mod tests {
                 "display_name": model_name,
             }),
             model_suffix: None,
+            priority: 0,
         }
     }
 
@@ -278,6 +279,7 @@ mod tests {
                 },
             }),
             model_suffix: Some(lora_name.to_string()),
+            priority: 0,
         }
     }
 
@@ -426,6 +428,7 @@ mod tests {
                     "source_path": "base-repo",
                 }),
                 model_suffix: None,
+                priority: 0,
             })
             .await
             .unwrap();
@@ -459,6 +462,7 @@ mod tests {
                     "source_path": "base-repo",
                 }),
                 model_suffix: None,
+                priority: 0,
             })
             .await
             .unwrap();

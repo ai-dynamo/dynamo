@@ -36,6 +36,9 @@ pub struct WorkerSet {
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
 
+    /// Worker selection priority. Higher values are preferred.
+    priority: u32,
+
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
@@ -58,10 +61,20 @@ pub struct WorkerSet {
 
 impl WorkerSet {
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        Self::with_priority(namespace, mdcsum, card, 0)
+    }
+
+    pub fn with_priority(
+        namespace: String,
+        mdcsum: String,
+        card: ModelDeploymentCard,
+        priority: u32,
+    ) -> Self {
         Self {
             namespace,
             mdcsum,
             card,
+            priority,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -85,6 +98,10 @@ impl WorkerSet {
 
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
+    }
+
+    pub fn priority(&self) -> u32 {
+        self.priority
     }
 
     pub fn has_chat_engine(&self) -> bool {

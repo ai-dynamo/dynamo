@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
@@ -38,15 +38,15 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             prefill_load_estimator: None,
-            model_name: String::new(), // Not used for disabled router
-            namespace: String::new(),  // Not used for disabled router
+            model_name: String::new(),     // Not used for disabled router
+            worker_set_key: String::new(), // Not used for disabled router
             is_eagle: false,
         })
     }
 
     #[expect(clippy::too_many_arguments)]
     pub fn new(
-        activation_rx: oneshot::Receiver<Endpoint>,
+        mut activation_rx: watch::Receiver<Option<Endpoint>>,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_cache_block_size: u32,
@@ -54,7 +54,7 @@ impl PrefillRouter {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         enforce_disagg: bool,
         model_name: String,
-        namespace: String,
+        worker_set_key: String,
         is_eagle: bool,
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
@@ -69,32 +69,42 @@ impl PrefillRouter {
             enforce_disagg,
             prefill_load_estimator,
             model_name,
-            namespace,
+            worker_set_key,
             is_eagle,
         });
 
-        // Spawn background task to wait for activation
+        // Spawn background task to wait for the shared prefill endpoint.
         let router_clone = router.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                result = activation_rx => {
-                    let Ok(endpoint) = result else {
-                        tracing::debug!("Prefill router activation channel closed without receiving endpoint");
-                        return;
-                    };
-
-                    if let Err(e) = router_clone.activate(
-                        endpoint,
-                        model_manager,
-                        kv_cache_block_size,
-                        kv_router_config,
-                        router_clone.prefill_load_estimator.clone(),
-                    ).await {
+            loop {
+                let endpoint = { activation_rx.borrow().clone() };
+                if let Some(endpoint) = endpoint {
+                    if let Err(e) = router_clone
+                        .activate(
+                            endpoint,
+                            model_manager.clone(),
+                            kv_cache_block_size,
+                            kv_router_config.clone(),
+                            router_clone.prefill_load_estimator.clone(),
+                        )
+                        .await
+                    {
                         tracing::error!(error = %e, "Failed to activate prefill router");
                     }
+                    return;
                 }
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("Prefill router activation cancelled");
+
+                tokio::select! {
+                    result = activation_rx.changed() => {
+                        if result.is_err() {
+                            tracing::debug!("Prefill router activation channel closed without receiving endpoint");
+                            return;
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        tracing::debug!("Prefill router activation cancelled");
+                        return;
+                    }
                 }
             }
         });
@@ -186,7 +196,7 @@ impl PrefillRouter {
 
     fn register_prefill_client(&self, model_manager: &ModelManager, client: &Client) {
         if let Some(monitor) =
-            model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            model_manager.get_worker_monitor_for_worker_set(&self.model_name, &self.worker_set_key)
         {
             monitor.set_prefill_client(client.clone());
         }

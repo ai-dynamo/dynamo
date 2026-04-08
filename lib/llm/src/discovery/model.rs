@@ -268,10 +268,13 @@ impl Model {
         result
     }
 
-    /// Get the worker monitor for a specific namespace's WorkerSet.
-    pub fn get_worker_monitor_for_namespace(&self, namespace: &str) -> Option<KvWorkerMonitor> {
+    /// Get the worker monitor for a specific worker-set key.
+    pub fn get_worker_monitor_for_worker_set(
+        &self,
+        worker_set_key: &str,
+    ) -> Option<KvWorkerMonitor> {
         self.worker_sets
-            .get(namespace)
+            .get(worker_set_key)
             .and_then(|entry| entry.value().worker_monitor.clone())
     }
 
@@ -297,23 +300,8 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        // TODO: When the single set has 0 workers, this returns None which maps to
-        // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
-        if self.worker_sets.len() == 1 {
-            return self.worker_sets.iter().next().and_then(|entry| {
-                let ws = entry.value();
-                if ws.worker_count() == 0 {
-                    return None;
-                }
-                extract(ws)
-            });
-        }
-
-        // Collect eligible sets with their worker counts, skipping sets with no workers.
-        // In-process models (no discovery watcher) return count=1, so they always participate.
-        // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = self
+        // Collect eligible sets with worker counts and priorities, skipping empty sets.
+        let eligible: Vec<(T, usize, u32)> = self
             .worker_sets
             .iter()
             .filter_map(|entry| {
@@ -322,7 +310,7 @@ impl Model {
                 if count == 0 {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (val, count, ws.priority()))
             })
             .collect();
 
@@ -331,19 +319,32 @@ impl Model {
         }
 
         if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+            return eligible.into_iter().next().map(|(val, _, _)| val);
         }
 
-        // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
+        // Strict tiered selection: pick the highest-priority tier with healthy workers,
+        // then weighted-random within that tier.
+        let max_priority = eligible.iter().map(|(_, _, p)| *p).max().unwrap();
+
+        let top_tier: Vec<(T, usize)> = eligible
+            .into_iter()
+            .filter(|(_, _, p)| *p == max_priority)
+            .map(|(val, count, _)| (val, count))
+            .collect();
+
+        if top_tier.len() == 1 {
+            return top_tier.into_iter().next().map(|(val, _)| val);
+        }
+
+        // Weighted random selection within the highest-priority tier
+        let total_weight: usize = top_tier.iter().map(|(_, w)| w).sum();
         let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
+        for (val, weight) in top_tier {
             if pick < weight {
                 return Some(val);
             }
             pick -= weight;
         }
-        // Should not reach here, but fallback to None
         None
     }
 }
