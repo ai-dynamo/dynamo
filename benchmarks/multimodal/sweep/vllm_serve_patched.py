@@ -12,10 +12,11 @@ from __future__ import annotations
 # Apply patches BEFORE vllm CLI parses/starts anything heavy
 import benchmarks.multimodal.sweep.vllm_perf_patches  # noqa: F401
 
-# Delegate to vllm's CLI
-try:
-    from vllm.scripts import main
-except ImportError:
-    from vllm.entrypoints.cli.main import main  # type: ignore[no-redef]
+if __name__ == "__main__":
+    # Delegate to vllm's CLI (guard prevents re-execution in spawned workers)
+    try:
+        from vllm.scripts import main
+    except ImportError:
+        from vllm.entrypoints.cli.main import main  # type: ignore[no-redef]
 
-main()
+    main()
