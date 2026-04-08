@@ -21,7 +21,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -32,6 +32,52 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+
+
+class _Abortable(Protocol):
+    """Structural type for objects that support abort(). Satisfied by both
+    GenerationResult and _DeferredAbort."""
+
+    def abort(self) -> None: ...
+
+
+class _DeferredAbort:
+    """Wraps GenerationResult.abort() to defer until first token in disagg decode.
+
+    When abort() is called before the first generation result, spawns a
+    background asyncio.Task that reads from GenerationResult.aqueue (TRT-LLM's
+    internal asyncio.Queue, decoupled from Dynamo RPC transport) until the
+    first result arrives, then calls the real abort(). See NVBugs 5969206.
+    """
+
+    def __init__(self, generation_result: GenerationResult):
+        self._generation_result = generation_result
+        self._first_token_received = False
+
+    def signal_first_token(self) -> None:
+        """Called by generate_locally() when first generation result is yielded."""
+        self._first_token_received = True
+
+    def abort(self) -> None:
+        """Abort immediately if first token received, otherwise defer."""
+        if self._first_token_received:
+            self._generation_result.abort()
+            logging.debug("Deferred abort: first token already received, aborting now")
+        else:
+            logging.debug(
+                "Deferred abort: first token not received, spawning background task"
+            )
+            asyncio.create_task(self._wait_and_abort())
+
+    async def _wait_and_abort(self) -> None:
+        """Background task: read from GenerationResult until first token, then abort."""
+        try:
+            async for _ in self._generation_result:
+                break  # First result = KV transfer complete
+        except Exception:
+            pass
+        self._generation_result.abort()
+        logging.debug("Deferred abort: background task completed, abort fired")
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -198,18 +244,16 @@ class HandlerBase(BaseGenerativeHandler):
 
     async def _handle_cancellation(
         self,
-        generation_result: GenerationResult,
+        generation_result: _Abortable,
         context: Context,
-        kv_transfer_complete_event: Optional[asyncio.Event] = None,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        In disaggregated decode mode, abort is delayed until
-        kv_transfer_complete_event is set (first generation result received),
-        ensuring KV cache transfer from prefill completes before the decode
-        worker stops. See NVBugs 5969206.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token is received (KV
+        transfer complete). See NVBugs 5969206.
 
         Raise EngineShutdown if shutdown event is triggered.
         """
@@ -229,57 +273,12 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Shutdown always aborts immediately, bypassing disagg guards
-            if shutdown_task in done:
-                generation_result.abort()
-                # Clean up pending tasks before raising
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                raise EngineShutdown("Engine was shut down during generation.")
-
-            # Abort the generation unless disabled or delayed by disagg guard
+            # Abort the generation unless disabled
             if self.disable_request_abort:
                 logging.debug(
                     f"Request ID {context.id()} cancelled but abort() skipped "
                     "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
                 )
-            elif (
-                kv_transfer_complete_event is not None
-                and not kv_transfer_complete_event.is_set()
-            ):
-                # Decode waiting for KV — delay abort until first generation
-                # result confirms KV cache transfer is complete. Continue to
-                # observe shutdown_task so EngineShutdown still propagates
-                # if the engine shuts down while we wait. See NVBugs 5969206.
-                logging.debug(
-                    f"Request ID {context.id()} cancelled, waiting for KV "
-                    "transfer to complete before abort (disagg decode guard)"
-                )
-                kv_wait_task = asyncio.create_task(kv_transfer_complete_event.wait())
-                try:
-                    guard_waiters: list[asyncio.Task] = [kv_wait_task]
-                    if shutdown_task is not None:
-                        guard_waiters.append(shutdown_task)
-                    guard_done, _ = await asyncio.wait(
-                        guard_waiters,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if shutdown_task in guard_done:
-                        generation_result.abort()
-                        raise EngineShutdown("Engine was shut down during generation.")
-                finally:
-                    if not kv_wait_task.done():
-                        kv_wait_task.cancel()
-                        try:
-                            await kv_wait_task
-                        except asyncio.CancelledError:
-                            pass
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
             else:
                 generation_result.abort()
                 logging.debug(f"Aborted Request ID: {context.id()}")
@@ -292,6 +291,10 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
+            if shutdown_task in done:
+                raise EngineShutdown("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
@@ -299,17 +302,15 @@ class HandlerBase(BaseGenerativeHandler):
     @asynccontextmanager
     async def _cancellation_monitor(
         self,
-        generation_result: GenerationResult,
+        generation_result: _Abortable,
         context: Context,
-        kv_transfer_complete_event: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        In disaggregated decode mode, kv_transfer_complete_event delays abort
-        until the first generation result is received, ensuring KV cache
-        transfer completes.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token. See NVBugs 5969206.
 
         Raise EngineShutdown if shutdown event is triggered.
 
@@ -317,11 +318,7 @@ class HandlerBase(BaseGenerativeHandler):
             asyncio.Task: The cancellation monitoring task
         """
         monitor_task = asyncio.create_task(
-            self._handle_cancellation(
-                generation_result,
-                context,
-                kv_transfer_complete_event=kv_transfer_complete_event,
-            )
+            self._handle_cancellation(generation_result, context)
         )
 
         try:
@@ -884,26 +881,22 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
-            # In disagg decode mode, create kv_transfer_complete_event to delay
-            # abort until KV cache transfer completes. See NVBugs 5969206.
-            kv_transfer_complete_event = (
-                asyncio.Event()
+            # In disagg decode mode, wrap abort() to defer until first token
+            # (KV transfer complete). See NVBugs 5969206.
+            abort_guard = (
+                _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE
                 else None
             )
 
-            # Monitor for cancellation triggers and cancel by calling generation_result.abort()
+            # Monitor for cancellation triggers and cancel by calling abort()
             async with self._cancellation_monitor(
-                generation_result,
-                context,
-                kv_transfer_complete_event=kv_transfer_complete_event,
+                abort_guard or generation_result, context
             ):
-                _kv_signaled = False
                 async for res in generation_result:
-                    # Signal kv_transfer_complete on first result (decode KV received)
-                    if not _kv_signaled and kv_transfer_complete_event is not None:
-                        kv_transfer_complete_event.set()
-                        _kv_signaled = True
+                    # Signal first token to deferred abort guard
+                    if abort_guard is not None:
+                        abort_guard.signal_first_token()
 
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
