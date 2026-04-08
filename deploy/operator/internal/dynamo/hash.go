@@ -35,9 +35,7 @@ import (
 //
 // Excluded fields (do not affect the pod template):
 //   - ServiceName, ComponentType, SubComponentType: identity fields
-//   - DynamoNamespace: deprecated, not used in pod spec generation
 //   - Replicas: scaling, not pod template
-//   - Autoscaling: deprecated, ignored
 //   - ScalingAdapter: scaling configuration, not pod template
 //   - Ingress: networking resources, not pod template
 //   - ModelRef: headless service creation, not pod template
@@ -92,9 +90,7 @@ func stripNonPodTemplateFields(spec *v1alpha1.DynamoComponentDeploymentSharedSpe
 	stripped.ServiceName = ""
 	stripped.ComponentType = ""
 	stripped.SubComponentType = ""
-	stripped.DynamoNamespace = nil
 	stripped.Replicas = nil
-	stripped.Autoscaling = nil //nolint:staticcheck // SA1019: intentionally clearing deprecated field for backward compatibility
 	stripped.ScalingAdapter = nil
 	stripped.Ingress = nil
 	stripped.ModelRef = nil

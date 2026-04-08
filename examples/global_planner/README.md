@@ -152,11 +152,11 @@ GlobalPlanner operates in one of two modes depending on whether `--managed-names
 
 ## Namespace Convention
 
-The Dynamo operator prepends the Kubernetes namespace to the DGD's `dynamoNamespace`:
+The Dynamo operator computes the Dynamo namespace as `{k8s-namespace}-{dgd-name}`:
 - K8s namespace: `my-ns`, DGD name: `gp-ctrl`
 - Dynamo namespace: `my-ns-gp-ctrl`
 
-This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-<dgd-name>` path.
+This is why planner configs and router endpoints use the full `{k8s-namespace}-{dgd-name}` path.
 
 ## Further Reading
 

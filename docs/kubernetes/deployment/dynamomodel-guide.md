@@ -539,7 +539,6 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
-      dynamoNamespace: my-app
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest

@@ -127,9 +127,6 @@ func TestComputeDGDWorkersSpecHash_StableOnExcludedFields(t *testing.T) {
 			// Change to another worker type — still included in hash but componentType is stripped
 			d.Spec.Services["worker"].ComponentType = commonconsts.ComponentTypePrefill
 		}},
-		{"dynamoNamespace", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].DynamoNamespace = ptr.To("changed")
-		}},
 		{"ingress", func(d *v1alpha1.DynamoGraphDeployment) {
 			d.Spec.Services["worker"].Ingress = &v1alpha1.IngressSpec{Enabled: true}
 		}},
@@ -180,9 +177,7 @@ func TestStripNonPodTemplateFields(t *testing.T) {
 		ServiceName:      "svc",
 		ComponentType:    commonconsts.ComponentTypeWorker,
 		SubComponentType: "sub",
-		DynamoNamespace:  ptr.To("ns"),
 		Replicas:         ptr.To(int32(3)),
-		Autoscaling:      &v1alpha1.Autoscaling{}, //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
 		ScalingAdapter:   &v1alpha1.ScalingAdapter{},
 		Ingress:          &v1alpha1.IngressSpec{Enabled: true},
 		ModelRef:         &v1alpha1.ModelReference{Name: "m"},
@@ -199,9 +194,7 @@ func TestStripNonPodTemplateFields(t *testing.T) {
 	assert.Empty(t, stripped.ServiceName)
 	assert.Empty(t, stripped.ComponentType)
 	assert.Empty(t, stripped.SubComponentType)
-	assert.Nil(t, stripped.DynamoNamespace)
 	assert.Nil(t, stripped.Replicas)
-	assert.Nil(t, stripped.Autoscaling) //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
 	assert.Nil(t, stripped.ScalingAdapter)
 	assert.Nil(t, stripped.Ingress)
 	assert.Nil(t, stripped.ModelRef)

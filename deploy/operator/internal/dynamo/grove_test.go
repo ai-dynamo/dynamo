@@ -879,10 +879,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(2)),
 					},
 				},
 			},
@@ -921,19 +920,17 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"decode": {
-						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
 					},
 					"prefill": {
-						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(3)),
+						ServiceName:   "prefill",
+						ComponentType: string(commonconsts.ComponentTypePrefill),
+						Replicas:      ptr.To(int32(3)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 4,
 						},
@@ -998,10 +995,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"worker": {
-						ServiceName:     "worker",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeWorker),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "worker",
+						ComponentType: string(commonconsts.ComponentTypeWorker),
+						Replicas:      ptr.To(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 4,
 						},
@@ -1043,25 +1039,22 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
 					},
 					"decode": {
-						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
 					},
 					"prefill": {
-						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(2)),
+						ServiceName:   "prefill",
+						ComponentType: string(commonconsts.ComponentTypePrefill),
+						Replicas:      ptr.To(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
@@ -1149,10 +1142,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
-						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
 					},
 				},
 			},

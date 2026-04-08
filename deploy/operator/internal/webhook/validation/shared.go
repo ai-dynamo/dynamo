@@ -72,14 +72,6 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 	// Collect warnings (e.g., deprecation notices)
 	var warnings admission.Warnings
 
-	// Warn about deprecated dynamoNamespace field
-	if v.spec.DynamoNamespace != nil && *v.spec.DynamoNamespace != "" {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s.dynamoNamespace is deprecated and ignored. Value '%s' will be replaced with '%s'. "+
-				"Remove this field from your configuration",
-			v.fieldPath, *v.spec.DynamoNamespace, v.calculatedNamespace))
-	}
-
 	// Validate replicas if specified
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
@@ -102,15 +94,6 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		if err := v.validateSharedMemory(); err != nil {
 			return nil, err
 		}
-	}
-
-	// Check for deprecated autoscaling field
-	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
-	if v.spec.Autoscaling != nil {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
-				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
-			v.fieldPath))
 	}
 
 	// Validate frontend sidecar container name conflicts

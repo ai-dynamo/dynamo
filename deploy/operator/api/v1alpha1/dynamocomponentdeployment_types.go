@@ -67,21 +67,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// DynamoNamespace is deprecated and will be removed in a future version.
-	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
-	// +kubebuilder:validation:Optional
-	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
-
 	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
-	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
-	// for migration guidance. This field will be removed in a future API version.
-	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as

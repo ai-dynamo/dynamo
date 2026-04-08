@@ -1833,7 +1833,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
 						Replicas:        ptr.To(int32(2)),
 					},
@@ -1893,7 +1893,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
 						Replicas:        ptr.To(int32(2)),
 					},
@@ -1953,19 +1953,19 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
 						Replicas:        ptr.To(int32(1)),
 					},
 					"decode": {
 						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeDecode),
 						Replicas:        ptr.To(int32(2)),
 					},
 					"prefill": {
 						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypePrefill),
 						Replicas:        ptr.To(int32(3)),
 					},
@@ -2099,19 +2099,19 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
 						Replicas:        ptr.To(int32(1)),
 					},
 					"decode": {
 						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeDecode),
 						Replicas:        ptr.To(int32(2)),
 					},
 					"prefill": {
 						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypePrefill),
 						Replicas:        ptr.To(int32(3)),
 					},
@@ -2245,13 +2245,13 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
 						Replicas:        ptr.To(int32(1)),
 					},
 					"decode": {
 						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
+
 						ComponentType:   string(commonconsts.ComponentTypeDecode),
 						Replicas:        ptr.To(int32(2)),
 					},

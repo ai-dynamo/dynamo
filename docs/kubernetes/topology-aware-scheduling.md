@@ -50,7 +50,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       envFromSecret: hf-token-secret
@@ -64,7 +63,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -89,7 +87,6 @@ spec:
     topologyProfile: my-cluster-topology
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -107,7 +104,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -133,7 +129,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -151,7 +146,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       # inherits zone from spec.topologyConstraint

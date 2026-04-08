@@ -20,12 +20,10 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-agg
       componentType: frontend
       replicas: 1
 
     decode:
-      dynamoNamespace: sglang-agg
       componentType: worker
       replicas: 1
       resources:
@@ -50,7 +48,7 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 | **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
 | **Custom Controllers** | Any scale-subresource-compatible controller | Custom requirements |
 
-> **⚠️ Deprecation Notice**: The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
+> **Note**: The `spec.services[X].autoscaling` field has been **removed** from the DGD API. Use DGDSA with HPA, KEDA, or Planner for autoscaling.
 
 ## Architecture
 
@@ -240,7 +238,7 @@ Dynamo metrics include these labels for filtering:
 
 | Label | Description | Example |
 |-------|-------------|---------|
-| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dynamoNamespace}`) | `default-sglang-agg` |
+| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dgd-name}`) | `default-sglang-agg` |
 | `model` | Model being served | `Qwen/Qwen3-0.6B` |
 
 <Note>
@@ -315,7 +313,7 @@ spec:
         name: dynamo_ttft_p95_seconds
         selector:
           matchLabels:
-            dynamo_namespace: "default-sglang-agg"  # ← {namespace}-{dynamoNamespace}
+            dynamo_namespace: "default-sglang-agg"  # ← {namespace}-{dgd-name}
       target:
         type: Value
         value: "500m"  # Scale up when TTFT p95 > 500ms

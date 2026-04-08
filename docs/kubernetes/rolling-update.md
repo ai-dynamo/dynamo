@@ -298,7 +298,7 @@ Worker DCDs always include a hash suffix derived from the worker specs: `{dgd-na
 - **Old worker DCD:** `vllm-disagg-vllmdecodeworker-a1b2c3d4` (previous hash)
 - **New worker DCD:** `vllm-disagg-vllmdecodeworker-f5e6d7c8` (new hash)
 
-The hash is computed from a SHA-256 digest of all worker service specs (excluding non-pod-template fields like `replicas`, `autoscaling`, and `ingress`). This means:
+The hash is computed from a SHA-256 digest of all worker service specs (excluding non-pod-template fields like `replicas` and `ingress`). This means:
 
 - Scaling changes (replica count) do **not** trigger a rolling update.
 - Pod template changes (image, resources, env vars, volumes, etc.) **do** trigger a rolling update.

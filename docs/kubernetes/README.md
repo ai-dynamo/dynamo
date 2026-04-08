@@ -14,10 +14,10 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 **Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](service-discovery.md).
 - Used for: Runtime component communication, service discovery
-- Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
-- Example: `my-llm`, `production-model`, `dynamo-dev`
+- Automatically computed as `{k8s-namespace}-{dgd-name}` (or `dynamo` when `globalDynamoNamespace: true`)
+- Example: If your DGD is named `my-llm` in namespace `default`, the Dynamo namespace is `default-my-llm`
 
-These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces, and vice versa.
+These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces (one per DGD).
 
 ## Prerequisites
 
@@ -154,14 +154,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: your-image
     VllmDecodeWorker:  # or SGLangDecodeWorker, TrtllmDecodeWorker
-      dynamoNamespace: dynamo-dev
       componentType: worker
       replicas: 1
       envFromSecret: hf-token-secret  # for HuggingFace models

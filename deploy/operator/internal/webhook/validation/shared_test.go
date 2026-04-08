@@ -27,11 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// ptr is a helper function to create a pointer to a string
-func ptr(s string) *string {
-	return &s
-}
-
 func TestSharedSpecValidator_Validate(t *testing.T) {
 	var (
 		negativeReplicas = int32(-1)
@@ -82,24 +77,6 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
 			errMsg:              "spec.replicas must be non-negative",
-		},
-		{
-			name: "nil dynamoNamespace is allowed",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				DynamoNamespace: nil,
-			},
-			fieldPath:           "spec",
-			calculatedNamespace: "default-my-dgd",
-			wantErr:             false,
-		},
-		{
-			name: "empty string dynamoNamespace is allowed",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				DynamoNamespace: ptr(""),
-			},
-			fieldPath:           "spec",
-			calculatedNamespace: "default-my-dgd",
-			wantErr:             false,
 		},
 		{
 			name: "ingress enabled without host",
@@ -337,32 +314,6 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 			fieldPath:           "spec",
 			calculatedNamespace: "default-my-dgd",
 			wantWarnings:        0,
-		},
-		{
-			name: "warning for deprecated autoscaling field enabled",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Replicas: &validReplicas,
-				//nolint:staticcheck // SA1019: Intentionally testing deprecated field
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 1,
-					MaxReplicas: 10,
-				},
-			},
-			fieldPath:           "spec",
-			calculatedNamespace: "default-my-dgd",
-			wantWarnings:        1,
-		},
-		{
-			name: "warning for deprecated dynamoNamespace field shows calculated namespace",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Replicas:        &validReplicas,
-				DynamoNamespace: ptr("my-custom-namespace"),
-			},
-			fieldPath:           "spec.services[Frontend]",
-			calculatedNamespace: "hannahz-trtllm-disagg",
-			wantWarnings:        1,
-			wantWarningContains: "Value 'my-custom-namespace' will be replaced with 'hannahz-trtllm-disagg'",
 		},
 	}
 

@@ -1086,9 +1086,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
 		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
 	}
-	if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		podLabels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
-	}
+	podLabels[commonconsts.KubeLabelDynamoNamespace] = opt.dynamoComponentDeployment.GetDynamoNamespace()
 	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
@@ -1145,15 +1143,11 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		return deleteStub, true, nil
 	}
 
-	if dcd.Spec.DynamoNamespace == nil {
-		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
-	}
-
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   dcd.Spec.ComponentType,
-		DynamoNamespace: *dcd.Spec.DynamoNamespace,
+		DynamoNamespace: dcd.GetDynamoNamespace(),
 		ComponentName:   dcd.Spec.ServiceName,
 		Labels:          r.getKubeLabels(dcd),
 		Annotations:     r.getKubeAnnotations(dcd),

@@ -689,14 +689,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		// else, only create for the frontend component
 		isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoDeployment.Annotations)
 		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
-			if component.DynamoNamespace == nil {
-				return ReconcileResult{}, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
-			}
+			dynamoNamespace := dynamoDeployment.GetDynamoNamespaceForService(component)
 			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
 				Namespace:       dynamoDeployment.Namespace,
 				ComponentType:   component.ComponentType,
-				DynamoNamespace: *component.DynamoNamespace,
+				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
 				Labels:          component.Labels,
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
@@ -1412,9 +1410,6 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 
 	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
 	// This is required for service discovery and distributed coordination
-	dynamoNamespace := dynamo.GetDynamoNamespace(dynamoDeployment, component)
-	componentForJob.DynamoNamespace = &dynamoNamespace
-
 	// Generate base PodSpec using the same logic as regular worker pods
 	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
 	// resources, security context, tolerations, node selectors, etc.

@@ -218,8 +218,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service1",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service1",
 								Ingress: &v1alpha1.IngressSpec{
 									Enabled:                    true,
 									Host:                       "someservice",
@@ -277,8 +276,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service1",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service1",
 								Ingress: &v1alpha1.IngressSpec{
 									Enabled: false,
 								},
@@ -340,8 +338,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service1",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service1",
 								Ingress: &v1alpha1.IngressSpec{
 									Enabled: true,
 								},
@@ -372,8 +369,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service1",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service1",
 								Ingress: &v1alpha1.IngressSpec{
 									Enabled:               true,
 									Host:                  "someservice",
@@ -468,8 +464,7 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								ServiceName:     "service1",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service1",
 							},
 						},
 					},
@@ -503,8 +498,7 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-nil-instanceid",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service-nil-instanceid",
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
@@ -530,8 +524,7 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-negative-instanceid",
-								DynamoNamespace: &[]string{"default"}[0],
+								ServiceName: "service-negative-instanceid",
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
@@ -639,7 +632,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ComponentType:    string(commonconsts.ComponentTypeWorker),
 								SubComponentType: "test-sub-component",
 								ServiceName:      "test-lws-deploy-service",
-								DynamoNamespace:  &[]string{"default-test-lws-deploy"}[0],
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
@@ -1164,10 +1156,9 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:     "test-service",
-				DynamoNamespace: ptr.To("default"),
-				ComponentType:   string(commonconsts.ComponentTypeDecode),
-				Replicas:        &replicaCount,
+				ServiceName:   "test-service",
+				ComponentType: string(commonconsts.ComponentTypeDecode),
+				Replicas:      &replicaCount,
 			},
 		},
 	}
@@ -1296,13 +1287,16 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "DynamoGraphDeployment",
+					Name: "test-dgd",
+				}},
 			},
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ServiceName:     "worker",
-					ComponentType:   commonconsts.ComponentTypeWorker,
-					DynamoNamespace: ptr.To("default"),
+					ServiceName:   "worker",
+					ComponentType: commonconsts.ComponentTypeWorker,
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
@@ -1412,8 +1406,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
-			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
+		expectedDynamoNS := v1alpha1.ComputeDynamoNamespace(false, "default", "test-dgd")
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != expectedDynamoNS {
+			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, expectedDynamoNS, got)
 		}
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoComponentType, commonconsts.ComponentTypeWorker, got)
@@ -1485,10 +1480,9 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ServiceName:     "worker",
-					ComponentType:   commonconsts.ComponentTypeWorker,
-					DynamoNamespace: ptr.To("default"),
-					Replicas:        &replicas,
+					ServiceName:   "worker",
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      &replicas,
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 					},
@@ -1646,10 +1640,9 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:     "test-service",
-				DynamoNamespace: ptr.To("default"),
-				ComponentType:   string(commonconsts.ComponentTypeDecode),
-				Replicas:        &replicaCount,
+				ServiceName:   "test-service",
+				ComponentType: string(commonconsts.ComponentTypeDecode),
+				Replicas:      &replicaCount,
 			},
 		},
 	}
@@ -1947,10 +1940,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						ServiceName:     "test-service",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        &tt.replicas,
+						ServiceName:   "test-service",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      &tt.replicas,
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
@@ -2136,10 +2128,9 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						ServiceName:     "test-service",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        &tt.replicas,
+						ServiceName:   "test-service",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      &tt.replicas,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Image: "test-image:latest",
@@ -2208,10 +2199,9 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:     "test-service",
-				DynamoNamespace: ptr.To("default"),
-				ComponentType:   string(commonconsts.ComponentTypeDecode),
-				Replicas:        &replicas,
+				ServiceName:   "test-service",
+				ComponentType: string(commonconsts.ComponentTypeDecode),
+				Replicas:      &replicas,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
 						Image: "test-image:latest",
@@ -2468,9 +2458,8 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						ServiceName:     "test-service",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						ServiceName:   "test-service",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
 					},
 				},
 			}
@@ -2663,11 +2652,10 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						ServiceName:     "test-service",
-						DynamoNamespace: ptr.To("default"),
-						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(1)),
-						Annotations:     tt.args.annotations,
+						ServiceName:   "test-service",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(1)),
+						Annotations:   tt.args.annotations,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Image: "test-image:latest",

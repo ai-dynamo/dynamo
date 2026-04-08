@@ -320,7 +320,6 @@ func generateSingleDCD(
 	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
 	deployment.Namespace = parentDGD.Namespace
 	deployment.Spec.ServiceName = componentName
-	deployment.Spec.DynamoNamespace = &dynamoNamespace
 
 	labels := make(map[string]string)
 	maps.Copy(labels, component.Labels)
@@ -1383,7 +1382,6 @@ func GenerateGrovePodCliqueSet(
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
-		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
@@ -1457,7 +1455,7 @@ func GenerateGrovePodCliqueSet(
 			if !isMultinode {
 				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, dynamoNamespace)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1517,14 +1515,13 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
+	dynamoNamespace string,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
-	if component.DynamoNamespace != nil {
-		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
-	}
+	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}
@@ -1549,9 +1546,7 @@ func generateLabels(
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}
-	if component.DynamoNamespace != nil {
-		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
-	}
+	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
