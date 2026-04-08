@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod events;
+pub mod eviction;
 pub mod key;
 pub mod lease;
 pub mod metadata;
@@ -18,7 +19,8 @@ pub use error::{RegistryError, RegistryResult};
 // Lease management
 pub use lease::{LeaseInfo, LeaseManager};
 
-// Storage
+// Storage & Eviction
+pub use eviction::{Eviction, NoEviction, PositionalEviction, TailEviction};
 pub use storage::{FlatStorage, HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
 
 // Key, Value, Metadata
