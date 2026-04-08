@@ -278,7 +278,10 @@ class GlobalRouterConfig:
                     f"({override.min_priority}) must be <= max_priority "
                     f"({override.max_priority})"
                 )
-            if override.target_pool < 0 or override.target_pool >= self.num_prefill_pools:
+            if (
+                override.target_pool < 0
+                or override.target_pool >= self.num_prefill_pools
+            ):
                 raise ValueError(
                     f"Prefill priority_overrides[{i}]: invalid target_pool "
                     f"{override.target_pool} (must be 0 to {self.num_prefill_pools - 1})"
@@ -314,7 +317,10 @@ class GlobalRouterConfig:
                     f"({override.min_priority}) must be <= max_priority "
                     f"({override.max_priority})"
                 )
-            if override.target_pool < 0 or override.target_pool >= self.num_decode_pools:
+            if (
+                override.target_pool < 0
+                or override.target_pool >= self.num_decode_pools
+            ):
                 raise ValueError(
                     f"Decode priority_overrides[{i}]: invalid target_pool "
                     f"{override.target_pool} (must be 0 to {self.num_decode_pools - 1})"

@@ -4,7 +4,6 @@
 """Tests for priority-based pool routing in the global router."""
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from dynamo.global_router.pool_selection import (
     _apply_priority_overrides,
     load_config,
 )
-
 
 # --- _apply_priority_overrides tests ---
 
@@ -135,9 +133,7 @@ class TestDecodeSelectPoolWithPriority:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=1)
             ]
         )
-        result = strategy.select_pool(
-            context_length=100, itl_target=20, priority=50
-        )
+        result = strategy.select_pool(context_length=100, itl_target=20, priority=50)
         assert result == 1
 
     def test_no_priority_uses_grid(self):
