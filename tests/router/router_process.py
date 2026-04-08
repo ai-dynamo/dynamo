@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -34,7 +35,7 @@ class FrontendRouterProcess(ManagedProcess):
         use_remote_indexer: bool = False,
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",
@@ -141,7 +142,7 @@ class DirectRouterProcess(ManagedProcess):
         request_plane: str = "nats",
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",

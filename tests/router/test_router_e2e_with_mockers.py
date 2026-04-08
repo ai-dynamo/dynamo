@@ -11,6 +11,7 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,6 +26,7 @@ from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
     _test_router_decisions_disagg,
+    _test_router_decisions_disagg_round_robin_prefill_dp_rank,
     _test_router_indexers_sync,
     _test_router_overload_503,
     _test_router_query_instance_id,
@@ -139,7 +141,7 @@ def _build_mocker_command(
         List of command arguments for subprocess
     """
     command = [
-        "python",
+        sys.executable,
         "-m",
         "dynamo.mocker",
         "--model-path",
@@ -1276,6 +1278,101 @@ def test_router_decisions_disagg(
                     test_payload=TEST_PAYLOAD,
                     request_plane="nats",
                 )
+
+
+@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+@pytest.mark.parametrize(
+    "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
+)
+@pytest.mark.timeout(180)
+def test_router_decisions_disagg_round_robin_prefill_dp_rank(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    registration_order,
+    enable_disagg_bootstrap,
+):
+    """Verify round-robin disagg prefill requests spread KV stores across DP ranks."""
+    logger.info(
+        "Starting disaggregated round-robin prefill dp-rank test "
+        "(registration_order=%s, bootstrap=%s)",
+        registration_order,
+        enable_disagg_bootstrap,
+    )
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+    prefill_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": 4,
+    }
+    decode_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    def run_case(prefill_workers, decode_workers):
+        frontend_port = get_unique_ports(
+            request, num_ports=1, registration_order=registration_order
+        )[0]
+        _test_router_decisions_disagg_round_robin_prefill_dp_rank(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            expected_prefill_dp_ranks=prefill_mocker_args["dp_size"],
+            request_plane="nats",
+        )
+
+    if registration_order == "prefill_first":
+        with DisaggMockerProcess(
+            request,
+            namespace=shared_namespace,
+            worker_type="prefill",
+            mocker_args=prefill_mocker_args,
+            num_mockers=1,
+            request_plane="nats",
+            enable_bootstrap=enable_disagg_bootstrap,
+        ) as prefill_workers:
+            logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
+
+            with DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="decode",
+                mocker_args=decode_mocker_args,
+                num_mockers=1,
+                request_plane="nats",
+            ) as decode_workers:
+                logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+                run_case(prefill_workers, decode_workers)
+    else:
+        with DisaggMockerProcess(
+            request,
+            namespace=shared_namespace,
+            worker_type="decode",
+            mocker_args=decode_mocker_args,
+            num_mockers=1,
+            request_plane="nats",
+        ) as decode_workers:
+            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+
+            with DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="prefill",
+                mocker_args=prefill_mocker_args,
+                num_mockers=1,
+                request_plane="nats",
+                enable_bootstrap=enable_disagg_bootstrap,
+            ) as prefill_workers:
+                logger.info(
+                    f"Prefill workers using endpoint: {prefill_workers.endpoint}"
+                )
+                run_case(prefill_workers, decode_workers)
 
 
 @pytest.mark.timeout(180)
