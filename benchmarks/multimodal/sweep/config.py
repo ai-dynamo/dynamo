@@ -42,6 +42,7 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
+    seed: Optional[int] = None
 
     @property
     def sweep_mode(self) -> str:
@@ -137,6 +138,7 @@ def load_config(
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
+        seed=raw.get("seed"),
     )
 
     if cli_overrides:
