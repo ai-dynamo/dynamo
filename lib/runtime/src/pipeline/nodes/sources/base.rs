@@ -100,4 +100,41 @@ mod tests {
             _ => panic!("Expected NoEdge error"),
         }
     }
+
+    #[tokio::test]
+    async fn test_generate_failure_cleans_up_sinks() {
+        // When generate() fails because on_next() errors (no edge linked),
+        // the oneshot sender should be removed from the sinks HashMap.
+        // Otherwise orphaned entries accumulate as a memory leak.
+        let source = Frontend::<SingleIn<()>, ManyOut<()>>::default();
+
+        // generate() should fail with NoEdge
+        let err = source.generate(().into()).await.unwrap_err();
+        assert!(err.downcast_ref::<PipelineError>().is_some());
+
+        // The sinks HashMap should be empty — the orphaned sender must be cleaned up
+        let sinks = source.sinks.lock().unwrap();
+        assert!(
+            sinks.is_empty(),
+            "sinks HashMap should be empty after generate() failure, but has {} entries",
+            sinks.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repeated_generate_failures_do_not_accumulate() {
+        // Repeated generate() failures should not cause the sinks HashMap to grow.
+        let source = Frontend::<SingleIn<()>, ManyOut<()>>::default();
+
+        for _ in 0..100 {
+            let _ = source.generate(().into()).await;
+        }
+
+        let sinks = source.sinks.lock().unwrap();
+        assert!(
+            sinks.is_empty(),
+            "sinks HashMap should be empty after 100 failed generate() calls, but has {} entries",
+            sinks.len()
+        );
+    }
 }
