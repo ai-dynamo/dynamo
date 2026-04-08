@@ -86,13 +86,17 @@ inputs:
     description: 'Tolerations for buildkit pods'
     required: false
     default: "key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
+  use_runner_docker_builder:
+    description: 'When true and no remote workers are configured, skip Kubernetes builder creation and reuse the runner docker builder.'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
   steps:
     - name: Route buildkit workers
       id: route-buildkit
-      if: inputs.fresh_builder != 'true'
+      if: inputs.use_runner_docker_builder != 'true' && inputs.fresh_builder != 'true'
       continue-on-error: true
       shell: bash
       run: |
@@ -119,6 +123,11 @@ runs:
         AMD64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}
         ARM64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_arm64', inputs.flavor)] }}
       run: |
+        if [[ "${{ inputs.use_runner_docker_builder }}" == "true" ]]; then
+          echo "Skipping remote BuildKit discovery; forcing local Kubernetes builder fallback."
+          echo "worker_addresses=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         # Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)
         ARCH="${{ inputs.arch }}"
         ARCH="${ARCH//linux\//}"
@@ -152,4 +161,5 @@ runs:
         requests_memory: ${{ inputs.requests_memory }}
         limits_memory: ${{ inputs.limits_memory }}
         tolerations: ${{ inputs.tolerations }}
+        use_runner_docker_builder: ${{ inputs.use_runner_docker_builder }}
 

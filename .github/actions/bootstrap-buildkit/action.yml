@@ -24,6 +24,10 @@ inputs:
     description: 'Comma-separated list of remote buildkit worker addresses. If empty, falls back to Kubernetes driver.'
     required: false
     default: ''
+  use_runner_docker_builder:
+    description: 'When true and no remote workers are configured, skip Kubernetes builder creation and reuse the runner docker builder.'
+    required: false
+    default: 'false'
 
 
   # Kubernetes driver inputs (used when remote_builder is false)
@@ -67,6 +71,20 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Verify Docker Buildx availability
+      shell: bash
+      run: |
+        docker buildx version
+
+    - name: Use runner docker builder
+      if: inputs.buildkit_worker_addresses == '' && inputs.use_runner_docker_builder == 'true' && inputs.fresh_builder != 'true'
+      shell: bash
+      run: |
+        RESOLVED_BUILDER="default"
+        echo "Using runner docker builder: ${RESOLVED_BUILDER}"
+        docker buildx use "$RESOLVED_BUILDER"
+        echo "BUILDX_BUILDER_NAME=${RESOLVED_BUILDER}" >> "$GITHUB_ENV"
+
     - name: Define remote buildkit builders
       if: inputs.buildkit_worker_addresses != ''
       shell: bash
@@ -84,7 +102,7 @@ runs:
         done
 
     - name: Create Kubernetes builder for both platforms
-      if: inputs.buildkit_worker_addresses == ''
+      if: inputs.buildkit_worker_addresses == '' && inputs.use_runner_docker_builder != 'true'
       shell: bash
       run: |
         if [[ "${{ inputs.fresh_builder }}" != "true" ]] && docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
@@ -131,9 +149,10 @@ runs:
       if: inputs.skip_bootstrap != 'true'
       shell: bash
       run: |
+        BUILDER_NAME="${BUILDX_BUILDER_NAME:-${{ inputs.builder_name }}}"
         echo "Bootstrapping buildkit..."
         for i in 1 2 3; do
-          if docker buildx inspect ${{ inputs.builder_name }} --bootstrap; then
+          if docker buildx inspect "$BUILDER_NAME" --bootstrap; then
             echo "Bootstrap succeeded on attempt $i"
             break
           fi
