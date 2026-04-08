@@ -52,11 +52,15 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         frontend_port: int,
         is_prefill: bool | None = None,
+        timeout_s: int = 300,
     ):
         # Allocate system port for this worker
         system_port = allocate_port(9100)
         self.system_port = system_port
         self.frontend_port = frontend_port
+
+        # Determine max-model-len based on worker type
+        max_model_len = "4096" if is_prefill is None else "16384"
 
         command = [
             "python3",
@@ -68,7 +72,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--gpu-memory-utilization",
             "0.45",
             "--max-model-len",
-            "16384",
+            max_model_len,
             "--block-size",
             str(get_default_vllm_block_size()),
         ]
@@ -163,7 +167,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            timeout=300,
+            timeout=timeout_s,
             display_output=True,
             terminate_all_matching_process_names=False,
             # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
@@ -231,13 +235,44 @@ def test_request_cancellation_vllm_aggregated(
     - Teardown: ~2s
     """
 
+    def wait_for_stable_frontend(
+        frontend_port: int, stable_seconds: int = 3, timeout_seconds: int = 60
+    ):
+        """Wait for frontend to reach stable state without errors."""
+        import requests
+        import time
+
+        start_time = time.time()
+        stable_start = None
+        while time.time() - start_time < timeout_seconds:
+            try:
+                response = requests.get(
+                    f"http://localhost:{frontend_port}/v1/models", timeout=2
+                )
+                if response.status_code == 200:
+                    if stable_start is None:
+                        stable_start = time.time()
+                    elif time.time() - stable_start >= stable_seconds:
+                        logger.info("Frontend is stable")
+                        return
+                else:
+                    stable_start = None
+            except Exception as e:
+                logger.debug(f"Frontend health check failed: {e}")
+                stable_start = None
+            time.sleep(0.5)
+        raise TimeoutError(f"Frontend did not stabilize within {timeout_seconds}s")
+
     # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start a single worker (allocates its own system_port)
-        with DynamoWorkerProcess(request, frontend.frontend_port) as worker:
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, timeout_s=600
+        ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
+            wait_for_stable_frontend(frontend.frontend_port)
 
             # Step 3: Test request cancellation with polling approach
             frontend_log_offset, worker_log_offset = 0, 0
