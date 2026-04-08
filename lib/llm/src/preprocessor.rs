@@ -419,6 +419,8 @@ impl OpenAIPreprocessor {
         let Some(messages) = request.typed_messages() else {
             return Ok(());
         };
+        let has_media_loader = self.media_loader.is_some();
+
         for message in messages.iter() {
             let content_parts = match message {
                 ChatCompletionRequestMessage::User(u) => match &u.content {
@@ -427,37 +429,33 @@ impl OpenAIPreprocessor {
                 },
                 _ => continue,
             };
-            // Iterate over content parts
             for content_part in content_parts.iter() {
-                let type_str = match content_part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
-                    ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
-                    ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
-                    _ => continue,
-                };
-
-                if self.media_loader.is_some() {
+                if has_media_loader {
+                    let type_str = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
+                        _ => continue,
+                    };
                     fetch_tasks.push((type_str.to_string(), content_part));
-                    continue;
+                } else {
+                    let (type_str, url) = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                            ("image_url", p.image_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
+                            ("video_url", p.video_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
+                            ("audio_url", p.audio_url.url.clone())
+                        }
+                        _ => continue,
+                    };
+                    media_map
+                        .entry(type_str.to_string())
+                        .or_default()
+                        .push(MultimodalData::Url(url));
                 }
-
-                // Fallback: just pass the URL through
-                let url = match content_part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                        image_part.image_url.url.clone()
-                    }
-                    ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                        video_part.video_url.url.clone()
-                    }
-                    ChatCompletionRequestUserMessageContentPart::AudioUrl(audio_part) => {
-                        audio_part.audio_url.url.clone()
-                    }
-                    _ => unreachable!(),
-                };
-                media_map
-                    .entry(type_str.to_string())
-                    .or_default()
-                    .push(MultimodalData::Url(url));
             }
         }
 
