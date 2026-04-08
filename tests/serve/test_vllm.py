@@ -592,7 +592,9 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="audio_agg.sh",
         marks=[
-            pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"),
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
+            ),
             pytest.mark.gpu_2,  # encode worker loads Qwen2Audio on GPU (~19 GiB)
             pytest.mark.nightly,
             pytest.mark.timeout(600),
@@ -623,7 +625,9 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="audio_disagg.sh",
         marks=[
-            pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"),
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
+            ),
             pytest.mark.gpu_4,  # needs 3 GPUs (encode loads Qwen2Audio ~19 GiB + prefill + decode)
             pytest.mark.nightly,
             pytest.mark.timeout(600),
@@ -654,7 +658,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"),
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
+            ),
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
