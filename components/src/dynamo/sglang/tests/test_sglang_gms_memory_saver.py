@@ -22,7 +22,7 @@ GMSMemorySaverImpl = gms_memory_saver.GMSMemorySaverImpl
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
     pytest.mark.sglang,
 ]
 

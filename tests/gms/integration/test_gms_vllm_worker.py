@@ -11,7 +11,7 @@ import pytest
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
     pytest.mark.vllm,
 ]
 

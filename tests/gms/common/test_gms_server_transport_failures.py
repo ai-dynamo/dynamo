@@ -42,7 +42,7 @@ from cuda.bindings import driver as cuda  # noqa: E402
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
 ]
 
 

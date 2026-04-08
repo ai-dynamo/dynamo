@@ -10,7 +10,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
 ]
 
 

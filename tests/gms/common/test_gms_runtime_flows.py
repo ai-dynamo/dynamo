@@ -41,7 +41,7 @@ from tests.gms.harness.gms import ServerThread
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
 ]
 
 
