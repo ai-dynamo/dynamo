@@ -28,6 +28,7 @@ GMSServerProcess = gms_harness.GMSServerProcess
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.vllm,
     pytest.mark.gpu_1,
 ]
 
