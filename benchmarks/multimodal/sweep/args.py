@@ -70,5 +70,4 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Skip plot generation.",
     )
-
     return parser.parse_args(argv)
