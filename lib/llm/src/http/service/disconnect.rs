@@ -308,8 +308,6 @@ mod tests {
         }
     }
 
-    /// Regression test for issue #7545:
-    ///
     /// A zombie backend worker that holds a live TCP connection but never produces
     /// output would cause `monitor_for_disconnects` to block forever.  As a result
     /// `InflightGuard::drop` never fired, `dec_inflight_gauge` was never called,
