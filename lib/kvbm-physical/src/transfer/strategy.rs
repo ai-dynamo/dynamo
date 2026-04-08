@@ -464,9 +464,8 @@ mod tests {
     fn test_device_to_remote_without_rdma() {
         let caps = default_caps(); // GPU RDMA disabled
         // Device → Remote should use bounce buffer
-        let plan =
-            select_direct_strategy(StorageKind::Device(0), StorageKind::System, true, &caps)
-                .unwrap();
+        let plan = select_direct_strategy(StorageKind::Device(0), StorageKind::System, true, &caps)
+            .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
@@ -496,9 +495,8 @@ mod tests {
     fn test_disk_to_remote() {
         let caps = default_caps();
         // Disk → Remote always uses bounce buffer
-        let plan =
-            select_direct_strategy(StorageKind::Disk(42), StorageKind::System, true, &caps)
-                .unwrap();
+        let plan = select_direct_strategy(StorageKind::Disk(42), StorageKind::System, true, &caps)
+            .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
