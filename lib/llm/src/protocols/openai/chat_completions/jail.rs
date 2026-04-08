@@ -4,7 +4,7 @@
 use async_stream::stream;
 use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
-    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
@@ -902,7 +902,7 @@ impl JailedStream {
                         .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
                             index: (tool_call_offset + idx) as u32,
                             id: Some(tool_call.id),
-                            r#type: Some(tool_call.r#type),
+                            r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
                                 name: Some(tool_call.function.name),
                                 arguments: Some(tool_call.function.arguments),
@@ -971,7 +971,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),
