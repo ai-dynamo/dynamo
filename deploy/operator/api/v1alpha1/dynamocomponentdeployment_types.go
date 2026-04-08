@@ -161,6 +161,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// multiple engine pods per rank that share GPUs via DRA resource claims.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// Priority for worker selection routing. Higher values are preferred by the
+	// frontend when multiple workers serve the same model. Workers at the highest
+	// priority tier receive all traffic; lower tiers only receive traffic when all
+	// higher-tier workers are unhealthy. Default: 0 (lowest priority).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 type MultinodeSpec struct {
