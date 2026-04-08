@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backend::ExecutionContext;
@@ -297,6 +298,7 @@ pub struct MockEngine {
     request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
     senders_ready: Notify,
     engine_args: MockEngineArgs,
+    unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     /// Keep schedulers alive so their CancelGuards don't fire prematurely.
@@ -311,9 +313,18 @@ impl MockEngine {
             request_senders: OnceCell::new(),
             senders_ready: Notify::new(),
             engine_args,
+            unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             _schedulers: OnceCell::new(),
         }
+    }
+
+    fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
+        if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
+            return dp_rank;
+        }
+
+        self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
     }
 
     pub async fn start(&self, component: Component) -> Result<()> {
@@ -583,12 +594,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from routing hints (defaults to 0 if not set)
-        let dp_rank = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.dp_rank)
-            .unwrap_or(0);
+        let dp_rank = self.resolve_dp_rank(&request);
 
         // Validate dp_rank
         if dp_rank >= self.engine_args.dp_size {
