@@ -240,7 +240,7 @@ Peer connection state: `Unattached` (waiting) or `Attached { peer }` (connected)
 
 ## File Structure
 
-```
+```text
 session/
 ├── mod.rs              # Module declarations, dispatch functions, re-exports
 ├── blocks.rs           # BlockHolder<T> — RAII block container
