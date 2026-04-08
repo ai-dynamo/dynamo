@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pass 2: re-run with [PERF] monkey-patches active + server.log capture.
+# Same as pass1 but fresh output dir so the orchestrator doesn't skip.
+# Goal: collect per-stage timing for BOTH vllm-baseline and dynamo-fd.
+#
+# Usage:
+#   python -m benchmarks.multimodal.sweep \
+#     --config benchmarks/multimodal/sweep/experiments/h100_vllm_vs_fd/sweep_pass2.yaml
+
+model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+request_rates: [4]
+osl: 1
+request_count: 60
+warmup_count: 3
+port: 8000
+timeout: 600
+output_dir: logs/04-08/h100-vllm-vs-fd-pass2
+
+env:
+  CUDA_VISIBLE_DEVICES: "0"
+  HF_HOME: /huggingface
+  DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
+  DYN_PERF_PATCHES: "1"
+
+input_files:
+  - benchmarks/multimodal/jsonl/60req_4img_192pool_400word_base64.jsonl
+
+configs:
+  - label: vllm-baseline
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    extra_args:
+      - --no-enable-prefix-caching
+      - --multimodal-embedding-cache-capacity-gb
+      - "0"
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"
+
+  - label: dynamo-fd
+    workflow: examples/backends/vllm/launch/agg_multimodal.sh
+    extra_args:
+      - --no-enable-prefix-caching
+      - --frontend-decoding
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"
