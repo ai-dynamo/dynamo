@@ -189,6 +189,20 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
+  
+  vllm-dev-build:
+    name: vllm Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
 
   sglang-build:
     name: sglang Build
@@ -204,6 +218,20 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  sglang-dev-build:
+    name: sglang Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   trtllm-build:
     name: trtllm Build
     needs: [changed-files]
@@ -212,6 +240,20 @@ jobs:
     with:
       framework: trtllm
       target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-dev-build:
+    name: trtllm Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: dev
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
