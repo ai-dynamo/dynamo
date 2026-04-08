@@ -329,9 +329,10 @@ impl EventBusConfig {
     }
 
     /// Build an event bus from this configuration.
+    ///
+    /// Currently always returns an [`InProcessEventBus`].
+    /// Future backends (ZMQ, NATS, Redis) will be selected via `self.backend`.
     pub fn build(&self) -> Box<dyn EventBus> {
-        // Future: Add ZMQ, NATS, Redis backends based on self.backend
-        let _ = self.backend.as_str(); // Reserved for future backend selection
         Box::new(InProcessEventBus::new(self.channel_capacity))
     }
 }
