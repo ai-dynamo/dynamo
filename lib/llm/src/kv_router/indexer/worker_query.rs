@@ -742,17 +742,8 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             result = self.processing_semaphore.acquire() => {
                 result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
             }
-            _ = engine_ctx.stopped() => {
-                tracing::debug!("Worker KV query request stopped while waiting for semaphore");
-                return Ok(ResponseStream::new(
-                    Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                        "Request cancelled".to_string(),
-                    )])),
-                    ctx.context(),
-                ));
-            }
-            _ = engine_ctx.killed() => {
-                tracing::debug!("Worker KV query request killed while waiting for semaphore");
+            _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
+                tracing::debug!("Worker KV query request cancelled while waiting for semaphore");
                 return Ok(ResponseStream::new(
                     Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
                         "Request cancelled".to_string(),
