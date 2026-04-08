@@ -43,7 +43,9 @@ pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
 
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
-pub use hub_transport::{ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport};
+pub use hub_transport::{
+    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport,
+};
 
 // Event Bus
 pub use events::{

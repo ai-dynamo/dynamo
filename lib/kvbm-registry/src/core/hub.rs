@@ -350,9 +350,7 @@ where
 mod tests {
     use super::*;
     use crate::core::hub_transport::InProcessHubTransport;
-    use crate::core::{
-        BinaryCodec, HashMapStorage, NoMetadata,
-    };
+    use crate::core::{BinaryCodec, HashMapStorage, NoMetadata};
 
     #[tokio::test]
     async fn test_hub_can_offload() {
