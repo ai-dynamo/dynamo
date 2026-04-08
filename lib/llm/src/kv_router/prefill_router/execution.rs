@@ -265,7 +265,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    )-> Result<(u64, Option<u32>)> {
+    ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
             .get()
