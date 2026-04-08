@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
 /// a CUDA context has been bound to the current thread.
 static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    if dynamo_config::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+    if crate::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
         tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
         return false;
     }

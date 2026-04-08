@@ -23,8 +23,6 @@ testing-nixl = []
 testing-all = ["testing-cuda", "testing-nixl"]
 
 [dependencies]
-dynamo-config = { workspace = true }
-
 anyhow = { workspace = true }
 cudarc = { workspace = true }
 nixl-sys = { version = "=0.10.1" }
