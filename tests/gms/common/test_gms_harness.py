@@ -19,10 +19,6 @@ def request_stub():
 
 
 def test_server_process_refuses_foreign_live_socket(monkeypatch, request_stub):
-    monkeypatch.setattr(
-        "tests.gms.harness.gms.get_socket_path",
-        lambda device, tag: f"/tmp/gms_{device}_{tag}.sock",
-    )
     server = GMSServerProcess(request_stub, device=0, tag="weights")
 
     monkeypatch.setattr("tests.gms.harness.gms.os.path.exists", lambda path: True)
@@ -33,10 +29,6 @@ def test_server_process_refuses_foreign_live_socket(monkeypatch, request_stub):
 
 
 def test_server_process_unlinks_only_stale_socket_on_exit(monkeypatch, request_stub):
-    monkeypatch.setattr(
-        "tests.gms.harness.gms.get_socket_path",
-        lambda device, tag: f"/tmp/gms_{device}_{tag}.sock",
-    )
     server = GMSServerProcess(request_stub, device=0, tag="weights")
     unlinked: list[str] = []
 
