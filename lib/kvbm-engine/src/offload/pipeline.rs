@@ -1750,9 +1750,8 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 for (_transfer_id, (state, block_ids)) in transfer_states {
                     let mut state_guard = state.lock().unwrap();
                     state_guard.mark_failed(block_ids);
-                    state_guard.set_error(
-                        "put_blocks returned mismatched result count".to_string(),
-                    );
+                    state_guard
+                        .set_error("put_blocks returned mismatched result count".to_string());
                 }
                 return Ok(());
             }
@@ -1884,7 +1883,11 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             "duplicate BlockId in batch — block_to_hash would lose entries"
         );
         debug_assert_eq!(
-            resolved.iter().map(|b| b.sequence_hash).collect::<std::collections::HashSet<_>>().len(),
+            resolved
+                .iter()
+                .map(|b| b.sequence_hash)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             resolved.len(),
             "duplicate SequenceHash in batch — hash-based success correlation is ambiguous"
         );
@@ -1897,13 +1900,11 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 // In test/skip mode, all blocks are considered successful
                 state_guard.mark_completed(block_ids);
             } else {
-                let (succeeded, failed): (Vec<_>, Vec<_>) = block_ids.into_iter().partition(
-                    |id| {
-                        block_to_hash
-                            .get(id)
-                            .is_some_and(|h| success_set.contains(h))
-                    },
-                );
+                let (succeeded, failed): (Vec<_>, Vec<_>) = block_ids.into_iter().partition(|id| {
+                    block_to_hash
+                        .get(id)
+                        .is_some_and(|h| success_set.contains(h))
+                });
                 state_guard.mark_completed(succeeded);
                 if !failed.is_empty() {
                     tracing::warn!(
@@ -1996,13 +1997,7 @@ mod tests {
             let fail_set = self.fail_hashes.clone();
             Box::pin(async move {
                 keys.into_iter()
-                    .map(|h| {
-                        if fail_set.contains(&h) {
-                            Err(h)
-                        } else {
-                            Ok(h)
-                        }
-                    })
+                    .map(|h| if fail_set.contains(&h) { Err(h) } else { Ok(h) })
                     .collect()
             })
         }
@@ -2041,8 +2036,7 @@ mod tests {
         };
 
         let transfer_id = crate::offload::handle::TransferId::new();
-        let (mut state, handle) =
-            TransferState::new(transfer_id, vec![10, 20, 30]);
+        let (mut state, handle) = TransferState::new(transfer_id, vec![10, 20, 30]);
         state.add_passed(vec![10, 20, 30]);
         state.mark_in_flight(vec![10, 20, 30]);
         let state_arc = Arc::new(std::sync::Mutex::new(state));
@@ -2106,10 +2100,9 @@ mod tests {
         let hash1 = test_hash(1);
         let hash2 = test_hash(2);
 
-        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
-            Arc::new(FailableObjectBlockOps {
-                fail_hashes: std::collections::HashSet::new(),
-            });
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> = Arc::new(FailableObjectBlockOps {
+            fail_hashes: std::collections::HashSet::new(),
+        });
 
         let shared = SharedObjectExecutorState {
             object_ops,
