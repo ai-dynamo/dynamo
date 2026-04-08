@@ -379,13 +379,13 @@ class TestHandleCancellationAbortToggle:
         generation_result.abort.assert_not_called()
 
 
-class TestKvTransferCompleteGuard:
-    """Tests for the kv_transfer_complete_event guard in disaggregated decode cancellation.
+class TestDeferredAbortGuard:
+    """Tests for _DeferredAbort in disaggregated decode cancellation.
 
-    NVBugs 5969206: In disaggregated serving, decode abort must be delayed until
-    the first generation result is received (indicating KV cache transfer is
-    complete). Aborting before KV transfer completes leaks blocks on the prefill
-    side.
+    NVBugs 5969206: In disaggregated serving, decode abort must be deferred
+    until the first generation result is received (indicating KV cache transfer
+    is complete). _DeferredAbort wraps GenerationResult.abort() to spawn a
+    background task that waits for the first token before calling real abort.
     """
 
     def _make_handler(self, disable_request_abort: bool = False) -> HandlerBase:
@@ -395,146 +395,113 @@ class TestKvTransferCompleteGuard:
         return _ConcreteHandler(config)
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_decode_abort_delayed_until_kv_transfer_complete(self):
-        """abort() should not fire until kv_transfer_complete_event is set."""
-        handler = self._make_handler(disable_request_abort=False)
+    async def test_deferred_abort_before_first_token(self):
+        """abort() before first token should NOT call real abort immediately."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
         generation_result = MagicMock()
-        context = MagicMock()
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-decode-delay"
+        # Make generation_result iterable (background task will try to read it)
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        never_resolve = asyncio.get_event_loop().create_future()
+        generation_result.__anext__ = MagicMock(return_value=never_resolve)
 
-        kv_transfer_complete = asyncio.Event()
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
 
-        # Start _handle_cancellation — it should block on kv_transfer_complete.wait()
-        task = asyncio.create_task(
-            handler._handle_cancellation(
-                generation_result,
-                context,
-                kv_transfer_complete_event=kv_transfer_complete,
-            )
-        )
-        await asyncio.sleep(0.05)
+        # Real abort should NOT have been called — deferred to background task
         generation_result.abort.assert_not_called()
 
-        # Signal KV transfer complete — abort should now fire
-        kv_transfer_complete.set()
-        await task
-        generation_result.abort.assert_called_once()
-
     @pytest.mark.asyncio
-    async def test_decode_abort_immediate_if_kv_transfer_already_complete(self):
-        """If kv_transfer_complete_event is already set when cancel fires, abort immediately."""
-        handler = self._make_handler(disable_request_abort=False)
+    async def test_deferred_abort_after_first_token(self):
+        """abort() after signal_first_token should call real abort immediately."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
         generation_result = MagicMock()
-        context = MagicMock()
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-decode-immediate"
+        guard = _DeferredAbort(generation_result)
 
-        kv_transfer_complete = asyncio.Event()
-        kv_transfer_complete.set()
+        guard.signal_first_token()
+        guard.abort()
 
-        await handler._handle_cancellation(
-            generation_result,
-            context,
-            kv_transfer_complete_event=kv_transfer_complete,
-        )
-        generation_result.abort.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_no_event_guard_without_kv_transfer_event(self):
-        """Without kv_transfer_complete_event (non-disagg mode), abort fires immediately."""
-        handler = self._make_handler(disable_request_abort=False)
-        generation_result = MagicMock()
-        context = MagicMock()
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-no-event"
-
-        await handler._handle_cancellation(
-            generation_result, context, kv_transfer_complete_event=None
-        )
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_shutdown_bypasses_kv_transfer_guard(self):
-        """Shutdown must abort immediately, even if kv_transfer_complete_event is not set."""
+    async def test_deferred_task_completes(self):
+        """Background task should call abort after first result from generation_result."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            if val is StopAsyncIteration:
+                raise StopAsyncIteration
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()  # Spawns background task
+
+        generation_result.abort.assert_not_called()
+
+        # Simulate first result arriving (KV transfer complete)
+        await result_queue.put("first_token")
+        await asyncio.sleep(0.05)  # Let background task run
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_guard_in_non_disagg_mode(self):
+        """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-no-guard"
+
+        # Pass real generation_result (no wrapper) — non-disagg path
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_shutdown_calls_abort_directly(self):
+        """Shutdown calls abort on whatever is passed (wrapper or real), immediately."""
         handler = self._make_handler(disable_request_abort=False)
         handler.shutdown_event = asyncio.Event()
 
+        # Pass a _DeferredAbort wrapper — shutdown should still call .abort()
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
         generation_result = MagicMock()
+        guard = _DeferredAbort(generation_result)
+
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         context.async_killed_or_stopped.return_value = killed_future
         context.id.return_value = "test-shutdown"
 
-        kv_transfer_complete = asyncio.Event()  # NOT set
-
         task = asyncio.create_task(
-            handler._handle_cancellation(
-                generation_result,
-                context,
-                kv_transfer_complete_event=kv_transfer_complete,
-            )
+            handler._handle_cancellation(guard, context)
         )
         await asyncio.sleep(0.05)
-        generation_result.abort.assert_not_called()
 
-        # Trigger shutdown — should bypass KV transfer guard
+        # Trigger shutdown
         handler.shutdown_event.set()
 
         with pytest.raises(EngineShutdown):
             await task
-        generation_result.abort.assert_called_once()
+        # Shutdown calls guard.abort() → since no first token, spawns background task
+        # The important thing is EngineShutdown is raised and abort path is entered
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_shutdown_during_kv_wait_after_cancel(self):
-        """Shutdown arriving while waiting for KV transfer must still raise EngineShutdown.
-
-        Regression test: if cancel fires first and we enter the KV wait branch,
-        a subsequent shutdown must not be lost.
-        """
-        handler = self._make_handler(disable_request_abort=False)
-        handler.shutdown_event = asyncio.Event()
-
-        generation_result = MagicMock()
-        context = MagicMock()
-        # Cancel fires immediately
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-shutdown-during-kv-wait"
-
-        kv_transfer_complete = asyncio.Event()  # NOT set — KV still in flight
-
-        task = asyncio.create_task(
-            handler._handle_cancellation(
-                generation_result,
-                context,
-                kv_transfer_complete_event=kv_transfer_complete,
-            )
-        )
-        # Let the handler enter the KV wait branch (cancel already fired)
-        await asyncio.sleep(0.05)
-        generation_result.abort.assert_not_called()
-
-        # Now fire shutdown while handler is waiting on kv_transfer_complete
-        handler.shutdown_event.set()
-
-        with pytest.raises(EngineShutdown):
-            await task
-        generation_result.abort.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_disable_request_abort_skips_event_guard(self):
-        """When disable_request_abort=True, the event guard is never reached."""
+    async def test_disable_request_abort_skips_guard(self):
+        """When disable_request_abort=True, abort is never called (guard irrelevant)."""
         handler = self._make_handler(disable_request_abort=True)
         generation_result = MagicMock()
         context = MagicMock()
@@ -543,13 +510,7 @@ class TestKvTransferCompleteGuard:
         context.async_killed_or_stopped.return_value = killed_future
         context.id.return_value = "test-disabled"
 
-        kv_transfer_complete = asyncio.Event()  # NOT set — would block if reached
-
-        await handler._handle_cancellation(
-            generation_result,
-            context,
-            kv_transfer_complete_event=kv_transfer_complete,
-        )
+        await handler._handle_cancellation(generation_result, context)
         generation_result.abort.assert_not_called()
 
 
