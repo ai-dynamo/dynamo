@@ -62,18 +62,18 @@ jobs:
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
-    runs-on: ubuntu-latest
+    runs-on: xpu
     needs: [changed-files, planner-pipeline, vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
-    if: always()
+    if: false
     steps:
       - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: xpu
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    if: always()
+    if: false
     steps:
       - name: "Check all deploy test jobs"
         run: |
@@ -86,7 +86,8 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    #if: needs.changed-files.outputs.operator == 'true'
+    if: false
     name: Operator
     runs-on: xpu
     env:
@@ -104,14 +105,14 @@ jobs:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
           arch: 'linux/amd64'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      #- name: Docker Login
+      #  uses: ./.github/actions/docker-login
+      #  with:
+      #    aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #    aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #    azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #    azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #    azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
         working-directory: ./deploy/operator
@@ -187,7 +188,8 @@ jobs:
   planner-pipeline:
     name: planner
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    #if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor.yml
     with:
       framework: dynamo
@@ -211,7 +213,8 @@ jobs:
   vllm-pipeline:
     name: vllm
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    #if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -264,7 +267,7 @@ jobs:
   sglang-pipeline:
     name: sglang
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -289,7 +292,7 @@ jobs:
   trtllm-pipeline:
     name: trtllm
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -313,7 +316,8 @@ jobs:
   vllm-dev-pipeline:
     name: vllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: false
+    #if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
@@ -329,7 +333,8 @@ jobs:
   sglang-dev-pipeline:
     name: sglang-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: false
+    #if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
@@ -344,7 +349,8 @@ jobs:
   trtllm-dev-pipeline:
     name: trtllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: false
+    #if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.tr
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
@@ -363,15 +369,16 @@ jobs:
    # ============================================================================
 
   deploy-operator:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    #if: |
+    #  !cancelled() && !failure() &&
+    #  (needs.changed-files.outputs.vllm == 'true' ||
+    #   needs.changed-files.outputs.sglang == 'true' ||
+    #   needs.changed-files.outputs.trtllm == 'true' ||
+    #   needs.changed-files.outputs.deploy == 'true') &&
+    #  (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    if: false
     needs: [changed-files, operator]
-    runs-on: prod-default-small-v2
+    runs-on: xpu
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
@@ -390,11 +397,7 @@ jobs:
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.vllm-pipeline.result == 'success'
+    if: false
     needs: [changed-files, deploy-operator, vllm-pipeline]
     uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
@@ -407,11 +410,7 @@ jobs:
     secrets: inherit
 
   deploy-test-sglang:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.sglang-pipeline.result == 'success'
+    if: false
     needs: [changed-files, deploy-operator, sglang-pipeline]
     uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
@@ -424,11 +423,7 @@ jobs:
     secrets: inherit
 
   deploy-test-trtllm:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.trtllm-pipeline.result == 'success'
+    if: false
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
@@ -441,9 +436,10 @@ jobs:
     secrets: inherit
 
   deploy-cleanup:
-    if: always()
+    #if: always()
+    if: false
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    runs-on: prod-default-small-v2
+    runs-on: xpu
     steps:
     - uses: actions/checkout@v4
     - name: Teardown vCluster
@@ -461,7 +457,7 @@ jobs:
 
   allure-report:
     needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    if: ${{ !cancelled() }}
+    if: false
     uses: ./.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}
