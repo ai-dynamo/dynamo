@@ -2,3 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Core traits and types for the pluggable registry architecture.
+
+pub mod error;
+pub mod key;
+pub mod metadata;
+pub mod storage;
+pub mod transport;
+pub mod value;
+
+// Error types
+pub use error::{RegistryError, RegistryResult};
+
+// Storage
+pub use storage::{FlatStorage, HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
+
+// Key, Value, Metadata
+pub use key::{CompositeKey, Key128, PositionalKey, RegistryKey};
+pub use metadata::{NoMetadata, PositionMetadata, RegistryMetadata, TimestampMetadata};
+pub use value::{RegistryValue, StorageBackend, StorageLocation};
+
+// Transport
+pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
