@@ -1292,7 +1292,7 @@ mod test_event_dedup_filter {
 
     #[test]
     fn stores_track_refcounts_for_removes() {
-        let filter = EventDedupFilter::new();
+        let mut filter = EventDedupFilter::new();
         let data = store_data(&[1, 2, 3]);
 
         // Store same hashes twice — refcount should be 2
@@ -1311,7 +1311,7 @@ mod test_event_dedup_filter {
 
     #[test]
     fn duplicate_removes_are_filtered() {
-        let filter = EventDedupFilter::new();
+        let mut filter = EventDedupFilter::new();
 
         // Store same hash twice
         filter.track_store(&store_data(&[1]));
@@ -1329,7 +1329,7 @@ mod test_event_dedup_filter {
 
     #[test]
     fn store_remove_store_cycle() {
-        let filter = EventDedupFilter::new();
+        let mut filter = EventDedupFilter::new();
 
         // Store hash 1
         filter.track_store(&store_data(&[1]));
@@ -1348,7 +1348,7 @@ mod test_event_dedup_filter {
 
     #[test]
     fn clear_resets_state() {
-        let filter = EventDedupFilter::new();
+        let mut filter = EventDedupFilter::new();
 
         // Store 3 blocks, then store them again (refcount 2 each)
         filter.track_store(&store_data(&[1, 2, 3]));
@@ -1363,7 +1363,7 @@ mod test_event_dedup_filter {
 
     #[test]
     fn mixed_blocks_in_single_remove() {
-        let filter = EventDedupFilter::new();
+        let mut filter = EventDedupFilter::new();
 
         // Hash 1: stored twice (refcount 2)
         filter.track_store(&store_data(&[1]));
