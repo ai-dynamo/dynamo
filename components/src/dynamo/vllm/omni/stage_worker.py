@@ -368,7 +368,7 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
     """Convert a parsed stage config to a single-stage YAML dict."""
-    from omegaconf import OmegaConf
+    from omegaconf import OmegaConf  # type: ignore[import-not-found]
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):

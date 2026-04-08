@@ -83,7 +83,7 @@ def parse_omni_request(
 
 def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | None:
     """Construct typed sampling params from YAML default_sampling_params."""
-    from omegaconf import OmegaConf
+    from omegaconf import OmegaConf  # type: ignore[import-not-found]
 
     defaults = getattr(stage_config, "default_sampling_params", None)
     if not defaults:
