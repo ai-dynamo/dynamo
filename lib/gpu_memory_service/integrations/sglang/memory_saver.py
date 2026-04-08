@@ -143,6 +143,8 @@ class GMSMemorySaverImpl:
         tag: str,
         enable_cpu_backup: bool,
     ):
+        # The old hybrid path could delegate this to torch_memory_saver, but
+        # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
         raise RuntimeError(
             "SGLang with GMS does not support pauseable CUDA graphs. "
             "torch_memory_saver only supports cuda_graph in hook_mode=preload, "
@@ -175,6 +177,7 @@ class GMSMemorySaverImpl:
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""
         if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
+            # Read-only import mode never republishes weights.
             return
 
         self.imported_weights_bytes = finalize_gms_write(
