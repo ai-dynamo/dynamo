@@ -2,7 +2,12 @@
 
 Aggregated and disaggregated DeepSeek-V3.1 (FP8 and [NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) on B200 GPUs. Includes both **Dynamo-native** (direct Frontend) and **GAIE** (GKE Inference Gateway + EPP) deployment variants.
 
-**Stack**: Dynamo Operator 1.0.0 · SGLang Runtime 0.9.1 (FP8) / 1.0.0 (NVFP4) · GKE with RDMA/RoCE · NIXL KV Transfer
+| Variant | Dynamo Platform | SGLang Runtime |
+|---|---|---|
+| FP8 (Dynamo-native) | 0.9.1 | `sglang-runtime:0.9.1` |
+| NVFP4 (GAIE) | 1.0.0 | `sglang-runtime:1.0.0` |
+
+**Stack**: GKE with RDMA/RoCE · NIXL KV Transfer
 
 ---
 
@@ -77,6 +82,15 @@ Install the Dynamo platform via Helm. Grove provides gang scheduling for disagg 
 ```bash
 kubectl create namespace dynamo-system --dry-run=client -o yaml | kubectl apply -f -
 
+# For FP8 deployments (dsv31-fp8/):
+helm upgrade --install dynamo-platform \
+  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
+  --version 0.9.1 \
+  -n dynamo-system \
+  --set global.kai-scheduler.enabled=true \
+  --set global.grove.enabled=true
+
+# For NVFP4 GAIE deployments (dsv31-nvfp4-gaie/):
 helm upgrade --install dynamo-platform \
   oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
   --version 1.0.0 \
@@ -223,12 +237,12 @@ These are set in the disagg DGD and tuned for GKE B200 nodes with RoCE networkin
 
 ## Images
 
-| Component | Image |
-|---|---|
-| Frontend + Worker (FP8) | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.1` |
-| Frontend + Worker (NVFP4) | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0` |
-| Model (FP8) | `deepseek-ai/DeepSeek-V3.1` (from HuggingFace) |
-| Model (NVFP4) | `nvidia/DeepSeek-V3.1-NVFP4` ([from HuggingFace](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) |
+| Component | Image | Dynamo Platform |
+|---|---|---|
+| Frontend + Worker (FP8) | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.1` | 0.9.1 |
+| Frontend + Worker (NVFP4) | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0` | 1.0.0 |
+| Model (FP8) | `deepseek-ai/DeepSeek-V3.1` (from HuggingFace) | — |
+| Model (NVFP4) | `nvidia/DeepSeek-V3.1-NVFP4` ([from HuggingFace](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) | — |
 
 ---
 

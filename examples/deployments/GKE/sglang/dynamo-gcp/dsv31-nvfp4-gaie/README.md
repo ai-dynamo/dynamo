@@ -107,21 +107,127 @@ for KV cache transfer using NIXL. **Agg total: 8 GPUs on 1 node.**
 | `benchmark-aiperf.sh`        | Parameterized `aiperf profile` (edit `CONCURRENCY`, `X_POOL`, `GATEWAY_IP`) |
 
 
+## Prerequisites
+
+### 1. GKE Cluster
+
+- Nodes with **NVIDIA B200** GPUs (`nvidia.com/gpu.product: NVIDIA-B200`)
+- **RDMA multi-networking** configured: 8x RoCE NICs per node (`networking.gke.io.networks/rdma-0` through `rdma-7`)
+- **GKE Inference Gateway** enabled (`gke-l7-rilb` GatewayClass)
+- Node pool capacity: 1 node for aggregated, 2 nodes for disaggregated 1P1D
+
+### 2. Dynamo Platform 1.0.0 (Operator, Grove, KAI Scheduler)
+
+```bash
+kubectl create namespace dynamo-system --dry-run=client -o yaml | kubectl apply -f -
+
+helm upgrade --install dynamo-platform \
+  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
+  --version 1.0.0 \
+  -n dynamo-system \
+  --set global.kai-scheduler.enabled=true \
+  --set global.grove.enabled=true
+```
+
+> **Note**: If Grove/KAI causes scheduling issues, use `--set global.grove.enabled=false` and the default Kubernetes scheduler.
+
+### 3. Model Storage (PVC + HF Token)
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<your-token> \
+  -n dynamo-system --dry-run=client -o yaml | kubectl apply -f -
+```
+
+The PVC `deepseek-v31-model-rwx` (ReadWriteMany) must exist in `dynamo-system` with the NVFP4 model pre-downloaded. The worker will download from [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4) on first boot if not cached, but this adds significant time to startup.
+
+### 4. Custom EPP Image
+
+The GAIE DGDs reference a custom Dynamo EPP image at `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest`. You must build and push this image to your own Artifact Registry before deploying. See the parent [README](../README.md) for details.
+
+### 5. Images
+
+| Component | Image |
+|---|---|
+| SGLang Runtime (NVFP4) | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0` |
+| Dynamo EPP | `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest` (custom build) |
+| Model | `nvidia/DeepSeek-V3.1-NVFP4` ([HuggingFace](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) |
+
+---
+
 ## Deployment Steps
 
-### 1. Deploy the DynamoGraphDeployment
+### Option A: Aggregated GAIE (single node, 8 GPUs)
+
+#### 1. Deploy the DynamoGraphDeployment
+
+```bash
+kubectl apply -f dgd-agg-gaie.yaml -n dynamo-system
+```
+
+Wait for all pods to become ready (~35-45 min for model loading):
+
+```bash
+kubectl get pods -n dynamo-system -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv31-nvfp4-agg-gaie -w
+```
+
+Expected: 1 EPP pod + 1 Worker pod (both Running/Ready).
+
+#### 2. Test (before Gateway)
+
+```bash
+kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
+  curl -s http://sglang-dsv31-nvfp4-agg-gaie-frontend.dynamo-system.svc.cluster.local:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+#### 3. Tear Down
+
+```bash
+kubectl delete dynamographdeployment sglang-dsv31-nvfp4-agg-gaie -n dynamo-system
+```
+
+---
+
+### Option B: Disaggregated GAIE 1P1D (2 nodes, 16 GPUs)
+
+#### 1. Deploy the DynamoGraphDeployment
 
 ```bash
 kubectl apply -f dgd-disagg-gaie-nvfp4.yaml -n dynamo-system
 ```
 
-Wait for all pods to become ready (~5-10 min for model loading):
+Wait for all pods to become ready (~35-45 min for model loading):
 
 ```bash
 kubectl get pods -n dynamo-system -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv31-nvfp4-disagg-gaie -w
 ```
 
-### 2. Identify the auto-generated pool-ips Service names
+Expected: 1 EPP pod + 1 Prefill worker + 1 Decode worker (all Running/Ready).
+
+#### 2. Test (before Gateway)
+
+```bash
+kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
+  curl -s http://sglang-dsv31-nvfp4-disagg-gaie-frontend.dynamo-system.svc.cluster.local:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+#### 3. Tear Down
+
+```bash
+kubectl delete dynamographdeployment sglang-dsv31-nvfp4-disagg-gaie -n dynamo-system
+```
+
+---
+
+### Gateway Setup (applies to both Agg and Disagg)
+
+After deploying either Option A or B above, apply the Gateway resources:
+
+#### 1. Identify the auto-generated pool-ips Service names
 
 Each InferencePool gets a headless `*-pool-ips-<hash>` Service. Both
 `health-check-policy.yaml` and `backend-policy.yaml` must reference the **current**
@@ -141,19 +247,19 @@ sglang-dsv31-nvfp4-disagg-gaie-pool-ips-c01ab801   ClusterIP   None   <none>   5
 If a hash differs from the YAML, update **both** `targetRef.name` entries for that pool
 in `health-check-policy.yaml` and `backend-policy.yaml` before applying.
 
-### 3. Apply the HTTPRoute
+#### 2. Apply the HTTPRoute
 
 ```bash
 kubectl apply -f httproute.yaml -n dynamo-system
 ```
 
-### 4. Apply the HealthCheckPolicy
+#### 3. Apply the HealthCheckPolicy
 
 ```bash
 kubectl apply -f health-check-policy.yaml -n dynamo-system
 ```
 
-### 5. Apply the GCPBackendPolicy (timeout fix)
+#### 4. Apply the GCPBackendPolicy (timeout fix)
 
 ```bash
 kubectl apply -f backend-policy.yaml -n dynamo-system
