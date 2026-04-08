@@ -141,7 +141,7 @@ impl
 
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
+                routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 let prefill_context =
