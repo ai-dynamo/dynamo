@@ -13,12 +13,22 @@ def normalize_request_format(request: dict) -> None:
 
     Modifies *request* in place.
     """
-    if "stop_conditions" not in request:
+    stop_cond = request.get("stop_conditions")
+    if stop_cond is None:
         request["stop_conditions"] = {}
+    elif not isinstance(stop_cond, dict):
+        raise TypeError(
+            f"request['stop_conditions'] must be a dict, got {type(stop_cond).__name__}"
+        )
     if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
         request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
 
-    if "sampling_options" not in request:
+    sampling_opts = request.get("sampling_options")
+    if sampling_opts is None:
         request["sampling_options"] = {}
+    elif not isinstance(sampling_opts, dict):
+        raise TypeError(
+            f"request['sampling_options'] must be a dict, got {type(sampling_opts).__name__}"
+        )
     if "temperature" in request and "temperature" not in request["sampling_options"]:
         request["sampling_options"]["temperature"] = request.pop("temperature")

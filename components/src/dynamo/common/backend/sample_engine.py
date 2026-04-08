@@ -49,6 +49,11 @@ class SampleDynamoEngine(DynamoEngine):
 
         for i in range(max_new):
             if context.is_stopped():
+                yield {
+                    "token_ids": [],
+                    "finish_reason": "cancelled",
+                    "completion_usage": build_completion_usage(prompt_len, i),
+                }
                 break
             await asyncio.sleep(self.delay)
             token_id = (i + 1) % 32000

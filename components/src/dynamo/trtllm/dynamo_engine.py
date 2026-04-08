@@ -12,7 +12,11 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import DynamoEngine, EngineConfig
-from dynamo.common.engine_utils import build_completion_usage, normalize_request_format
+from dynamo.common.engine_utils import (
+    build_completion_usage,
+    normalize_finish_reason,
+    normalize_request_format,
+)
 from dynamo.trtllm.engine import TensorRTLLMEngine
 
 logger = logging.getLogger(__name__)
@@ -97,7 +101,7 @@ class TrtllmDynamoEngine(DynamoEngine):
                 out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 if output.finish_reason:
-                    out["finish_reason"] = output.finish_reason
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
 
                 if out.get("finish_reason") or res.finished:
                     if not out.get("finish_reason"):

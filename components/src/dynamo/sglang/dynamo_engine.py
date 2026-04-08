@@ -56,11 +56,20 @@ class SglangDynamoEngine(DynamoEngine):
 
         async for res in stream:
             out: Dict[str, Any] = {}
-            finish_reason = res["meta_info"]["finish_reason"]
+            meta_info = res["meta_info"]
+            finish_reason = meta_info["finish_reason"]
 
             output_ids = res.get("output_ids", [])
             if not output_ids and not finish_reason:
                 if context.is_stopped():
+                    yield {
+                        "token_ids": [],
+                        "finish_reason": normalize_finish_reason("cancelled"),
+                        "completion_usage": build_completion_usage(
+                            meta_info.get("prompt_tokens", 0),
+                            meta_info.get("completion_tokens", 0),
+                        ),
+                    }
                     break
                 continue
 
@@ -68,14 +77,23 @@ class SglangDynamoEngine(DynamoEngine):
 
             if finish_reason:
                 out["finish_reason"] = normalize_finish_reason(finish_reason["type"])
-                input_tokens = res["meta_info"]["prompt_tokens"]
-                completion_tokens = res["meta_info"]["completion_tokens"]
                 out["completion_usage"] = build_completion_usage(
-                    input_tokens, completion_tokens
+                    meta_info["prompt_tokens"],
+                    meta_info["completion_tokens"],
                 )
 
-            if not context.is_stopped():
-                yield out
+            if context.is_stopped():
+                yield {
+                    "token_ids": output_ids,
+                    "finish_reason": normalize_finish_reason("cancelled"),
+                    "completion_usage": build_completion_usage(
+                        meta_info.get("prompt_tokens", 0),
+                        meta_info.get("completion_tokens", 0),
+                    ),
+                }
+                break
+
+            yield out
 
     async def abort(self, context: Context) -> None:
         rid = context.trace_id
