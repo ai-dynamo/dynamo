@@ -79,12 +79,16 @@ impl NixlBackendConfig {
                 }
 
                 // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true)
-                if matches!(value.to_lowercase().as_str(), "1" | "true" | "on" | "yes") {
-                    let backend_name = remainder.to_uppercase();
-                    backends.insert(backend_name, HashMap::new());
-                } else {
-                    // Explicitly disabled, don't add to backends
-                    continue;
+                let backend_name = remainder.to_uppercase();
+                match crate::parse_bool(&value) {
+                    Ok(true) => {
+                        backends.insert(backend_name, HashMap::new());
+                    }
+                    Ok(false) => {
+                        // Explicitly disabled, don't add to backends
+                        continue;
+                    }
+                    Err(e) => bail!("Invalid value for {}: {}", key, e),
                 }
             }
         }
