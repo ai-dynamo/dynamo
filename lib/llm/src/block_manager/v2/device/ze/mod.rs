@@ -103,12 +103,12 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         .map_err(|e| anyhow::anyhow!("Failed to create Level-Zero context: {:?}", e))?;
 
     // Create event pool with 1024 events (similar to common CUDA patterns)
-    let event_pool = context.create_event_pool(&[*device], 1024, ZE_EVENT_SCOPE_FLAG_HOST)
+    let event_pool = context.create_event_pool(&[device.clone()], 1024, ZE_EVENT_SCOPE_FLAG_HOST)
         .map_err(|e| anyhow::anyhow!("Failed to create event pool: {:?}", e))?;
 
     let cache_entry = Arc::new(DeviceContextCache {
-        _driver: *driver,
-        device: *device,
+        _driver: driver.clone(),
+        device: device.clone(),
         context: Arc::new(context),
         event_pool: Arc::new(event_pool),
     });
@@ -158,7 +158,7 @@ impl DeviceContextOps for ZeContext {
 
     fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
         // Use immediate command list for stream-like behavior
-        let cmd_list = self.cache.context.create_immediate_command_list(&self.cache.device)
+        let cmd_list = self.cache.context.create_immediate_command_list(&self.cache.device.clone())
             .map_err(|e| anyhow::anyhow!("Failed to create immediate command list: {:?}", e))?;
 
         // Track next event index for this stream
@@ -175,7 +175,7 @@ impl DeviceContextOps for ZeContext {
     }
 
     fn allocate_device(&self, size: usize) -> Result<u64> {
-        let buffer = self.cache.context.alloc_device(&self.cache.device, size, 1)
+        let buffer = self.cache.context.alloc_device(&self.cache.device.clone(), size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero device allocation failed: {:?}", e))?;
 
         // Get pointer before moving buffer
