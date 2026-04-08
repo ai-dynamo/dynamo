@@ -165,7 +165,6 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.discovery_backend,
             args.request_plane,
             args.event_plane,
-            True,  # statically set to True, just determines to enable_nats if event_plane is nats
         )
         runtimes.append(runtime)
 

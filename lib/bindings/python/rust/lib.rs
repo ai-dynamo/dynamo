@@ -626,8 +626,14 @@ impl DistributedRuntime {
             });
         }
 
+        let event_plane_is_nats =
+            std::env::var(config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
+
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok();
+            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
