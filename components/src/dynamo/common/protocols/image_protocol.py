@@ -65,6 +65,9 @@ class NvCreateImageRequest(BaseModel):
     moderation: Optional[str] = None
     """Content moderation level: auto or low."""
 
+    input_reference: Optional[str] = None
+    """Optional image reference that guides generation (for I2I)."""
+
     nvext: Optional[ImageNvExt] = None
     """NVIDIA extensions."""
 
