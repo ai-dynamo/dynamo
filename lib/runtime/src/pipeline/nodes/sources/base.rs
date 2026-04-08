@@ -59,11 +59,17 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
 impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Frontend<In, Out> {
     async fn generate(&self, request: In) -> Result<Out, Error> {
         let (tx, rx) = oneshot::channel::<Out>();
+        let id = request.id().to_string();
         {
             let mut sinks = self.sinks.lock().unwrap();
-            sinks.insert(request.id().to_string(), tx);
+            sinks.insert(id.clone(), tx);
         }
-        self.on_next(request, private::Token {}).await?;
+        if let Err(e) = self.on_next(request, private::Token {}).await {
+            // Clean up the orphaned sender to prevent unbounded HashMap growth
+            let mut sinks = self.sinks.lock().unwrap();
+            sinks.remove(&id);
+            return Err(e);
+        }
         Ok(rx.await.map_err(|_| PipelineError::DetachedStreamSender)?)
     }
 }
