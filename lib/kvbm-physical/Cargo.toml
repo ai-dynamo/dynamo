@@ -23,7 +23,6 @@ cudarc = { workspace = true, features = ["nccl"] }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 derive-getters = { version = "0.5" }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
