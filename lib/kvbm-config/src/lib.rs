@@ -350,14 +350,14 @@ mod tests {
     fn test_env_override_tokio() {
         temp_env::with_vars(
             vec![
-                ("KVBM_TOKIO_WORKER_THREADS", Some("8")),
-                ("KVBM_TOKIO_MAX_BLOCKING_THREADS", Some("256")),
+                ("KVBM_TOKIO_WORKER_THREADS", Some("2")),
+                ("KVBM_TOKIO_MAX_BLOCKING_THREADS", Some("32")),
             ],
             || {
                 let figment = KvbmConfig::figment();
                 let config: KvbmConfig = figment.extract().unwrap();
-                assert_eq!(config.tokio.worker_threads, Some(8));
-                assert_eq!(config.tokio.max_blocking_threads, Some(256));
+                assert_eq!(config.tokio.worker_threads, Some(2));
+                assert_eq!(config.tokio.max_blocking_threads, Some(32));
             },
         );
     }
@@ -373,11 +373,11 @@ mod tests {
             || {
                 // Use tuple pair for programmatic override (figment best practice)
                 let figment = KvbmConfig::figment()
-                    .merge(("tokio.worker_threads", 16usize))
+                    .merge(("tokio.worker_threads", 2usize))
                     .merge(("messenger.backend.tcp_port", 9090u16));
 
                 let config = KvbmConfig::extract_from(figment).unwrap();
-                assert_eq!(config.tokio.worker_threads, Some(16));
+                assert_eq!(config.tokio.worker_threads, Some(2));
                 assert_eq!(config.messenger.backend.tcp_port, 9090);
             },
         );
@@ -420,10 +420,10 @@ mod tests {
                 "KVBM_MESSENGER_BACKEND_TCP_PORT",
             ],
             || {
-                let json = r#"{"tokio": {"worker_threads": 16}, "messenger": {"backend": {"tcp_port": 9090}}}"#;
+                let json = r#"{"tokio": {"worker_threads": 2}, "messenger": {"backend": {"tcp_port": 9090}}}"#;
                 let config = KvbmConfig::from_figment_with_json(json).unwrap();
 
-                assert_eq!(config.tokio.worker_threads, Some(16));
+                assert_eq!(config.tokio.worker_threads, Some(2));
                 assert_eq!(config.messenger.backend.tcp_port, 9090);
             },
         );
@@ -432,12 +432,12 @@ mod tests {
     #[test]
     fn test_from_figment_with_json_overrides_env() {
         // JSON should override env vars (highest priority)
-        temp_env::with_vars(vec![("KVBM_TOKIO_WORKER_THREADS", Some("4"))], || {
-            let json = r#"{"tokio": {"worker_threads": 24}}"#;
+        temp_env::with_vars(vec![("KVBM_TOKIO_WORKER_THREADS", Some("1"))], || {
+            let json = r#"{"tokio": {"worker_threads": 2}}"#;
             let config = KvbmConfig::from_figment_with_json(json).unwrap();
 
-            // JSON (24) should override env var (4)
-            assert_eq!(config.tokio.worker_threads, Some(24));
+            // JSON (2) should override env var (1)
+            assert_eq!(config.tokio.worker_threads, Some(2));
         });
     }
 
