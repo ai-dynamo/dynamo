@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
     SingleIn, network::Ingress,
@@ -649,7 +650,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     local_indexer: Arc<LocalKvIndexer>,
 ) {
     // Register metrics for this worker
-    if let Err(e) = WorkerQueryMetrics::register(component.drt().prometheus_registry(), worker_id) {
+    if let Err(e) = WorkerQueryMetrics::register(&component.get_metrics_registry().get_prometheus_registry(), worker_id) {
         tracing::warn!("Failed to register worker query metrics: {e}");
     }
     let metrics = WorkerQueryMetrics::get();
@@ -743,20 +744,47 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
             }
             _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
-                tracing::debug!("Worker KV query request cancelled while waiting for semaphore");
+                // this should rarely happen, as routers typically do not give up their request.
+                tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
                 return Ok(ResponseStream::new(
                     Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                        "Request cancelled".to_string(),
+                        "Request cancelled by client".to_string(),
                     )])),
                     ctx.context(),
                 ));
             }
         };
 
+        // Process the query with slow operation logging
+        let slow_query_token = tokio_util::sync::CancellationToken::new();
+        {
+            let token = slow_query_token.clone();
+            let worker_id = self.worker_id;
+            tokio::spawn(async move {
+                let mut elapsed_secs = 0u64;
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                            elapsed_secs += 5;
+                            tracing::warn!(
+                                worker_id,
+                                elapsed_secs,
+                                "Worker KV query still running after {}s - possible slow tree dump",
+                                elapsed_secs
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         let response = self
             .local_indexer
             .get_events_in_id_range(request.start_event_id, request.end_event_id)
             .await;
+
+        slow_query_token.cancel();
 
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![response])),
