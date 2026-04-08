@@ -270,6 +270,7 @@ pub fn monitor_for_disconnects(
                     }
                 } => {
                     inflight_guard.mark_error(ErrorType::Cancelled);
+                    stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
