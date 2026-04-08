@@ -181,6 +181,9 @@ filterwarnings = [
     "error",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
+    # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
+    # Triggered by flashinfer 0.6.7+ during import of comm/mnnvl.py
+    "ignore:The cuda\\..*module is deprecated:FutureWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings
