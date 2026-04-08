@@ -301,3 +301,14 @@ impl MemoryRegion {
         }
     }
 }
+
+/// Check if an environment variable is truthy.
+///
+/// Returns `false` if the environment variable is not set or is invalid.
+/// Use [`env_parse_bool`] if you need to distinguish between unset, valid, and invalid values.
+pub fn env_is_truthy(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+        Err(_) => false,
+    }
+}
