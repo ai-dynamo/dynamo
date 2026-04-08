@@ -148,7 +148,7 @@ impl
                     link_child_context(&engine_ctx, prefill_req, request_id.as_str());
 
                 // Pass the phase barrier to the spawned task. It is released after routing
-                // completes so `record_worker_full` finishes before phase changes to Decode.
+                // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
