@@ -131,9 +131,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a07d1f37ff60921c83bdfc7407723bdefe89b44b98a9b772f225c8f9d67141a6"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
 dependencies = [
  "rustversion",
 ]
@@ -1127,9 +1127,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.3"
+version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6468cb7fa330840f3ebcd8df51edc0e7bf5c18df524792ce6004c6821851cdf3"
+checksum = "f071cd6a7b5d51607df76aa2d426aaabc7a74bc6bdb885b8afa63a880572ad9b"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -1277,19 +1277,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06d2e3287df1c007e74221c49ca10a95d557349e54b3a75dc2fb14712c751f04"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -1544,7 +1531,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-runtime",
@@ -1590,10 +1577,11 @@ dependencies = [
  "bytes",
  "chrono",
  "cudarc",
- "dashmap 5.5.3",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1663,6 +1651,7 @@ dependencies = [
  "anyhow",
  "cudarc",
  "libc",
+ "libloading 0.8.9",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",
@@ -1676,7 +1665,7 @@ name = "dynamo-mocker"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
@@ -1749,7 +1738,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
- "dashmap 6.1.0",
+ "dashmap",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
@@ -1789,7 +1778,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cudarc",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-config",
@@ -1846,7 +1835,7 @@ version = "1.0.0"
 dependencies = [
  "bs58",
  "bytemuck",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "serde",
  "thiserror 2.0.18",
@@ -2096,11 +2085,11 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.3.0"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 dependencies = [
- "getrandom 0.2.17",
+ "getrandom 0.3.4",
 ]
 
 [[package]]
