@@ -1532,14 +1532,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "dynamo-protocols",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.0.0"
+version = "1.1.0-dev.2"
 dependencies = [
  "bs58",
  "bytemuck",
