@@ -203,22 +203,6 @@ func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 		phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress
 }
 
-// needsRollingUpdateReconciliation returns true if the rolling update state machine
-// needs to run.
-func (r *DynamoGraphDeploymentReconciler) needsRollingUpdateReconciliation(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) bool {
-	if dgd.Status.RollingUpdate != nil {
-		phase := dgd.Status.RollingUpdate.Phase
-		if phase == nvidiacomv1alpha1.RollingUpdatePhasePending ||
-			phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress ||
-			phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted { // clean up orphaned DCDs
-			return true
-		}
-	}
-	return r.shouldTriggerRollingUpdate(dgd)
-}
-
 // reconcileRollingUpdate handles the rolling update lifecycle.
 func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	ctx context.Context,

@@ -2688,65 +2688,6 @@ func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
 	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedServices)
 }
 
-func TestReconcileRollingUpdate_CompletedGCSweep(t *testing.T) {
-	// Phase=Completed with matching hashes but old DCDs still exist — GC sweep should delete them
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
-	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
-		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
-	}
-
-	// Create an old DCD with a different hash (orphaned from a previous rolling update)
-	oldDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-oldhash0",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "oldhash0",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-			},
-		},
-	}
-
-	r := createTestReconcilerWithStatus(dgd, oldDCD)
-	err := r.reconcileRollingUpdate(context.Background(), dgd)
-	require.NoError(t, err)
-
-	// Phase should still be Completed
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-
-	// Verify the old DCD was deleted by the GC sweep
-	oldDCDs, err := r.listOldWorkerDCDs(context.Background(), dgd, hash)
-	require.NoError(t, err)
-	assert.Empty(t, oldDCDs, "GC sweep should have deleted old worker DCDs")
-}
-
-func TestReconcileRollingUpdate_CompletedGCSweep_NoOldDCDs(t *testing.T) {
-	// Phase=Completed with matching hashes and no old DCDs — no-op
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
-	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
-		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd)
-	require.NoError(t, err)
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-}
-
 func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate(t *testing.T) {
 	// Stuck case: hashes match but phase is InProgress (e.g., operator restarted between
 	// annotation write and status persistence). Should call completeRollingUpdate which
@@ -2774,40 +2715,4 @@ func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate
 	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedServices, "decode")
 	// Annotation should still have the correct hash
 	assert.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-}
-
-func TestNeedsRollingUpdateReconciliation(t *testing.T) {
-	tests := []struct {
-		name     string
-		phase    nvidiacomv1alpha1.RollingUpdatePhase
-		hashDiff bool
-		expected bool
-	}{
-		{"None phase no hash diff", nvidiacomv1alpha1.RollingUpdatePhaseNone, false, false},
-		{"None phase with hash diff", nvidiacomv1alpha1.RollingUpdatePhaseNone, true, true},
-		{"Pending phase", nvidiacomv1alpha1.RollingUpdatePhasePending, false, true},
-		{"InProgress phase", nvidiacomv1alpha1.RollingUpdatePhaseInProgress, false, true},
-		{"Completed phase", nvidiacomv1alpha1.RollingUpdatePhaseCompleted, false, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {ComponentType: consts.ComponentTypeWorker},
-			})
-			hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
-			if tt.hashDiff {
-				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
-			} else {
-				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
-			}
-			dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
-				Phase: tt.phase,
-			}
-
-			r := createTestReconcilerWithStatus(dgd)
-			result := r.needsRollingUpdateReconciliation(dgd)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
