@@ -3,29 +3,6 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, ErrorType, match_error_chain};
-
-/// Check if an error chain indicates the worker should be reported as down.
-fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    const INHIBITED: &[ErrorType] = &[
-        ErrorType::CannotConnect,
-        ErrorType::Disconnected,
-        ErrorType::ConnectionTimeout,
-        ErrorType::ResponseTimeout,
-        ErrorType::Backend(BackendError::EngineShutdown),
-    ];
-    match_error_chain(err, INHIBITED, &[])
-}
-
-/// Read the backend response inactivity timeout from the environment.
-/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
-/// as the HTTP-layer safety net in `disconnect.rs`.
-fn response_inactivity_timeout() -> Option<std::time::Duration> {
-    std::env::var("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&secs| secs > 0)
-        .map(std::time::Duration::from_secs)
-}
 use crate::{
     component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
     dynamo_nvtx_range,
@@ -54,6 +31,29 @@ use std::{
 };
 use tokio_stream::StreamExt;
 use tracing::Instrument;
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::ResponseTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
+
+/// Read the backend response inactivity timeout from the environment.
+/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
+/// as the HTTP-layer safety net in `disconnect.rs`.
+fn response_inactivity_timeout() -> Option<std::time::Duration> {
+    std::env::var("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
 
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
@@ -139,6 +139,10 @@ where
     /// instance list instead of the filtered avail list. Use for recovery/query paths
     /// where transient failures are expected.
     fault_detection_enabled: bool,
+
+    /// Cached response inactivity timeout. Read once at construction from
+    /// `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` to avoid a syscall per request.
+    response_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -247,6 +251,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold: None,
             fault_detection_enabled: false,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         })
@@ -282,6 +287,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
             fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         };
@@ -616,11 +622,12 @@ where
                 // when the backend stops producing output. This triggers is_inhibited()
                 // → report_instance_down() to quarantine the worker.
                 let stream: Pin<Box<dyn Stream<Item = U> + Send>> =
-                    if let Some(timeout) = response_inactivity_timeout() {
+                    if let Some(timeout) = self.response_timeout {
                         Box::pin(async_stream::stream! {
                             let mut inner = Box::pin(stream);
                             loop {
                                 tokio::select! {
+                                    biased;
                                     item = inner.next() => {
                                         match item {
                                             Some(item) => yield item,

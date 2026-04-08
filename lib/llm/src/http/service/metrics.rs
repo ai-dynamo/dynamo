@@ -1152,7 +1152,7 @@ impl ErrorType {
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
-            ErrorType::ResponseTimeout => "response_timeout",
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
