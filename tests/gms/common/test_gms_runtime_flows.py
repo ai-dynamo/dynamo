@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import itertools
 import os
 import signal
@@ -52,6 +53,15 @@ def _gpu_memory_free_bytes(device: int = 0) -> int:
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
     finally:
         pynvml.nvmlShutdown()
+
+
+def _skip_if_cuda_libraries_unavailable() -> None:
+    try:
+        ctypes.CDLL("libnvidia-ml.so.1")
+        ctypes.CDLL("libcuda.so.1")
+        _gpu_memory_free_bytes()
+    except Exception:
+        pytest.skip("CUDA and NVML are required for this test")
 
 
 def _drop_connection(session: _GMSClientSession) -> None:
@@ -747,6 +757,7 @@ async def test_new_layout_large_allocation_waits_for_dead_writer_process(
     tmp_path,
     monkeypatch,
 ):
+    _skip_if_cuda_libraries_unavailable()
     free_before = _gpu_memory_free_bytes()
     size = int(free_before * 0.9)
     assert size > 0

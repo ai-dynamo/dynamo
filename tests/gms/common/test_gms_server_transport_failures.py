@@ -264,6 +264,24 @@ class _FakeGMS:
         raise AssertionError(f"Unexpected request type in test: {type(msg)}")
 
 
+class _NoopAllocationManager:
+    allocation_count = 0
+
+    def __init__(
+        self,
+        device: int,
+        *,
+        allocation_retry_interval: float = 0.5,
+        allocation_retry_timeout: float | None = None,
+    ) -> None:
+        self.device = device
+        self.allocation_retry_interval = allocation_retry_interval
+        self.allocation_retry_timeout = allocation_retry_timeout
+
+    def clear_all(self) -> int:
+        return 0
+
+
 def _make_server(handler: _FakeHandler | None = None) -> GMSRPCServer:
     server = object.__new__(GMSRPCServer)
     server.socket_path = "/tmp/gms-test.sock"
@@ -554,7 +572,11 @@ async def test_runtime_state_handshake_send_failure_does_not_fail_server(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_request_is_rejected_on_live_session():
+async def test_runtime_state_request_is_rejected_on_live_session(monkeypatch):
+    monkeypatch.setattr(
+        "gpu_memory_service.server.gms.GMSAllocationManager",
+        _NoopAllocationManager,
+    )
     gms = GMS()
     conn, _ = _make_connection(GrantedLockType.RW, "session_4")
 
@@ -570,7 +592,11 @@ async def test_runtime_state_request_is_rejected_on_live_session():
 
 
 @pytest.mark.asyncio
-async def test_event_history_request_is_rejected_on_live_session():
+async def test_event_history_request_is_rejected_on_live_session(monkeypatch):
+    monkeypatch.setattr(
+        "gpu_memory_service.server.gms.GMSAllocationManager",
+        _NoopAllocationManager,
+    )
     gms = GMS()
     conn, _ = _make_connection(GrantedLockType.RW, "session_5")
 
