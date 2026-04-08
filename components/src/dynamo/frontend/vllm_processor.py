@@ -14,7 +14,6 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.inputs.data import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -25,6 +24,8 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
     KvRouter,
@@ -77,6 +78,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        block_size: int = 16,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -86,6 +88,12 @@ class VllmProcessor:
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
         self.exclude_tools_when_tool_choice_none = True
+        self.block_size = block_size
+        # Persistent NIXL sender — caches pickled mm_kwargs across requests.
+        self._mm_kwargs_sender: Any = None
+        # Set DYNAMO_DISABLE_NIXL_MM=1 to disable NIXL mm_kwargs transfer
+        # (useful for debugging routing without the pre-rendered input path).
+        self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -102,6 +110,116 @@ class VllmProcessor:
             return []
         return [eos_token_id]
 
+    async def _prepare_mm_routing(
+        self,
+        vllm_preproc: EngineCoreRequest,
+        dynamo_preproc: dict[str, Any],
+    ) -> tuple[dict | None, list, bool]:
+        """Extract MM routing info and prepare NIXL transfer.
+
+        Returns:
+            (mm_routing_info, nixl_completion_futures, nixl_transferred)
+        """
+        mm_routing_info = None
+        nixl_completion_futures: list = []
+        nixl_transferred = False
+
+        rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
+        if self.is_kv_router and vllm_preproc.mm_features:
+            mm_routing_info = build_mm_routing_info_from_features(
+                vllm_preproc.mm_features,
+                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                block_size=self.block_size,
+            )
+            # Forward mm_hashes to backend for hash consistency — the backend
+            # will use these directly instead of recomputing.
+            mm_hashes_list = [f.mm_hash for f in vllm_preproc.mm_features]
+            mm_placeholders_list = [
+                (f.mm_position.offset, f.mm_position.length)
+                for f in vllm_preproc.mm_features
+            ]
+            # Transport mm_hashes and mm_placeholders to backend via extra_args.
+            if "extra_args" not in dynamo_preproc:
+                dynamo_preproc["extra_args"] = {}
+            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
+            # Forward the expanded prompt_token_ids (with image placeholders)
+            # so the backend can use them in the pre-rendered MultiModalInput.
+            dynamo_preproc["extra_args"]["expanded_token_ids"] = list(
+                vllm_preproc.prompt_token_ids
+            )
+
+            n_blocks = len(mm_routing_info["block_mm_infos"]) if mm_routing_info else 0
+            n_mm_blocks = sum(
+                1 for b in (mm_routing_info or {}).get("block_mm_infos", []) if b
+            )
+            logger.debug(
+                "[mm-routing] Built mm_routing_info: %d mm_features, "
+                "%d hashes, %d total blocks, %d blocks with MM content, "
+                "block_size=%d",
+                len(vllm_preproc.mm_features),
+                len(mm_hashes_list),
+                n_blocks,
+                n_mm_blocks,
+                self.block_size,
+            )
+            if logger.isEnabledFor(logging.DEBUG):
+                for i, f in enumerate(vllm_preproc.mm_features):
+                    logger.debug(
+                        "[mm-routing]   feature[%d]: modality=%s, hash=%s..., "
+                        "offset=%d, length=%d",
+                        i,
+                        f.modality,
+                        f.mm_hash[:16] if f.mm_hash else "None",
+                        f.mm_position.offset,
+                        f.mm_position.length,
+                    )
+            # Register mm_kwargs tensors with NIXL so the backend can pull
+            # them and skip its own HF processor call.
+            if not self.nixl_mm_enabled:
+                logger.debug(
+                    "[mm-routing] NIXL mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
+                )
+            else:
+                try:
+                    from dynamo.common.multimodal.mm_kwargs_transfer import (
+                        MmKwargsSender,
+                    )
+
+                    if self._mm_kwargs_sender is None:
+                        self._mm_kwargs_sender = MmKwargsSender()
+                    (
+                        nixl_meta,
+                        nixl_completion_futures,
+                    ) = await self._mm_kwargs_sender.prepare(
+                        vllm_preproc.mm_features, modality="image"
+                    )
+                    if nixl_meta is not None:
+                        dynamo_preproc["extra_args"][
+                            "mm_kwargs_nixl"
+                        ] = nixl_meta.model_dump()
+                        logger.debug(
+                            "[mm-routing] NIXL: registered %d tensor(s) for transfer",
+                            len(nixl_meta.tensor_specs),
+                        )
+                        nixl_transferred = True
+                    else:
+                        logger.debug(
+                            "[mm-routing] NIXL: no tensors to transfer (sender returned None)"
+                        )
+                except Exception:
+                    logger.warning(
+                        "[mm-routing] NIXL sender failed, backend will run HF processor",
+                        exc_info=True,
+                    )
+                    nixl_completion_futures = []
+
+        elif self.is_kv_router:
+            logger.debug("[mm-routing] No mm_features — text-only request")
+        _nvtx.end_range(rng_routing)
+
+        return mm_routing_info, nixl_completion_futures, nixl_transferred
+
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
@@ -112,9 +230,9 @@ class VllmProcessor:
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
-
-        async for item in self._generator_inner(request):
-            yield item
+        with _nvtx.annotate("mm_frontend:generator", color="blue"):
+            async for item in self._generator_inner(request):
+                yield item
 
     async def _generator_inner(
         self, request: dict[str, Any]
@@ -138,13 +256,17 @@ class VllmProcessor:
                     if isinstance(img_url, dict) and img_url.get("detail") is None:
                         img_url["detail"] = "auto"
 
-        pre = await preprocess_chat_request(
-            request,
-            tokenizer=self.tokenizer,
-            renderer=self.input_processor.renderer,
-            tool_parser_class=self.tool_parser_class,
-            exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
-        )
+        # Images are fetched by vLLM's renderer via DynamoMediaConnector,
+        # which wraps our ImageLoader (LRU cache + in-flight dedup).
+        # No data URI encoding needed.
+        with _nvtx.annotate("mm_frontend:preprocess_chat", color="yellow"):
+            pre = await preprocess_chat_request(
+                request,
+                tokenizer=self.tokenizer,
+                renderer=self.input_processor.renderer,
+                tool_parser_class=self.tool_parser_class,
+                exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+            )
 
         request_for_sampling = pre.request_for_sampling
         tool_parser = pre.tool_parser
@@ -196,12 +318,11 @@ class VllmProcessor:
                 "Logprobs requested but not supported in distributed inference mode"
             )
 
-        # This calls update_from_generation_config and update_from_tokenizer on SamplingParams
-        prompt_inputs = TokensPrompt(prompt_token_ids=tokens)
-        if "multi_modal_data" in engine_prompt:
-            prompt_inputs["multi_modal_data"] = engine_prompt["multi_modal_data"]
-        if "multi_modal_uuids" in engine_prompt:
-            prompt_inputs["multi_modal_uuids"] = engine_prompt["multi_modal_uuids"]
+        # The renderer's process_for_engine() always returns a fully processed
+        # EngineInput (TokenInputs or MultiModalInputs) with a "type" key.
+        # Pass it directly to process_inputs() — no need to rebuild a
+        # TokensPrompt, and this avoids the deprecation warning.
+        prompt_inputs = engine_prompt
         if request_for_sampling.cache_salt is not None:
             prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
         if request_for_sampling.mm_processor_kwargs is not None:
@@ -209,12 +330,13 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
-        vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
-            request_id,
-            prompt_inputs,
-            sampling_params,
-            GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
-        )
+        with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
+            vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
+                request_id,
+                prompt_inputs,
+                sampling_params,
+                GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
+            )
 
         InputProcessor.assign_request_id(vllm_preproc)
 
@@ -268,10 +390,20 @@ class VllmProcessor:
             "annotations": [],
         }
 
+        # Extract MM routing metadata and prepare NIXL transfer.
+        (
+            mm_routing_info,
+            nixl_completion_futures,
+            nixl_transferred,
+        ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+
         # Forward multimodal URLs so the backend handler can load the media.
-        mm_data = extract_mm_urls(request.get("messages") or [])
-        if mm_data:
-            dynamo_preproc["multi_modal_data"] = mm_data
+        # Skip when NIXL transferred successfully — the backend already has
+        # the pre-processed mm_kwargs and does not need to re-download.
+        if not nixl_transferred:
+            mm_data = extract_mm_urls(request.get("messages") or [])
+            if mm_data:
+                dynamo_preproc["multi_modal_data"] = mm_data
 
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -290,6 +422,8 @@ class VllmProcessor:
             tokens,
             vllm_preproc,
             post,
+            mm_routing_info=mm_routing_info,
+            nixl_completion_futures=nixl_completion_futures,
         ):
             yield item
 
@@ -301,24 +435,56 @@ class VllmProcessor:
         tokens: list[int],
         vllm_preproc: EngineCoreRequest,
         post: StreamingPostProcessor,
+        mm_routing_info: dict[str, Any] | None = None,
+        nixl_completion_futures: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
         try:
+            rng_route = _nvtx.start_range("mm_frontend:kv_router_generate", color="red")
             if self.is_kv_router:
-                dynamo_stream = await self.router.generate(
-                    token_ids=tokens,
-                    model=dynamo_preproc["model"],
-                    stop_conditions=dynamo_preproc["stop_conditions"],
-                    sampling_options=dynamo_preproc["sampling_options"],
-                    output_options=dynamo_preproc["output_options"],
-                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
-                )
+                kv_kwargs: dict[str, Any] = {
+                    "token_ids": tokens,
+                    "model": dynamo_preproc["model"],
+                    "stop_conditions": dynamo_preproc["stop_conditions"],
+                    "sampling_options": dynamo_preproc["sampling_options"],
+                    "output_options": dynamo_preproc["output_options"],
+                    "multi_modal_data": dynamo_preproc.get("multi_modal_data"),
+                }
+                if dynamo_preproc.get("extra_args"):
+                    kv_kwargs["extra_args"] = dynamo_preproc["extra_args"]
+                    ea = dynamo_preproc["extra_args"]
+                    logger.debug(
+                        "[mm-routing] extra_args keys=%s, has_nixl=%s, "
+                        "n_hashes=%d, n_placeholders=%d",
+                        list(ea.keys()),
+                        "mm_kwargs_nixl" in ea,
+                        len(ea.get("mm_hashes", [])),
+                        len(ea.get("mm_placeholders", [])),
+                    )
+                if mm_routing_info is not None:
+                    kv_kwargs["mm_routing_info"] = mm_routing_info
+                    logger.debug(
+                        "[mm-routing] KvRouter.generate() called with "
+                        "mm_routing_info (%d routing tokens, %d blocks)",
+                        len(mm_routing_info.get("routing_token_ids", [])),
+                        len(mm_routing_info.get("block_mm_infos", [])),
+                    )
+                else:
+                    logger.debug(
+                        "[mm-routing] KvRouter.generate() called without "
+                        "mm_routing_info (text-only)"
+                    )
+                dynamo_stream = await self.router.generate(**kv_kwargs)
             else:
                 dynamo_stream = await self.router.generate(
                     dynamo_preproc, annotated=False
                 )
+            _nvtx.end_range(rng_route)
 
+            rng_stream = _nvtx.start_range(
+                "mm_frontend:stream_response", color="purple"
+            )
             async for dynamo_response in dynamo_stream:
                 if self.is_kv_router:
                     engine_response = dynamo_response
@@ -375,7 +541,22 @@ class VllmProcessor:
                         dynamo_out["usage"] = usage
 
                     yield dynamo_out
+            _nvtx.end_range(rng_stream)
         finally:
+            # Wait for NIXL transfers to complete so the frontend can safely
+            # deregister the memory regions.
+            if nixl_completion_futures:
+                with _nvtx.annotate(
+                    "mm_frontend:nixl_completion_wait", color="magenta"
+                ):
+                    try:
+                        await asyncio.gather(*nixl_completion_futures)
+                        logger.debug("[mm-routing] NIXL: all transfers completed")
+                    except Exception:
+                        logger.warning(
+                            "[mm-routing] NIXL: transfer completion failed",
+                            exc_info=True,
+                        )
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
@@ -434,17 +615,37 @@ class EngineFactory:
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
 
+        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+
         model_config = ModelConfig(
             model=source_path,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
+            trust_remote_code=trust_remote_code,
         )
+        # Use processor_only cache so tensor data persists across requests.
+        # The default "lru" sender cache drops tensor data on cache hits
+        # (designed for disagg where P1 holds tensors), but we need the
+        # data to pickle and send via NIXL on repeated requests.
+        if model_config.multimodal_config is not None:
+            nixl_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
+            if nixl_enabled:
+                model_config.multimodal_config.mm_processor_cache_type = (
+                    "processor_only"
+                )
         vllm_config = VllmConfig(
             model_config=model_config,
             load_config=LoadConfig(load_format=load_format),
             cache_config=CacheConfig(),
             # scheduler_config=SchedulerConfig(),
         )
+
+        # Register dynamo's ImageLoader as vLLM's media connector so the
+        # renderer uses our LRU cache + in-flight dedup for image fetching.
+        # This eliminates data URI encoding overhead entirely.
+        if os.environ.get("VLLM_MEDIA_CONNECTOR") != "dynamo":
+            os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+        import dynamo.common.multimodal.media_connector  # noqa: F401
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
@@ -489,6 +690,8 @@ class EngineFactory:
                 router_mode=self.router_config.router_mode
             )
 
+        block_size = self.config.kv_cache_block_size or 16
+
         gen = VllmProcessor(
             tokenizer,
             input_processor,
@@ -496,6 +699,7 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            block_size=block_size,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

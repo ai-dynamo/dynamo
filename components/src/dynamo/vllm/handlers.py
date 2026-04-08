@@ -7,6 +7,9 @@ import binascii
 import io
 import logging
 import os
+
+# MM kwargs NIXL transfer (frontend → backend pre-rendered path)
+import pickle
 import tempfile
 import threading
 import time
@@ -19,6 +22,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -33,7 +37,12 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.mm_kwargs_transfer import (
+    MmKwargsReceiver,
+    MmKwargsTransferMetadata,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -402,6 +411,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+        self._mm_kwargs_receiver = None
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -1169,13 +1179,125 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
+    async def _try_receive_mm_kwargs_nixl(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """Try to receive pre-processed mm_kwargs via NIXL from the frontend.
+
+        If the request contains NIXL transfer metadata (mm_kwargs_nixl), pulls
+        the tensors via NIXL READ and constructs a pre-rendered MultiModalInput
+        dict that the vLLM engine can consume directly, skipping the HF processor.
+
+        Returns a dict suitable for passing to engine as an EngineInput, or None
+        if NIXL metadata is not present.
+        """
+        extra_args = request.get("extra_args") or {}
+        ea_keys = list(extra_args.keys()) if extra_args else []
+        logger.debug(
+            "[mm-routing] _try_receive_mm_kwargs_nixl: extra_args keys=%s", ea_keys
+        )
+        nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
+        if not nixl_meta_raw:
+            logger.debug("[mm-routing] No mm_kwargs_nixl in extra_args, skipping NIXL")
+            return None
+
+        rng = _nvtx.start_range("mm_backend:nixl_receive", color="magenta")
+        logger.debug(
+            "[mm-routing] Found mm_kwargs_nixl in extra_args, attempting NIXL reception"
+        )
+        mm_hashes = extra_args.get("mm_hashes")
+        mm_placeholders = extra_args.get("mm_placeholders")
+        if not mm_hashes or not mm_placeholders:
+            logger.warning(
+                "mm_kwargs_nixl present but mm_hashes/mm_placeholders missing"
+            )
+            _nvtx.end_range(rng)
+            return None
+
+        try:
+            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+            if self._mm_kwargs_receiver is None:
+                self._mm_kwargs_receiver = MmKwargsReceiver()
+            receiver = self._mm_kwargs_receiver
+            mm_kwargs_tensors = await receiver.receive(metadata)
+
+            # Reconstruct a pre-rendered MultiModalInput dict.
+            # The vLLM engine detects "type": "multimodal" and skips the HF
+            # processor entirely (InputProcessor.process_inputs line 222).
+
+            # Deserialize the MultiModalKwargsItem that was pickled by the
+            # frontend sender.  This preserves the full structure including
+            # MultiModalFieldElem wrappers and field metadata, which vLLM's
+            # internal serializer requires.
+            # NOTE: pickle is used here because MultiModalKwargsItem contains
+            # MultiModalFieldElem wrappers with field metadata that vLLM's
+            # internal serializer requires. This is safe because the frontend
+            # is a trusted component within the same Dynamo deployment.
+            pickled_item = mm_kwargs_tensors.get("__pickled_kwargs_item__")
+            if pickled_item is None:
+                logger.warning(
+                    "[mm-routing] NIXL tensors received but no pickled kwargs item; "
+                    "falling back to normal path"
+                )
+                return None
+            kwargs_item = pickle.loads(pickled_item)
+            if not isinstance(kwargs_item, MultiModalKwargsItem):
+                logger.warning(
+                    "[mm-routing] Deserialized object is %s, expected "
+                    "MultiModalKwargsItem; falling back to normal path",
+                    type(kwargs_item).__name__,
+                )
+                return None
+
+            # Use the expanded token IDs (with image placeholders) from the
+            # frontend, not the unexpanded request["token_ids"].
+            expanded_token_ids = extra_args.get("expanded_token_ids")
+            if not expanded_token_ids:
+                logger.warning(
+                    "[mm-routing] No expanded_token_ids in extra_args, "
+                    "falling back to request token_ids"
+                )
+                expanded_token_ids = request["token_ids"]
+
+            engine_input = {
+                "type": "multimodal",
+                "_externally_processed": True,
+                "prompt_token_ids": expanded_token_ids,
+                "mm_kwargs": {
+                    metadata.modality: [kwargs_item],
+                },
+                "mm_hashes": {
+                    metadata.modality: mm_hashes,
+                },
+                "mm_placeholders": {
+                    metadata.modality: [
+                        PlaceholderRange(offset=off, length=length)
+                        for off, length in mm_placeholders
+                    ],
+                },
+            }
+            logger.debug(
+                "[mm-routing] Constructed pre-rendered MultiModalInput from "
+                "pickled kwargs_item, %d hashes, %d placeholders",
+                len(mm_hashes),
+                len(mm_placeholders),
+            )
+            _nvtx.end_range(rng)
+            return engine_input
+        except Exception:
+            logger.exception("Failed to receive mm_kwargs via NIXL, falling back")
+            _nvtx.end_range(rng)
+            return None
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any], request_id: str, context
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
         """
+        rng = _nvtx.start_range("mm_backend:extract_multimodal_data", color="orange")
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            _nvtx.end_range(rng)
             return None
 
         # Security check: reject multimodal data if not explicitly enabled
@@ -1212,9 +1334,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
         if "image" not in vllm_mm_data and image_mm_items:
-            images = await self.image_loader.load_image_batch(
-                image_mm_items,
-            )
+            with _nvtx.annotate("mm_backend:image_download", color="green"):
+                images = await self.image_loader.load_image_batch(
+                    image_mm_items,
+                )
 
             if images:
                 # vLLM expects single image or list
@@ -1234,6 +1357,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Extracted {len(videos)} video(s) for multimodal processing"
                 )
 
+        _nvtx.end_range(rng)
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1286,7 +1410,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        # Prefer frontend-forwarded mm_hashes for hash consistency with the
+        # routing layer.  Fall back to computing from loaded image data.
+        extra_args = request.get("extra_args") or {}
+        forwarded_hashes = extra_args.get("mm_hashes")
+        if forwarded_hashes:
+            mm_uuids = {"image": forwarded_hashes}
+        else:
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+            if mm_uuids and multi_modal_data:
+                logger.warning(
+                    "[mm-routing] No forwarded mm_hashes from frontend; "
+                    "recomputed from image data. KV-cache-aware MM routing "
+                    "may not match the frontend's routing decisions."
+                )
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
@@ -1597,6 +1734,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         multi_modal_data = None
+        pre_rendered = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
             if is_qwen_vl_model(self.config.model):
@@ -1630,15 +1768,41 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request, request_id, context
                     )
         else:
-            # Aggregated mode: load images normally
-            multi_modal_data = await self._extract_multimodal_data(
-                request, request_id, context
-            )
+            # Fast path: check for pre-processed mm_kwargs via NIXL from frontend.
+            # If available, we skip image downloading AND the HF processor.
+            pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
+            if pre_rendered is not None:
+                logger.debug(
+                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL",
+                    request_id,
+                )
+            else:
+                # Aggregated mode: load images normally
+                multi_modal_data = await self._extract_multimodal_data(
+                    request, request_id, context
+                )
 
-        # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data
-        )
+        # Build prompt from request
+        with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
+            if pre_rendered is not None:
+                # pre_rendered is a MultiModalInput dict with "type": "multimodal".
+                # The engine's InputProcessor.process_inputs() will see the "type"
+                # key and skip the HF processor entirely.
+                prompt = pre_rendered
+                embedding_sequence_length = None
+                error = None
+                logger.debug(
+                    "[mm-routing] Request %s: using pre-rendered MultiModalInput",
+                    request_id,
+                )
+            else:
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    error,
+                ) = self._build_prompt_from_request(
+                    request, request_id, multi_modal_data
+                )
         if error is not None:
             yield error
             return
@@ -1830,6 +1994,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        # TODO: Wire up NIXL mm_kwargs passthrough for disaggregated prefill
+        # (similar to DecodeWorkerHandler). For now, prefill
+        # always downloads and processes images via the standard path.
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(
             request, request_id, context
