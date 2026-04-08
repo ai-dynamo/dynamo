@@ -51,8 +51,6 @@ def run_sweep(
         f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}"
     )
     print(f"  Output:        {output_base}")
-    if config.seed is not None:
-        print(f"  Seed:          {config.seed}")
     print(flush=True)
 
     server = ServerManager(port=config.port, timeout=config.timeout)

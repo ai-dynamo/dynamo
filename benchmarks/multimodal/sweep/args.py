@@ -70,11 +70,4 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Skip plot generation.",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed for reproducible dataset generation.",
-    )
-
     return parser.parse_args(argv)
