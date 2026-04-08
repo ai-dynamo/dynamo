@@ -4,8 +4,8 @@
 """Tests for the flock-based failover lock.
 
 These are pure Python/OS tests exercising flock semantics across asyncio
-tasks and child processes, but they run in the GPU lane with the rest of
-the repo-level GMS suite.
+tasks and child processes, so they stay on the generic cpu-style pre-merge
+lane instead of the dedicated GPU job.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
 ]
 
 
