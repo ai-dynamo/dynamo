@@ -10,7 +10,16 @@ to <think> blocks in the content field before chat template rendering.
 
 import copy
 
+import pytest
+
 from dynamo.common.utils.input_params import _inject_reasoning_content
+
+# Total runtime ~0.04s — no need for parallel marker.
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 
 class TestInjectReasoningContent:

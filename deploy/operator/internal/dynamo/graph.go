@@ -43,6 +43,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RestartState holds the restart state for DGD services.
@@ -894,12 +895,12 @@ type MultinodeDeployer interface {
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration) Backend {
+func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration, parentGraphDeploymentName string) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
-		return &VLLMBackend{}
+		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,
@@ -1120,7 +1121,7 @@ func GenerateBasePodSpec(
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework, operatorConfig)
+	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -1164,22 +1165,6 @@ func GenerateBasePodSpec(
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
-
-	// Inject checkpoint configuration if enabled
-	// This handles ALL checkpoint-related modifications:
-	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
-	// - Security context (hostIPC, privileged mode)
-	// - Restore/checkpoint pod metadata (labels/annotations)
-	// - Storage configuration (volumes, mounts)
-	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
-	// Checkpoint config comes from the operator's controller config (Helm values)
-	var checkpointConfig *configv1alpha1.CheckpointConfiguration
-	if operatorConfig.Checkpoint.Enabled {
-		checkpointConfig = &operatorConfig.Checkpoint
-	}
-	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, checkpointConfig); err != nil {
-		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
-	}
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
@@ -1359,6 +1344,7 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
+	kubeClient ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -1438,13 +1424,29 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
 			}
+			if operatorConfig.Checkpoint.Enabled {
+				if err := checkpoint.InjectCheckpointIntoPodSpec(
+					ctx,
+					kubeClient,
+					dynamoDeployment.Namespace,
+					podSpec,
+					checkpointInfo,
+				); err != nil {
+					return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", r.Name, err)
+				}
+			}
+
+			minAvailable := int32(1)
+			if isMultinode {
+				minAvailable = r.Replicas
+			}
 
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(r.Name),
 				Spec: grovev1alpha1.PodCliqueSpec{
 					RoleName:     strings.ToLower(r.Name),
 					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(int32(1)),
+					MinAvailable: ptr.To(minAvailable),
 					PodSpec:      *podSpec,
 				},
 			}
