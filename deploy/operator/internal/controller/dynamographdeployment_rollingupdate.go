@@ -260,9 +260,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
-		if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-			return fmt.Errorf("failed to delete old worker DCDs: %w", err)
-		}
+		logger.Info("Rolling update already completed")
 		return nil
 	}
 
