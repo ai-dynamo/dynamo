@@ -147,22 +147,6 @@ where
             model_name.as_deref(),
         )
         .await?;
-        let served_indexer_handle = if kv_router_config.serve_indexer {
-            let model_name = model_name.ok_or_else(|| {
-                anyhow::anyhow!("model_name is required when serve_indexer is configured")
-            })?;
-            Some(
-                ensure_served_indexer_service(
-                    component.clone(),
-                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
-                    model_name,
-                    indexer.clone(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -201,6 +185,23 @@ where
                 kv_router_config.overlap_score_weight,
             );
         }
+
+        let served_indexer_handle = if kv_router_config.serve_indexer {
+            let model_name = model_name.clone().ok_or_else(|| {
+                anyhow::anyhow!("model_name is required when serve_indexer is configured")
+            })?;
+            Some(
+                ensure_served_indexer_service(
+                    component.clone(),
+                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
+                    model_name,
+                    indexer.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
         tracing::info!("KV Routing initialized");
         Ok(Self {

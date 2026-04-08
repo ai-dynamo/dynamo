@@ -353,6 +353,21 @@ impl KvIndexerSharded {
     ) -> Self {
         Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics, None)
     }
+
+    fn shard_for_worker(&self, worker_id: WorkerId) -> usize {
+        *self.worker_assignments.entry(worker_id).or_insert_with(|| {
+            let worker_counts = self.worker_counts.lock().unwrap();
+            let selected_shard = worker_counts
+                .iter()
+                .enumerate()
+                .min_by_key(|&(_, value)| value)
+                .unwrap()
+                .0;
+            drop(worker_counts);
+            self.worker_counts.lock().unwrap()[selected_shard] += 1;
+            selected_shard
+        })
+    }
 }
 
 #[async_trait]
@@ -439,26 +454,8 @@ impl KvIndexerInterface for KvIndexerSharded {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let shard = self
-            .worker_assignments
-            .entry(event.worker_id)
-            .or_insert_with(|| {
-                // Get the shard with the smallest amount of workers.
-                let worker_counts = self.worker_counts.lock().unwrap();
-                let selected_shard = worker_counts
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|&(_, value)| value)
-                    .unwrap()
-                    .0;
-                drop(worker_counts);
-
-                // Increment the count for this shard
-                self.worker_counts.lock().unwrap()[selected_shard] += 1;
-                selected_shard
-            });
-
-        self.event_tx[*shard].send(event).await.unwrap();
+        let shard = self.shard_for_worker(event.worker_id);
+        self.event_tx[shard].send(event).await.unwrap();
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
@@ -557,12 +554,7 @@ impl KvIndexerSharded {
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
-        // Route to the appropriate shard based on worker assignment
-        let shard_idx = self
-            .worker_assignments
-            .get(&worker.worker_id)
-            .map(|shard_idx| *shard_idx)
-            .unwrap_or_default();
+        let shard_idx = self.shard_for_worker(worker.worker_id);
 
         self.routing_tx[shard_idx]
             .send(RoutingDecisionRequest {

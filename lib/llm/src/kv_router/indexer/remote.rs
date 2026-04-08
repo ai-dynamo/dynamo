@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
@@ -12,7 +12,7 @@ use dynamo_kv_router::indexer::{
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
 use dynamo_kv_router::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, RouterMode, SingleIn,
@@ -29,9 +29,11 @@ use super::Indexer;
 
 pub struct RemoteIndexer {
     query_router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
+    query_client: Client,
     record_router: Option<
         PushRouter<IndexerRecordRoutingDecisionRequest, IndexerRecordRoutingDecisionResponse>,
     >,
+    record_client: Client,
     component: Component,
     model_name: String,
     use_kv_events: bool,
@@ -47,24 +49,31 @@ impl RemoteIndexer {
             .endpoint(KV_INDEXER_QUERY_ENDPOINT)
             .client()
             .await?;
-        let query_router =
-            PushRouter::from_client_no_fault_detection(query_client, RouterMode::RoundRobin)
-                .await?;
+        let query_router = PushRouter::from_client_no_fault_detection(
+            query_client.clone(),
+            RouterMode::RoundRobin,
+        )
+        .await?;
+        let record_client = component
+            .endpoint(KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT)
+            .client()
+            .await?;
         let record_router = if use_kv_events {
             None
         } else {
-            let record_client = component
-                .endpoint(KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT)
-                .client()
-                .await?;
             Some(
-                PushRouter::from_client_no_fault_detection(record_client, RouterMode::RoundRobin)
-                    .await?,
+                PushRouter::from_client_no_fault_detection(
+                    record_client.clone(),
+                    RouterMode::RoundRobin,
+                )
+                .await?,
             )
         };
         Ok(Self {
             query_router,
+            query_client,
             record_router,
+            record_client,
             component: component.clone(),
             model_name,
             use_kv_events,
@@ -127,33 +136,8 @@ impl RemoteIndexer {
     }
 
     async fn validate_topology_if_ready(&self) -> Result<()> {
-        let endpoints = self
-            .component
-            .drt()
-            .discovery()
-            .list(DiscoveryQuery::ComponentEndpoints {
-                namespace: self.component.namespace().name(),
-                component: self.component.name().to_string(),
-            })
-            .await?;
-
-        let mut query_instances = HashSet::new();
-        let mut record_instances = HashSet::new();
-
-        for endpoint in endpoints {
-            let DiscoveryInstance::Endpoint(instance) = endpoint else {
-                continue;
-            };
-            match instance.endpoint.as_str() {
-                KV_INDEXER_QUERY_ENDPOINT => {
-                    query_instances.insert(instance.instance_id);
-                }
-                KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT => {
-                    record_instances.insert(instance.instance_id);
-                }
-                _ => {}
-            }
-        }
+        let query_instances = cached_instance_ids(&self.query_client);
+        let record_instances = cached_instance_ids(&self.record_client);
 
         if query_instances.is_empty() && record_instances.is_empty() {
             return Ok(());
@@ -189,6 +173,10 @@ impl RemoteIndexer {
     }
 }
 
+fn cached_instance_ids(client: &Client) -> HashSet<u64> {
+    client.instance_ids_avail().iter().copied().collect()
+}
+
 type ServiceKey = (u64, String, String);
 
 static SERVED_INDEXER_SERVICES: LazyLock<DashMap<ServiceKey, Arc<ServedIndexerService>>> =
@@ -218,53 +206,33 @@ impl ServedIndexerMode {
     }
 }
 
-#[derive(Clone)]
-struct ServedIndexerBinding {
-    model_name: String,
-    indexer: Indexer,
-}
-
 struct ServedIndexerService {
     mode: ServedIndexerMode,
-    binding: Arc<RwLock<Option<ServedIndexerBinding>>>,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
 
 impl ServedIndexerService {
     async fn start(component: Component, mode: ServedIndexerMode) -> Result<Arc<Self>> {
         verify_service_topology(&component, mode).await?;
 
-        let binding = Arc::new(RwLock::new(None));
-        start_query_endpoint(component.clone(), binding.clone())?;
+        let bindings = Arc::new(RwLock::new(HashMap::new()));
+        start_query_endpoint(component.clone(), bindings.clone())?;
         if mode == ServedIndexerMode::Approximate {
-            start_record_endpoint(component.clone(), binding.clone())?;
+            start_record_endpoint(component.clone(), bindings.clone())?;
         }
 
-        Ok(Arc::new(Self { mode, binding }))
+        Ok(Arc::new(Self { mode, bindings }))
     }
 }
 
 pub struct ServedIndexerHandle {
-    service_key: ServiceKey,
     service: Arc<ServedIndexerService>,
+    model_name: String,
 }
 
 impl Drop for ServedIndexerHandle {
     fn drop(&mut self) {
-        {
-            let mut binding = self.service.binding.write();
-            *binding = None;
-        }
-
-        if Arc::strong_count(&self.service) != 2 {
-            return;
-        }
-
-        let should_remove = SERVED_INDEXER_SERVICES
-            .get(&self.service_key)
-            .is_some_and(|service| Arc::ptr_eq(service.value(), &self.service));
-        if should_remove {
-            SERVED_INDEXER_SERVICES.remove(&self.service_key);
-        }
+        self.service.bindings.write().remove(&self.model_name);
     }
 }
 
@@ -274,7 +242,6 @@ pub async fn ensure_served_indexer_service(
     model_name: String,
     indexer: Indexer,
 ) -> Result<ServedIndexerHandle> {
-    let service_key = service_key(&component);
     let service = get_or_start_service(component.clone(), mode).await?;
 
     if service.mode != mode {
@@ -288,24 +255,22 @@ pub async fn ensure_served_indexer_service(
     }
 
     {
-        let mut binding = service.binding.write();
-        if binding.is_some() {
+        let mut bindings = service.bindings.write();
+        if bindings.contains_key(&model_name) {
             anyhow::bail!(
-                "served indexer is already registered under {}.{}",
+                "served indexer for model {} is already registered under {}.{}",
+                model_name,
                 component.namespace().name(),
                 component.name(),
             );
         }
 
-        *binding = Some(ServedIndexerBinding {
-            model_name: model_name.clone(),
-            indexer,
-        });
+        bindings.insert(model_name.clone(), indexer);
     }
 
     Ok(ServedIndexerHandle {
-        service_key,
         service,
+        model_name,
     })
 }
 
@@ -381,9 +346,9 @@ async fn verify_service_topology(component: &Component, mode: ServedIndexerMode)
 
 fn start_query_endpoint(
     component: Component,
-    binding: Arc<RwLock<Option<ServedIndexerBinding>>>,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 ) -> Result<()> {
-    let engine = Arc::new(ServedIndexerQueryEngine { binding });
+    let engine = Arc::new(ServedIndexerQueryEngine { bindings });
     let ingress =
         Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>>::for_engine(
             engine,
@@ -405,9 +370,9 @@ fn start_query_endpoint(
 
 fn start_record_endpoint(
     component: Component,
-    binding: Arc<RwLock<Option<ServedIndexerBinding>>>,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 ) -> Result<()> {
-    let engine = Arc::new(ServedIndexerRecordEngine { binding });
+    let engine = Arc::new(ServedIndexerRecordEngine { bindings });
     let ingress = Ingress::<
         SingleIn<IndexerRecordRoutingDecisionRequest>,
         ManyOut<IndexerRecordRoutingDecisionResponse>,
@@ -428,7 +393,7 @@ fn start_record_endpoint(
 }
 
 struct ServedIndexerQueryEngine {
-    binding: Arc<RwLock<Option<ServedIndexerBinding>>>,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
 
 #[async_trait]
@@ -440,20 +405,17 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
         request: SingleIn<IndexerQueryRequest>,
     ) -> Result<ManyOut<IndexerQueryResponse>> {
         let (request, ctx) = request.into_parts();
-        let binding = self.binding.read().clone();
+        let indexer = self.bindings.read().get(&request.model_name).cloned();
 
-        let response = match binding {
-            Some(binding) if binding.model_name == request.model_name => {
-                match binding.indexer.find_matches(request.block_hashes).await {
-                    Ok(scores) => IndexerQueryResponse::Scores(scores.into()),
-                    Err(error) => IndexerQueryResponse::Error(error.to_string()),
-                }
-            }
-            Some(binding) => IndexerQueryResponse::Error(format!(
-                "served indexer model mismatch: requested={}, served={}",
-                request.model_name, binding.model_name
+        let response = match indexer {
+            Some(indexer) => match indexer.find_matches(request.block_hashes).await {
+                Ok(scores) => IndexerQueryResponse::Scores(scores.into()),
+                Err(error) => IndexerQueryResponse::Error(error.to_string()),
+            },
+            None => IndexerQueryResponse::Error(format!(
+                "served indexer model {} is not registered",
+                request.model_name
             )),
-            None => IndexerQueryResponse::Error("served indexer is not registered".to_string()),
         };
 
         Ok(ResponseStream::new(
@@ -464,7 +426,7 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
 }
 
 struct ServedIndexerRecordEngine {
-    binding: Arc<RwLock<Option<ServedIndexerBinding>>>,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
 
 #[async_trait]
@@ -480,11 +442,10 @@ impl
         request: SingleIn<IndexerRecordRoutingDecisionRequest>,
     ) -> Result<ManyOut<IndexerRecordRoutingDecisionResponse>> {
         let (request, ctx) = request.into_parts();
-        let binding = self.binding.read().clone();
+        let indexer = self.bindings.read().get(&request.model_name).cloned();
 
-        let response = match binding {
-            Some(binding) if binding.model_name == request.model_name => match binding
-                .indexer
+        let response = match indexer {
+            Some(indexer) => match indexer
                 .record_hashed_routing_decision(
                     request.worker,
                     request.local_hashes,
@@ -495,13 +456,10 @@ impl
                 Ok(()) => IndexerRecordRoutingDecisionResponse::Recorded,
                 Err(error) => IndexerRecordRoutingDecisionResponse::Error(error.to_string()),
             },
-            Some(binding) => IndexerRecordRoutingDecisionResponse::Error(format!(
-                "served indexer model mismatch: requested={}, served={}",
-                request.model_name, binding.model_name
+            None => IndexerRecordRoutingDecisionResponse::Error(format!(
+                "served indexer model {} is not registered",
+                request.model_name
             )),
-            None => IndexerRecordRoutingDecisionResponse::Error(
-                "served indexer is not registered".to_string(),
-            ),
         };
 
         Ok(ResponseStream::new(
@@ -517,4 +475,29 @@ fn service_key(component: &Component) -> ServiceKey {
         component.namespace().name(),
         component.name().to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn query_engine_supports_multiple_model_bindings() {
+        let bindings = Arc::new(RwLock::new(HashMap::from([
+            ("model-a".to_string(), Indexer::None),
+            ("model-b".to_string(), Indexer::None),
+        ])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let request = SingleIn::new(IndexerQueryRequest {
+            model_name: "model-b".to_string(),
+            block_hashes: vec![LocalBlockHash(1)],
+        });
+
+        let mut stream = engine.generate(request).await.unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(IndexerQueryResponse::Scores(_))
+        ));
+    }
 }

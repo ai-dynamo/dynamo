@@ -351,19 +351,17 @@ def _test_remote_indexer_decisions(
             f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
         )
         query_client = await query_endpoint.client()
-        record_client = None
-        if expected_record_instances > 0:
-            record_endpoint = runtime.endpoint(
-                f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_record_routing_decision"
-            )
-            record_client = await record_endpoint.client()
+        record_endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_record_routing_decision"
+        )
+        record_client = await record_endpoint.client()
 
         for _ in range(120):
             query_ids = set(query_client.instance_ids())
-            record_ids = set(record_client.instance_ids()) if record_client else set()
+            record_ids = set(record_client.instance_ids())
 
             if use_kv_events:
-                if len(query_ids) >= expected_query_instances and not record_ids:
+                if len(query_ids) >= expected_query_instances and len(record_ids) == 0:
                     return
             elif (
                 len(query_ids) == expected_query_instances
