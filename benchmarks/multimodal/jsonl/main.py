@@ -26,17 +26,19 @@ from generate_images import (
 )
 from generate_input_text import generate_filler
 
-SEED = int(time.time() * 1000) % (2**32)
+_DEFAULT_SEED = int(time.time() * 1000) % (2**32)
 
 
 def main() -> None:
     args = parse_args(__doc__)
+    global _DEFAULT_SEED
+    seed: int = args.seed if args.seed is not None else _DEFAULT_SEED
     num_requests: int = args.num_requests
     images_per_request: int = args.images_per_request
     image_pool: int = args.images_pool or (num_requests * images_per_request)
 
-    np_rng = np.random.default_rng(SEED)
-    py_rng = random.Random(SEED)
+    np_rng = np.random.default_rng(seed)
+    py_rng = random.Random(seed)
 
     if args.image_mode == "http":
         pool = generate_image_pool_http(py_rng, image_pool, args.coco_annotations)

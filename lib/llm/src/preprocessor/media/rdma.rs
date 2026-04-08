@@ -4,6 +4,7 @@
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use dynamo_memory::SystemStorage;
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView};
 use flate2::{Compression, write::ZlibEncoder};
 use ndarray::{ArrayBase, Dimension, OwnedRepr};
@@ -54,11 +55,17 @@ pub struct RdmaMediaDataDescriptor {
 impl DecodedMediaData {
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
-        let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
-            .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
+        let registered = {
+            let _nvtx = dynamo_nvtx_range!("nixl.register");
+            nixl::register_with_nixl(source_storage, nixl_agent, None)
+                .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?
+        };
 
         let nixl_descriptor = registered.descriptor();
-        let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
+        let nixl_metadata = {
+            let _nvtx = dynamo_nvtx_range!("nixl.get_metadata");
+            get_nixl_metadata(nixl_agent, registered.storage())?
+        };
 
         Ok(RdmaMediaDataDescriptor {
             nixl_metadata,

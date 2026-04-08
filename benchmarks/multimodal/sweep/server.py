@@ -22,6 +22,7 @@ class ServerManager:
         self.port = port
         self.timeout = timeout
         self._process: Optional[subprocess.Popen] = None
+        self._log_fh: Optional[object] = None
 
     @property
     def is_running(self) -> bool:
@@ -33,6 +34,7 @@ class ServerManager:
         model: str,
         extra_args: Optional[List[str]] = None,
         env_overrides: Optional[dict] = None,
+        log_file: Optional[str] = None,
     ) -> None:
         """Launch the workflow script and block until the model is served."""
         if self.is_running:
@@ -51,11 +53,21 @@ class ServerManager:
         if env_overrides:
             env.update(env_overrides)
 
+        stdout_target = None
+        stderr_target = None
+        if log_file:
+            self._log_fh = open(log_file, "w")  # noqa: SIM115
+            stdout_target = self._log_fh
+            stderr_target = subprocess.STDOUT
+            print(f"Server output -> {log_file}", flush=True)
+
         print(f"Launching: {' '.join(cmd)}", flush=True)
         self._process = subprocess.Popen(
             cmd,
             start_new_session=True,
             env=env,
+            stdout=stdout_target,
+            stderr=stderr_target,
         )
 
         self.wait_for_ready(model)
@@ -121,4 +133,7 @@ class ServerManager:
 
         print(f"Server stopped (PID {pid}).", flush=True)
         self._process = None
+        if self._log_fh is not None:
+            self._log_fh.close()
+            self._log_fh = None
         time.sleep(5)
