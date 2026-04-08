@@ -17,6 +17,13 @@ from dynamo.global_router.pool_selection import (
     load_config,
 )
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.parallel,
+    pytest.mark.unit,
+]
+
 # --- _apply_priority_overrides tests ---
 
 
