@@ -1779,6 +1779,145 @@ def _test_router_decisions_disagg(
         )
 
 
+def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    expected_prefill_dp_ranks: int,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Verify disaggregated round-robin requests store prefill KV blocks across DP ranks."""
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        router_mode="round-robin",
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        logger.info(
+            "Starting round-robin frontend on port %s for disagg prefill dp-rank test",
+            frontend_port,
+        )
+
+        async def test_sync():
+            frontend_url = f"http://localhost:{frontend_port}"
+            chat_url = f"{frontend_url}/v1/chat/completions"
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+
+            with min_initial_workers_env(prefill_workers.num_workers):
+                observer_router = KvRouter(
+                    endpoint=prefill_endpoint,
+                    block_size=block_size,
+                    kv_router_config=KvRouterConfig(
+                        router_snapshot_threshold=20,
+                        use_kv_events=True,
+                        durable_kv_events=False,
+                        router_event_threads=4,
+                        router_track_prefill_tokens=True,
+                        router_prefill_load_model="none",
+                    ),
+                )
+
+            client = await prefill_endpoint.client()
+            worker_ids: list[int] = []
+            deadline = asyncio.get_running_loop().time() + 60
+            while asyncio.get_running_loop().time() < deadline:
+                worker_ids = sorted(set(client.instance_ids()))
+                if len(worker_ids) >= prefill_workers.num_workers:
+                    break
+                await asyncio.sleep(1.0)
+
+            assert len(worker_ids) == prefill_workers.num_workers, (
+                f"Timed out waiting for prefill workers. "
+                f"Found {worker_ids}, expected {prefill_workers.num_workers}"
+            )
+            prefill_worker_id = worker_ids[0]
+
+            def stored_blocks_by_dp_rank(events_json: str) -> dict[int, int]:
+                counts = {dp_rank: 0 for dp_rank in range(expected_prefill_dp_ranks)}
+                for event in json.loads(events_json):
+                    if event.get("worker_id") != prefill_worker_id:
+                        continue
+                    stored = event.get("event", {}).get("data", {}).get("stored")
+                    if stored is None:
+                        continue
+                    dp_rank = event.get("event", {}).get("dp_rank", 0)
+                    counts[dp_rank] = counts.get(dp_rank, 0) + len(
+                        stored.get("blocks", [])
+                    )
+                return counts
+
+            await asyncio.sleep(2.0)
+            baseline_counts = stored_blocks_by_dp_rank(
+                await observer_router.dump_events()
+            )
+
+            async with aiohttp.ClientSession() as session:
+                for request_idx in range(expected_prefill_dp_ranks * 2):
+                    prompt_tokens = " ".join(
+                        f"prefill-{request_idx}-token-{token_idx}"
+                        for token_idx in range(block_size * 3)
+                    )
+                    payload = {
+                        **test_payload,
+                        "stream": False,
+                        "max_tokens": 1,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": prompt_tokens,
+                            }
+                        ],
+                    }
+                    async with session.post(chat_url, json=payload) as response:
+                        assert response.status == 200, (
+                            f"Request {request_idx + 1} failed with status "
+                            f"{response.status}: {await response.text()}"
+                        )
+                        await response.text()
+                    await asyncio.sleep(0.5)
+
+            await asyncio.sleep(2.0)
+            final_counts = stored_blocks_by_dp_rank(await observer_router.dump_events())
+            return prefill_worker_id, baseline_counts, final_counts
+
+        prefill_worker_id, baseline_counts, final_counts = asyncio.run(test_sync())
+
+        delta_counts = {
+            dp_rank: final_counts.get(dp_rank, 0) - baseline_counts.get(dp_rank, 0)
+            for dp_rank in range(expected_prefill_dp_ranks)
+        }
+        active_dp_ranks = sorted(
+            dp_rank for dp_rank, block_count in delta_counts.items() if block_count > 0
+        )
+
+        assert active_dp_ranks == list(range(expected_prefill_dp_ranks)), (
+            f"Expected round-robin prefill requests for worker {prefill_worker_id} "
+            f"to store KV blocks on dp_ranks {list(range(expected_prefill_dp_ranks))}, "
+            f"but saw deltas {delta_counts}"
+        )
+
+
 def _test_router_decisions(
     engine_workers,
     endpoint,
