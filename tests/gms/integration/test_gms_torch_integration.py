@@ -21,7 +21,6 @@ torch = pytest.importorskip("torch", reason="torch is required")
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.vllm,
     pytest.mark.gpu_1,
 ]
 
