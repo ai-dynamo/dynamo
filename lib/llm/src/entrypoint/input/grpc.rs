@@ -33,7 +33,11 @@ pub async fn run(
     }
 
     let grpc_service = match engine_config {
-        EngineConfig::Dynamic { ref model, .. } => {
+        EngineConfig::Dynamic {
+            ref model,
+            ref prefill_load_estimator,
+            ..
+        } => {
             let grpc_service = grpc_service_builder.build()?;
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
@@ -48,6 +52,7 @@ pub async fn run(
                 router_config.clone(),
                 migration_limit,
                 namespace_filter,
+                prefill_load_estimator.clone(),
             )
             .await?;
             grpc_service
@@ -111,6 +116,7 @@ async fn run_watcher(
     router_config: RouterConfig,
     migration_limit: u32,
     namespace_filter: NamespaceFilter,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
@@ -120,6 +126,7 @@ async fn run_watcher(
         router_config,
         migration_limit,
         None,
+        prefill_load_estimator,
         metrics,
     );
     tracing::debug!("Waiting for remote model");

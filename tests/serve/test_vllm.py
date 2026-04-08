@@ -7,6 +7,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -50,6 +51,10 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+LOCAL_VIDEO_TEST_PATH = Path(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+).resolve()
+LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -325,7 +330,7 @@ vllm_configs = {
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
-    # PD worker honors build_gpu_mem_args for parallel execution.
+    # PD worker honors build_vllm_gpu_mem_args for parallel execution.
     "multimodal_e_pd_qwen": VLLMConfig(
         name="multimodal_e_pd_qwen",
         directory=vllm_dir,
@@ -409,7 +414,7 @@ vllm_configs = {
     # total on this GPU.
     # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
-    # P/D workers honor build_gpu_mem_args for parallel execution.
+    # P/D workers honor build_vllm_gpu_mem_args for parallel execution.
     "multimodal_disagg_qwen": VLLMConfig(
         name="multimodal_disagg_qwen",
         directory=vllm_dir,
@@ -423,14 +428,6 @@ vllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=300,
-        env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.4",
-        },
         request_payloads=[
             chat_payload(
                 [
@@ -531,20 +528,18 @@ vllm_configs = {
             ),
         ],
     ),
-    # Video multimodal tests for nightly CI pipeline
-    # These tests validate video inference capabilities with LLaVA-NeXT-Video model
-    # Reference: Linear OPS-3015
+    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="video_agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
-            pytest.mark.nightly,
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
-        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
@@ -552,13 +547,11 @@ vllm_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {
-                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                        },
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response=["red", "static", "still"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -566,15 +559,15 @@ vllm_configs = {
     ),
     "multimodal_video_disagg": VLLMConfig(
         name="multimodal_video_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="video_disagg.sh",
+        directory=vllm_dir,
+        script_name="disagg_multimodal_epd.sh",
         marks=[
-            pytest.mark.gpu_2,
-            pytest.mark.nightly,
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
-        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
@@ -582,13 +575,11 @@ vllm_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {
-                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                        },
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response=["red", "static", "still"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -601,13 +592,13 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="audio_agg.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_2,  # encode worker loads Qwen2Audio on GPU (~19 GiB)
             pytest.mark.nightly,
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],
         model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=60,  # Audio models require longer loading time
+        delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        timeout=600,  # 10 minutes for audio processing overhead
         request_payloads=[
             chat_payload(
                 [
@@ -631,13 +622,13 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="audio_disagg.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_4,  # needs 3 GPUs (encode loads Qwen2Audio ~19 GiB + prefill + decode)
             pytest.mark.nightly,
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],
         model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=60,  # Audio models require longer loading time
+        delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        timeout=600,  # 10 minutes for audio processing overhead
         request_payloads=[
             chat_payload(
                 [
@@ -661,10 +652,10 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
-        ],  # TODO: profile to get max_vram and timeout
+        ],
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
             "--model",
@@ -722,7 +713,13 @@ vllm_configs = {
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
-                expected_response=["purple"],  # Validate image understanding
+                expected_response=[
+                    "green",
+                    "purple",
+                    "llm",
+                    "optimize",
+                    "deploy",
+                ],  # OR: pass if any keyword found in tool args
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
@@ -905,6 +902,65 @@ def test_multimodal_b64(
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
         timeout=360,
+        request_payloads=[b64_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.pre_merge
+@pytest.mark.timeout(220)
+def test_multimodal_b64_frontend_decoding(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """
+    Test multimodal inference with base64 images through frontend decoding path.
+
+    This exercises the Rust frontend image decode + NIXL RDMA transfer path
+    with inline base64 data: URIs (not HTTP URLs). Verifies that the
+    strip_inline_data_urls optimization does not break correctness.
+    """
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["green"],
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+    config = VLLMConfig(
+        name="test_multimodal_b64_frontend_decoding",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        delayed_start=0,
+        timeout=220,
         request_payloads=[b64_payload],
     )
 

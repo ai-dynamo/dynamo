@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is controlled via build_gpu_mem_args (see gpu_utils.sh).
+# Per-worker VRAM is controlled via build_sglang_gpu_mem_args (see gpu_utils.sh).
 # Override individual knobs (CONTEXT_LENGTH, MAX_RUNNING_REQUESTS) via env vars.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --context-length 4096, RTX 6000 Ada 48 GiB):
@@ -25,7 +25,7 @@ MODEL="Qwen/Qwen3-0.6B"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args sglang --workers-per-gpu 2)
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
@@ -39,6 +39,9 @@ print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend --router-mode kv &
 
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # run prefill worker with metrics on port 8081
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \

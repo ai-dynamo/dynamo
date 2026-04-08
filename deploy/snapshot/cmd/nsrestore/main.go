@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/executor"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 )
 
 func main() {
@@ -31,14 +31,10 @@ func main() {
 		CgroupRoot:     *cgroupRoot,
 	}
 
-	restoredPID, err := executor.RestoreInNamespace(context.Background(), opts, log)
+	result, err := executor.RestoreInNamespace(context.Background(), opts, log)
 	if err != nil {
 		fatal(log, err, "restore failed")
 	}
-
-	result := struct {
-		RestoredPID int `json:"restoredPID"`
-	}{RestoredPID: restoredPID}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fatal(log, err, "Failed to write restore result")
 	}

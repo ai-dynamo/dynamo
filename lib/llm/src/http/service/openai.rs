@@ -194,18 +194,12 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        // First check for PipelineError::ServiceOverloaded
-        if let Some(pipeline_err) =
-            err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
-            && matches!(
-                pipeline_err,
-                dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
-            )
-        {
+        // Check for ResourceExhausted anywhere in the error chain → HTTP 503
+        if super::metrics::request_was_rejected(err.as_ref()) {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: pipeline_err.to_string(),
+                    message: err.to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
@@ -291,30 +285,39 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
     }
 }
 
-/// Validate the `x-dynamo-request-id` header and return the request ID.
+/// Return the request ID for the current request.
 ///
-/// Returns `Err(message)` if the header is present but invalid (not UTF-8 or not a UUID).
-/// The caller is responsible for converting the error message into the appropriate HTTP
-/// error format (OpenAI vs Anthropic).
+/// The canonical request ID is set by `make_inference_request_span()` and stored
+/// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
+/// retrieves it, falling back to a validated `x-dynamo-request-id` header value
+/// (deprecated, DEP #7812) or a new UUID.
 ///
-/// The request ID comes from the trace context — `make_inference_request_span()` guarantees it by
-/// generating a UUID when the client doesn't provide one.
-pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> Result<String, String> {
-    // Validate and extract x-dynamo-request-id header if present.
-    // Returns error for non-UTF-8 or non-UUID values.
+/// **Deprecation (DEP #7812):** The `x-dynamo-request-id` header is deprecated.
+/// Clients should rely on server-generated request IDs instead of supplying their own.
+pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
+    // Validate x-dynamo-request-id header if present, warn on invalid values.
+    // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
+    // server-generated request IDs instead of supplying their own.
     let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+        tracing::warn!(
+            "{} header is deprecated (DEP #7812); server-generated request IDs should be used instead",
+            DYNAMO_REQUEST_ID_HEADER
+        );
         match raw.to_str() {
             Err(_) => {
-                return Err(format!(
-                    "{}{} header must be a valid UTF-8 string",
-                    VALIDATION_PREFIX, DYNAMO_REQUEST_ID_HEADER
-                ));
+                tracing::warn!(
+                    "{} header must be a valid UTF-8 string",
+                    DYNAMO_REQUEST_ID_HEADER
+                );
+                None
             }
             Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
-                return Err(format!(
-                    "{}{} header must be a valid UUID, got: {}",
-                    VALIDATION_PREFIX, DYNAMO_REQUEST_ID_HEADER, s
-                ));
+                tracing::warn!(
+                    "{} header must be a valid UUID, got: {}",
+                    DYNAMO_REQUEST_ID_HEADER,
+                    s
+                );
+                None
             }
             Ok(s) => Some(s.to_string()),
         }
@@ -324,13 +327,13 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> Result<String, St
 
     // Prefer trace context (set by make_inference_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
-        && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
+        && let Some(request_id) = trace_context.request_id
     {
-        return Ok(x_dynamo_request_id);
+        return request_id;
     }
 
-    // Fallback: use validated header value, or generate new UUID
-    Ok(validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
+    // Fallback: use validated header for backwards compat, or generate new UUID
+    validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
 /// OpenAI Completions Request Handler
@@ -352,12 +355,7 @@ async fn handler_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -439,10 +437,12 @@ async fn completions_single(
     let model = request.inner.model.clone();
 
     // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Completions,
+        streaming,
+        &request_id,
+    );
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
@@ -464,6 +464,11 @@ async fn completions_single(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+        }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -573,10 +578,12 @@ async fn completions_batch(
     let model = request.inner.model.clone();
 
     // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Completions,
+        streaming,
+        &request_id,
+    );
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
@@ -613,6 +620,11 @@ async fn completions_batch(
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
+            if super::metrics::request_was_rejected(e.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+            }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -737,12 +749,7 @@ async fn embeddings(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -754,10 +761,12 @@ async fn embeddings(
     let model = &request.inner.model;
 
     // Create inflight_guard early to ensure all errors are counted
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Embeddings, streaming);
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Embeddings,
+        streaming,
+        &request_id,
+    );
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
@@ -770,9 +779,15 @@ async fn embeddings(
     })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let model_name = model.to_string();
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+        }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -820,12 +835,7 @@ async fn handler_chat_completions(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone(),
@@ -1130,10 +1140,12 @@ async fn chat_completions(
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::ChatCompletions,
+        streaming,
+        &request_id,
+    );
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -1182,6 +1194,11 @@ async fn chat_completions(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+        }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1434,12 +1451,7 @@ async fn handler_responses(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
         model: request.inner.model.clone().unwrap_or_default(),
@@ -1510,10 +1522,12 @@ async fn responses(
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Responses, streaming);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Responses,
+        streaming,
+        request.id(),
+    );
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -1591,6 +1605,11 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+        }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1931,12 +1950,7 @@ async fn images(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -1965,10 +1979,12 @@ async fn images(
         .map_err(|_| ErrorMessage::model_not_found())?;
 
     // this will increment the inflight gauge for the model
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Images, streaming);
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Images,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -1976,10 +1992,16 @@ async fn images(
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate images"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Images);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first response
     let mut http_queue_guard = Some(http_queue_guard);
@@ -1998,27 +2020,53 @@ async fn images(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold images stream")
+            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
     Ok(Json(response).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Images endpoint
-/// If not path is provided, the default path is `/v1/images/generations`
+/// Handler for `/v1/images/edits` (I2I). Requires `input_reference`.
+async fn images_edits(
+    state: State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    if request.input_reference.is_none() {
+        let code = StatusCode::BAD_REQUEST;
+        return Err((
+            code,
+            Json(ErrorMessage {
+                message: "input_reference is required for /v1/images/edits".to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+            }),
+        ));
+    }
+    images(state, headers, Json(request)).await
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Images endpoints.
+/// `/v1/images/generations` accepts optional `input_reference` (T2I or TI2I).
+/// `/v1/images/edits` requires `input_reference` (I2I).
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/images/generations".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let generations_path = path.unwrap_or("/v1/images/generations".to_string());
+    let edits_path = generations_path.replace("/generations", "/edits");
+    let doc = RouteDoc::new(axum::http::Method::POST, &generations_path);
+    let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
-        .route(&path, post(images))
+        .route(&generations_path, post(images))
+        .route(&edits_path, post(images_edits))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc], router)
+    (vec![doc, edits_doc], router)
 }
 
 async fn videos(
@@ -2029,12 +2077,7 @@ async fn videos(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -2054,18 +2097,26 @@ async fn videos(
         .map_err(|_| ErrorMessage::model_not_found())?;
 
     // this will increment the inflight gauge for the model
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Videos, streaming);
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Videos,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate videos"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -2084,7 +2135,9 @@ async fn videos(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold videos stream")
+            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
@@ -2105,12 +2158,7 @@ async fn video_stream(
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
 
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let model = request.model.clone();
 
@@ -2121,16 +2169,23 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let mut inflight = state
-        .metrics_clone()
-        .create_inflight_guard(&model, Endpoint::Videos, true);
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to start video stream"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Capture the context to cancel the stream if the client disconnects.
     let ctx = stream.context();
@@ -2213,6 +2268,7 @@ async fn video_stream(
                 }
                 _ = ctx.stopped() => {
                     tracing::trace!("Context stopped; breaking MJPEG stream");
+                    inflight.mark_error(ErrorType::Cancelled);
                     break;
                 }
             }
@@ -2228,6 +2284,8 @@ async fn video_stream(
         .body(Body::from_stream(monitored_stream))
         .map(|r| r.into_response())
         .map_err(|e| {
+            // inflight is already owned by the monitored_stream which handles
+            // mark_ok (stream end) and mark_error (cancellation).
             ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
         })
 }
@@ -2264,12 +2322,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let response_format = request.response_format.clone();
-    let request_id = get_or_create_request_id(&headers).map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
+    let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
@@ -2292,10 +2345,12 @@ async fn audio_speech(
         .get_audios_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Audios, streaming);
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::Audios,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -2449,18 +2504,24 @@ mod tests {
     }
 
     #[test]
-    fn test_service_overloaded_error_response_from_anyhow() {
+    fn test_resource_exhausted_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
-        let err: anyhow::Error = PipelineError::ServiceOverloaded(
+        let cause = PipelineError::ServiceOverloaded(
             "All workers are busy, please retry later".to_string(),
-        )
-        .into();
+        );
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("All workers are busy, please retry later")
+            .cause(cause)
+            .build()
+            .into();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            "Service temporarily unavailable: All workers are busy, please retry later"
+            "ResourceExhausted: All workers are busy, please retry later"
         );
     }
 
