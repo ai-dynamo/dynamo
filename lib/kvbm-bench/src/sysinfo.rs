@@ -27,7 +27,11 @@ pub fn collect() -> SystemInfo {
         .unwrap_or_default()
         .lines()
         .find(|l| l.starts_with("PRETTY_NAME="))
-        .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+        .map(|l| {
+            l.trim_start_matches("PRETTY_NAME=")
+                .trim_matches('"')
+                .to_string()
+        })
         .unwrap_or_else(|| "Unknown".to_string());
 
     let kernel = std::fs::read_to_string("/proc/version")
@@ -46,7 +50,10 @@ pub fn collect() -> SystemInfo {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let cpu_threads = cpuinfo.lines().filter(|l| l.starts_with("processor")).count();
+    let cpu_threads = cpuinfo
+        .lines()
+        .filter(|l| l.starts_with("processor"))
+        .count();
 
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let memory_total_kb: u64 = meminfo
@@ -57,7 +64,14 @@ pub fn collect() -> SystemInfo {
         .unwrap_or(0);
     let memory_total_gb = memory_total_kb as f64 / (1024.0 * 1024.0);
 
-    SystemInfo { hostname, os, kernel, cpu_model, cpu_threads, memory_total_gb }
+    SystemInfo {
+        hostname,
+        os,
+        kernel,
+        cpu_model,
+        cpu_threads,
+        memory_total_gb,
+    }
 }
 
 impl std::fmt::Display for SystemInfo {
@@ -89,12 +103,23 @@ pub fn rss_snapshot() -> RssSnapshot {
     let mut peak_rss_kb = 0u64;
     for line in status.lines() {
         if line.starts_with("VmRSS:") {
-            rss_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            rss_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
         } else if line.starts_with("VmPeak:") {
-            peak_rss_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            peak_rss_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
         }
     }
-    RssSnapshot { rss_kb, peak_rss_kb }
+    RssSnapshot {
+        rss_kb,
+        peak_rss_kb,
+    }
 }
 
 /// CPU time snapshot from /proc/self/stat.

@@ -14,10 +14,13 @@ pub mod key;
 pub mod lease;
 pub mod metadata;
 pub mod metrics;
+pub mod persistence;
 pub mod registry;
 pub mod storage;
 pub mod transport;
+pub mod uds_hub_transport;
 pub mod value;
+pub mod velo_hub_transport;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +49,8 @@ pub use value::{RegistryValue, StorageBackend, StorageLocation};
 // Client
 pub use registry::{OffloadResult, Registry, RegistryClient};
 pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
+pub use uds_hub_transport::{UdsClientTransport, UdsHubTransport};
+pub use velo_hub_transport::{VeloClientTransport, VeloHubTransport};
 
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
@@ -55,6 +60,12 @@ pub use hub_transport::{
 
 // Builder
 pub use builder::{ClientBuilder, HubBuilder, client, hub};
+
+// Persistence
+pub use persistence::{
+    AccessStats, HybridPersistence, LocalDiskBackend, PersistedEntry, PersistenceBackend,
+    PersistenceConfig, RegistrySnapshot, SnapshotPersistence, WalEntry, WalPersistence,
+};
 
 // Event Bus
 pub use events::{

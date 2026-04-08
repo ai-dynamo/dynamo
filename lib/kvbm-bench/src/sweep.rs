@@ -150,8 +150,20 @@ configs:
 "#;
         let runner = SweepRunner::<TestParams>::from_yaml_str(yaml).unwrap();
         assert_eq!(runner.len(), 2);
-        assert_eq!(runner.points[0], TestParams { threads: 4, clients: 8 });
-        assert_eq!(runner.points[1], TestParams { threads: 2, clients: 16 });
+        assert_eq!(
+            runner.points[0],
+            TestParams {
+                threads: 4,
+                clients: 8
+            }
+        );
+        assert_eq!(
+            runner.points[1],
+            TestParams {
+                threads: 2,
+                clients: 16
+            }
+        );
     }
 
     #[test]
@@ -173,6 +185,12 @@ clients: 8
 "#;
         let runner = SweepRunner::<TestParams>::from_yaml_str(yaml).unwrap();
         assert_eq!(runner.len(), 1);
-        assert_eq!(runner.points[0], TestParams { threads: 4, clients: 8 });
+        assert_eq!(
+            runner.points[0],
+            TestParams {
+                threads: 4,
+                clients: 8
+            }
+        );
     }
 }
