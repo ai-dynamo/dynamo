@@ -15,6 +15,7 @@
 
 import json
 import logging
+import math
 import os
 from enum import Enum
 from pathlib import Path
@@ -127,8 +128,6 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
-        import math
-
         sqrt = math.isqrt(self.fpm_sample_bucket_size)
         if sqrt * sqrt != self.fpm_sample_bucket_size:
             raise ValueError(

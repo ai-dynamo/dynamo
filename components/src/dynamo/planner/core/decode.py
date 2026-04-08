@@ -68,7 +68,7 @@ class DecodePlanner(BasePlanner):
 
     def _compute_replica_requirements(
         self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
+    ) -> Optional[int]:
         demand_rps = next_num_req / self.config.throughput_adjustment_interval
         engine_rps, actual_itl_ms = self.itl_regression.find_best_engine_decode_rps(
             itl=self.config.itl,

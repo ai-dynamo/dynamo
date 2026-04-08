@@ -77,7 +77,7 @@ class PrefillPlanner(BasePlanner):
 
     def _compute_replica_requirements(
         self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
+    ) -> Optional[int]:
         demand_rps = next_num_req / self.config.throughput_adjustment_interval
         engine_rps, actual_ttft_ms = self.ttft_regression.find_best_engine_prefill_rps(
             ttft_sla=self.config.ttft, isl=next_isl

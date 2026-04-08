@@ -1,8 +1,4 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+
 
 # SLA Planner Load Test
 
@@ -19,6 +15,7 @@ You have two options to obtain the pre-deployment profiling data:
 ### Option A: Use Test Configuration (Quickstart)
 
 Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for the following models x hardware configurations:
+
 - `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 with max context length 16384, TP1 Prefill, and TP1 Decode. At ISL/OSL 3000/150, it achieves 40k tokens/s/gpu prefill with 80ms TTFT and 10k tokens/s/gpu decode with 10ms ITL. See `../tests/data/profiling_results/H200_TP1P_TP1D/`.
 
 ### Option B: Use Your Own Profiling Results
@@ -62,6 +59,7 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 ### Quick Start for Unit Tests and End-to-End Tests
 
 #### Run Unit Tests Only
+
 Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
@@ -105,6 +103,7 @@ components/src/dynamo/planner/tests/manual/scaling/run_scaling_test.sh --namespa
 ### Instructions for End-to-End Perf Tests
 
 In this test, we compare performance (goodput and goodput/GPU) on deployments on the following four deployments using the aforementioned 8b FP8 model on H200 and the dataset used in dryrun:
+
 - Config 1 with inefficient P/D ratio: 3xTP1P_1xTP1D_4GPU
  `./perf_test_configs/disagg_8b_3p1d.yaml`
 - Config 2 with best static deployment: 2xTP1P_2xTP1D_4GPU
@@ -144,12 +143,13 @@ aiperf profile \
 
 #### E2E Perf Test Results
 
-![Results](./figures/sla_planner_perf.png)
+Results
 
 The table below shows the performance improvement of SLA planner across different deployment configurations:
 
-| Baseline | Goodput Improvement | Goodput/GPU Improvement |
-|---------------|-----------------|-------------------------|
-| Inefficient P/D ratio | 725% | 600% |
-| Inefficient parallelization mapping | 311% | 249% |
-| Best static deployment | 52% | 29% |
+
+| Baseline                            | Goodput Improvement | Goodput/GPU Improvement |
+| ----------------------------------- | ------------------- | ----------------------- |
+| Inefficient P/D ratio               | 725%                | 600%                    |
+| Inefficient parallelization mapping | 311%                | 249%                    |
+| Best static deployment              | 52%                 | 29%                     |

@@ -143,7 +143,12 @@ class AggRegressionModel(_BaseRegressionModel):
             predicted TTFT/ITL.  If SLAs are violated, a warning
             is logged but the rate is still returned.
         """
-        if not self._ensure_fitted() or osl <= 0:
+        if (
+            not self._ensure_fitted()
+            or isl <= 0
+            or osl <= 0
+            or max_num_batched_tokens <= 0
+        ):
             return (0.0, 0.0, 0.0)
 
         avg_ctx = isl + osl / 2.0

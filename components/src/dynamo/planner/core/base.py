@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional, Union
 
 from prometheus_client import start_http_server
 
-from dynamo.common.forward_pass_metrics import decode as decode_fpm
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -81,7 +80,7 @@ class BasePlanner:
                     config.model_name,
                 )
             elif config.environment == "kubernetes":
-                self.connector = KubernetesConnector(self.namespace, self.model_name)
+                self.connector = KubernetesConnector(self.namespace, config.model_name)
             elif config.environment == "virtual":
                 assert runtime is not None
                 self.connector = VirtualConnector(
@@ -311,6 +310,8 @@ class BasePlanner:
 
     def _get_fpm_stats(self) -> "dict[tuple[str, int], ForwardPassMetrics]":
         """Get decoded FPM stats from the subscriber, keyed by (worker_id, dp_rank)."""
+        from dynamo.common.forward_pass_metrics import decode as decode_fpm
+
         if self.fpm_subscriber is None:
             return {}
         raw_stats = self.fpm_subscriber.get_recent_stats()
@@ -553,7 +554,7 @@ class BasePlanner:
 
     def _compute_replica_requirements(
         self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
+    ) -> Optional[int]:
         raise NotImplementedError
 
     def _component_name(self) -> str:
