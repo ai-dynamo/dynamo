@@ -621,36 +621,6 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_audio_epd_disagg": VLLMConfig(
-        name="multimodal_audio_epd_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="audio_disagg.sh",
-        marks=[
-            pytest.mark.gpu_4,  # needs 3 GPUs (encode loads Qwen2Audio ~19 GiB + prefill + decode)
-            pytest.mark.nightly,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is recited in the audio?"},
-                    {
-                        "type": "audio_url",
-                        "audio_url": {
-                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["Hester", "Pynne"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,

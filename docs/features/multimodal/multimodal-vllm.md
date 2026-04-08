@@ -16,7 +16,7 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 | ------------------------ | ---------- | ------------- |
 | **Image**                | Yes        | Yes           |
 | **Video**                | Yes        | Yes           |
-| **Audio**                | Yes        | Experimental  |
+| **Audio**                | Yes        | No            |
 
 ### Supported URL Formats
 
@@ -194,24 +194,6 @@ curl http://localhost:8000/v1/chat/completions \
       "stream": false
     }' | jq
 ```
-
-### Disaggregated Serving (Experimental)
-
-For workloads that benefit from a dedicated audio encode worker, the EPD (Encode-Prefill-Decode) pattern separates audio encoding from inference. Audio embeddings are only required during the prefill stage, so the AudioEncodeWorker connects directly to the prefill worker.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --audio_url--> audio_encode_worker
-  audio_encode_worker --> processor
-  audio_encode_worker --embeddings--> prefill_worker
-  prefill_worker --> audio_encode_worker
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-See the [AudioEncodeWorker example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/audio_encode_worker.py) for the EPD implementation.
 
 ## Embedding Cache
 
