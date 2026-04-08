@@ -14,7 +14,6 @@ on:
         description: 'Runner to execute tests on (amd64 only)'
         required: true
         type: string
-        default: 'self-hosted'
       target_tag_plain:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true

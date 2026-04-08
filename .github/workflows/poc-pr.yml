@@ -22,7 +22,6 @@ jobs:
   # ============================================================================
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}

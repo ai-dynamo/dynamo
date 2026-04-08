@@ -77,6 +77,11 @@ on:
         required: false
         type: boolean
         default: false
+      extra_build_args:
+        description: 'Extra build args to pass to docker build (newline-separated)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -294,11 +299,11 @@ jobs:
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
         run: |
-          echo "### 🐳 ${{ inputs.framework }}-${{ steps.calculate-target-tag.outputs.plain_tag }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 ${{ steps.calculate-target-tag.outputs.target_tag_plain }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           EXTRA_TAGS="${{ steps.extra-tags.outputs.tags }}"
           if [ -n "$EXTRA_TAGS" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
