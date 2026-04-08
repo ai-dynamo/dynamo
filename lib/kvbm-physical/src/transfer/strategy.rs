@@ -90,12 +90,12 @@ pub(crate) fn select_strategy(
     }
 
     if is_src_local && is_dst_local {
-        return Ok(select_direct_strategy(
+        return select_direct_strategy(
             src.location(),
             dst.location(),
             false,
             ctx.capabilities(),
-        )?);
+        );
     }
 
     select_remote_strategy_v2(
