@@ -1109,9 +1109,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.3"
+version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6468cb7fa330840f3ebcd8df51edc0e7bf5c18df524792ce6004c6821851cdf3"
+checksum = "f071cd6a7b5d51607df76aa2d426aaabc7a74bc6bdb885b8afa63a880572ad9b"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -1259,19 +1259,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06d2e3287df1c007e74221c49ca10a95d557349e54b3a75dc2fb14712c751f04"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -1535,7 +1522,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-runtime",
@@ -1578,10 +1565,11 @@ dependencies = [
  "bytes",
  "chrono",
  "cudarc",
- "dashmap 5.5.3",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1648,6 +1636,7 @@ dependencies = [
  "anyhow",
  "cudarc",
  "libc",
+ "libloading 0.8.9",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",
@@ -1661,7 +1650,7 @@ name = "dynamo-mocker"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
@@ -1742,7 +1731,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-config",
@@ -1799,7 +1788,7 @@ version = "1.0.0"
 dependencies = [
  "bs58",
  "bytemuck",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "serde",
  "thiserror 2.0.18",
