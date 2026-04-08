@@ -65,26 +65,11 @@ impl DeviceContextOps for CudaContext {
     }
 
     fn free_device(&self, ptr: u64) -> Result<()> {
-        // NOTE: CUDA memory management limitation
-        // cudarc manages device memory via RAII through typed buffer handles (CudaSlice).
-        // The allocate_device() method returns a raw pointer (u64) after calling malloc_sync,
-        // but we don't retain the buffer handle that cudarc would need for deallocation.
-        //
-        // This is a known limitation of the current abstraction layer design:
-        // - Level-Zero and HPU: Store buffers in global maps, free via context API calls
-        // - CUDA: Would need to either store buffer handles globally (like XPU/HPU) or
-        //         change the trait to return an opaque handle type instead of u64
-        //
-        // Current workaround: Memory is leaked from CUDA's perspective until process exit.
-        // This is acceptable for short-lived benchmark/test processes but would cause OOM
-        // in long-running production workloads.
-        //
-        // Future fix: Either adopt the Level-Zero pattern (global buffer registry) or
-        // change DeviceContextOps to return/accept typed handles instead of raw pointers.
-        tracing::warn!(
-            "CUDA free_device called with raw pointer {} - memory not freed (cudarc limitation)",
-            ptr
-        );
+        self.context.bind_to_thread()?;
+        unsafe {
+            cuda_result::free_sync(ptr)
+                .context("Failed to free device memory")?;
+        }
         Ok(())
     }
 
@@ -300,6 +285,9 @@ mod tests {
 
         // Verify data
         assert_eq!(host_data, host_result, "Data mismatch after H2D->D2H roundtrip");
+
+        // Cleanup
+        ctx.free_device(dev_ptr).expect("Failed to free device memory");
     }
 
     #[test]
@@ -330,6 +318,10 @@ mod tests {
 
         // Verify data
         assert_eq!(host_data, host_result, "Data mismatch after H2D->D2D->D2H");
+
+        // Cleanup
+        ctx.free_device(dev_ptr1).expect("Failed to free device memory 1");
+        ctx.free_device(dev_ptr2).expect("Failed to free device memory 2");
     }
 
     #[test]
