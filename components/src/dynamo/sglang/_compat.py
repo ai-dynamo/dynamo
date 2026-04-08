@@ -15,7 +15,6 @@ removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
 """
 
-import importlib
 import ipaddress
 import logging
 import socket
@@ -102,39 +101,6 @@ except ImportError:
             if self.is_ipv6:
                 return f"tcp://[{self.host}]:{self.port}"
             return f"tcp://{self.host}:{self.port}"
-
-
-# ---------------------------------------------------------------------------
-# KvMetrics: scheduler metrics class
-#
-# 0.5.10+: sglang.srt.observability.scheduler_metrics_mixin
-# 0.5.9:   sglang.srt.managers.scheduler_metrics_mixin
-#
-# In 0.5.10 the observability module has a circular import at cold-import time
-# (observability -> scheduler -> observability). The import succeeds once the
-# scheduler module is fully loaded (i.e., inside a running engine process).
-# We handle both paths and swallow the circular-import error gracefully: the
-# type is only used for annotation on ZMQ recv_pyobj() results (duck-typed).
-# ---------------------------------------------------------------------------
-KvMetrics: type | None = None
-
-for _kv_path in (
-    "sglang.srt.observability.scheduler_metrics_mixin",  # 0.5.10+
-    "sglang.srt.managers.scheduler_metrics_mixin",  # 0.5.9
-):
-    try:
-        _kv_mod = importlib.import_module(_kv_path)
-        KvMetrics = getattr(_kv_mod, "KvMetrics", None)  # type: ignore[assignment]
-        if KvMetrics is not None:
-            break
-    except (ImportError, AttributeError):
-        continue
-
-if KvMetrics is None:
-    logger.warning(
-        "Could not import KvMetrics from SGLang — scheduler metrics "
-        "will still work (duck-typed via ZMQ recv_pyobj)"
-    )
 
 
 def enable_disjoint_streaming_output(server_args: Any) -> None:
