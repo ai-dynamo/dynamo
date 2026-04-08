@@ -978,6 +978,8 @@ mod tests {
         let engine = WorkerKvQueryEngine {
             worker_id,
             local_indexer,
+            processing_semaphore: Semaphore::new(1),
+            metrics: None,
         };
 
         let request = WorkerKvQueryRequest {
