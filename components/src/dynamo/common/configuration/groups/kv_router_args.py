@@ -36,7 +36,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_threshold",
     "router_event_threads",
     "router_queue_policy",
-    "remote_indexer_component",
+    "use_remote_indexer",
+    "serve_indexer",
 )
 
 
@@ -61,7 +62,8 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_threshold: Optional[float]
     router_event_threads: int
     router_queue_policy: str
-    remote_indexer_component: Optional[str]
+    use_remote_indexer: bool = False
+    serve_indexer: bool = False
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -286,15 +288,14 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=str,
             choices=["fcfs", "wspt"],
         )
-        add_argument(
+        add_negatable_bool_argument(
             g,
-            flag_name="--remote-indexer-component",
-            env_var="DYN_REMOTE_INDEXER_COMPONENT",
-            default=None,
+            flag_name="--use-remote-indexer",
+            env_var="DYN_USE_REMOTE_INDEXER",
+            default=False,
             help=(
-                "[EXPERIMENTAL] KV Router: Component name of a standalone KV indexer to use for overlap scoring. "
-                "When set, the router queries the standalone indexer via the request plane instead "
-                "of maintaining a local radix tree (e.g. 'kv-indexer')."
+                "[EXPERIMENTAL] KV Router: Query a remote KV indexer served from the worker "
+                "component via the request plane instead of maintaining a local radix tree."
             ),
-            arg_type=str,
+            dest="use_remote_indexer",
         )
