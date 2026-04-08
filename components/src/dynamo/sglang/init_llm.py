@@ -9,11 +9,13 @@ from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -23,36 +25,34 @@ from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHan
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
-    """Perform warmup request for prefill engine to reduce initial TTFT."""
+    """Perform warmup request for prefill engine to reduce initial TTFT.
+
+    Raises on failure so the caller can prevent the worker from registering
+    with a broken engine (silent request drops).
+    """
     logging.info("Start of prefill disaggregation warmup ...")
-    try:
-        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-        from sglang.srt.sampling.sampling_params import SamplingParams
+    from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_new_tokens=8,
-            ignore_eos=True,
+    sampling_params = {
+        "temperature": 0.0,
+        "max_new_tokens": 8,
+        "ignore_eos": True,
+    }
+
+    async def _do_warmup():
+        results = await engine.async_generate(
+            input_ids=[0, 1, 2, 3],
+            sampling_params=sampling_params,
+            stream=True,
+            bootstrap_host=FAKE_BOOTSTRAP_HOST,
+            bootstrap_port=server_args.disaggregation_bootstrap_port,
+            bootstrap_room=999999,
         )
+        async for _ in results:
+            pass
 
-        async def _do_warmup():
-            results = await engine.async_generate(
-                input_ids=[0, 1, 2, 3],
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=FAKE_BOOTSTRAP_HOST,
-                bootstrap_port=server_args.disaggregation_bootstrap_port,
-                bootstrap_room=999999,
-            )
-            async for _ in results:
-                pass
-
-        await asyncio.wait_for(_do_warmup(), timeout=1800)
-        logging.info("Prefill warmup completed")
-    except asyncio.TimeoutError:
-        logging.warning("Prefill warmup timed out after 1800s")
-    except Exception as e:
-        logging.warning(f"Prefill warmup failed: {e}")
+    await asyncio.wait_for(_do_warmup(), timeout=1800)
+    logging.info("Prefill warmup completed")
 
 
 async def init_decode(
@@ -101,9 +101,14 @@ async def init_decode(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -178,7 +183,16 @@ async def init_prefill(
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
-    await _warmup_prefill_engine(engine, server_args)
+    try:
+        await _warmup_prefill_engine(engine, server_args)
+    except asyncio.TimeoutError as e:
+        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
+        raise RuntimeError(
+            "Prefill warmup timed out; worker cannot serve requests"
+        ) from e
+    except Exception as e:
+        logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
+        raise RuntimeError(f"Prefill warmup failed: {e}") from e
 
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event

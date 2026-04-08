@@ -8,10 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::{BlockId, G2, G3, InstanceId, SequenceHash, worker::group::ParallelWorkers};
-use kvbm_common::LogicalLayoutHandle;
-use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};
-use kvbm_physical::manager::LayoutHandle;
-use kvbm_physical::transfer::TransferOptions;
+use kvbm_logical::manager::BlockManager;
 
 use super::{BlockHolder, SessionId, messages::OnboardMessage, transport::MessageTransport};
 
@@ -97,14 +94,9 @@ impl ResponderSession {
             .map(|b| b.block_id())
             .collect();
 
-        // TODO: Get layout handle from G2 manager
-        // Need to add layout_handle() method to BlockManager or store it
-        let layout_handle = LayoutHandle::new(0, 0); // Placeholder
-
         let g2_msg = OnboardMessage::G2Results {
             responder: self.instance_id,
             session_id: self.session_id,
-            layout_handle,
             sequence_hashes: g2_sequence_hashes,
             block_ids: g2_block_ids,
         };
@@ -183,9 +175,17 @@ impl ResponderSession {
                     // BlockHolder's retain keeps only matching hashes
                     self.held_g3_blocks.retain(&stage_hashes);
 
-                    if !self.held_g3_blocks.is_empty() && self.parallel_worker.is_some() {
-                        // Execute G3->G2 transfer
-                        self.stage_g3_to_g2().await?;
+                    if !self.held_g3_blocks.is_empty() {
+                        if self.parallel_worker.is_some() {
+                            // Execute G3->G2 transfer
+                            self.stage_g3_to_g2().await?;
+                        } else {
+                            tracing::warn!(
+                                session_id = %self.session_id,
+                                g3_blocks = self.held_g3_blocks.count(),
+                                "G3 blocks cannot be staged: no parallel worker configured"
+                            );
+                        }
                     }
 
                     // Don't exit - wait for CloseSession in Hold/Prepare modes
@@ -248,62 +248,30 @@ impl ResponderSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3->G2 staging"))?;
 
-        let stage_block_ids: Vec<BlockId> = self
-            .held_g3_blocks
-            .blocks()
-            .iter()
-            .map(|b| b.block_id())
-            .collect();
-
-        // Allocate destination G2 blocks
-        let dst_blocks = self
-            .g2_manager
-            .allocate_blocks(stage_block_ids.len())
-            .ok_or_else(|| anyhow::anyhow!("Failed to allocate G2 blocks"))?;
-
-        let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
-
-        // Execute transfer
-        let notification = parallel_worker.execute_local_transfer(
-            LogicalLayoutHandle::G3,
-            LogicalLayoutHandle::G2,
-            Arc::from(stage_block_ids.clone()),
-            Arc::from(dst_block_ids.clone()),
-            TransferOptions::default(),
-        )?;
-
-        // Wait for transfer to complete
-        notification.await?;
-
-        // Register the new G2 blocks using the G3 blocks' metadata
-        let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
-            .into_iter()
-            .zip(self.held_g3_blocks.blocks().iter())
-            .map(|(dst, src)| {
-                let complete = dst
-                    .stage(src.sequence_hash(), self.g2_manager.block_size())
-                    .expect("block size mismatch");
-                self.g2_manager.register_block(complete)
-            })
-            .collect();
+        let result = super::staging::stage_g3_to_g2(
+            &self.held_g3_blocks,
+            &self.g2_manager,
+            &**parallel_worker,
+        )
+        .await?;
 
         // Extract sequence hashes and block IDs for newly staged blocks
-        let new_sequence_hashes: Vec<SequenceHash> =
-            new_g2_blocks.iter().map(|b| b.sequence_hash()).collect();
-        let new_block_ids: Vec<BlockId> = new_g2_blocks.iter().map(|b| b.block_id()).collect();
+        let new_sequence_hashes: Vec<SequenceHash> = result
+            .new_g2_blocks
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect();
+        let new_block_ids: Vec<BlockId> =
+            result.new_g2_blocks.iter().map(|b| b.block_id()).collect();
 
         // Release G3 blocks (take_all releases them) and hold new G2 blocks
         let _ = self.held_g3_blocks.take_all();
-        self.held_g2_blocks.extend(new_g2_blocks);
-
-        // TODO: Get layout handle from G2 manager
-        let layout_handle = LayoutHandle::new(0, 0); // Placeholder
+        self.held_g2_blocks.extend(result.new_g2_blocks);
 
         // Send BlocksReady with only newly staged blocks
         let ready_msg = OnboardMessage::BlocksReady {
             responder: self.instance_id,
             session_id: self.session_id,
-            layout_handle,
             sequence_hashes: new_sequence_hashes,
             block_ids: new_block_ids,
         };

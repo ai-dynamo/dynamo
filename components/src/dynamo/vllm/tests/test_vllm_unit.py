@@ -5,16 +5,22 @@
 
 import json
 import re
+import socket
+import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
+    _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
+    ensure_side_channel_host,
+    get_host_ip,
     parse_args,
 )
 from dynamo.vllm.constants import DisaggregationMode
@@ -31,6 +37,8 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
+    # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
 ]
@@ -332,6 +340,14 @@ def test_disaggregation_mode_default(mock_vllm_cli):
     assert config.is_decode_worker is False
 
 
+def test_kv_events_disabled_by_default_without_explicit_config(mock_vllm_cli):
+    """Test that vLLM no longer auto-creates kv_events_config."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.engine_args.kv_events_config is None
+    assert config.use_kv_events is False
+
+
 def test_disaggregation_mode_prefill(mock_vllm_cli):
     """Test --disaggregation-mode prefill sets correct state."""
     mock_vllm_cli(
@@ -414,3 +430,296 @@ def test_explicit_default_mode_with_legacy_flag_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Cannot combine"):
         parse_args()
+
+
+# --- _is_routable tests (pure logic, no mocking) ---
+
+
+class TestIsRoutable:
+    def test_accepts_private_ipv4(self):
+        assert _is_routable("10.0.0.5") is True
+        assert _is_routable("192.168.1.1") is True
+
+    def test_accepts_private_ipv6(self):
+        assert _is_routable("fd00::1") is True
+
+    def test_rejects_loopback_v4(self):
+        assert _is_routable("127.0.0.1") is False
+
+    def test_rejects_loopback_v6(self):
+        assert _is_routable("::1") is False
+
+    def test_rejects_link_local_v4(self):
+        assert _is_routable("169.254.1.1") is False
+
+    def test_rejects_link_local_v6(self):
+        assert _is_routable("fe80::1") is False
+
+    def test_rejects_unspecified(self):
+        assert _is_routable("0.0.0.0") is False
+        assert _is_routable("::") is False
+
+    def test_rejects_multicast(self):
+        assert _is_routable("224.0.0.1") is False
+
+    def test_rejects_invalid(self):
+        assert _is_routable("not-an-ip") is False
+
+
+# --- get_host_ip tests (mock socket module functions) ---
+
+
+class TestGetHostIp:
+    def test_hostname_resolution_success(self):
+        """getaddrinfo returns routable IPv4 → returns it."""
+        with patch(
+            "dynamo.vllm.args._try_hostname_resolution", return_value="10.0.0.5"
+        ):
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_hostname_loopback_falls_through_to_udp(self):
+        """getaddrinfo returns 127.0.0.1, UDP returns 10.0.0.5 → returns 10.0.0.5."""
+        with (
+            patch(
+                "dynamo.vllm.args._try_hostname_resolution", return_value="127.0.0.1"
+            ),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "10.0.0.5" if family == socket.AF_INET else None
+            )
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_hostname_link_local_falls_through_to_udp(self):
+        """getaddrinfo returns 169.254.1.1, UDP returns 10.0.0.5 → returns 10.0.0.5."""
+        with (
+            patch(
+                "dynamo.vllm.args._try_hostname_resolution", return_value="169.254.1.1"
+            ),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "10.0.0.5" if family == socket.AF_INET else None
+            )
+            result = get_host_ip()
+        assert result == "10.0.0.5"
+
+    def test_ipv6_fallback(self):
+        """IPv4 strategies fail, IPv6 UDP returns fd00::1 → returns fd00::1."""
+        with (
+            patch("dynamo.vllm.args._try_hostname_resolution", return_value=None),
+            patch("dynamo.vllm.args._try_udp_connect") as mock_udp,
+        ):
+            mock_udp.side_effect = lambda family, target: (
+                "fd00::1" if family == socket.AF_INET6 else None
+            )
+            result = get_host_ip()
+        assert result == "fd00::1"
+
+    def test_all_fail_raises_runtime_error(self):
+        """All strategies fail → RuntimeError with VLLM_NIXL_SIDE_CHANNEL_HOST in message."""
+        with (
+            patch("dynamo.vllm.args._try_hostname_resolution", return_value=None),
+            patch("dynamo.vllm.args._try_udp_connect", return_value=None),
+        ):
+            with pytest.raises(RuntimeError, match="VLLM_NIXL_SIDE_CHANNEL_HOST"):
+                get_host_ip()
+
+
+# --- ensure_side_channel_host tests ---
+
+
+class TestEnsureSideChannelHost:
+    def test_preserves_existing_env_var(self, monkeypatch):
+        """Pre-set env var → verify not overwritten."""
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "192.168.99.99")
+        with patch("dynamo.vllm.args.get_host_ip") as mock_get:
+            ensure_side_channel_host()
+            mock_get.assert_not_called()
+        import os
+
+        assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "192.168.99.99"
+
+    def test_sets_env_var_on_successful_detection(self, monkeypatch):
+        """No env var set, successful detection populates the side-channel host."""
+        monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+        with patch("dynamo.vllm.args.get_host_ip", return_value="10.0.0.5"):
+            ensure_side_channel_host()
+
+        import os
+
+        assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.5"
+
+    def test_raises_when_detection_fails_and_no_env(self, monkeypatch):
+        """All strategies fail, no env var → RuntimeError."""
+        monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+        with patch(
+            "dynamo.vllm.args.get_host_ip",
+            side_effect=RuntimeError("Unable to determine"),
+        ):
+            with pytest.raises(RuntimeError, match="Unable to determine"):
+                ensure_side_channel_host()
+
+
+# --- vllm_omni optional dependency tests ---
+
+
+class TestVllmOmniOptionalDependency:
+    def test_dynamo_vllm_main_importable_without_vllm_omni(self):
+        """dynamo.vllm.main must import cleanly even when vllm_omni is absent.
+
+        Setting sys.modules["vllm_omni"] = None blocks ALL imports from the
+        vllm_omni package — Python always resolves the top-level package first,
+        so a None sentinel at the root raises ImportError for any submodule import.
+        """
+        # Save and evict any already-cached vllm_omni and dynamo.vllm.omni modules
+        saved = {
+            k: sys.modules.pop(k)
+            for k in list(sys.modules)
+            if k == "vllm_omni"
+            or k.startswith("vllm_omni.")
+            or k == "dynamo.vllm.main"
+            or k.startswith("dynamo.vllm.omni")
+        }
+        # Explicitly block the top-level vllm_omni package regardless of prior imports
+        sys.modules["vllm_omni"] = None  # type: ignore[assignment]
+
+        try:
+            import dynamo.vllm.main  # noqa: F401
+        except ImportError as e:
+            pytest.fail(f"dynamo.vllm.main has a hard dependency on vllm_omni: {e}")
+        finally:
+            sys.modules.pop("vllm_omni", None)
+            # Remove any modules imported during this test
+            for mod in list(sys.modules):
+                if mod == "dynamo.vllm.main" or mod.startswith("dynamo.vllm.omni"):
+                    sys.modules.pop(mod, None)
+            # Restore original state
+            sys.modules.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark mode unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestBenchmarkConfig:
+    """Tests for BenchmarkConfig dataclass and grid generation."""
+
+    def test_benchmark_config_defaults(self):
+        from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
+
+        cfg = BenchmarkConfig()
+        assert cfg.mode == "agg"
+        assert cfg.prefill_isl_granularity == 16
+        assert cfg.decode_length_granularity == 6
+        assert cfg.decode_batch_size_granularity == 6
+        assert cfg.warmup_iterations == 5
+        assert cfg.output_path == "/tmp/benchmark_results.json"
+
+    def test_benchmark_config_from_dict(self):
+        from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
+
+        cfg = BenchmarkConfig(
+            mode="decode",
+            prefill_isl_granularity=4,
+            decode_length_granularity=3,
+            decode_batch_size_granularity=3,
+            warmup_iterations=2,
+            output_path="/tmp/test.json",
+        )
+        assert cfg.mode == "decode"
+        assert cfg.prefill_isl_granularity == 4
+
+    def test_benchmark_config_kwargs_unpack(self):
+        from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
+
+        d = {"mode": "prefill", "warmup_iterations": 1}
+        cfg = BenchmarkConfig(**d)
+        assert cfg.mode == "prefill"
+        assert cfg.warmup_iterations == 1
+        assert cfg.prefill_isl_granularity == 16
+
+
+class TestBenchmarkGrid:
+    """Tests for benchmark grid generation logic (no GPU required)."""
+
+    def _make_grid_helper(self):
+        """Return (prefill_grid_fn, decode_grid_fn) that operate on plain params."""
+        import numpy as np
+
+        def generate_prefill_grid(max_num_scheduled_tokens, granularity):
+            isls = np.unique(
+                np.linspace(10, max_num_scheduled_tokens, granularity, dtype=int)
+            )
+            return [int(x) for x in isls]
+
+        def generate_decode_grid(
+            block_size,
+            max_model_len,
+            max_num_running_reqs,
+            num_gpu_blocks,
+            length_granularity,
+            batch_granularity,
+        ):
+            total_kv_tokens = num_gpu_blocks * block_size
+            ctx_lens = np.unique(
+                np.linspace(block_size, max_model_len, length_granularity, dtype=int)
+            )
+            points = []
+            for ctx_len in ctx_lens:
+                ctx_len = int(ctx_len)
+                max_batch = min(max_num_running_reqs, total_kv_tokens // ctx_len)
+                if max_batch < 1:
+                    continue
+                batch_sizes = np.unique(
+                    np.linspace(1, max_batch, batch_granularity, dtype=int)
+                )
+                for bs in batch_sizes:
+                    points.append((ctx_len, int(bs)))
+            return points
+
+        return generate_prefill_grid, generate_decode_grid
+
+    def test_prefill_grid_count(self):
+        gen_prefill, _ = self._make_grid_helper()
+        isls = gen_prefill(max_num_scheduled_tokens=8192, granularity=10)
+        assert len(isls) == 10
+        assert isls[0] == 10
+        assert isls[-1] == 8192
+
+    def test_prefill_grid_dedup(self):
+        gen_prefill, _ = self._make_grid_helper()
+        isls = gen_prefill(max_num_scheduled_tokens=20, granularity=100)
+        assert len(isls) == len(set(isls))
+
+    def test_decode_grid_batch_capped(self):
+        _, gen_decode = self._make_grid_helper()
+        points = gen_decode(
+            block_size=16,
+            max_model_len=4096,
+            max_num_running_reqs=64,
+            num_gpu_blocks=256,
+            length_granularity=3,
+            batch_granularity=3,
+        )
+        total_kv = 256 * 16
+        for ctx_len, bs in points:
+            assert bs <= min(64, total_kv // ctx_len)
+            assert bs >= 1
+
+    def test_decode_grid_skips_large_ctx(self):
+        _, gen_decode = self._make_grid_helper()
+        points = gen_decode(
+            block_size=16,
+            max_model_len=100000,
+            max_num_running_reqs=64,
+            num_gpu_blocks=100,
+            length_granularity=5,
+            batch_granularity=3,
+        )
+        total_kv = 100 * 16
+        for ctx_len, bs in points:
+            assert ctx_len <= total_kv

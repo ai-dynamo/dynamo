@@ -9,16 +9,19 @@ Exceptions exist, but they should be rare and justified in a code comment.
 
 ### Keep imports at the top of the file
 
-Avoid importing inside functions because it hides dependencies, makes the module
-harder to understand at a glance, and can mask missing packages until a specific
-code path is hit at runtime.
+**Always flag** any `import` statement that appears inside a function body, method,
+or class. Imports inside functions hide dependencies, make the module harder to
+understand at a glance, and can mask missing packages until a specific code path
+is hit at runtime.
 
-Avoid wrapping imports in `try/except` because it creates two execution modes --
-one with the library and one without -- which doubles the testing surface and
-produces confusing behavior when the dependency is unexpectedly absent.
+**Always flag** `try/except ImportError` around imports (except for the documented
+exceptions below). This pattern creates two execution modes -- one with the library
+and one without -- which doubles the testing surface and produces confusing
+behavior when the dependency is unexpectedly absent.
 
 ```python
 # BAD -- import inside function; dependency is invisible until this path runs
+# ALWAYS FLAG THIS PATTERN
 def process_data():
     import json
     return json.loads(data)
@@ -129,29 +132,40 @@ except Exception as e:
 
 ### NO defensive `getattr()` on known types
 
-When an object has a known type with known attributes, access them directly.
-Using `getattr()` with a default hides bugs by silently returning a fallback
-when the attribute should always exist.
+**Always flag** `getattr(obj, "attr", default)` when the object's type is known
+and the attribute is part of its definition (class attribute, `__init__` parameter,
+dataclass field, etc.). Using `getattr()` with a default hides bugs by silently
+returning a fallback when the attribute should always exist. Direct attribute
+access fails loudly if the type contract changes, which is what you want.
 
 ```python
-# BAD -- node has a job_name attribute, getattr hides AttributeError
-name = getattr(node, "job_name", "")
+# BAD -- cfg is a ServiceConfig with host/port; getattr hides AttributeError
+# ALWAYS FLAG THIS PATTERN
+cfg = ServiceConfig(host="0.0.0.0", port=8080)
+host = getattr(cfg, "host", "localhost")
+port = getattr(cfg, "port", 9999)
 
 # GOOD -- direct access, fails loudly if something is wrong
-name = node.job_name
+host = cfg.host
+port = cfg.port
 ```
 
 ---
 
-## Common Pitfalls
+## Anti-Patterns That Must Be Flagged in Review
+
+Every item below is a **mandatory review check**. If any of these patterns appear
+in a pull request, flag it and request changes. These are not style preferences --
+they are sources of real bugs, resource leaks, and CI flakiness.
 
 ### Mutable default arguments
 
-Default argument values are evaluated once at function definition time, not on
-each call. A mutable default (list, dict, set) is shared across all invocations.
+**Always flag** any function whose default argument is a mutable object (`[]`, `{}`,
+`set()`). Default values are evaluated once at function definition time and shared
+across all calls, so mutations accumulate silently between invocations.
 
 ```python
-# BAD -- the list is shared across all calls
+# BAD -- the list is shared across all calls; flag this
 def add_item(item, items=[]):
     items.append(item)
     return items
@@ -159,7 +173,7 @@ def add_item(item, items=[]):
 add_item("a")  # ["a"]
 add_item("b")  # ["a", "b"] -- not ["b"]!
 
-# GOOD
+# GOOD -- use None sentinel, create a new list each call
 def add_item(item, items=None):
     if items is None:
         items = []
@@ -167,13 +181,15 @@ def add_item(item, items=None):
     return items
 ```
 
-### Always use context managers for resources
+### Leaked file handles -- always use context managers
 
-Files, network connections, subprocesses, and locks should be opened with `with`
-so they are released even if an exception occurs.
+**Always flag** any `open()` call that is not wrapped in a `with` statement.
+Files, network connections, subprocesses, and locks must be opened with `with`
+so they are released even if an exception occurs. Bare `open()` followed by
+manual `.close()` leaks the handle when an exception fires between the two calls.
 
 ```python
-# BAD -- file handle leaks if json.load raises
+# BAD -- file handle leaks if json.load raises; flag this
 f = open("data.json")
 data = json.load(f)
 f.close()
@@ -188,14 +204,17 @@ etcd/NATS connections, and temp directories. Use `ManagedProcess`,
 `tempfile.TemporaryDirectory`, and similar context managers rather than
 manual setup/teardown.
 
-### Do not shadow built-in names
+### Shadowing built-in names
 
-Naming a variable `list`, `dict`, `id`, `type`, `input`, `open`, or `format`
-overwrites the built-in and causes confusing errors later in the same scope.
+**Always flag** any variable named `list`, `dict`, `id`, `type`, `input`, `open`,
+`format`, `set`, `map`, `filter`, `range`, `str`, `int`, `float`, `bool`, `bytes`,
+`tuple`, `hash`, `len`, `min`, `max`, `sum`, `any`, `all`, `zip`, `enumerate`,
+`sorted`, `reversed`, or `next`. Assigning to these names overwrites the built-in
+and causes confusing `TypeError`s later in the same scope.
 
 ```python
-# BAD
-list = get_items()          # shadows built-in list()
+# BAD -- shadows built-in list(); flag this
+list = get_items()
 filtered = list(some_gen)   # TypeError: 'list' object is not callable
 
 # GOOD
@@ -205,26 +224,30 @@ filtered = list(some_gen)
 
 ### Use `is` for None / True / False comparisons
 
-`==` invokes `__eq__`, which can be overridden. `is` checks identity, which is
-what you want for singletons.
+**Always flag** `== None`, `== True`, `== False`, `!= None`, `!= True`, and
+`!= False`. These invoke `__eq__`, which can be overridden and produce
+surprising results. Use `is` / `is not` for singleton comparisons.
 
 ```python
-# BAD
+# BAD -- flag these
 if result == None:
 if flag == True:
+if done == False:
 
 # GOOD
 if result is None:
 if flag is True:     # or just: if flag:
+if not done:
 ```
 
 ### Do not modify a collection while iterating
 
-Adding or removing items during iteration causes skipped elements or
-`RuntimeError`. Build a new collection or iterate over a copy.
+**Always flag** any loop that adds, removes, or deletes from the collection it is
+iterating over. This causes skipped elements, `RuntimeError` (for dicts), or
+infinite loops. Build a new collection or iterate over a copy.
 
 ```python
-# BAD -- skips elements
+# BAD -- RuntimeError on dict, skips elements on list; flag this
 for item in items:
     if item.is_stale():
         items.remove(item)
@@ -235,25 +258,28 @@ items = [item for item in items if not item.is_stale()]
 
 ### Prefer `join()` over string concatenation in loops
 
-Repeated `+=` on strings creates a new string object each time, which is O(n^2)
-for large loops.
+**Always flag** `+=` on a string variable inside a loop. Repeated `+=` on strings
+creates a new string object each time, which is O(n^2) for large loops.
 
 ```python
-# BAD
+# BAD -- O(n^2) string building; flag this
 result = ""
 for line in lines:
     result += line + "\n"
 
-# GOOD
+# GOOD -- O(n) with join
 result = "\n".join(lines)
 ```
 
-### Watch out for late-binding closures in loops
+### Late-binding closures in loops
 
-Closures capture the variable reference, not its value at the time of creation.
+**Always flag** lambdas or inner functions created inside a loop that reference the
+loop variable without binding it as a default argument. Closures capture the
+variable reference, not its value at the time of creation, so all closures end up
+with the final loop value.
 
 ```python
-# BAD -- all lambdas return 4 (the final value of i)
+# BAD -- all lambdas return 4 (the final value of i); flag this
 fns = [lambda: i for i in range(5)]
 [f() for f in fns]  # [4, 4, 4, 4, 4]
 
@@ -264,11 +290,13 @@ fns = [lambda i=i: i for i in range(5)]
 
 ### Do not use `assert` for runtime validation
 
-Assertions are stripped when Python runs with `-O` (optimize). Use explicit
-`if/raise` for validation that must always execute.
+**Always flag** `assert` statements used to validate function arguments, request
+payloads, configuration, or any data that comes from outside the current function.
+Assertions are stripped when Python runs with `-O` (optimize), silently removing
+the validation. Use explicit `if/raise` for checks that must always execute.
 
 ```python
-# BAD -- silently skipped under python -O
+# BAD -- silently skipped under python -O; flag this
 assert user_id is not None, "user_id required"
 
 # GOOD
@@ -363,15 +391,6 @@ See the **Critical Rules** section above for the full policy. Summary:
 
 Be careful with escaping in raw strings (`\s` vs `\\s`). When changing a critical
 regex, add a one-line test to prove it matches.
-
-## License Headers
-
-Every `.py` file must have the SPDX header:
-
-```python
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-```
 
 ## Import Order
 

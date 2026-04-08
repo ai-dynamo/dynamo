@@ -6,8 +6,9 @@ Common runtime utilities shared across Dynamo engine backends.
 
 Provides:
     - parse_endpoint: Parse 'dyn://namespace.component.endpoint' strings
-    - graceful_shutdown: Shutdown DistributedRuntime with optional event signaling
     - create_runtime: Create DistributedRuntime.
+    - run_async: Helper to run async functions in non-async functions that
+                 may be run in either sync or async context.
 """
 
 import asyncio
@@ -70,3 +71,28 @@ def create_runtime(
     runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
 
     return runtime, loop
+
+
+def run_async(func, *args, **kwargs):
+    """Run an async function as if it is synchronous, handling both sync and async contexts.
+
+    Args:
+        func: An async function to execute.
+        *args: Positional arguments to pass to the function.
+        **kwargs: Keyword arguments to pass to the function.
+
+    Returns:
+        The result of the async function.
+    """
+    # Check if we're in async context, exception is raised if not and we can safely
+    # run 'func' with asyncio.run()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(func(*args, **kwargs))
+
+    # In an async context, we want to run 'func' in a separate thread to avoid blocking the event loop
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        return pool.submit(asyncio.run, func(*args, **kwargs)).result()

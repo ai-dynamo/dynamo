@@ -3,20 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is estimated from model parameters below. Override individual
-# knobs (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE to bypass the calculation entirely.
+# Per-worker VRAM is controlled via env vars (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS).
+# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
+# merging is supported.
 #
 # NOTE — trtllm fraction semantics differ from vllm/sglang:
 #   vllm/sglang:  fraction of TOTAL VRAM  (weights + KV + activations all inside)
 #   trtllm:       fraction of FREE  VRAM  (KV cache only, after model load)
-# gpu_worker_fraction("trtllm") handles this — see gpu_utils.sh / gpu_utils.md.
+# build_vllm_gpu_mem_args / build_sglang_gpu_mem_args handle this — see gpu_utils.sh / gpu_utils.md.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-seq-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~8.0 GiB per worker (~16.0 GiB total)
 #   actual (nvidia-smi)          : ~7.4 GiB per worker (~14.8 GiB total)
 #   fraction per worker (free)   : 0.05
 #   Overestimating is intentional -- better to pad than OOM.
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
@@ -27,17 +30,9 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$MAX_SEQ_LEN" "$MAX_CONCURRENT_SEQS" trtllm
-
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction trtllm)
-fi
+# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
+# merging is supported.
+GPU_MEM_FRACTION="${GPU_MEM_FRACTION:-}"
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -46,14 +41,7 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
 export MODALITY=${MODALITY:-"text"}
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -82,7 +70,10 @@ done
 # Always override free_gpu_memory_fraction so the script controls KV cache size,
 # matching how vllm (--gpu-memory-utilization) and sglang (--mem-fraction-static)
 # pass memory parameters from the launch script.
-OVERRIDE_PAIRS="\"kv_cache_config\": {\"free_gpu_memory_fraction\": ${GPU_MEM_FRACTION}}"
+OVERRIDE_PAIRS=""
+if [[ -n "$GPU_MEM_FRACTION" ]]; then
+    OVERRIDE_PAIRS="\"kv_cache_config\": {\"free_gpu_memory_fraction\": ${GPU_MEM_FRACTION}}"
+fi
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
@@ -91,20 +82,14 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 OVERRIDE_ARGS=(--override-engine-args "{${OVERRIDE_PAIRS}}")
 
-echo "=========================================="
-echo "Launching Disaggregated on Same GPU (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Max seq len: $MAX_SEQ_LEN"
-echo "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)"
-echo "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
-echo "=========================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
+    "Workers:     2 (prefill + decode, fraction is per worker)"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
 OTEL_SERVICE_NAME=dynamo-worker-prefill \
@@ -118,9 +103,8 @@ python3 -m dynamo.trtllm \
   --publish-events-and-metrics \
   --disaggregation-mode prefill \
   "${OVERRIDE_ARGS[@]}" &
-PREFILL_PID=$!
 
-# run decode worker (shares GPU with prefill) - foreground
+# run decode worker (shares GPU with prefill)
 OTEL_SERVICE_NAME=dynamo-worker-decode \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -131,4 +115,7 @@ python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
   --disaggregation-mode decode \
-  "${OVERRIDE_ARGS[@]}"
+  "${OVERRIDE_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

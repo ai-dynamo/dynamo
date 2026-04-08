@@ -12,10 +12,7 @@
 //! 4. Drop all `ImmutableBlock` guards → blocks released
 //! 5. `CancelState::Confirmed` → `CancelConfirmation` resolves
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use tokio::sync::watch;
 
@@ -121,12 +118,6 @@ impl CancellationToken {
     }
 }
 
-impl Default for CancellationToken {
-    fn default() -> Self {
-        CancellationToken::new().0
-    }
-}
-
 /// Internal updater for cancellation state.
 ///
 /// Held by pipeline stages to update state and check for cancel requests.
@@ -212,29 +203,6 @@ impl CancelConfirmation {
                 return;
             }
         }
-    }
-}
-
-impl Future for CancelConfirmation {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        // For manual polling, we need to store additional state.
-        // Use the wait() method for simpler async/await usage.
-        // This implementation checks once and requires re-polling.
-        let this = self.get_mut();
-
-        // Check current state
-        if this.state_rx.borrow().is_confirmed() {
-            return Poll::Ready(());
-        }
-
-        // Register waker for future notification
-        // Note: watch::Receiver doesn't have a poll interface, so we
-        // need to check periodically. For most use cases, use the
-        // wait() method which is async and works properly.
-        cx.waker().wake_by_ref();
-        Poll::Pending
     }
 }
 

@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -28,6 +29,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
@@ -46,6 +48,8 @@ if TYPE_CHECKING:
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
 def setup_engine_factory(
@@ -110,6 +114,17 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     vllm_flags = None
     sglang_flags = None
 
+    # --trust-remote-code is only meaningful with --dyn-chat-processor vllm.
+    # Warn and strip it when a different (or no) chat processor is active so
+    # it does not propagate as an unknown-argument error below.
+    if "--trust-remote-code" in unknown and config.chat_processor != "vllm":
+        logger.warning(
+            "--trust-remote-code has no effect without '--dyn-chat-processor vllm'. "
+            "It is only supported by the vLLM chat processor. "
+            "Pass '--dyn-chat-processor vllm' to enable trust_remote_code."
+        )
+        unknown = [arg for arg in unknown if arg != "--trust-remote-code"]
+
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
@@ -165,6 +180,10 @@ async def async_main():
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
+    if config.tokenizer_backend == "fastokens":
+        os.environ["DYN_TOKENIZER"] = "fastokens"
+    else:
+        os.environ.pop("DYN_TOKENIZER", None)
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit})"
@@ -221,10 +240,17 @@ async def async_main():
     elif config.router_mode == "direct":
         router_mode = RouterMode.Direct
         kv_router_config = None
+    elif config.router_mode == "power-of-two":
+        router_mode = RouterMode.PowerOfTwoChoices
+        kv_router_config = None
+    elif config.router_mode == "least-loaded":
+        router_mode = RouterMode.LeastLoaded
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
         router_mode,
         kv_router_config,
@@ -264,6 +290,16 @@ async def async_main():
     else:
         os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
 
+    if config.enable_streaming_tool_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
+
+    if config.enable_streaming_reasoning_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
+
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
@@ -277,6 +313,9 @@ async def async_main():
             runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

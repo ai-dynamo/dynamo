@@ -31,6 +31,7 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
         map.insert("nemotron_nano", ReasoningParserType::DeepseekR1); // nemotron nano is ...</think>
+        map.insert("nemotron3", ReasoningParserType::DeepseekR1);
         map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
         map.insert(
             "minimax_append_think",
@@ -249,6 +250,7 @@ mod tests {
             "mistral",
             "granite",
             "nemotron_nano",
+            "nemotron3",
             "glm45",
             "minimax_append_think",
         ];
@@ -386,5 +388,76 @@ mod tests {
         let r_k25 = kimi_k25.detect_and_parse_reasoning("<think>reasoning</think>answer", &[]);
         assert_eq!(r_k25.reasoning_text, "reasoning");
         assert_eq!(r_k25.normal_text, "answer");
+    }
+
+    // Scenario 1: Normal streaming flow with force_reasoning + set_in_reasoning.
+    // Simulates the OpenAI path where the preprocessor detects prompt-injected
+    // reasoning and calls set_in_reasoning(true). The parser should correctly
+    // transition from reasoning to content when </think> arrives.
+    #[test]
+    fn test_nemotron_streaming_with_set_in_reasoning() {
+        let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
+        parser.set_in_reasoning(true); // OpenAI path calls this
+
+        let tokens = &["Think", "ing about", " this", ".\n\n", "</think>", "Four"];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        assert_eq!(all_reasoning, "Thinking about this.\n\n");
+        assert_eq!(all_content, "Four");
+    }
+
+    // Scenario 2: Streaming with force_reasoning but WITHOUT set_in_reasoning.
+    // Simulates the Anthropic path bug where thinking_enabled=false and
+    // set_in_reasoning is never called. The parser still starts in reasoning
+    // mode (force_reasoning=true) but stripped_think_start=false. The </think>
+    // boundary must still be detected correctly.
+    #[test]
+    fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
+        // DeepseekR1 has force_reasoning=true but we do NOT call set_in_reasoning
+        let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
+
+        let tokens = &["Think", "ing about", " this", ".\n\n", "</think>", "Four"];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        assert_eq!(all_reasoning, "Thinking about this.\n\n");
+        assert_eq!(all_content, "Four");
+    }
+
+    // Scenario 3: Token-by-token </think> split across chunks.
+    // The '<' in '</think>' is a prefix of '<think>'. When stripped_think_start
+    // is false, the parser's prefix-check could buffer '<' and interfere with
+    // </think> detection. This test verifies the boundary is detected even when
+    // </think> arrives as individual characters.
+    #[test]
+    fn test_nemotron_streaming_split_end_think_tokens() {
+        let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
+        parser.set_in_reasoning(true);
+
+        // Simulate token-by-token arrival including </think> split across chunks
+        let tokens = &[
+            "reason", "ing", " done", ".", "</", "think", ">", "Hello", " world",
+        ];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        assert_eq!(all_reasoning, "reasoning done.");
+        assert_eq!(all_content, "Hello world");
     }
 }

@@ -91,13 +91,19 @@ impl LeaderState {
         let coordinated = CoordinatedWorker::new(worker, rank, host_instance);
 
         // Ensure rank-ordered insertion
-        if rank >= self.workers.len() {
-            // Extend with placeholder capacity
-            self.workers.resize_with(rank + 1, || {
-                panic!("Gap in worker ranks - this shouldn't happen")
-            });
+        if rank == self.workers.len() {
+            // Sequential append (expected path)
+            self.workers.push(coordinated);
+        } else if rank < self.workers.len() {
+            // Re-registration or out-of-order within existing range
+            self.workers[rank] = coordinated;
+        } else {
+            panic!(
+                "Gap in worker ranks: rank {} but only {} workers registered",
+                rank,
+                self.workers.len()
+            );
         }
-        self.workers[rank] = coordinated;
     }
 
     /// Number of workers under this leader.
@@ -243,7 +249,13 @@ pub fn route_local_to_remote(
         // Few local → many remote: each local gets multiple remotes
         let remotes_per_local = remote_count / local_count;
         let start = local_rank * remotes_per_local;
-        (start..start + remotes_per_local).collect()
+        // Last local rank absorbs any remainder from non-divisible ratios
+        let end = if local_rank == local_count - 1 {
+            remote_count
+        } else {
+            start + remotes_per_local
+        };
+        (start..end).collect()
     }
 }
 
@@ -283,5 +295,17 @@ mod tests {
         assert_eq!(route_local_to_remote(1, 4, 8), vec![2, 3]);
         assert_eq!(route_local_to_remote(2, 4, 8), vec![4, 5]);
         assert_eq!(route_local_to_remote(3, 4, 8), vec![6, 7]);
+    }
+
+    #[test]
+    fn test_route_non_divisible_remainder() {
+        // Local TP=2, Remote TP=5: last local rank absorbs remainder
+        assert_eq!(route_local_to_remote(0, 2, 5), vec![0, 1]);
+        assert_eq!(route_local_to_remote(1, 2, 5), vec![2, 3, 4]);
+
+        // Local TP=3, Remote TP=7: last rank gets extras
+        assert_eq!(route_local_to_remote(0, 3, 7), vec![0, 1]);
+        assert_eq!(route_local_to_remote(1, 3, 7), vec![2, 3]);
+        assert_eq!(route_local_to_remote(2, 3, 7), vec![4, 5, 6]);
     }
 }

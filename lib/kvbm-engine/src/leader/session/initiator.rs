@@ -14,8 +14,9 @@ use crate::{
 };
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};
-use kvbm_physical::manager::LayoutHandle;
 use kvbm_physical::transfer::TransferOptions;
+
+use super::staging;
 
 use super::{
     super::{OnboardingStatus, SessionControl, StagingMode},
@@ -108,7 +109,6 @@ pub struct InitiatorSession {
     remote_g2_blocks: HashMap<InstanceId, Vec<BlockId>>, // G2: track block IDs
     remote_g2_hashes: HashMap<InstanceId, Vec<SequenceHash>>, // G2: track sequence hashes (parallel to block_ids)
     remote_g3_blocks: HashMap<InstanceId, Vec<SequenceHash>>, // G3: track sequence hashes
-    remote_g2_layouts: HashMap<InstanceId, LayoutHandle>,     // G2 layouts for RDMA
 
     // Shared with FindMatchesResult for block access
     all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
@@ -158,7 +158,6 @@ impl InitiatorSession {
             remote_g2_blocks: HashMap::new(),
             remote_g2_hashes: HashMap::new(),
             remote_g3_blocks: HashMap::new(),
-            remote_g2_layouts: HashMap::new(),
             all_g2_blocks,
             control_rx,
             object_client,
@@ -205,12 +204,12 @@ impl InitiatorSession {
                 self.await_commands(rx).await?;
             }
             StagingMode::Prepare => {
-                self.prepare_mode().await?;
+                self.prepare_mode(&mut rx).await?;
                 // Wait for pull command or shutdown
                 self.await_commands(rx).await?;
             }
             StagingMode::Full => {
-                self.full_mode().await?;
+                self.full_mode(&mut rx).await?;
                 // Completes and exits
             }
         }
@@ -413,7 +412,6 @@ impl InitiatorSession {
                     match msg {
                         OnboardMessage::G2Results {
                             responder,
-                            layout_handle,
                             sequence_hashes,
                             block_ids,
                             ..
@@ -424,8 +422,6 @@ impl InitiatorSession {
                                 num_hashes = sequence_hashes.len(),
                                 "Processing G2Results"
                             );
-                            // Store layout for RDMA operations
-                            self.remote_g2_layouts.insert(responder, layout_handle);
 
                             // First-responder-wins logic using sequence hashes
                             let mut hold_hashes = Vec::new();
@@ -736,39 +732,95 @@ impl InitiatorSession {
         Ok(())
     }
 
-    /// Prepare mode: Stage all G3→G2 but keep session alive.
-    async fn prepare_mode(&mut self) -> Result<()> {
-        // Stage local G3→G2
-        self.stage_local_g3_to_g2().await?;
+    /// Send StageBlocks to all remotes with G3 blocks and wait for BlocksReady responses.
+    ///
+    /// After sending StageBlocks, waits for each remote to respond with BlocksReady,
+    /// which updates `remote_g2_blocks` and `remote_g2_hashes` with the newly staged blocks.
+    async fn send_stage_and_wait_for_ready(
+        &mut self,
+        rx: &mut mpsc::Receiver<OnboardMessage>,
+    ) -> Result<()> {
+        if self.remote_g3_blocks.is_empty() {
+            return Ok(());
+        }
 
         // Send StageBlocks to remotes for their G3 sequence hashes
-        for (remote, sequence_hashes) in &self.remote_g3_blocks {
+        let remotes_with_g3: Vec<(InstanceId, Vec<SequenceHash>)> = self
+            .remote_g3_blocks
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
+        for (remote, stage_hashes) in &remotes_with_g3 {
             self.transport
                 .send(
                     *remote,
                     OnboardMessage::StageBlocks {
                         requester: self.instance_id,
                         session_id: self.session_id,
-                        stage_hashes: sequence_hashes.clone(),
+                        stage_hashes: stage_hashes.clone(),
                     },
                 )
                 .await?;
         }
 
-        // Wait for BlocksReady from all remotes
-        // (simplified - would need proper tracking in production)
+        // Wait for BlocksReady from all remotes that had G3 blocks
+        let mut pending: HashSet<InstanceId> = remotes_with_g3.iter().map(|(k, _)| *k).collect();
+
+        while !pending.is_empty() {
+            match rx.recv().await {
+                Some(OnboardMessage::BlocksReady {
+                    responder,
+                    sequence_hashes,
+                    block_ids,
+                    ..
+                }) => {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        responder = %responder,
+                        count = block_ids.len(),
+                        "Received BlocksReady"
+                    );
+                    self.remote_g2_blocks
+                        .entry(responder)
+                        .or_default()
+                        .extend(block_ids);
+                    self.remote_g2_hashes
+                        .entry(responder)
+                        .or_default()
+                        .extend(sequence_hashes);
+                    pending.remove(&responder);
+                }
+                Some(other) => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        msg = other.variant_name(),
+                        "Unexpected message while waiting for BlocksReady"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        "Channel closed while waiting for BlocksReady"
+                    );
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Prepare mode: Stage all G3→G2 but keep session alive.
+    async fn prepare_mode(&mut self, rx: &mut mpsc::Receiver<OnboardMessage>) -> Result<()> {
+        // Stage local G3→G2
+        self.stage_local_g3_to_g2().await?;
+
+        // Send StageBlocks to remotes and wait for BlocksReady
+        self.send_stage_and_wait_for_ready(rx).await?;
 
         let local_g2 = self.local_g2_blocks.count();
-        let remote_g2: usize = self
-            .remote_g2_blocks
-            .values()
-            .map(|v| v.len())
-            .sum::<usize>()
-            + self
-                .remote_g3_blocks
-                .values()
-                .map(|v| v.len())
-                .sum::<usize>(); // G3 now staged to G2
+        let remote_g2: usize = self.remote_g2_blocks.values().map(|v| v.len()).sum();
 
         self.status_tx
             .send(OnboardingStatus::Prepared {
@@ -781,23 +833,12 @@ impl InitiatorSession {
     }
 
     /// Full mode: Stage G3→G2 + pull remote G2→local G2.
-    async fn full_mode(&mut self) -> Result<()> {
+    async fn full_mode(&mut self, rx: &mut mpsc::Receiver<OnboardMessage>) -> Result<()> {
         // Stage local G3→G2
         self.stage_local_g3_to_g2().await?;
 
-        // Send StageBlocks to remotes for their G3 sequence hashes
-        for (remote, sequence_hashes) in &self.remote_g3_blocks {
-            self.transport
-                .send(
-                    *remote,
-                    OnboardMessage::StageBlocks {
-                        requester: self.instance_id,
-                        session_id: self.session_id,
-                        stage_hashes: sequence_hashes.clone(),
-                    },
-                )
-                .await?;
-        }
+        // Send StageBlocks to remotes and wait for BlocksReady before pulling
+        self.send_stage_and_wait_for_ready(rx).await?;
 
         // Pull remote G2→local G2 via RDMA (both original G2 and newly staged from G3)
         self.pull_remote_blocks().await?;
@@ -839,47 +880,12 @@ impl InitiatorSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3→G2 staging"))?;
 
-        let src_ids: Vec<BlockId> = self
-            .local_g3_blocks
-            .blocks()
-            .iter()
-            .map(|b| b.block_id())
-            .collect();
+        let result =
+            staging::stage_g3_to_g2(&self.local_g3_blocks, &self.g2_manager, &**parallel_worker)
+                .await?;
 
-        // Allocate G2 blocks
-        let dst_blocks = self
-            .g2_manager
-            .allocate_blocks(src_ids.len())
-            .ok_or_else(|| anyhow::anyhow!("Failed to allocate G2 blocks"))?;
-
-        let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
-
-        // Execute transfer
-        let notification = parallel_worker.execute_local_transfer(
-            LogicalLayoutHandle::G3,
-            LogicalLayoutHandle::G2,
-            Arc::from(src_ids),
-            Arc::from(dst_ids.clone()),
-            TransferOptions::default(),
-        )?;
-
-        notification.await?;
-
-        // Register new G2 blocks with G3 metadata
-        let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
-            .into_iter()
-            .zip(self.local_g3_blocks.blocks().iter())
-            .map(|(dst, src)| {
-                let complete = dst
-                    .stage(src.sequence_hash(), self.g2_manager.block_size())
-                    .expect("block size mismatch");
-                self.g2_manager.register_block(complete)
-            })
-            .collect();
-
-        // Clear G3 blocks (take_all releases them) and add new G2 blocks
         let _ = self.local_g3_blocks.take_all();
-        self.local_g2_blocks.extend(new_g2_blocks);
+        self.local_g2_blocks.extend(result.new_g2_blocks);
 
         Ok(())
     }
@@ -1014,15 +1020,19 @@ impl InitiatorSession {
         // This ensures correct positional correspondence for G2→G1 transfer
         all_blocks.sort_by_key(|b| b.sequence_hash().position());
 
-        // Validate contiguous positions - catches ordering bugs before data corruption
+        // Validate contiguous positions - catches ordering bugs before data corruption.
+        // If validation fails, we still proceed with sorted blocks because:
+        // 1. Sorted order is strictly safer than unsorted for G2→G1 transfer
+        // 2. Non-contiguous positions indicate an upstream aggregation bug, not a
+        //    sorting bug — failing here would discard valid cached data
+        // 3. The consumer (G1 transfer) handles sparse blocks correctly
         let seq_hashes: Vec<SequenceHash> = all_blocks.iter().map(|b| b.sequence_hash()).collect();
         if let Err(e) = validate_contiguous_positions(&seq_hashes) {
-            tracing::error!(
+            tracing::warn!(
                 session_id = %self.session_id,
                 error = %e,
-                "Block position validation failed - potential data corruption avoided"
+                "Block positions are not contiguous — proceeding with sorted order"
             );
-            // The sorted order is still safer than unsorted even if validation fails
         }
 
         let matched_blocks = all_blocks.len();
@@ -1041,7 +1051,7 @@ impl InitiatorSession {
                     match cmd {
                         SessionControl::Prepare => {
                             if self.mode == StagingMode::Hold {
-                                self.prepare_mode().await?;
+                                self.prepare_mode(&mut rx).await?;
                                 self.mode = StagingMode::Prepare;
                             }
                         }

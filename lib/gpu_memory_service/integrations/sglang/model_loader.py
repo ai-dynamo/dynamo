@@ -14,13 +14,16 @@ Usage:
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 import torch
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
+from gpu_memory_service.integrations.common.utils import (
+    setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
+)
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
+    patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
 
@@ -28,9 +31,13 @@ logger = logging.getLogger(__name__)
 
 # Apply patches at module import time.
 # This module is only imported when load_format="gms" is used.
+# Because SGLang scheduler processes use multiprocessing spawn, these patches
+# must run inside the child process.  The import chain that triggers this is:
+#   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
+patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
 
@@ -45,7 +52,10 @@ class GMSModelLoader:
         if self._default_loader is None:
             from sglang.srt.model_loader.loader import DefaultModelLoader
 
-            config = replace(self.load_config, load_format="auto")
+            config = strip_gms_model_loader_config(
+                self.load_config,
+                load_format="auto",
+            )
             self._default_loader = DefaultModelLoader(config)
         return self._default_loader
 
@@ -119,7 +129,10 @@ class GMSModelLoader:
         with meta_device:
             model = get_model(
                 model_config=model_config,
-                load_config=replace(self.load_config, load_format="dummy"),
+                load_config=strip_gms_model_loader_config(
+                    self.load_config,
+                    load_format="dummy",
+                ),
                 device_config=device_config,
             )
 

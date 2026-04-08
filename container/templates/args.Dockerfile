@@ -6,18 +6,14 @@
 ##########################
 #### Build Arguments #####
 ##########################
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
+# TARGETARCH is set automatically by Docker BuildKit for every --platform build.
+# It must NOT be declared in the global scope (before any FROM) — doing so shadows
+# the automatic per-platform value that BuildKit injects.
 #
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+# In each stage that needs it, re-declare with:  ARG TARGETARCH
 #
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH={{ platform }}
-ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
+# ARCH_ALT (x86_64 / aarch64) is computed inline in RUN steps:
+#   ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 ARG DEVICE={{ device }}
 {% if device == "cuda" -%}
 {% set device_key = device + cuda_version -%}
@@ -41,10 +37,13 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
+{% elif platform == "multi" %}
+{# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
+{# in wheel_builder.Dockerfile using TARGETARCH. No static ARG needed here.         #}
 {% else %}
-ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_${ARCH_ALT}
+ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "amd64" else "aarch64" }}
 {% endif %}
 
 # Build configuration
@@ -67,7 +66,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-ARG NIXL_REF={{ context.dynamo.nixl_ref }}
+ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
@@ -80,6 +79,13 @@ ARG FRAMEWORK={{ framework }}
 {% if target == "frontend" %}
 ARG EPP_IMAGE={{ context.dynamo.epp_image }}
 ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
+{% endif %}
+
+{% if target == "planner" %}
+ARG PLANNER_BUILD_IMAGE={{ context.dynamo.planner_build_image }}
+ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
+ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
+ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% endif %}
 
 {% if framework == "vllm" -%}

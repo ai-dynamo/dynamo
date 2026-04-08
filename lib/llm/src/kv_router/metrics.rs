@@ -44,7 +44,7 @@ use std::time::Duration;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, labels, name_prefix, router_request, routing_overhead,
+    frontend_service, labels, name_prefix, router, router_request, routing_overhead,
 };
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
@@ -263,26 +263,26 @@ impl RoutingOverheadMetrics {
     pub fn observe(
         &self,
         hash_elapsed: Duration,
-        find_matches_elapsed: Duration,
         seq_hash_elapsed: Duration,
+        find_matches_elapsed: Duration,
         total_elapsed: Duration,
     ) {
         self.block_hashing
             .observe(hash_elapsed.as_secs_f64() * 1000.0);
+        self.seq_hashing
+            .observe(seq_hash_elapsed.saturating_sub(hash_elapsed).as_secs_f64() * 1000.0);
         self.indexer_find_matches.observe(
             find_matches_elapsed
-                .saturating_sub(hash_elapsed)
+                .saturating_sub(seq_hash_elapsed)
                 .as_secs_f64()
                 * 1000.0,
         );
-        self.seq_hashing.observe(
-            seq_hash_elapsed
+        self.scheduling.observe(
+            total_elapsed
                 .saturating_sub(find_matches_elapsed)
                 .as_secs_f64()
                 * 1000.0,
         );
-        self.scheduling
-            .observe(total_elapsed.saturating_sub(seq_hash_elapsed).as_secs_f64() * 1000.0);
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
     }
 }
@@ -315,7 +315,7 @@ impl RoutingOverheadMetrics {
 /// # Why component-scoped
 ///
 /// These metrics MUST be registered through the Component hierarchy (not a standalone
-/// registry). In hierarchical planner deployments, the frontend's router is the global
+/// registry). In global planner deployments, the frontend's router is the global
 /// entry point, but each worker pool has its own local router (e.g. prefill pool,
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
@@ -403,6 +403,54 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
+    }
+}
+
+pub struct RemoteIndexerMetrics {
+    pub query_failures_total: prometheus::IntCounter,
+    pub write_failures_total: prometheus::IntCounter,
+}
+
+static REMOTE_INDEXER_METRICS: OnceLock<Arc<RemoteIndexerMetrics>> = OnceLock::new();
+
+impl RemoteIndexerMetrics {
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        REMOTE_INDEXER_METRICS
+            .get_or_init(|| {
+                let instance_id = component.drt().discovery().instance_id();
+                let router_id = instance_id.to_string();
+                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+
+                let metrics = component.metrics();
+                let query_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_QUERY_FAILURES_TOTAL,
+                        "Total number of remote indexer overlap queries that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_query_failures_total");
+                let write_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_WRITE_FAILURES_TOTAL,
+                        "Total number of remote indexer routing-decision writes that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_write_failures_total");
+
+                Arc::new(Self {
+                    query_failures_total,
+                    write_failures_total,
+                })
+            })
+            .clone()
+    }
+
+    pub fn increment_query_failures(&self) {
+        self.query_failures_total.inc();
+    }
+
+    pub fn increment_write_failures(&self) {
+        self.write_failures_total.inc();
     }
 }
 
@@ -557,7 +605,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             total: make("test_total_ms"),
         };
 
-        // Out-of-order durations: each phase < previous (would panic without saturating_sub)
+        // Out-of-order cumulative durations: each phase < previous (would panic without saturating_sub)
         metrics.observe(
             Duration::from_millis(10),
             Duration::from_millis(5),

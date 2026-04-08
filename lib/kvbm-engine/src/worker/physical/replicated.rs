@@ -46,12 +46,14 @@ use std::sync::Arc;
 /// - [`WorkerTransfers`]: Specialized routing based on source/destination tiers
 /// - [`ParallelWorker`]: Delegates to inner SpmdWorker
 /// - [`ObjectBlockOps`]: Routes to rank 0 only (it has the G2 layout for resolution)
+#[allow(dead_code)]
 pub struct ReplicatedDataWorker {
     inner: Arc<PhysicalWorker>,
     runtime: Arc<KvbmRuntime>,
     collective: Arc<dyn CollectiveOps>,
 }
 
+#[allow(dead_code)]
 impl ReplicatedDataWorker {
     /// Create a new ReplicatedDataWorker.
     ///
@@ -88,6 +90,7 @@ impl ReplicatedDataWorker {
         self.inner.rank().expect("Worker must have a rank")
     }
 
+    #[expect(unused_variables)]
     fn broadcast(
         &self,
         xfer_completion: TransferCompleteNotification,
@@ -143,6 +146,7 @@ impl WorkerTransfers for ReplicatedDataWorker {
         }
     }
 
+    #[expect(unused_variables)]
     fn execute_remote_onboard(
         &self,
         src: RemoteDescriptor,
@@ -153,6 +157,7 @@ impl WorkerTransfers for ReplicatedDataWorker {
         unimplemented!()
     }
 
+    #[expect(unused_variables)]
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
@@ -176,6 +181,7 @@ impl WorkerTransfers for ReplicatedDataWorker {
         self.inner.has_remote_metadata(instance_id)
     }
 
+    #[expect(unused_variables)]
     fn execute_remote_onboard_for_instance(
         &self,
         instance_id: InstanceId,

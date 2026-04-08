@@ -13,6 +13,8 @@ use kvbm_engine::offload::TransferHandle;
 use kvbm_common::{BlockId, SequenceHash};
 use kvbm_logical::KvbmSequenceHashProvider;
 
+use crate::common::{AssignedBlockId, BlockAssignmentOps, BlockAssignmentStorage};
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -530,29 +532,50 @@ impl std::fmt::Debug for RequestSlot {
 #[derive(Debug, Default)]
 pub struct BlockAssignments {
     /// The blocks that have been aligned to the sequence.
-    pub assigned_blocks: Vec<(SequenceHash, BlockId)>,
+    pub assigned_blocks: Vec<AssignedBlockId>,
 
     pub unassigned_blocks: Vec<BlockId>,
-    // /// The range of blocks with device matches. Matched by the scheduler. Provides by `get_num_new_matched_tokens`.
-    // pub device_matches: Option<Range<usize>>,
+}
 
-    // /// The range of blocks with host matches. Matched by the connector, match performed during `get_num_new_matched_tokens`.
-    // pub external_matches: Option<Range<usize>>,
+impl BlockAssignmentStorage for BlockAssignments {
+    type Unassigned = BlockId;
+    type Assigned = AssignedBlockId;
 
-    // /// The range of blocks with prefill tokens. Essentially the difference between the ISL and the total matches.
-    // pub prefill_tokens: Option<Range<usize>>,
+    fn assigned(&self) -> &[Self::Assigned] {
+        &self.assigned_blocks
+    }
 
-    // /// The range of blocks with decode tokens. Essentially the difference between the ISL and the total matches.
-    // /// The tail block with partial prefill is considered to be a decode block.
-    // pub decode_tokens: Option<Range<usize>>,
+    fn unassigned(&self) -> &[Self::Unassigned] {
+        &self.unassigned_blocks
+    }
+
+    fn unassigned_mut(&mut self) -> &mut Vec<Self::Unassigned> {
+        &mut self.unassigned_blocks
+    }
+
+    fn extend_assigned(&mut self, blocks: impl IntoIterator<Item = Self::Assigned>) {
+        self.assigned_blocks.extend(blocks);
+    }
+
+    fn take_unassigned(&mut self) -> Vec<Self::Unassigned> {
+        std::mem::take(&mut self.unassigned_blocks)
+    }
+
+    fn extend_unassigned(&mut self, blocks: impl IntoIterator<Item = Self::Unassigned>) {
+        self.unassigned_blocks.extend(blocks);
+    }
+
+    fn clear(&mut self) {
+        self.assigned_blocks.clear();
+        self.unassigned_blocks.clear();
+    }
 }
 
 impl RequestSlot {
     /// Assign physical block_ids to logical sequence hashes.
     ///
-    /// Block IDs are paired with sequence hashes by skipping already assigned logical blocks,
-    /// then applying new blocks in the order provided. Any extra block_ids (beyond what can
-    /// be paired with sequence hashes) are assigned to `unassigned_blocks`.
+    /// Delegates to [`BlockAssignmentOps::apply_new_blocks`] which pairs blocks with
+    /// sequence hashes in order, storing excess as unassigned.
     ///
     /// # Returns
     /// The range of indices into `assigned_blocks` for the newly assigned blocks.
@@ -565,29 +588,8 @@ impl RequestSlot {
             self.block_matches.unassigned_blocks.len(),
             self.sequence.blocks().len()
         );
-        let start_idx = self.block_matches.assigned_blocks.len();
 
-        // first apply unassigned blocks
-        self.block_matches.unassigned_blocks.extend(block_ids);
-        let block_ids = std::mem::take(&mut self.block_matches.unassigned_blocks);
-
-        let mut block_ids = block_ids;
-        let mut drain = block_ids.drain(0..);
-        let newly_assigned_blocks = self
-            .sequence
-            .blocks()
-            .iter()
-            .skip(start_idx)
-            .zip(&mut drain)
-            .map(|(b, id)| (b.kvbm_sequence_hash(), id))
-            .collect::<Vec<_>>();
-
-        self.block_matches
-            .assigned_blocks
-            .extend(newly_assigned_blocks);
-        self.block_matches.unassigned_blocks.extend(drain);
-
-        let end_idx = self.block_matches.assigned_blocks.len();
+        let range = self.block_matches.apply_new_blocks(block_ids, self.sequence.blocks());
 
         tracing::debug!(
             "after applying new blocks: assigned_blocks_count: {}; unassigned_blocks_count: {}; token_block_count: {}",
@@ -596,79 +598,15 @@ impl RequestSlot {
             self.sequence.blocks().len()
         );
 
-        start_idx..end_idx
+        range
     }
 
-    /// Filter the block_ids to only include those that are not already known (assigned or unassigned).
+    /// Filter block_ids to only those not already known (assigned or unassigned).
     ///
-    /// It is expected that `all_block_ids` is in order and at the first miss, all remaining block_ids
-    /// should be returned. This will be validated.
-    ///
-    /// The method validates that the prefix of `all_block_ids` matches:
-    /// 1. First, the already assigned block IDs (in order)
-    /// 2. Then, the unassigned block IDs (in order)
-    ///
-    /// If there's a mismatch, this indicates a bug and will panic.
-    ///
-    /// # Arguments
-    /// * `all_block_ids` - The complete list of block IDs from the scheduler, in order.
-    ///
-    /// # Returns
-    /// The block IDs that are not yet known (the suffix after assigned + unassigned).
-    ///
-    /// # Panics
-    /// Panics if the prefix of `all_block_ids` doesn't match the assigned and unassigned block IDs in order.
+    /// Delegates to [`BlockAssignmentOps::filter_block_ids`] which validates prefix
+    /// consistency and returns the suffix of unknown blocks.
     pub fn filter_block_ids(&self, all_block_ids: Vec<BlockId>) -> Vec<BlockId> {
-        let num_assigned = self.block_matches.assigned_blocks.len();
-        let num_unassigned = self.block_matches.unassigned_blocks.len();
-        let num_known = num_assigned + num_unassigned;
-
-        // If no blocks are known, return all block_ids
-        if num_known == 0 {
-            return all_block_ids;
-        }
-
-        // Validate that we have enough block_ids
-        assert!(
-            all_block_ids.len() >= num_known,
-            "all_block_ids length ({}) is less than number of known blocks (assigned={} + unassigned={})",
-            all_block_ids.len(),
-            num_assigned,
-            num_unassigned
-        );
-
-        // Validate that the prefix matches assigned blocks
-        for (i, ((_hash, assigned_id), provided_id)) in self
-            .block_matches
-            .assigned_blocks
-            .iter()
-            .zip(all_block_ids.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                *assigned_id, *provided_id,
-                "Assigned block ID mismatch at index {}: assigned={}, provided={}",
-                i, assigned_id, provided_id
-            );
-        }
-
-        // Validate that the next portion matches unassigned blocks
-        for (i, (unassigned_id, provided_id)) in self
-            .block_matches
-            .unassigned_blocks
-            .iter()
-            .zip(all_block_ids.iter().skip(num_assigned))
-            .enumerate()
-        {
-            assert_eq!(
-                *unassigned_id, *provided_id,
-                "Unassigned block ID mismatch at index {}: unassigned={}, provided={}",
-                i, unassigned_id, provided_id
-            );
-        }
-
-        // Return the suffix (block_ids not yet known)
-        all_block_ids.into_iter().skip(num_known).collect()
+        self.block_matches.filter_block_ids(all_block_ids)
     }
 
     pub fn get_next_block_mappings(
@@ -676,27 +614,21 @@ impl RequestSlot {
         num_scheduled_tokens: usize,
     ) -> Vec<(BlockId, SequenceHash)> {
         let evaluated_blocks = self.evaluated_blocks();
-        let num_blocks_after_evaluation =
-            (self.evaluated_tokens + num_scheduled_tokens) / self.block_size();
-        let new_blocks_to_evaluate = num_blocks_after_evaluation - evaluated_blocks;
 
         tracing::debug!(
             evaluated_tokens = self.evaluated_tokens,
             num_scheduled_tokens,
             evaluated_blocks,
-            num_blocks_after_evaluation,
-            new_blocks_to_evaluate,
             assigned_blocks = self.block_matches.assigned_blocks.len(),
             "get_next_block_mappings: computing offload candidates"
         );
 
-        self.block_matches
-            .assigned_blocks
-            .iter()
-            .skip(evaluated_blocks)
-            .take(new_blocks_to_evaluate)
-            .map(|(hash, block_id)| (*block_id, *hash))
-            .collect::<Vec<_>>()
+        self.block_matches.get_next_block_mappings(
+            evaluated_blocks,
+            self.evaluated_tokens,
+            num_scheduled_tokens,
+            self.block_size(),
+        )
     }
 }
 
@@ -997,8 +929,7 @@ impl RequestSlot {
     /// resumed request's new block allocations.
     pub fn reset_for_preemption(&mut self) {
         // Clear block assignments (BlockIds are now invalid - freed by vLLM)
-        self.block_matches.assigned_blocks.clear();
-        self.block_matches.unassigned_blocks.clear();
+        self.block_matches.clear();
 
         // Reset evaluation tracking
         self.evaluated_tokens = 0;
@@ -1176,6 +1107,7 @@ impl RequestSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::AssignedBlock;
 
     #[cfg(test)]
     mod apply_new_blocks_tests {
@@ -1251,7 +1183,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 1);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1269,7 +1201,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 1);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(slot.block_matches.unassigned_blocks, vec![200]);
         }
@@ -1287,15 +1219,15 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 3);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[2],
-                (expected_hashes[2], 300)
+                AssignedBlockId::new(expected_hashes[2], 300)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1313,7 +1245,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 1);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1331,15 +1263,15 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 3);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[2],
-                (expected_hashes[2], 300)
+                AssignedBlockId::new(expected_hashes[2], 300)
             );
             assert_eq!(slot.block_matches.unassigned_blocks, vec![400, 500]);
         }
@@ -1376,11 +1308,11 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 2);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1399,11 +1331,11 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 2);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
             assert_eq!(slot.block_matches.unassigned_blocks, vec![300, 400]);
         }
@@ -1422,7 +1354,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 1);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1445,11 +1377,11 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 2);
             assert_eq!(
                 slot.block_matches.assigned_blocks[0],
-                (expected_hashes[0], 100)
+                AssignedBlockId::new(expected_hashes[0], 100)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
 
             // Second call: assign next 2 blocks
@@ -1460,11 +1392,11 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 4);
             assert_eq!(
                 slot.block_matches.assigned_blocks[2],
-                (expected_hashes[2], 300)
+                AssignedBlockId::new(expected_hashes[2], 300)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[3],
-                (expected_hashes[3], 400)
+                AssignedBlockId::new(expected_hashes[3], 400)
             );
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
@@ -1490,7 +1422,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 3);
             assert_eq!(
                 slot.block_matches.assigned_blocks[2],
-                (expected_hashes[2], 300)
+                AssignedBlockId::new(expected_hashes[2], 300)
             );
             assert_eq!(slot.block_matches.unassigned_blocks, vec![400, 500]);
         }
@@ -1517,7 +1449,7 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 2);
             assert_eq!(
                 slot.block_matches.assigned_blocks[1],
-                (expected_hashes[1], 200)
+                AssignedBlockId::new(expected_hashes[1], 200)
             );
             assert_eq!(slot.block_matches.unassigned_blocks, vec![300, 400]);
         }
@@ -1588,7 +1520,7 @@ mod tests {
             for (i, expected_hash) in expected_hashes.iter().enumerate().take(10) {
                 assert_eq!(
                     slot.block_matches.assigned_blocks[i],
-                    (*expected_hash, (i + 1) * 100)
+                    AssignedBlockId::new(*expected_hash, (i + 1) * 100)
                 );
             }
             assert!(slot.block_matches.unassigned_blocks.is_empty());
@@ -1605,15 +1537,15 @@ mod tests {
 
             assert_eq!(range, 0..5);
             // Verify each (hash, block_id) pair is in the correct order
-            assert_eq!(slot.block_matches.assigned_blocks[0].1, 999);
-            assert_eq!(slot.block_matches.assigned_blocks[1].1, 888);
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 777);
-            assert_eq!(slot.block_matches.assigned_blocks[3].1, 666);
-            assert_eq!(slot.block_matches.assigned_blocks[4].1, 555);
+            assert_eq!(slot.block_matches.assigned_blocks[0].block_id(), 999);
+            assert_eq!(slot.block_matches.assigned_blocks[1].block_id(), 888);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 777);
+            assert_eq!(slot.block_matches.assigned_blocks[3].block_id(), 666);
+            assert_eq!(slot.block_matches.assigned_blocks[4].block_id(), 555);
 
             // And hashes match expected sequence order
             for (i, expected_hash) in expected_hashes.iter().enumerate().take(5) {
-                assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
+                assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
             }
         }
 
@@ -1659,8 +1591,8 @@ mod tests {
                         assert!(slot.block_matches.unassigned_blocks.is_empty());
 
                         for (i, expected_hash) in expected_hashes.iter().enumerate().take(fewer) {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
-                            assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
                     }
 
@@ -1678,8 +1610,8 @@ mod tests {
                         for (i, expected_hash) in
                             expected_hashes.iter().enumerate().take(available_blocks)
                         {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
-                            assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
                     }
 
@@ -1699,8 +1631,8 @@ mod tests {
                         for (i, expected_hash) in
                             expected_hashes.iter().enumerate().take(available_blocks)
                         {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
-                            assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
 
                         let expected_unassigned: Vec<BlockId> =
@@ -1748,11 +1680,11 @@ mod tests {
             // Verify the previously unassigned blocks (600, 700) were assigned to blocks 5, 6
             assert_eq!(
                 slot.block_matches.assigned_blocks[5],
-                (expected_hashes_after[5], 600)
+                AssignedBlockId::new(expected_hashes_after[5], 600)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[6],
-                (expected_hashes_after[6], 700)
+                AssignedBlockId::new(expected_hashes_after[6], 700)
             );
 
             // New blocks (800, 900) should be unassigned since there was no room
@@ -1788,16 +1720,16 @@ mod tests {
             // Verify unassigned block (400) was assigned to block 3
             assert_eq!(
                 slot.block_matches.assigned_blocks[3],
-                (expected_hashes_after[3], 400)
+                AssignedBlockId::new(expected_hashes_after[3], 400)
             );
             // Verify new blocks assigned to blocks 4, 5
             assert_eq!(
                 slot.block_matches.assigned_blocks[4],
-                (expected_hashes_after[4], 500)
+                AssignedBlockId::new(expected_hashes_after[4], 500)
             );
             assert_eq!(
                 slot.block_matches.assigned_blocks[5],
-                (expected_hashes_after[5], 600)
+                AssignedBlockId::new(expected_hashes_after[5], 600)
             );
 
             assert!(slot.block_matches.unassigned_blocks.is_empty());
@@ -1858,7 +1790,7 @@ mod tests {
             // First old unassigned block (400) should get assigned
             assert_eq!(
                 slot.block_matches.assigned_blocks[3],
-                (expected_hashes_after[3], 400)
+                AssignedBlockId::new(expected_hashes_after[3], 400)
             );
 
             // Rest should be unassigned in order: second old unassigned, then new ones
@@ -1912,9 +1844,9 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks.len(), 5);
 
             // First 3 unassigned (300, 400, 500) should be assigned
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 300);
-            assert_eq!(slot.block_matches.assigned_blocks[3].1, 400);
-            assert_eq!(slot.block_matches.assigned_blocks[4].1, 500);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 300);
+            assert_eq!(slot.block_matches.assigned_blocks[3].block_id(), 400);
+            assert_eq!(slot.block_matches.assigned_blocks[4].block_id(), 500);
 
             // Last 2 should still be unassigned
             assert_eq!(slot.block_matches.unassigned_blocks, vec![600, 700]);
@@ -1930,7 +1862,7 @@ mod tests {
             slot.apply_new_blocks(block_ids_1);
 
             // 10 should be assigned, rest unassigned in order
-            assert_eq!(slot.block_matches.assigned_blocks[0].1, 10);
+            assert_eq!(slot.block_matches.assigned_blocks[0].block_id(), 10);
             assert_eq!(
                 slot.block_matches.unassigned_blocks,
                 vec![20, 30, 40, 50, 60]
@@ -1943,8 +1875,8 @@ mod tests {
 
             // Apply empty list - should assign first 2 from unassigned (20, 30)
             slot.apply_new_blocks(vec![]);
-            assert_eq!(slot.block_matches.assigned_blocks[1].1, 20);
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 30);
+            assert_eq!(slot.block_matches.assigned_blocks[1].block_id(), 20);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 30);
             assert_eq!(slot.block_matches.unassigned_blocks, vec![40, 50, 60]);
 
             // Add 1 new block ID
@@ -1956,7 +1888,7 @@ mod tests {
             slot.apply_new_blocks(block_ids_2);
 
             // Should assign 40 (first from old unassigned), not 70 (new)
-            assert_eq!(slot.block_matches.assigned_blocks[3].1, 40);
+            assert_eq!(slot.block_matches.assigned_blocks[3].block_id(), 40);
             assert_eq!(slot.block_matches.unassigned_blocks, vec![50, 60, 70]);
         }
 
@@ -1986,7 +1918,7 @@ mod tests {
 
             assert_eq!(range_2, 2..3);
             assert_eq!(slot.block_matches.assigned_blocks.len(), 3);
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 300);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 300);
             assert_eq!(slot.block_matches.unassigned_blocks, vec![400, 500]);
         }
 
@@ -2012,9 +1944,9 @@ mod tests {
 
             assert_eq!(range, 2..5);
             assert_eq!(slot.block_matches.assigned_blocks.len(), 5);
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 300);
-            assert_eq!(slot.block_matches.assigned_blocks[3].1, 400);
-            assert_eq!(slot.block_matches.assigned_blocks[4].1, 500);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 300);
+            assert_eq!(slot.block_matches.assigned_blocks[3].block_id(), 400);
+            assert_eq!(slot.block_matches.assigned_blocks[4].block_id(), 500);
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
 
@@ -2040,7 +1972,7 @@ mod tests {
             let range = slot.apply_new_blocks(block_ids_2);
 
             assert_eq!(range, 3..4);
-            assert_eq!(slot.block_matches.assigned_blocks[3].1, 400);
+            assert_eq!(slot.block_matches.assigned_blocks[3].block_id(), 400);
             assert!(slot.block_matches.unassigned_blocks.is_empty());
         }
 
@@ -2266,7 +2198,7 @@ mod tests {
             // Second call: unassigned 300 gets assigned, 400 stays unassigned, 500 new unassigned
             slot.apply_new_blocks(vec![500]);
             assert_eq!(slot.block_matches.assigned_blocks.len(), 3);
-            assert_eq!(slot.block_matches.assigned_blocks[2].1, 300);
+            assert_eq!(slot.block_matches.assigned_blocks[2].block_id(), 300);
             assert_eq!(slot.block_matches.unassigned_blocks, vec![400, 500]);
 
             // Now filter should skip assigned (100, 200, 300) + unassigned (400, 500)
@@ -3065,6 +2997,138 @@ mod tests {
             // Try to prepare onboard - should fail
             let result = slot.txn_prepare_to_onboard(num_computed_tokens, find_session);
             assert!(result.is_err());
+        }
+    }
+
+    #[cfg(test)]
+    mod get_next_block_mappings_tests {
+        use super::*;
+
+        const TEST_BLOCK_SIZE: usize = 4;
+
+        fn create_test_slot(num_complete_blocks: usize, partial_tokens: usize) -> RequestSlot {
+            let total_tokens = num_complete_blocks * TEST_BLOCK_SIZE + partial_tokens;
+            let tokens: Vec<u32> = (0..total_tokens as u32).collect();
+
+            let request = Request::new(
+                "test-request",
+                tokens,
+                None,
+                None,
+                None,
+            );
+
+            RequestSlot::new(request, TEST_BLOCK_SIZE).expect("Failed to create RequestSlot")
+        }
+
+        fn get_expected_hashes(slot: &RequestSlot) -> Vec<SequenceHash> {
+            slot.sequence
+                .blocks()
+                .iter()
+                .map(|b| b.kvbm_sequence_hash())
+                .collect()
+        }
+
+        #[test]
+        fn test_no_assigned_blocks_returns_empty() {
+            let slot = create_test_slot(4, 0);
+            // No blocks assigned, so nothing to map
+            let mappings = slot.get_next_block_mappings(16);
+            assert!(mappings.is_empty());
+        }
+
+        #[test]
+        fn test_no_scheduled_tokens_returns_empty() {
+            let mut slot = create_test_slot(4, 0);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+            let mappings = slot.get_next_block_mappings(0);
+            assert!(mappings.is_empty());
+        }
+
+        #[test]
+        fn test_one_block_worth_of_tokens() {
+            let mut slot = create_test_slot(4, 0);
+            let expected_hashes = get_expected_hashes(&slot);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+
+            // Schedule exactly 1 block worth of tokens (4 tokens)
+            let mappings = slot.get_next_block_mappings(TEST_BLOCK_SIZE);
+            assert_eq!(mappings.len(), 1);
+            assert_eq!(mappings[0].0, 100); // BlockId
+            assert_eq!(mappings[0].1, expected_hashes[0]); // SequenceHash
+        }
+
+        #[test]
+        fn test_multiple_blocks_worth_of_tokens() {
+            let mut slot = create_test_slot(4, 0);
+            let expected_hashes = get_expected_hashes(&slot);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+
+            // Schedule 3 blocks worth of tokens
+            let mappings = slot.get_next_block_mappings(TEST_BLOCK_SIZE * 3);
+            assert_eq!(mappings.len(), 3);
+            assert_eq!(mappings[0], (100, expected_hashes[0]));
+            assert_eq!(mappings[1], (200, expected_hashes[1]));
+            assert_eq!(mappings[2], (300, expected_hashes[2]));
+        }
+
+        #[test]
+        fn test_partial_block_tokens_not_included() {
+            let mut slot = create_test_slot(4, 0);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+
+            // Schedule less than a full block
+            let mappings = slot.get_next_block_mappings(TEST_BLOCK_SIZE - 1);
+            assert!(mappings.is_empty());
+        }
+
+        #[test]
+        fn test_incremental_evaluation() {
+            let mut slot = create_test_slot(4, 0);
+            let expected_hashes = get_expected_hashes(&slot);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+
+            // First: evaluate 2 blocks worth
+            let mappings1 = slot.get_next_block_mappings(TEST_BLOCK_SIZE * 2);
+            assert_eq!(mappings1.len(), 2);
+            assert_eq!(mappings1[0], (100, expected_hashes[0]));
+            assert_eq!(mappings1[1], (200, expected_hashes[1]));
+
+            // Advance evaluated tokens
+            slot.advance_evaluated_tokens(TEST_BLOCK_SIZE * 2);
+
+            // Second: evaluate 1 more block
+            let mappings2 = slot.get_next_block_mappings(TEST_BLOCK_SIZE);
+            assert_eq!(mappings2.len(), 1);
+            assert_eq!(mappings2[0], (300, expected_hashes[2]));
+        }
+
+        #[test]
+        fn test_all_blocks_already_evaluated() {
+            let mut slot = create_test_slot(4, 0);
+            slot.apply_new_blocks(vec![100, 200, 300, 400]);
+
+            // Evaluate all blocks
+            slot.advance_evaluated_tokens(TEST_BLOCK_SIZE * 4);
+
+            // No more blocks to map
+            let mappings = slot.get_next_block_mappings(TEST_BLOCK_SIZE);
+            assert!(mappings.is_empty());
+        }
+
+        #[test]
+        fn test_scheduled_tokens_exceed_assigned_blocks() {
+            let mut slot = create_test_slot(4, 0);
+            let expected_hashes = get_expected_hashes(&slot);
+            // Only assign 2 of 4 blocks
+            slot.apply_new_blocks(vec![100, 200]);
+
+            // Schedule more tokens than we have blocks for
+            let mappings = slot.get_next_block_mappings(TEST_BLOCK_SIZE * 4);
+            // Should only return the 2 assigned blocks
+            assert_eq!(mappings.len(), 2);
+            assert_eq!(mappings[0], (100, expected_hashes[0]));
+            assert_eq!(mappings[1], (200, expected_hashes[1]));
         }
     }
 }

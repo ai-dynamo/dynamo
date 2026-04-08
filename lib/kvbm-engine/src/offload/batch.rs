@@ -21,17 +21,6 @@ use super::pending::PendingGuard;
 use super::queue::CancellableQueue;
 use super::source::SourceBlock;
 
-/// Helper macro to create an NVTX range when the nvtx feature is enabled.
-macro_rules! nvtx_range {
-    ($name:expr) => {{
-        #[cfg(feature = "nvtx")]
-        let _range = nvtx::range!($name);
-        #[cfg(not(feature = "nvtx"))]
-        let _range = ();
-        _range
-    }};
-}
-
 /// Timing trace for tracking block progression through pipeline stages.
 ///
 /// Each block carries a timing trace that records when it passed through
@@ -281,17 +270,16 @@ impl<T: BlockMetadata> TransferBatch<T> {
     /// Drain blocks for the given transfer ID (for cancellation).
     #[allow(dead_code)]
     pub fn drain_transfer(&mut self, transfer_id: TransferId) -> Vec<QueuedBlock<T>> {
-        let drained = Vec::new();
-        self.blocks.retain(|b| {
-            if b.transfer_id == transfer_id {
-                false // Will be moved to drained
+        let mut kept = Vec::new();
+        let mut drained = Vec::new();
+        for block in std::mem::take(&mut self.blocks) {
+            if block.transfer_id == transfer_id {
+                drained.push(block);
             } else {
-                true // Keep in batch
+                kept.push(block);
             }
-        });
-        // Re-iterate to collect drained (retain doesn't give us removed items)
-        // This is a bit inefficient but keeps the API simple
-        // In practice, cancellation is rare
+        }
+        self.blocks = kept;
         drained
     }
 }
@@ -317,192 +305,33 @@ pub struct EvalResult<T: BlockMetadata> {
     pub(crate) state: Arc<std::sync::Mutex<TransferState>>,
 }
 
-/// Input to the batch collector from policy evaluator.
-#[allow(dead_code)]
-pub type BatchInput<T> = mpsc::Sender<EvalResult<T>>;
-/// Receiver side of batch input channel.
-#[allow(dead_code)]
-pub type BatchInputRx<T> = mpsc::Receiver<EvalResult<T>>;
-
 /// Output from the batch collector to transfer executor.
 pub type BatchOutput<T> = mpsc::Sender<TransferBatch<T>>;
 /// Receiver side of batch output channel.
 pub type BatchOutputRx<T> = mpsc::Receiver<TransferBatch<T>>;
 
+/// Extract the common precondition from a batch of blocks.
+///
+/// If all blocks share the same precondition, returns it.
+/// Otherwise returns `None`.
+fn extract_common_precondition<T: BlockMetadata>(blocks: &[QueuedBlock<T>]) -> Option<EventHandle> {
+    blocks.first().and_then(|first_block| {
+        let first_precondition = first_block.state.lock().unwrap().precondition;
+        let all_same = blocks
+            .iter()
+            .all(|block| block.state.lock().unwrap().precondition == first_precondition);
+        if all_same { first_precondition } else { None }
+    })
+}
+
 /// Batch collector that accumulates blocks and flushes batches.
 ///
-/// The collector accumulates blocks from policy evaluation and groups them
-/// into batches based on the configuration. Batches are flushed when:
+/// The collector accumulates blocks from policy evaluation (via `CancellableQueue`)
+/// and groups them into batches based on the configuration. Batches are flushed when:
 /// - `max_batch_size` is reached
 /// - `flush_interval` expires and `min_batch_size` is met
 /// - Shutdown is requested
-#[allow(dead_code)]
 pub struct BatchCollector<T: BlockMetadata> {
-    config: BatchConfig,
-    /// Output channel to transfer executor
-    output_tx: BatchOutput<T>,
-    /// Current batch being built
-    current_batch: TransferBatch<T>,
-}
-
-#[allow(dead_code)]
-impl<T: BlockMetadata> BatchCollector<T> {
-    /// Create a new batch collector using mpsc channel input.
-    pub fn new(config: BatchConfig, _input_rx: BatchInputRx<T>, output_tx: BatchOutput<T>) -> Self {
-        let max_batch_size = config.max_batch_size;
-        let mut collector = Self {
-            config,
-            output_tx,
-            current_batch: TransferBatch::with_capacity(max_batch_size),
-        };
-        // Store the receiver - we'll use it in run()
-        // This is a workaround; we need to restructure for queue mode anyway
-        collector.current_batch = TransferBatch::with_capacity(max_batch_size);
-        Self {
-            config: collector.config,
-            output_tx: collector.output_tx,
-            current_batch: collector.current_batch,
-        }
-    }
-
-    /// Create a new batch collector using CancellableQueue input.
-    pub fn new_with_queue(
-        config: BatchConfig,
-        _input_queue: Arc<CancellableQueue<EvalResult<T>>>,
-        output_tx: BatchOutput<T>,
-        _cancel_rx: watch::Receiver<HashSet<TransferId>>,
-    ) -> BatchCollectorQueue<T> {
-        let max_batch_size = config.max_batch_size;
-        BatchCollectorQueue {
-            config,
-            input_queue: _input_queue,
-            output_tx,
-            cancel_rx: _cancel_rx,
-            current_batch: TransferBatch::with_capacity(max_batch_size),
-        }
-    }
-
-    /// Run the batch collector loop using channel input.
-    pub async fn run(mut self, mut input_rx: BatchInputRx<T>) {
-        let mut flush_timer = tokio::time::interval(self.config.flush_interval);
-        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                // Receive evaluation results
-                result = input_rx.recv() => {
-                    match result {
-                        Some(eval_result) => {
-                            self.handle_eval_result(eval_result).await;
-                        }
-                        None => {
-                            // Input channel closed, flush remaining and exit
-                            self.flush_if_not_empty().await;
-                            break;
-                        }
-                    }
-                }
-                // Periodic flush timer
-                _ = flush_timer.tick() => {
-                    self.try_flush().await;
-                }
-            }
-        }
-    }
-
-    /// Handle an evaluation result.
-    ///
-    /// Adds passed blocks to the current batch and flushes when:
-    /// - max_batch_size is reached, OR
-    /// - all blocks for a transfer have been processed (per-transfer sentinel flush)
-    async fn handle_eval_result(&mut self, result: EvalResult<T>) {
-        // Count blocks processed in this eval result (both passed and filtered)
-        let blocks_in_eval = result.passed_blocks.len() + result.filtered_ids.len();
-
-        // Add passed blocks to current batch
-        for block in result.passed_blocks {
-            self.current_batch.push(block);
-
-            // Flush if we've reached max batch size
-            if self.current_batch.len() >= self.config.max_batch_size {
-                self.flush().await;
-            }
-        }
-
-        // Update transfer state and check if transfer is complete (sentinel flush)
-        let should_flush = {
-            let mut state = result.state.lock().unwrap();
-            state.blocks_processed += blocks_in_eval;
-            // Flush when all blocks for this transfer have been processed
-            state.blocks_processed >= state.total_expected_blocks && state.total_expected_blocks > 0
-        };
-
-        // Flush immediately when a transfer completes to avoid waiting for min_batch_size
-        if should_flush && !self.current_batch.is_empty() {
-            tracing::debug!(
-                transfer_id = %result.transfer_id,
-                batch_size = self.current_batch.len(),
-                "Per-transfer sentinel flush"
-            );
-            self.flush().await;
-        }
-    }
-
-    /// Try to flush if minimum batch size is reached.
-    async fn try_flush(&mut self) {
-        if self.current_batch.len() >= self.config.min_batch_size {
-            self.flush().await;
-        }
-    }
-
-    /// Flush current batch if not empty.
-    async fn flush_if_not_empty(&mut self) {
-        if !self.current_batch.is_empty() {
-            self.flush().await;
-        }
-    }
-
-    /// Flush the current batch to the output channel.
-    async fn flush(&mut self) {
-        nvtx_range!("offload::batch");
-        if self.current_batch.is_empty() {
-            return;
-        }
-
-        let mut batch = std::mem::replace(
-            &mut self.current_batch,
-            TransferBatch::with_capacity(self.config.max_batch_size),
-        );
-
-        // Mark batch as ready (single O(1) call, not per-block)
-        batch.timing.mark_batched();
-
-        // Extract precondition from blocks' transfer states
-        // If all blocks share the same precondition, set it on the batch
-        let precondition = batch.blocks.first().and_then(|first_block| {
-            let first_precondition = first_block.state.lock().unwrap().precondition;
-
-            // Check if all blocks share the same precondition
-            let all_same = batch.blocks.iter().all(|block| {
-                let state = block.state.lock().unwrap();
-                state.precondition == first_precondition
-            });
-
-            if all_same { first_precondition } else { None }
-        });
-
-        batch.precondition = precondition;
-
-        // Send to transfer executor
-        if self.output_tx.send(batch).await.is_err() {
-            // Output channel closed, log and continue
-            tracing::warn!("Batch output channel closed");
-        }
-    }
-}
-
-/// Batch collector variant using CancellableQueue input.
-pub struct BatchCollectorQueue<T: BlockMetadata> {
     config: BatchConfig,
     /// Input queue from policy evaluator
     input_queue: Arc<CancellableQueue<EvalResult<T>>>,
@@ -514,8 +343,25 @@ pub struct BatchCollectorQueue<T: BlockMetadata> {
     current_batch: TransferBatch<T>,
 }
 
-impl<T: BlockMetadata> BatchCollectorQueue<T> {
-    /// Run the batch collector loop using CancellableQueue input.
+impl<T: BlockMetadata> BatchCollector<T> {
+    /// Create a new batch collector.
+    pub fn new(
+        config: BatchConfig,
+        input_queue: Arc<CancellableQueue<EvalResult<T>>>,
+        output_tx: BatchOutput<T>,
+        cancel_rx: watch::Receiver<HashSet<TransferId>>,
+    ) -> Self {
+        let max_batch_size = config.max_batch_size;
+        Self {
+            config,
+            input_queue,
+            output_tx,
+            cancel_rx,
+            current_batch: TransferBatch::with_capacity(max_batch_size),
+        }
+    }
+
+    /// Run the batch collector loop.
     pub async fn run(mut self) {
         let mut flush_timer = tokio::time::interval(self.config.flush_interval);
         flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -614,21 +460,7 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
         // Mark batch as ready (single O(1) call, not per-block)
         batch.timing.mark_batched();
 
-        // Extract precondition from blocks' transfer states
-        // If all blocks share the same precondition, set it on the batch
-        let precondition = batch.blocks.first().and_then(|first_block| {
-            let first_precondition = first_block.state.lock().unwrap().precondition;
-
-            // Check if all blocks share the same precondition
-            let all_same = batch.blocks.iter().all(|block| {
-                let state = block.state.lock().unwrap();
-                state.precondition == first_precondition
-            });
-
-            if all_same { first_precondition } else { None }
-        });
-
-        batch.precondition = precondition;
+        batch.precondition = extract_common_precondition(&batch.blocks);
 
         // Send to transfer executor
         if self.output_tx.send(batch).await.is_err() {
@@ -636,22 +468,6 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
             tracing::warn!("Batch output channel closed");
         }
     }
-}
-
-/// Create batch collection channels with given capacity.
-#[allow(dead_code)]
-pub fn batch_channels<T: BlockMetadata>(
-    input_capacity: usize,
-    output_capacity: usize,
-) -> (
-    BatchInput<T>,
-    BatchInputRx<T>,
-    BatchOutput<T>,
-    BatchOutputRx<T>,
-) {
-    let (input_tx, input_rx) = mpsc::channel(input_capacity);
-    let (output_tx, output_rx) = mpsc::channel(output_capacity);
-    (input_tx, input_rx, output_tx, output_rx)
 }
 
 #[cfg(test)]
@@ -686,21 +502,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_collector_empty_input() {
-        let (input_tx, input_rx) = mpsc::channel::<EvalResult<()>>(10);
+        let input_queue = Arc::new(CancellableQueue::<EvalResult<()>>::new());
         let (output_tx, mut output_rx) = mpsc::channel::<TransferBatch<()>>(10);
+        let (cancel_tx, cancel_rx) = watch::channel(HashSet::new());
 
-        let collector = BatchCollector {
-            config: BatchConfig::default(),
-            output_tx,
-            current_batch: TransferBatch::with_capacity(64),
-        };
+        let collector =
+            BatchCollector::new(BatchConfig::default(), input_queue, output_tx, cancel_rx);
 
-        // Drop input to close channel
-        drop(input_tx);
+        // Drop cancel sender to close channel (triggers shutdown)
+        drop(cancel_tx);
 
         // Run collector
         tokio::spawn(async move {
-            collector.run(input_rx).await;
+            collector.run().await;
         });
 
         // Should receive nothing (empty input)

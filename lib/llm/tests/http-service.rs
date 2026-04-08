@@ -3,7 +3,6 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynamo_async_openai::config::OpenAIConfig;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -14,24 +13,17 @@ use dynamo_llm::protocols::{
     },
 };
 use dynamo_llm::{
-    http::{
-        client::{
-            GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient,
-            PureOpenAIClient,
-        },
-        service::{
-            Metrics,
-            error::HttpError,
-            metrics::{Endpoint, ErrorType, RequestType, Status},
-            service_v2::HttpService,
-        },
+    http::service::{
+        Metrics,
+        error::HttpError,
+        metrics::{Endpoint, ErrorType, RequestType, Status},
+        service_v2::HttpService,
     },
     model_card::ModelDeploymentCard,
 };
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
-    engine::AsyncEngineContext,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -222,6 +214,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Tensor => todo!(),
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
+        Endpoint::Audios => todo!(),
     };
 
     let request_type = match request_type {
@@ -317,16 +310,16 @@ async fn test_http_service() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "hi".to_string(),
             ),
             name: None,
         },
     );
 
-    let mut request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let mut request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![message])
         .build()
@@ -492,7 +485,7 @@ async fn test_http_service() {
     // ==== ChatCompletions / Unary / Error ====
 
     // ==== Completions / Unary / Error ====
-    let mut request = dynamo_async_openai::types::CreateCompletionRequestArgs::default()
+    let mut request = dynamo_protocols::types::CreateCompletionRequestArgs::default()
         .model("bar")
         .prompt("hi")
         .build()
@@ -581,404 +574,10 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
-    let port = get_random_port().await;
-    let service = HttpService::builder()
-        .enable_chat_endpoints(true)
-        .enable_cmpl_endpoints(true)
-        .port(port)
-        .build()
-        .unwrap();
-    let manager = service.model_manager();
-
-    let counter = Arc::new(CounterEngine {});
-    let failure = Arc::new(AlwaysFailEngine {});
-
-    let card = ModelDeploymentCard::with_name_only("foo");
-    manager
-        .add_chat_completions_model("foo", card.mdcsum(), counter.clone())
-        .unwrap();
-    let card = ModelDeploymentCard::with_name_only("bar");
-    manager
-        .add_chat_completions_model("bar", card.mdcsum(), failure.clone())
-        .unwrap();
-    manager
-        .add_completions_model("bar", card.mdcsum(), failure.clone())
-        .unwrap();
-
-    (service, counter, failure, port)
-}
-
-fn pure_openai_client(port: u16) -> PureOpenAIClient {
-    let config = HttpClientConfig {
-        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
-        verbose: false,
-    };
-    PureOpenAIClient::new(config)
-}
-
-fn nv_custom_client(port: u16) -> NvCustomClient {
-    let config = HttpClientConfig {
-        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
-        verbose: false,
-    };
-    NvCustomClient::new(config)
-}
-
-fn generic_byot_client(port: u16) -> GenericBYOTClient {
-    let config = HttpClientConfig {
-        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
-        verbose: false,
-    };
-    GenericBYOTClient::new(config)
-}
-
-#[tokio::test]
-async fn test_pure_openai_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
-    let pure_openai_client = pure_openai_client(port);
-
-    let token = CancellationToken::new();
-    let cancel_token = token.clone();
-
-    // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
-
-    // Wait for service to be ready
-    wait_for_service_ready(port).await;
-
-    // Test successful streaming request
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("foo")
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let result = pure_openai_client.chat_stream(request).await;
-    assert!(result.is_ok(), "PureOpenAI client should succeed");
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    let mut count = 0;
-    while let Some(response) = stream.next().await {
-        count += 1;
-        assert!(response.is_ok(), "Response should be ok");
-        if count >= 3 {
-            break; // Don't consume entire stream
-        }
-    }
-    assert!(count > 0, "Should receive at least one response");
-
-    // Test error case with invalid model
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("bar") // This model will fail
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let result = pure_openai_client.chat_stream(request).await;
-    assert!(
-        result.is_ok(),
-        "Client should return stream even for failing model"
-    );
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    if let Some(response) = stream.next().await {
-        assert!(
-            response.is_err(),
-            "Response should be error for failing model"
-        );
-    }
-
-    // Test context management
-    let ctx = HttpRequestContext::new();
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("foo")
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let result = pure_openai_client
-        .chat_stream_with_context(request, ctx.clone())
-        .await;
-    assert!(result.is_ok(), "Context-based request should succeed");
-
-    let (_stream, context) = result.unwrap().dissolve();
-    assert_eq!(context.id(), ctx.id(), "Context ID should match");
-
-    cancel_token.cancel();
-    task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn test_nv_custom_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
-    let nv_custom_client = nv_custom_client(port);
-
-    let token = CancellationToken::new();
-    let cancel_token = token.clone();
-
-    // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
-
-    // Wait for service to be ready
-    wait_for_service_ready(port).await;
-
-    // Test successful streaming request
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("foo")
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let request = NvCreateChatCompletionRequest {
-        inner: inner_request,
-        common: Default::default(),
-        nvext: None,
-        chat_template_args: None,
-        media_io_kwargs: None,
-        unsupported_fields: Default::default(),
-    };
-
-    let result = nv_custom_client.chat_stream(request).await;
-    assert!(result.is_ok(), "NvCustom client should succeed");
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    let mut count = 0;
-    while let Some(response) = stream.next().await {
-        count += 1;
-        assert!(response.is_ok(), "Response should be ok");
-        if count >= 3 {
-            break; // Don't consume entire stream
-        }
-    }
-    assert!(count > 0, "Should receive at least one response");
-
-    // Test error case with invalid model
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("bar") // This model will fail
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let request = NvCreateChatCompletionRequest {
-        inner: inner_request,
-        common: Default::default(),
-        nvext: None,
-        chat_template_args: None,
-        media_io_kwargs: None,
-        unsupported_fields: Default::default(),
-    };
-
-    let result = nv_custom_client.chat_stream(request).await;
-    assert!(
-        result.is_ok(),
-        "Client should return stream even for failing model"
-    );
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    if let Some(response) = stream.next().await {
-        assert!(
-            response.is_err(),
-            "Response should be error for failing model"
-        );
-    }
-
-    // Test context management
-    let ctx = HttpRequestContext::new();
-    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
-        .model("foo")
-        .messages(vec![
-            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content:
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                            "Hi".to_string(),
-                        ),
-                    name: None,
-                },
-            ),
-        ])
-        .stream(true)
-        .max_tokens(50u32)
-        .build()
-        .unwrap();
-
-    let request = NvCreateChatCompletionRequest {
-        inner: inner_request,
-        common: Default::default(),
-        nvext: None,
-        chat_template_args: None,
-        media_io_kwargs: None,
-        unsupported_fields: Default::default(),
-    };
-
-    let result = nv_custom_client
-        .chat_stream_with_context(request, ctx.clone())
-        .await;
-    assert!(result.is_ok(), "Context-based request should succeed");
-
-    let (_stream, context) = result.unwrap().dissolve();
-    assert_eq!(context.id(), ctx.id(), "Context ID should match");
-
-    cancel_token.cancel();
-    task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn test_generic_byot_client() {
-    let (service, _counter, _failure, port) = service_with_engines().await;
-    let generic_byot_client = generic_byot_client(port);
-
-    let token = CancellationToken::new();
-    let cancel_token = token.clone();
-
-    // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
-
-    // Wait for service to be ready
-    wait_for_service_ready(port).await;
-
-    // Test successful streaming request
-    let request = serde_json::json!({
-        "model": "foo",
-        "messages": [
-            {
-                "role": "user",
-                "content": "Hi"
-            }
-        ],
-        "stream": true,
-        "max_tokens": 50
-    });
-
-    let result = generic_byot_client.chat_stream(request).await;
-    assert!(result.is_ok(), "GenericBYOT client should succeed");
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    let mut count = 0;
-    while let Some(response) = stream.next().await {
-        println!("Response: {:?}", response);
-        count += 1;
-        assert!(response.is_ok(), "Response should be ok");
-        if count >= 3 {
-            break; // Don't consume entire stream
-        }
-    }
-    assert!(count > 0, "Should receive at least one response");
-
-    // Test error case with invalid model
-    let request = serde_json::json!({
-        "model": "bar", // This model will fail
-        "messages": [
-            {
-                "role": "user",
-                "content": "Hi"
-            }
-        ],
-        "stream": true,
-        "max_tokens": 50
-    });
-
-    let result = generic_byot_client.chat_stream(request).await;
-    assert!(
-        result.is_ok(),
-        "Client should return stream even for failing model"
-    );
-
-    let (mut stream, _context) = result.unwrap().dissolve();
-    if let Some(response) = stream.next().await {
-        assert!(
-            response.is_err(),
-            "Response should be error for failing model"
-        );
-    }
-
-    // Test context management
-    let ctx = HttpRequestContext::new();
-    let request = serde_json::json!({
-        "model": "foo",
-        "messages": [
-            {
-                "role": "user",
-                "content": "Hi"
-            }
-        ],
-        "stream": true,
-        "max_tokens": 50
-    });
-
-    let result = generic_byot_client
-        .chat_stream_with_context(request, ctx.clone())
-        .await;
-    assert!(result.is_ok(), "Context-based request should succeed");
-
-    let (_stream, context) = result.unwrap().dissolve();
-    assert_eq!(context.id(), ctx.id(), "Context ID should match");
-
-    cancel_token.cancel();
-    task.await.unwrap().unwrap();
-}
-
+// NOTE: BYOT (Bring Your Own Type) client tests were removed during the
+// upstream async-openai migration. They depended on the forked
+// dynamo_protocols::config and http::client modules which no longer exist.
+// TODO: Rewrite these tests using the upstream async-openai client.
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
     let port = get_random_port().await;
@@ -1009,16 +608,16 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will take a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("slow-model")
         .messages(vec![message])
         .stream(false) // Test unary response
@@ -1105,16 +704,16 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let client = reqwest::Client::new();
 
-    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will stream for a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
         .model("slow-stream-model")
         .messages(vec![message])
         .stream(true) // Test streaming response

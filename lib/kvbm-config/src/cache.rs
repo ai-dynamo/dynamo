@@ -67,8 +67,12 @@ impl HostCacheConfig {
     /// * `bytes_per_block` - Size of each block in bytes
     ///
     /// # Returns
-    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set.
+    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set,
+    /// or if bytes_per_block is zero.
     pub fn compute_num_blocks(&self, bytes_per_block: usize) -> Option<usize> {
+        if bytes_per_block == 0 {
+            return None;
+        }
         self.num_blocks.or_else(|| {
             self.cache_size_gb.map(|gb| {
                 // Convert GB to bytes and divide by block size
@@ -118,8 +122,12 @@ impl DiskCacheConfig {
     /// * `bytes_per_block` - Size of each block in bytes
     ///
     /// # Returns
-    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set.
+    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set,
+    /// or if bytes_per_block is zero.
     pub fn compute_num_blocks(&self, bytes_per_block: usize) -> Option<usize> {
+        if bytes_per_block == 0 {
+            return None;
+        }
         self.num_blocks.or_else(|| {
             self.cache_size_gb.map(|gb| {
                 // Convert GB to bytes and divide by block size

@@ -72,13 +72,25 @@
 //!         println!("Completed: {:?}", result?.completed_blocks);
 //!     }
 //!     _ = shutdown_signal => {
-//!         handle.cancel().await;
+//!         handle.cancel().wait().await;
 //!         println!("Cancelled");
 //!     }
 //! }
 //! ```
 //!
 //! See also: [Developer Guide](../../docs/offload-developer.md)
+
+/// Helper macro to create an NVTX range when the nvtx feature is enabled.
+/// The range automatically ends when the returned guard is dropped.
+macro_rules! nvtx_range {
+    ($name:expr) => {{
+        #[cfg(feature = "nvtx")]
+        let _range = nvtx::range!($name);
+        #[cfg(not(feature = "nvtx"))]
+        let _range = ();
+        _range
+    }};
+}
 
 mod batch;
 mod cancel;

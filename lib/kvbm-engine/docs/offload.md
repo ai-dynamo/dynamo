@@ -57,9 +57,6 @@ struct OffloadBatch<T: BlockMetadata> {
 }
 ```
 
-## Policy Statements
-
-The following policies govern the behavior of this module. See [AGENTS.md](../src/offload/AGENTS.md) for governance rules.
 
 ### P1: Container is the Unit of Cancellation
 
@@ -126,7 +123,6 @@ handle.cancel().await;
 ## Related Documentation
 
 - [offload-developer.md](offload-developer.md) - Implementation details and extension rules
-- [AGENTS.md](../src/offload/AGENTS.md) - AI agent governance rules
 
 
 

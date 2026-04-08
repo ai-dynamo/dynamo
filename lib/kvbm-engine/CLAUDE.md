@@ -43,7 +43,7 @@ Leaders own block metadata and make placement decisions. Workers execute data tr
 ### Key Modules
 
 - **`leader/`** — `InstanceLeader` coordinates block lookups (`find_matches`), holds blocks via RAII `BlockHolder`, and manages distributed sessions. The `Leader` trait is the core coordination interface.
-- **`leader/session/`** — Distributed session protocol: `InitiatorSession` (requester), `ResponderSession` (provider), `ControllableSession` (deferred staging control). Sessions track onboarding state: Searching → Holding → Preparing → Staging → Complete.
+- **`leader/session/`** — Distributed session protocol: `InitiatorSession` (requester), `ResponderSession` (provider), `ServerSession` (server-side block exposure with optional G3→G2 staging). Sessions track onboarding state: Searching → Holding → Staging → Ready → Complete.
 - **`worker/`** — `PhysicalWorker` owns a `TransferManager` and layout handles for actual transfers. `CoordinatedWorker` wraps any `Worker` with the leader's coordination state. The `Worker` and `WorkerTransfers` traits define the execution contract.
 - **`worker/group/`** — `SpmdParallelWorkers` broadcasts operations to all workers in parallel (SPMD model) with event aggregation.
 - **`worker/velo/`** — RPC layer (`VeloWorkerService`/`VeloWorkerClient`) for remote worker execution via Velo.
