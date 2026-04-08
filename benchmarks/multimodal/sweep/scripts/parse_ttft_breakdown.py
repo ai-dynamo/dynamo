@@ -50,6 +50,12 @@ def parse_perf_lines(log_path: str) -> Dict[str, List[float]]:
                 components["vision_encoder"].append(float(m.group(1)))
                 continue
 
+            # [PERF] llm_forward: 500ms tokens=1234
+            m = re.search(r"\[PERF\]\s+llm_forward:\s+([\d.]+)ms", line)
+            if m:
+                components["llm_forward"].append(float(m.group(1)))
+                continue
+
             # [PERF] extract_mm_data: 50ms req=...
             m = re.search(r"\[PERF\]\s+extract_mm_data:\s+([\d.]+)ms", line)
             if m:

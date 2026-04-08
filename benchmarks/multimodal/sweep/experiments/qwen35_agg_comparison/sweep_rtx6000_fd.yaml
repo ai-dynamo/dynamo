@@ -16,6 +16,7 @@ env:
   DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
   DYN_ENABLE_RUST_NVTX: "1"
   DYN_NVTX: "1"
+  DYN_PERF_SYNC: "1"
   LD_LIBRARY_PATH: "/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/nvidia/nvtx/lib:/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs:/usr/local/cuda/lib64"
 
 input_files:
