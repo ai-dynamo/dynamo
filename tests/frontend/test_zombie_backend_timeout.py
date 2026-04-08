@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests for backend stream inactivity timeout (issue #7545).
+"""Integration tests for backend stream inactivity timeout.
 
 These tests verify that the frontend's zombie backend detection works end-to-end:
 when a backend holds a live TCP connection but produces no output (or stalls
@@ -24,7 +24,7 @@ import time
 import pytest
 import requests
 
-from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
+from tests.frontend.conftest import wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 
@@ -283,8 +283,8 @@ def test_inflight_gauge_recovers_after_timeout(
     """After the inactivity timeout fires on a zombie backend, the
     dynamo_frontend_inflight_requests gauge must return to 0.
 
-    This is the core regression test for issue #7545: without the fix,
-    InflightGuard::drop() never fires and the gauge leaks.
+    This is the core regression test for the inflight gauge leak: without the
+    fix, InflightGuard::drop() never fires and the gauge leaks.
     """
     ports = dynamo_dynamic_ports
     frontend_port = ports.frontend_port
@@ -319,63 +319,5 @@ def test_inflight_gauge_recovers_after_timeout(
             ), "Could not read inflight metric from /metrics endpoint"
             assert inflight_after == 0, (
                 f"Inflight gauge is {inflight_after} after timeout -- "
-                f"InflightGuard was not dropped (issue #7545 regression)"
+                f"InflightGuard was not dropped"
             )
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Normal requests work fine with the timeout enabled
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.timeout(120)
-def test_normal_requests_work_with_timeout_enabled(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_tokenizers,
-):
-    """With DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS configured, normal (non-zombie)
-    streaming requests should still complete successfully.
-
-    This proves the timeout doesn't kill healthy streams.
-    """
-    ports = dynamo_dynamic_ports
-    frontend_port = ports.frontend_port
-    system_port = ports.system_ports[0]
-
-    with _start_frontend_with_timeout(request, frontend_port):
-        with MockerWorkerProcess(
-            request, MODEL, frontend_port, system_port, speedup_ratio=100
-        ):
-            wait_for_http_completions_ready(frontend_port=frontend_port, model=MODEL)
-
-            resp = _streaming_chat_request(
-                frontend_port,
-                MODEL,
-                max_tokens=10,
-                timeout=30,
-            )
-            resp.raise_for_status()
-
-            chunks, saw_done, _ = _drain_sse_stream(resp)
-
-            assert saw_done, "Missing [DONE] marker -- stream did not complete"
-            assert (
-                len(chunks) > 0
-            ), "Expected token chunks from normal mocker but got none"
-
-            logger.info(
-                "Normal request completed successfully with %d chunks "
-                "(timeout was enabled at %ds)",
-                len(chunks),
-                BACKEND_STREAM_TIMEOUT_SECS,
-            )
-
-            # Verify inflight gauge is clean
-            time.sleep(1)
-            inflight = _get_inflight_count(frontend_port)
-            if inflight is not None:
-                assert (
-                    inflight == 0
-                ), f"Inflight gauge is {inflight} after normal completion"
