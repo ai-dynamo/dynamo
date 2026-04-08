@@ -34,7 +34,7 @@ import socketserver
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 _REQUIRED_PACKAGES = {
@@ -468,10 +468,20 @@ def _pcie_worker(conn, gpu_idx):
 def _main_worker(conn, gpu_count, interval_sec):
     """Subprocess: CPU (overall + per-name groups) + GPU mem/util + network at 5/s; temperature at 1/s."""
     import psutil as _ps
-    import pynvml as _nvml
 
-    _nvml.nvmlInit()
-    handles = [_nvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
+    handles = []
+    if gpu_count > 0:
+        try:
+            import pynvml as _nvml
+
+            _nvml.nvmlInit()
+            handles = [_nvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
+        except Exception as exc:
+            print(
+                f"[main_worker] NVML init failed ({exc}), GPU metrics disabled",
+                flush=True,
+            )
+            gpu_count = 0
     _ps.cpu_percent(interval=None)
     # Prime per-process cpu_percent so subsequent calls return real deltas
     list(_ps.process_iter(["name", "cpu_percent"]))
@@ -882,8 +892,6 @@ class MetricsCollector:
             # Build compact GPU summary like "[2x RTX 6000 Ada]"
             gpu_summary = ""
             if self.gpu_names:
-                from collections import Counter
-
                 counts = Counter(self.gpu_names)
                 parts = []
                 for name, cnt in counts.items():
@@ -1861,17 +1869,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 def build_server(collector: MetricsCollector, args):
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = "gpu_monitor"
+    app.config["SECRET_KEY"] = os.urandom(24).hex()
+    # Allow cross-origin only when explicitly binding to a remote-reachable address.
+    cors = "*" if args.host == "0.0.0.0" else None
     socketio = SocketIO(
         app,
-        cors_allowed_origins="*",
+        cors_allowed_origins=cors,
         async_mode="threading",
         ping_timeout=60,
         ping_interval=25,
         max_http_buffer_size=50 * 1024 * 1024,
     )
 
-    ui_state = {"paused": False}
+    # Per-client state keyed by socket ID so one browser's zoom/pause
+    # does not affect other connected clients.
+    _client_state: dict[str, dict] = {}
+    _state_lock = threading.Lock()
 
     @app.route("/")
     def index():
@@ -1880,6 +1893,8 @@ def build_server(collector: MetricsCollector, args):
     @socketio.on("connect")
     def handle_connect():
         sid = flask_request.sid
+        with _state_lock:
+            _client_state[sid] = {"paused": False, "view_minutes": 2}
 
         def send_init():
             for _ in range(50):
@@ -1892,6 +1907,11 @@ def build_server(collector: MetricsCollector, args):
 
         threading.Thread(target=send_init, daemon=True).start()
 
+    @socketio.on("disconnect")
+    def handle_disconnect():
+        with _state_lock:
+            _client_state.pop(flask_request.sid, None)
+
     @socketio.on("request_init")
     def handle_request_init():
         data = collector.snapshot_full()
@@ -1899,11 +1919,17 @@ def build_server(collector: MetricsCollector, args):
 
     @socketio.on("pause")
     def handle_pause(is_paused):
-        ui_state["paused"] = bool(is_paused)
+        with _state_lock:
+            st = _client_state.get(flask_request.sid)
+            if st:
+                st["paused"] = bool(is_paused)
 
     @socketio.on("view_minutes")
     def handle_view_minutes(vm):
-        ui_state["view_minutes"] = int(vm)
+        with _state_lock:
+            st = _client_state.get(flask_request.sid)
+            if st:
+                st["view_minutes"] = int(vm)
 
     # Push interval and thinning step per zoom level (view_minutes).
     # Wider views push less often and thin more aggressively.
@@ -1921,9 +1947,19 @@ def build_server(collector: MetricsCollector, args):
         last_pcie: list[int] = [0] * collector.gpu_count
         last_disk = 0
         while True:
-            vm = ui_state.get("view_minutes", 2)
-            push_sec, step = _PUSH_POLICY.get(vm, (0.100, 1))
-            time.sleep(push_sec)
+            # Use the most aggressive (fastest) push cadence among all clients
+            # so no client misses data; each client already thins locally.
+            min_push = 0.100
+            max_step = 1
+            with _state_lock:
+                for st in _client_state.values():
+                    if st.get("paused"):
+                        continue
+                    vm = st.get("view_minutes", 2)
+                    ps, stp = _PUSH_POLICY.get(vm, (0.100, 1))
+                    min_push = min(min_push, ps)
+                    max_step = max(max_step, stp)
+            time.sleep(min_push)
             with collector.lock:
                 cm = collector.counter_main
                 cp = list(collector.counter_pcie)
@@ -1932,17 +1968,19 @@ def build_server(collector: MetricsCollector, args):
                 continue
             try:
                 delta = collector.snapshot_delta(
-                    last_main, last_pcie, last_disk, step=step
+                    last_main, last_pcie, last_disk, step=max_step
                 )
-                last_main = cm
-                last_pcie = cp
-                last_disk = cd
+                # CR6: Advance cursors from the delta actually sent (not the
+                # stale snapshot) to avoid duplicate points on next emit.
+                last_main = delta["counter_main"]
+                last_pcie = delta["counter_pcie"]
+                last_disk = delta["counter_disk"]
                 socketio.emit("delta", delta)
             except Exception as e:
                 print(f"[push_loop] error: {e}", flush=True)
                 raise
 
-    return app, socketio, ui_state, push_loop
+    return app, socketio, _client_state, push_loop
 
 
 def main():
@@ -1985,7 +2023,7 @@ def main():
     )
     collector.load_state()
 
-    app, socketio, ui_state, push_loop = build_server(collector, args)
+    app, socketio, _client_state, push_loop = build_server(collector, args)
 
     workers: list[multiprocessing.Process] = []
     pipes: list[multiprocessing.connection.Connection] = []
@@ -2000,16 +2038,17 @@ def main():
                     target=_pcie_worker, args=(pcie_child, gi), daemon=True
                 )
             )
-        # 1 main subprocess: CPU + GPU mem/util/temp + network
-        main_parent, main_child = multiprocessing.Pipe(duplex=False)
-        pipes.append(main_parent)
-        workers.append(
-            multiprocessing.Process(
-                target=_main_worker,
-                args=(main_child, gpu_count, main_sec),
-                daemon=True,
-            )
+
+    # 1 main subprocess: CPU + GPU mem/util/temp + network (always started)
+    main_parent, main_child = multiprocessing.Pipe(duplex=False)
+    pipes.append(main_parent)
+    workers.append(
+        multiprocessing.Process(
+            target=_main_worker,
+            args=(main_child, gpu_count, main_sec),
+            daemon=True,
         )
+    )
 
     # 1 disk subprocess
     disk_parent, disk_child = multiprocessing.Pipe(duplex=False)
@@ -2021,10 +2060,16 @@ def main():
     )
 
     def _poll_pipes():
-        while True:
-            ready = multiprocessing.connection.wait(pipes, timeout=0.5)
+        live = list(pipes)
+        while live:
+            ready = multiprocessing.connection.wait(live, timeout=0.5)
             for conn in ready:
-                msg = conn.recv()
+                try:
+                    msg = conn.recv()
+                except (EOFError, ConnectionResetError):
+                    live.remove(conn)
+                    print("[poll] worker pipe closed", flush=True)
+                    continue
                 tag = msg[0]
                 if tag == "pcie":
                     collector.ingest_pcie(msg[1], msg[2], msg[3], msg[4])

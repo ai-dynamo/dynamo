@@ -8,7 +8,7 @@ title: GPU System Monitor
 
 A self-contained, real-time system monitor that runs as a web dashboard. It tracks GPU memory, utilization, PCIe bandwidth, CPU usage, disk I/O, and network I/O with per-process breakdowns — useful for profiling Dynamo deployments and understanding resource consumption during inference.
 
-No build step or external frontend dependencies are required. The server embeds the full HTML/JS client and serves it directly.
+No build step is required. The server embeds the full HTML/JS client and serves it directly. The client loads [Plotly.js](https://cdn.plot.ly/) and [Socket.IO](https://cdn.socket.io/) from public CDNs, so the browser needs internet access (or you can vendor these files locally for air-gapped environments).
 
 > [!IMPORTANT]
 > This tool is designed to run on the **host machine**, not inside a container. It needs direct access to GPU devices and host-level process information.
@@ -77,7 +77,7 @@ usage: gpu_monitor.py [-h] [--port PORT] [--host HOST]
 
 options:
   --port PORT   Server port (default: 8051)
-  --host HOST   Bind address (default: 0.0.0.0)
+  --host HOST   Bind address (default: 127.0.0.1)
 ```
 
 ## Dependencies
