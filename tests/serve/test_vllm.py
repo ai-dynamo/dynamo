@@ -8,7 +8,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -30,7 +30,11 @@ from tests.utils.payload_builder import (
     completion_payload_with_logprobs,
     metric_payload_default,
 )
-from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    LoraTestChatPayload,
+    ToolCallingChatPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,149 @@ LOCAL_VIDEO_TEST_PATH = Path(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
 ).resolve()
 LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
+
+
+# ---------------------------------------------------------------------------
+# Multimodal model profile framework
+# ---------------------------------------------------------------------------
+# Generated config keys use the "mm_" prefix. Do not use this prefix for
+# hand-written configs to avoid collisions.
+
+
+@dataclass
+class MultimodalModelProfile:
+    """Describes a multimodal model's test-relevant properties.
+
+    Each profile generates one VLLMConfig per topology in supported_topologies
+    via make_multimodal_configs().
+    """
+
+    name: str  # HuggingFace model ID
+    short_name: str  # kebab-case slug for config key (e.g. "qwen3-vl-2b")
+    supported_topologies: list[str]  # ordered list: ["agg"] for Phase 1
+    image_expected_response: list[str]  # OR-substring keywords (any match = pass)
+    gpu_marker: str  # "gpu_1" or "gpu_2"
+    timeout_s: int  # pytest timeout in seconds
+    extra_vllm_args: list[str] = field(default_factory=list)
+    marks: list[Any] = field(default_factory=list)
+    profiled_vram_gib: Optional[float] = None
+    requested_vllm_kv_cache_bytes: Optional[int] = None
+    gated: bool = False  # if True, skip unless DYN_HF_GATED_MODELS_ENABLED=1
+
+
+TOPOLOGY_SCRIPTS: dict[str, str] = {
+    "agg": "agg_multimodal.sh",
+    "e_pd": "disagg_multimodal_e_pd.sh",
+    "epd": "disagg_multimodal_epd.sh",
+    "p_d": "disagg_multimodal_p_d.sh",
+}
+
+
+def _make_image_payload(expected_response: list[str]) -> ChatPayload:
+    """Standard multimodal image test payload.
+
+    Uses the shared test image (MULTIMODAL_IMG_URL) with a color-identification
+    prompt. Response validation uses case-insensitive OR-substring matching:
+    the check passes if ANY keyword in expected_response appears in the response.
+    """
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? "
+                "Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": MULTIMODAL_IMG_URL},
+            },
+        ],
+        repeat_count=1,
+        expected_response=expected_response,
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+
+def make_multimodal_configs(
+    profile: MultimodalModelProfile,
+) -> dict[str, VLLMConfig]:
+    """Generate VLLMConfig entries for each topology in profile.supported_topologies."""
+    configs: dict[str, VLLMConfig] = {}
+    for topology in profile.supported_topologies:
+        script_name = TOPOLOGY_SCRIPTS[topology]  # KeyError if invalid
+        script_args = ["--model", profile.name] + profile.extra_vllm_args
+        if topology != "agg":
+            script_args.append("--single-gpu")
+
+        marks: list[Any] = [
+            getattr(pytest.mark, profile.gpu_marker),
+            pytest.mark.timeout(profile.timeout_s),
+            pytest.mark.post_merge,
+        ]
+        if profile.profiled_vram_gib is not None:
+            marks.append(pytest.mark.profiled_vram_gib(profile.profiled_vram_gib))
+        if profile.requested_vllm_kv_cache_bytes is not None:
+            marks.append(
+                pytest.mark.requested_vllm_kv_cache_bytes(
+                    profile.requested_vllm_kv_cache_bytes
+                )
+            )
+        if profile.gated:
+            marks.append(
+                pytest.mark.skipif(
+                    not os.environ.get("DYN_HF_GATED_MODELS_ENABLED"),
+                    reason=(
+                        f"{profile.name} is gated; set DYN_HF_GATED_MODELS_ENABLED=1 "
+                        "with an HF_TOKEN that has accepted the license"
+                    ),
+                )
+            )
+        marks.extend(profile.marks)
+
+        key = f"mm_{topology}_{profile.short_name}"
+        configs[key] = VLLMConfig(
+            name=key,
+            directory=vllm_dir,
+            script_name=script_name,
+            model=profile.name,
+            script_args=script_args,
+            marks=marks,
+            request_payloads=[_make_image_payload(profile.image_expected_response)],
+        )
+    return configs
+
+
+# ---------------------------------------------------------------------------
+# Multimodal model profiles — add new models here
+# ---------------------------------------------------------------------------
+MULTIMODAL_MODEL_PROFILES: list[MultimodalModelProfile] = [
+    MultimodalModelProfile(
+        name="Qwen/Qwen3-VL-2B-Instruct",
+        short_name="qwen3-vl-2b",
+        supported_topologies=["agg"],
+        image_expected_response=["green"],
+        gpu_marker="gpu_1",
+        timeout_s=220,
+        profiled_vram_gib=9.6,
+    ),
+    MultimodalModelProfile(
+        name="google/gemma-3-4b-it",
+        short_name="gemma3-4b",
+        supported_topologies=["agg"],
+        image_expected_response=["green"],
+        gpu_marker="gpu_1",
+        timeout_s=300,
+        extra_vllm_args=["--dtype", "bfloat16"],
+        gated=True,
+        profiled_vram_gib=12.0,
+    ),
+]
+
+# Generate and merge multimodal configs into the main config dict (populated below)
+_generated_mm_configs: dict[str, VLLMConfig] = {}
+for _profile in MULTIMODAL_MODEL_PROFILES:
+    _generated_mm_configs.update(make_multimodal_configs(_profile))
 
 
 # vLLM test configurations
@@ -860,6 +1007,9 @@ vllm_configs = {
         ],
     ),
 }
+
+# Merge generated multimodal configs
+vllm_configs.update(_generated_mm_configs)
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
