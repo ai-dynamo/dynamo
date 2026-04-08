@@ -52,6 +52,7 @@ pub enum RouterMode {
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
     Direct,
     LeastLoaded,
+    DeviceAwareWeighted,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -63,6 +64,7 @@ impl From<RouterMode> for RsRouterMode {
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
             RouterMode::LeastLoaded => Self::LeastLoaded,
+            RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
         }
     }
 }

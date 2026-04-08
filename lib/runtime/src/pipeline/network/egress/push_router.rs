@@ -15,7 +15,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 use crate::{
-    component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
+    component::{Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
@@ -146,6 +146,8 @@ pub enum RouterMode {
     KV,
     Direct,
     LeastLoaded,
+    /// Device-aware weighted routing for heterogeneous workers.
+    DeviceAwareWeighted,
 }
 
 impl RouterMode {
@@ -221,7 +223,7 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -256,7 +258,7 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -375,6 +377,128 @@ where
             .await
     }
 
+    /// Issue a request using device-aware weighted routing:
+    /// For encoder endpoints: partition instances by device type (CPU/CUDA),
+    /// route based on budget calculation, then select least-loaded within group.
+    /// For other endpoints: falls back to round-robin.
+    pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let state = self.occupancy_state()?;
+        let instance_ids = self
+            .client
+            .instance_ids_avail()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+
+        if instance_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no instances found for endpoint {}",
+                self.client.endpoint.id()
+            ));
+        }
+
+        // For non-encoder endpoints, fall back to round-robin
+        let endpoint_id = self.client.endpoint.id();
+
+        // For encoder endpoints, partition by device type
+        let instances = self.client.instances();
+        let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
+            .iter()
+            .map(|inst| (inst.instance_id, inst.device_type.clone()))
+            .collect();
+
+        let cpu_ids: Vec<u64> = instance_ids
+            .iter()
+            .copied()
+            .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+            .collect();
+        let non_cpu_ids: Vec<u64> = instance_ids
+            .iter()
+            .copied()
+            .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+            .collect();
+
+        // Apply budget-based routing to determine which group to send to
+        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(8);
+
+        let candidates: &[u64] = if cpu_ids.is_empty() {
+            tracing::debug!(
+                endpoint = %endpoint_id,
+                "DeviceAwareWeighted: no CPU instances, routing to non-CPU only"
+            );
+            &non_cpu_ids
+        } else if non_cpu_ids.is_empty() {
+            tracing::debug!(
+                endpoint = %endpoint_id,
+                "DeviceAwareWeighted: no non-CPU instances, routing to CPU only"
+            );
+            &cpu_ids
+        } else {
+            // Both types present: apply budget-based routing
+            let total_non_cpu_inflight: usize = non_cpu_ids
+                .iter()
+                .map(|id| state.load(*id))
+                .sum();
+            let total_cpu_inflight: usize = cpu_ids
+                .iter()
+                .map(|id| state.load(*id))
+                .sum();
+            let cpu_count = cpu_ids.len();
+            let non_cpu_count = non_cpu_ids.len();
+
+            let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
+                / (cuda_to_cpu_ratio.saturating_mul(non_cpu_count));
+
+            tracing::debug!(
+                endpoint = %endpoint_id,
+                total_non_cpu_inflight,
+                total_cpu_inflight,
+                cpu_count,
+                non_cpu_count,
+                ratio = cuda_to_cpu_ratio,
+                allowed_cpu_inflight,
+                "DeviceAwareWeighted budget calculation"
+            );
+
+            if total_cpu_inflight < allowed_cpu_inflight {
+                &cpu_ids
+            } else {
+                &non_cpu_ids
+            }
+        };
+
+        // Select least-loaded within the chosen group
+        let instance_id = state
+            .select_exact_min_and_increment(candidates)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instances in selected device group for endpoint {}",
+                    endpoint_id
+                )
+            })?;
+        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        let is_cpu = matches!(device_type_map.get(&instance_id), Some(Some(DeviceType::Cpu)));
+        tracing::info!(
+            endpoint = %endpoint_id,
+            selected_instance = instance_id,
+            is_cpu,
+            "DeviceAwareWeighted selected instance"
+        );
+
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
+            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
@@ -427,7 +551,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
@@ -459,7 +583,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
@@ -636,6 +760,7 @@ where
                 );
             }
             RouterMode::LeastLoaded => self.least_loaded(request).await,
+            RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
         }
     }
 }
