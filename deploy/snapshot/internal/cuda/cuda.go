@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
@@ -24,6 +25,14 @@ const (
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+type CheckpointPhaseTimings struct {
+	TotalDuration time.Duration
+}
+
+type RestorePhaseTimings struct {
+	TotalDuration time.Duration
+}
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
 // PodResources (nvidia.com/gpu entries in GetDevices()).
@@ -174,38 +183,52 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
+func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
+	var timings CheckpointPhaseTimings
+
+	start := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := lock(ctx, pid, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
 		if err := checkpoint(ctx, pid, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
+	timings.TotalDuration = time.Since(start)
 
-	return nil
+	return timings, nil
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+	var timings RestorePhaseTimings
+
+	start := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
+
 	for _, pid := range cudaPIDs {
 		if err := unlock(ctx, pid, log); err != nil {
+			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return err
+			return timings, err
 		}
 	}
-	return nil
+	timings.TotalDuration = time.Since(start)
+
+	return timings, nil
 }

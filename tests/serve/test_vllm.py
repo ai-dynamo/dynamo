@@ -330,7 +330,7 @@ vllm_configs = {
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
-    # PD worker honors build_gpu_mem_args for parallel execution.
+    # PD worker honors build_vllm_gpu_mem_args for parallel execution.
     "multimodal_e_pd_qwen": VLLMConfig(
         name="multimodal_e_pd_qwen",
         directory=vllm_dir,
@@ -414,7 +414,7 @@ vllm_configs = {
     # total on this GPU.
     # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
-    # P/D workers honor build_gpu_mem_args for parallel execution.
+    # P/D workers honor build_vllm_gpu_mem_args for parallel execution.
     "multimodal_disagg_qwen": VLLMConfig(
         name="multimodal_disagg_qwen",
         directory=vllm_dir,
@@ -423,6 +423,38 @@ vllm_configs = {
             pytest.mark.gpu_1,
             # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
             # uses hardcoded fractions via DYN_*_GPU_MEM that scale with GPU size.
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=300,
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    # P/D multimodal (no encoder): prefill loads images via PIL,
+    # computes grid_thw for decode using smart_resize.
+    "multimodal_p_d_qwen": VLLMConfig(
+        name="multimodal_p_d_qwen",
+        directory=vllm_dir,
+        script_name="disagg_multimodal_p_d.sh",
+        marks=[
+            pytest.mark.gpu_1,
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",

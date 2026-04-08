@@ -497,6 +497,7 @@ async def init_llm_worker(
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
+            disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
         # Register the model with runtime config

@@ -30,7 +30,7 @@ pub async fn try_tool_call_parse_aggregate(
             .map(
                 |parsed| dynamo_protocols::types::ChatCompletionMessageToolCall {
                     id: parsed.id,
-                    r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+                    r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: parsed.function.name,
                         arguments: parsed.function.arguments,
@@ -65,7 +65,7 @@ pub async fn try_tool_call_parse_stream(
                 |(idx, parsed)| dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: idx as u32,
                     id: Some(parsed.id),
-                    r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                    r#type: Some(dynamo_protocols::types::FunctionType::Function),
                     function: Some(dynamo_protocols::types::FunctionCallStream {
                         name: Some(parsed.function.name),
                         arguments: Some(parsed.function.arguments),

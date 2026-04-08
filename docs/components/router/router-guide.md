@@ -42,7 +42,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
 | **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
-| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; standalone indexer aggregates events |
+| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology
@@ -93,6 +93,8 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
 | `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
+| `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -443,6 +445,63 @@ graph TD
 ## Serving Multiple Router Replicas
 
 For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
+
+### Dynamo-Native Remote Indexer
+
+For Dynamo-native deployments, the remote indexer is served by `dynamo.frontend` or `dynamo.router`, not by `dynamo.indexer`.
+
+- Use `--serve-indexer` on router/frontend replicas that should expose `kv_indexer_query` from the worker component.
+- Use `--use-remote-indexer` on consumer routers/frontends that should query that served endpoint instead of maintaining a local overlap indexer.
+- `dynamo.indexer` remains the standalone HTTP + ZMQ microservice for non-Dynamo / direct-ZMQ deployments.
+
+Frontend example:
+
+```bash
+# Serving anchors
+python -m dynamo.frontend --router-mode kv --serve-indexer
+
+# Consumer frontend
+python -m dynamo.frontend --router-mode kv --use-remote-indexer
+```
+
+The served service is request-plane only. Each serving router/frontend keeps its normal local KV event ingestion, gap detection, and worker-query recovery path; remote consumers only issue hash-based overlap queries.
+
+Approximate mode (`--no-router-kv-events`) is singleton-only for remote serving: only one `--serve-indexer` replica may exist for a given worker component. Event-driven mode allows multiple serving replicas behind the same worker component.
+
+```mermaid
+graph TD
+    subgraph "Workers"
+        W1["Worker 1"]
+        W2["Worker 2"]
+    end
+
+    subgraph "Event Plane"
+        EP["KV Events"]
+    end
+
+    subgraph "Serving Routers / Frontends"
+        S1["Router / Frontend A<br/>--serve-indexer"]
+        S2["Router / Frontend B<br/>--serve-indexer"]
+        I1["Local Indexer"]
+        I2["Local Indexer"]
+    end
+
+    subgraph "Request Plane"
+        RP["backend.kv_indexer_query"]
+    end
+
+    C["Consumer Router / Frontend<br/>--use-remote-indexer"]
+
+    W1 --> EP
+    W2 --> EP
+    EP --> S1
+    EP --> S2
+    S1 --> I1
+    S2 --> I2
+    C --> RP
+    RP --> S1
+    RP --> S2
+```
 
 ### Router State Management
 

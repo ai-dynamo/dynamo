@@ -44,7 +44,7 @@ dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
 dynamo-memory = { path = "lib/memory", version = "1.0.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.0.0", features = ["byot"] }
+dynamo-protocols = { path = "lib/protocols", version = "1.0.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 fastokens = { version = "0.1.0" }
 

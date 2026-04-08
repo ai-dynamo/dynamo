@@ -301,3 +301,43 @@ impl MemoryRegion {
         }
     }
 }
+
+/// Check if an environment variable is truthy
+pub fn env_is_truthy(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+        Err(_) => false,
+    }
+}
+
+/// Parse a string as a boolean value, returning an error if invalid.
+/// Do not use this unless you really need to support vague values. Prefer only allowing a specific
+/// value.
+///
+/// This function strictly validates that the input is a valid boolean representation.
+///
+/// # Arguments
+/// * `val` - The string value to parse
+///
+/// # Returns
+/// * `Ok(true)` - For truthy values: "1", "true", "on", "yes" (case-insensitive)
+/// * `Ok(false)` - For falsey values: "0", "false", "off", "no" (case-insensitive)
+/// * `Err(_)` - For any other value
+///
+/// # Example
+/// ```ignore
+/// assert_eq!(parse_bool("true")?, true);
+/// assert_eq!(parse_bool("0")?, false);
+/// assert!(parse_bool("maybe").is_err());
+/// ```
+pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
+    if matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes") {
+        Ok(true)
+    } else if matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no") {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "Invalid boolean value: '{val}'. Expected one of: true/false, 1/0, on/off, yes/no",
+        )
+    }
+}

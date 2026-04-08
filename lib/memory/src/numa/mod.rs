@@ -45,7 +45,7 @@ static NUMA_NODE_CACHE: OnceLock<Mutex<HashMap<String, Option<NumaNode>>>> = Onc
 /// NUMA-aware allocation is enabled by default. Set `DYN_MEMORY_DISABLE_NUMA=1`
 /// (or any truthy value) to disable it.
 pub fn is_numa_disabled() -> bool {
-    dynamo_config::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
+    crate::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
 }
 
 /// Represents a NUMA node identifier.
