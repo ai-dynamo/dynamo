@@ -376,6 +376,10 @@ async def parse_args(args: list[str]) -> Config:
     # Without this, the old flag is a no-op on sglang >= 0.5.10.
     if hasattr(server_args, "incremental_streaming_output"):
         server_args.incremental_streaming_output = True
+    # sglang renamed stream_output -> incremental_streaming_output in PR #20614.
+    # Without this, the old flag is a no-op on sglang >= 0.5.10.
+    if hasattr(server_args, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
 
     if dynamo_config.use_sglang_tokenizer:
         logging.info(
