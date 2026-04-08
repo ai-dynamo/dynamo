@@ -275,6 +275,21 @@ class TrtllmConfigModifier(BaseConfigModifier):
     def get_kv_cache_size_from_dynamo_log(
         cls, dynamo_log_fn: str, attention_dp_size: int = 1
     ) -> int:
+        """Return TRT-LLM paged KV cache token capacity parsed from Dynamo logs.
+
+        TRT-LLM may emit multiple memory allocation lines for paged KV cache
+        during startup. This parser scans the full file and returns the token
+        value from the last matching entry, which reflects the effective
+        configured capacity.
+
+        Args:
+            dynamo_log_fn: Path to the Dynamo runtime log file.
+            attention_dp_size: Unused for TRT-LLM; included for interface parity.
+
+        Returns:
+            Parsed max token count for paged KV cache, or ``100000`` when no
+            matching log entry is found.
+        """
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
         max_tokens: int | None = None
