@@ -4,7 +4,9 @@
 //! Core traits and types for the pluggable registry architecture.
 
 pub mod error;
+pub mod events;
 pub mod key;
+pub mod lease;
 pub mod metadata;
 pub mod storage;
 pub mod transport;
@@ -12,6 +14,9 @@ pub mod value;
 
 // Error types
 pub use error::{RegistryError, RegistryResult};
+
+// Lease management
+pub use lease::{LeaseInfo, LeaseManager};
 
 // Storage
 pub use storage::{FlatStorage, HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
@@ -23,3 +28,9 @@ pub use value::{RegistryValue, StorageBackend, StorageLocation};
 
 // Transport
 pub use transport::{InProcessHub, InProcessTransport, RegistryTransport};
+
+// Event Bus
+pub use events::{
+    EventBus, EventBusConfig, EventHandler, EventReceiver, EventTopic, EvictionReason,
+    InProcessEventBus, RegistryEvent, StorageTier, StorageType,
+};
