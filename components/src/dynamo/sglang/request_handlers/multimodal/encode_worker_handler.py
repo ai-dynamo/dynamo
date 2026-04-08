@@ -14,7 +14,6 @@ try:
     from sglang.srt.disaggregation.encode_server import MMEncoder
 except (ImportError, OSError):
     MMEncoder = None  # type: ignore[assignment]
-from sglang.srt.managers.schedule_batch import Modality
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
@@ -25,6 +24,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.sglang._compat import Modality, mm_encode
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -216,8 +216,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # SGLang's _encode outputs are already on CPU; use CPU as target for consistency
         target_device = torch.device("cpu")
         if uncached_urls:
-            grid_dim, new_embeddings, _aux = await self.encoder._encode(
-                uncached_urls, Modality.IMAGE
+            grid_dim, new_embeddings, _aux = await mm_encode(
+                self.encoder, uncached_urls, Modality.IMAGE
             )
             # Verify SGLang output is on CPU as expected
             if new_embeddings.device != target_device:
@@ -342,7 +342,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         image_grid_dim,
                         precomputed_embeddings,
                         _aux,
-                    ) = await self.encoder._encode(image_urls, Modality.IMAGE)
+                    ) = await mm_encode(self.encoder, image_urls, Modality.IMAGE)
 
             image_grid_thw_list = (
                 image_grid_dim.tolist()

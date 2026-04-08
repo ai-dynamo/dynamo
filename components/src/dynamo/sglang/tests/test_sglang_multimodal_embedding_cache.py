@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
-from sglang.srt.managers.schedule_batch import Modality
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.sglang._compat import Modality
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     MultimodalEncodeWorkerHandler,
 )

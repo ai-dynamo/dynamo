@@ -15,10 +15,15 @@ removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
 """
 
+import inspect
 import ipaddress
 import logging
 import socket
 from typing import Any
+
+from sglang.srt.managers.schedule_batch import (  # noqa: F401 — stable across 0.5.9+
+    Modality,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +108,39 @@ except ImportError:
             return f"tcp://{self.host}:{self.port}"
 
 
+# ---------------------------------------------------------------------------
+# MMEncoder._encode() adapter
+#
+# 0.5.10+: _encode(mm_items, modality) -> (grid_dim, embedding, aux_data)
+# 0.5.9:   _encode(mm_items)           -> (grid_dim, embedding)
+#
+# We probe the signature at import time and provide a unified async wrapper
+# that always returns the 3-tuple form. On 0.5.9 the missing aux_data is None.
+# ---------------------------------------------------------------------------
+try:
+    from sglang.srt.disaggregation.encode_server import MMEncoder as _MMEncoder
+
+    _encode_needs_modality = (
+        "modality" in inspect.signature(_MMEncoder._encode).parameters
+    )
+except (ImportError, OSError):
+    # MMEncoder not available (CPU-only env) — flag is irrelevant
+    _encode_needs_modality = True  # assume latest API
+
+
+async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
+    """Version-safe wrapper around MMEncoder._encode().
+
+    Always returns (grid_dim, embedding, aux_data). On sglang 0.5.9 where
+    _encode returns only 2 values and ignores modality, aux_data is None.
+    """
+    if _encode_needs_modality:
+        return await encoder._encode(mm_items, modality)
+    # sglang 0.5.9: no modality arg, returns 2-tuple
+    grid_dim, embedding = await encoder._encode(mm_items)
+    return grid_dim, embedding, None
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """
     Enable SGLang's disjoint streaming output across ServerArgs field renames.
@@ -137,8 +175,10 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 
 __all__ = [
+    "Modality",
     "NetworkAddress",
     "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
+    "mm_encode",
 ]
