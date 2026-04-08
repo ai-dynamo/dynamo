@@ -62,7 +62,9 @@ def patch_torch_memory_saver() -> None:
         logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
         if hook_mode is None or hook_mode == "gms":
-            # Use our GPU Memory Service implementation
+            # In GMS mode we install only the strict GMS implementation:
+            # weights + kv_cache go through GMS, generic unsupported tags stay
+            # no-ops/warnings, and cuda_graph remains unsupported.
             # Get device from torch.cuda.current_device() (already set by SGLang)
             device_index = torch.cuda.current_device()
 

@@ -6,6 +6,12 @@
 SGLang with GMS owns exactly two memory classes:
 1. "weights" via the shared RO/RW publish flow
 2. "kv_cache" via the RW failover flow
+
+Unsupported release/resume tags stay no-ops with a warning so the generic
+SGLang memory-control API can still pass broader tag sets without reintroducing
+the old torch-memory-saver fallback. `cuda_graph` is a hard error because the
+pauseable CUDA-graph path depends on the LD_PRELOAD torch allocator hooks that
+GMS intentionally does not use.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_
 
 logger = logging.getLogger(__name__)
 
+# Published weights must come back RO, while KV cache always resumes in a fresh
+# RW epoch so the restored engine can rebuild mutable cache state.
 _TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
 
 
@@ -66,6 +74,8 @@ class GMSMemorySaverImpl:
             tag: get_or_create_gms_client_memory_manager(
                 get_socket_path(device_index, tag),
                 device_index,
+                # weights follow the configured publish/import mode; kv_cache is
+                # always mutable and therefore always needs an RW session.
                 mode=requested_mode if tag == "weights" else RequestedLockType.RW,
                 tag=tag,
             )
@@ -101,6 +111,8 @@ class GMSMemorySaverImpl:
             tag == "weights"
             and self.allocators["weights"].granted_lock_type == GrantedLockType.RO
         ):
+            # Imported weights are already mapped and immutable in RO mode, so
+            # there is no allocator swap to install for this region.
             yield
             return
 
@@ -111,6 +123,9 @@ class GMSMemorySaverImpl:
                 if allocator.granted_lock_type is not None
                 else "DISCONNECTED"
             )
+            # The server would reject writes on a non-RW session too, but we
+            # fail before entering the allocation path so SGLang never starts a
+            # partial region with the wrong lock state.
             raise RuntimeError(
                 f"SGLang with GMS requires {tag!r} to be RW for allocations; got {mode}"
             )
@@ -140,6 +155,8 @@ class GMSMemorySaverImpl:
                 continue
             logger.info("[GMS] Unmapping %s", target_tag)
             self.allocators[target_tag].unmap_all_vas()
+            # abort() drops the current session after unmapping while keeping
+            # the VA reservation alive for the next resume().
             self.allocators[target_tag].abort()
 
     def resume(self, tag: Optional[str] = None) -> None:
@@ -150,6 +167,8 @@ class GMSMemorySaverImpl:
             logger.info("[GMS] Remapping %s", target_tag)
             self.allocators[target_tag].connect(_TAG_LOCK_TYPES[target_tag])
             if target_tag == "kv_cache":
+                # KV cache resumes into a new RW layout epoch, so the handles
+                # must be re-created before the VA range is mapped again.
                 self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
             self.allocators[target_tag].remap_all_vas()
 

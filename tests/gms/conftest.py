@@ -16,11 +16,16 @@ PROJECT_PATHS = [
     REPO_ROOT / "lib",
 ]
 
+# Prefer the repo sources over any prebuilt wheel so these tests exercise the
+# code under review, even in environments that already have Dynamo installed.
 for path in reversed(PROJECT_PATHS):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
+# pytest may have already imported the installed gpu_memory_service package via
+# another test module, so clear it before collection to make the path override
+# above take effect consistently.
 for module_name in list(sys.modules):
     if module_name == "gpu_memory_service" or module_name.startswith(
         "gpu_memory_service."
