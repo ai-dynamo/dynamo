@@ -313,11 +313,17 @@ mod tests {
     #[test]
     fn test_host_to_device_transfers() {
         let caps = default_caps();
-        // // System (unpinned) to device should be blocking
-        // assert_eq!(
-        //     select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
-        //     TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
-        // );
+        let err = select_direct_strategy(
+            StorageKind::System,
+            StorageKind::Device(0),
+            false,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("use Pinned memory"),
+            "unexpected error: {err}"
+        );
 
         // Pinned to device should be async
         assert_eq!(
@@ -329,11 +335,17 @@ mod tests {
     #[test]
     fn test_device_to_host_transfers() {
         let caps = default_caps();
-        //    // Device to system should be blocking
-        //     assert_eq!(
-        //         select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
-        //         TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
-        //     );
+        let err = select_direct_strategy(
+            StorageKind::Device(0),
+            StorageKind::System,
+            false,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("use Pinned memory"),
+            "unexpected error: {err}"
+        );
 
         // Device to pinned should be async
         assert_eq!(
