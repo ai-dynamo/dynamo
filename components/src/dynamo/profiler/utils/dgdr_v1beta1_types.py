@@ -67,13 +67,10 @@ class GPUSKUType(str, Enum):
 
 
 class XPUSKUType(str, Enum):
-    """Intel XPU/Gaudi SKU types. Enum values are AIC system identifiers directly."""
+    """Intel XPU SKU types. Enum values are AIC system identifiers directly."""
 
-    # Intel Arc discrete GPUs
-    IntelArcB580 = "b60"  # Intel Arc B580 (Battlemage) — AIC system: b60
-    # Intel Gaudi (future AIC support)
-    IntelGaudi3 = "gaudi3"
-    IntelGaudi2 = "gaudi2"
+    # Intel Arc discrete GPUs (only b60 is currently supported by AIC)
+    IntelArcProB60 = "b60"  # Intel Arc Pro B60 (Xe2 Battlemage, 0xe211) — AIC system: b60
 
     @property
     def aic_system(self) -> str:
@@ -213,11 +210,11 @@ class HardwareSpec(BaseModel):
 
     deviceType: Optional[str] = Field(
         default="cuda",
-        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU/Gaudi). Defaults to 'cuda'.",
+        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.",
     )
     gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
-        description="SKU of the accelerator. Use GPUSKUType for NVIDIA GPUs and XPUSKUType for Intel XPU/Gaudi. When omitted, the operator auto-detects via cluster GPU node labels.",
+        description="SKU of the accelerator. Use GPUSKUType for NVIDIA GPUs and XPUSKUType for Intel XPU. When omitted, the operator auto-detects via cluster GPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
@@ -234,7 +231,7 @@ class HardwareSpec(BaseModel):
     def _derive_device_type_from_sku(self) -> "HardwareSpec":
         """Auto-derive deviceType from gpuSku when not explicitly set.
 
-        If gpuSku identifies an Intel accelerator and deviceType was not
+        If gpuSku identifies an Intel XPU accelerator and deviceType was not
         explicitly provided by the user, set deviceType to 'xpu'.  This
         prevents the silent misconfiguration where a user specifies an Intel
         SKU but the default 'cuda' deviceType bypasses all XPU-specific logic.
