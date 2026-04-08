@@ -510,7 +510,7 @@ impl KvIndexerInterface for KvIndexer {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
 
-        self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
+        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
     async fn flush(&self) -> usize {
@@ -526,8 +526,8 @@ impl KvIndexerInterface for KvIndexer {
 }
 
 impl KvIndexer {
-    /// Internal method to process a routing decision with pre-computed hashes.
-    async fn process_routing_decision_internal(
+    /// Process a routing decision with pre-computed hashes.
+    pub async fn process_routing_decision_with_hashes(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
