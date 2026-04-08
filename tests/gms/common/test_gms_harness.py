@@ -10,7 +10,7 @@ import pytest
 from tests.gms.harness.gms import GMSServerProcess
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_1]
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 @pytest.fixture

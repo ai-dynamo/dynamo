@@ -22,7 +22,7 @@ from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.sglang,
 ]
 
