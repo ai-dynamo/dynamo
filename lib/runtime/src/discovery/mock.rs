@@ -72,6 +72,26 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
                 && &inst.endpoint == endpoint
         }
 
+        // VeloPeer matching
+        (DiscoveryInstance::VeloPeer { .. }, DiscoveryQuery::AllVeloPeers) => true,
+        (
+            DiscoveryInstance::VeloPeer {
+                namespace: inst_ns, ..
+            },
+            DiscoveryQuery::NamespacedVeloPeers { namespace },
+        ) => inst_ns == namespace,
+        (
+            DiscoveryInstance::VeloPeer {
+                namespace: inst_ns,
+                component: inst_comp,
+                ..
+            },
+            DiscoveryQuery::ComponentVeloPeers {
+                namespace,
+                component,
+            },
+        ) => inst_ns == namespace && inst_comp == component,
+
         // Model matching
         (DiscoveryInstance::Model { .. }, DiscoveryQuery::AllModels) => true,
         (
@@ -124,6 +144,21 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
         (
             DiscoveryInstance::Endpoint(_),
             DiscoveryQuery::AllModels
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::NamespacedVeloPeers { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::ComponentVeloPeers { .. }
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::EventChannels(_),
+        ) => false,
+        (
+            DiscoveryInstance::VeloPeer { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. }
@@ -135,6 +170,9 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::NamespacedVeloPeers { .. }
+            | DiscoveryQuery::ComponentVeloPeers { .. }
             | DiscoveryQuery::EventChannels(_),
         ) => false,
         (
@@ -143,6 +181,9 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::NamespacedVeloPeers { .. }
+            | DiscoveryQuery::ComponentVeloPeers { .. }
             | DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
@@ -328,6 +369,7 @@ mod tests {
         // Remove first instance
         registry.instances.lock().unwrap().retain(|i| match i {
             DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
+            DiscoveryInstance::VeloPeer { instance_id, .. } => *instance_id != 1,
             DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
             DiscoveryInstance::EventChannel { instance_id, .. } => *instance_id != 1,
         });

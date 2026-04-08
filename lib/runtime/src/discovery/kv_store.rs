@@ -12,11 +12,12 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
-    ModelCardInstanceId,
+    ModelCardInstanceId, VeloPeerInstanceId,
 };
 use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
+const VELO_PEERS_BUCKET: &str = "v1/velo_peers";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 
@@ -42,6 +43,11 @@ impl KVStoreDiscovery {
     /// Build the key path for a model (relative to bucket, not absolute)
     fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    }
+
+    /// Build the key path for a Velo peer (relative to bucket, not absolute)
+    fn velo_peer_key(namespace: &str, component: &str, instance_id: u64) -> String {
+        format!("{}/{}/{:x}", namespace, component, instance_id)
     }
 
     /// Build the key path for an event channel relative to bucket, not absolute)
@@ -76,6 +82,16 @@ impl KVStoreDiscovery {
                     "{}/{}/{}/{}",
                     INSTANCES_BUCKET, namespace, component, endpoint
                 )
+            }
+            DiscoveryQuery::AllVeloPeers => VELO_PEERS_BUCKET.to_string(),
+            DiscoveryQuery::NamespacedVeloPeers { namespace } => {
+                format!("{}/{}", VELO_PEERS_BUCKET, namespace)
+            }
+            DiscoveryQuery::ComponentVeloPeers {
+                namespace,
+                component,
+            } => {
+                format!("{}/{}/{}", VELO_PEERS_BUCKET, namespace, component)
             }
             DiscoveryQuery::AllModels => MODELS_BUCKET.to_string(),
             DiscoveryQuery::NamespacedModels { namespace } => {
@@ -177,6 +193,22 @@ impl Discovery for KVStoreDiscovery {
                     key
                 );
                 (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::VeloPeer {
+                namespace,
+                component,
+                instance_id,
+                ..
+            } => {
+                let key = Self::velo_peer_key(namespace, component, *instance_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::register: Registering Velo peer instance_id={}, namespace={}, component={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    key
+                );
+                (VELO_PEERS_BUCKET, key)
             }
             DiscoveryInstance::Model {
                 namespace,
@@ -297,6 +329,22 @@ impl Discovery for KVStoreDiscovery {
                 );
                 (INSTANCES_BUCKET, key)
             }
+            DiscoveryInstance::VeloPeer {
+                namespace,
+                component,
+                instance_id,
+                ..
+            } => {
+                let key = Self::velo_peer_key(namespace, component, *instance_id);
+                tracing::debug!(
+                    "Unregistering Velo peer instance_id={}, namespace={}, component={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    key
+                );
+                (VELO_PEERS_BUCKET, key)
+            }
             DiscoveryInstance::Model {
                 namespace,
                 component,
@@ -377,6 +425,8 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(VELO_PEERS_BUCKET) {
+            VELO_PEERS_BUCKET
         } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
             EVENT_CHANNELS_BUCKET
         } else {
@@ -428,6 +478,8 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(VELO_PEERS_BUCKET) {
+            VELO_PEERS_BUCKET
         } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
             EVENT_CHANNELS_BUCKET
         } else {
@@ -495,9 +547,7 @@ impl Discovery for KVStoreDiscovery {
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
                         let key_parts: Vec<&str> = relative_key.split('/').collect();
 
-                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
-                        // Endpoints/Models need at least 4 parts
-                        let min_parts = 4;
+                        let min_parts = if bucket_name == VELO_PEERS_BUCKET { 3 } else { 4 };
                         if key_parts.len() < min_parts {
                             tracing::warn!(
                                 key = %key_str,
@@ -513,7 +563,7 @@ impl Discovery for KVStoreDiscovery {
                         let namespace = key_parts[0].to_string();
                         let component = key_parts[1].to_string();
 
-                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
+                        // Handle VeloPeer (3 parts), EventChannel (4 parts) vs Endpoints/Models
                         let id = if bucket_name == EVENT_CHANNELS_BUCKET {
                             // EventChannel keys: namespace/component/topic/{instance_id:x}
                             let topic = key_parts[2].to_string();
@@ -533,6 +583,26 @@ impl Discovery for KVStoreDiscovery {
                                         error = %e,
                                         instance_id_hex = %instance_id_hex,
                                         "Failed to parse event channel instance_id hex"
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else if bucket_name == VELO_PEERS_BUCKET {
+                            let instance_id_hex = key_parts[2];
+                            match u64::from_str_radix(instance_id_hex, 16) {
+                                Ok(instance_id) => {
+                                    DiscoveryInstanceId::VeloPeer(VeloPeerInstanceId {
+                                        namespace,
+                                        component,
+                                        instance_id,
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        instance_id_hex = %instance_id_hex,
+                                        "Failed to parse Velo peer instance_id hex"
                                     );
                                     continue;
                                 }

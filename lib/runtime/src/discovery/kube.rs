@@ -117,6 +117,19 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_endpoint(instance.clone())?;
             }
+            DiscoveryInstance::VeloPeer {
+                namespace,
+                component,
+                ..
+            } => {
+                tracing::info!(
+                    "Registering Velo peer: namespace={}, component={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    instance_id
+                );
+                metadata.register_velo_peer(instance.clone())?;
+            }
             DiscoveryInstance::Model {
                 namespace,
                 component,
@@ -188,6 +201,19 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.unregister_endpoint(&instance)?;
+            }
+            DiscoveryInstance::VeloPeer {
+                namespace,
+                component,
+                ..
+            } => {
+                tracing::info!(
+                    "Unregistering Velo peer: namespace={}, component={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    instance_id
+                );
+                metadata.unregister_velo_peer(&instance)?;
             }
             DiscoveryInstance::Model {
                 namespace,

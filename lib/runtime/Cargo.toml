@@ -87,6 +87,8 @@ rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
 tokio-rayon = { version = "2.1" }
+upstream-velo-messenger = { package = "velo-messenger", version = "0.1.0" }
+upstream-velo-transports = { package = "velo-transports", version = "0.1.0" }
 
 # Kubernetes discovery backend
 kube = { version = "2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs"] }

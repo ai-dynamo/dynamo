@@ -10,6 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 mod metadata;
 pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
+mod velo_peers;
+pub use velo_peers::{
+    DiscoveredVeloMessenger, build_default_messenger, register_local_component_peer,
+};
 
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
@@ -204,6 +208,17 @@ pub enum DiscoveryQuery {
         component: String,
         endpoint: String,
     },
+    /// Query all Velo peer records in the system
+    AllVeloPeers,
+    /// Query all Velo peer records in a specific namespace
+    NamespacedVeloPeers {
+        namespace: String,
+    },
+    /// Query all Velo peer records for a namespace/component
+    ComponentVeloPeers {
+        namespace: String,
+        component: String,
+    },
     AllModels,
     NamespacedModels {
         namespace: String,
@@ -299,6 +314,13 @@ pub enum DiscoverySpec {
         /// Transport type and routing information
         transport: TransportType,
     },
+    /// Velo peer transport metadata for a component instance
+    VeloPeer {
+        namespace: String,
+        component: String,
+        /// Serialized Velo PeerInfo as JSON to avoid lib/runtime depending on Velo types
+        peer_json: serde_json::Value,
+    },
     Model {
         namespace: String,
         component: String,
@@ -324,6 +346,18 @@ pub enum DiscoverySpec {
 }
 
 impl DiscoverySpec {
+    /// Creates a Velo peer discovery spec from a serializable type.
+    pub fn from_velo_peer<T>(namespace: String, component: String, peer: &T) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        Ok(Self::VeloPeer {
+            namespace,
+            component,
+            peer_json: serde_json::to_value(peer)?,
+        })
+    }
+
     /// Creates a Model discovery spec from a serializable type
     /// The card will be serialized to JSON to avoid cross-crate dependencies
     pub fn from_model<T>(
@@ -375,6 +409,16 @@ impl DiscoverySpec {
                 instance_id,
                 transport,
             }),
+            Self::VeloPeer {
+                namespace,
+                component,
+                peer_json,
+            } => DiscoveryInstance::VeloPeer {
+                namespace,
+                component,
+                instance_id,
+                peer_json,
+            },
             Self::Model {
                 namespace,
                 component,
@@ -412,6 +456,14 @@ impl DiscoverySpec {
 pub enum DiscoveryInstance {
     /// Registered endpoint instance - wraps the component::Instance directly
     Endpoint(crate::component::Instance),
+    /// Registered Velo peer metadata for a component instance
+    VeloPeer {
+        namespace: String,
+        component: String,
+        instance_id: u64,
+        /// Serialized Velo PeerInfo as JSON to avoid lib/runtime depending on Velo types
+        peer_json: serde_json::Value,
+    },
     Model {
         namespace: String,
         component: String,
@@ -441,8 +493,28 @@ impl DiscoveryInstance {
     pub fn instance_id(&self) -> u64 {
         match self {
             Self::Endpoint(inst) => inst.instance_id,
+            Self::VeloPeer { instance_id, .. } => *instance_id,
             Self::Model { instance_id, .. } => *instance_id,
             Self::EventChannel { instance_id, .. } => *instance_id,
+        }
+    }
+
+    /// Deserializes the Velo peer JSON into the specified type T.
+    pub fn deserialize_velo_peer<T>(&self) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        match self {
+            Self::VeloPeer { peer_json, .. } => Ok(serde_json::from_value(peer_json.clone())?),
+            Self::Endpoint(_) => {
+                anyhow::bail!("Cannot deserialize Velo peer from Endpoint instance")
+            }
+            Self::Model { .. } => {
+                anyhow::bail!("Cannot deserialize Velo peer from Model instance")
+            }
+            Self::EventChannel { .. } => {
+                anyhow::bail!("Cannot deserialize Velo peer from EventChannel instance")
+            }
         }
     }
 
@@ -456,6 +528,9 @@ impl DiscoveryInstance {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
+            }
+            Self::VeloPeer { .. } => {
+                anyhow::bail!("Cannot deserialize model from VeloPeer instance")
             }
             Self::EventChannel { .. } => {
                 anyhow::bail!("Cannot deserialize model from EventChannel instance")
@@ -472,6 +547,16 @@ impl DiscoveryInstance {
                 component: inst.component.clone(),
                 endpoint: inst.endpoint.clone(),
                 instance_id: inst.instance_id,
+            }),
+            Self::VeloPeer {
+                namespace,
+                component,
+                instance_id,
+                ..
+            } => DiscoveryInstanceId::VeloPeer(VeloPeerInstanceId {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                instance_id: *instance_id,
             }),
             Self::Model {
                 namespace,
@@ -500,6 +585,41 @@ impl DiscoveryInstance {
                 instance_id: *instance_id,
             }),
         }
+    }
+}
+
+/// Unique identifier for a Velo peer instance
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VeloPeerInstanceId {
+    pub namespace: String,
+    pub component: String,
+    pub instance_id: u64,
+}
+
+impl VeloPeerInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{instance_id:x}`
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{:x}",
+            self.namespace, self.component, self.instance_id
+        )
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{instance_id:x}`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid VeloPeerInstanceId path: expected 3 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            instance_id: u64::from_str_radix(parts[2], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+        })
     }
 }
 
@@ -629,6 +749,7 @@ impl ModelCardInstanceId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiscoveryInstanceId {
     Endpoint(EndpointInstanceId),
+    VeloPeer(VeloPeerInstanceId),
     Model(ModelCardInstanceId),
     EventChannel(EventChannelInstanceId),
 }
@@ -638,6 +759,7 @@ impl DiscoveryInstanceId {
     pub fn instance_id(&self) -> u64 {
         match self {
             Self::Endpoint(eid) => eid.instance_id,
+            Self::VeloPeer(vid) => vid.instance_id,
             Self::Model(mid) => mid.instance_id,
             Self::EventChannel(ecid) => ecid.instance_id,
         }
@@ -647,8 +769,19 @@ impl DiscoveryInstanceId {
     pub fn extract_endpoint_id(&self) -> Result<&EndpointInstanceId> {
         match self {
             Self::Endpoint(eid) => Ok(eid),
+            Self::VeloPeer(_) => anyhow::bail!("Expected Endpoint variant, got VeloPeer"),
             Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
             Self::EventChannel(_) => anyhow::bail!("Expected Endpoint variant, got EventChannel"),
+        }
+    }
+
+    /// Extracts the VeloPeerInstanceId, returning an error if this is not a VeloPeer variant.
+    pub fn extract_velo_peer_id(&self) -> Result<&VeloPeerInstanceId> {
+        match self {
+            Self::VeloPeer(vid) => Ok(vid),
+            Self::Endpoint(_) => anyhow::bail!("Expected VeloPeer variant, got Endpoint"),
+            Self::Model(_) => anyhow::bail!("Expected VeloPeer variant, got Model"),
+            Self::EventChannel(_) => anyhow::bail!("Expected VeloPeer variant, got EventChannel"),
         }
     }
 
@@ -657,6 +790,7 @@ impl DiscoveryInstanceId {
         match self {
             Self::Model(mid) => Ok(mid),
             Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
+            Self::VeloPeer(_) => anyhow::bail!("Expected Model variant, got VeloPeer"),
             Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
         }
     }
@@ -666,6 +800,7 @@ impl DiscoveryInstanceId {
         match self {
             Self::EventChannel(ecid) => Ok(ecid),
             Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
+            Self::VeloPeer(_) => anyhow::bail!("Expected EventChannel variant, got VeloPeer"),
             Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
         }
     }
