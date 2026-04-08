@@ -50,7 +50,10 @@ impl EventDedupFilter {
     /// Filter a remove event. Retains only block hashes whose refcount
     /// decrements to 0 (removing them from the map). Returns `None` if
     /// no hashes survive filtering.
-    pub(super) fn filter_remove(&mut self, mut data: KvCacheRemoveData) -> Option<KvCacheRemoveData> {
+    pub(super) fn filter_remove(
+        &mut self,
+        mut data: KvCacheRemoveData,
+    ) -> Option<KvCacheRemoveData> {
         data.block_hashes.retain(|hash| {
             match self.refcounts.entry(*hash) {
                 Entry::Occupied(mut entry) => {
@@ -148,21 +151,21 @@ impl BatchingState {
         }
         let dp_rank = self.last_dp_rank;
         let mut emitted = false;
-        if let Some(data) = self.pending_removed.take() {
-            if let Some(filtered) = dedup.filter_remove(data) {
-                emit(
-                    publisher,
-                    local_indexer,
-                    worker_id,
-                    KvCacheEvent {
-                        event_id: self.next_publish_id,
-                        data: KvCacheEventData::Removed(filtered),
-                        dp_rank,
-                    },
-                )
-                .await;
-                emitted = true;
-            }
+        if let Some(data) = self.pending_removed.take()
+            && let Some(filtered) = dedup.filter_remove(data)
+        {
+            emit(
+                publisher,
+                local_indexer,
+                worker_id,
+                KvCacheEvent {
+                    event_id: self.next_publish_id,
+                    data: KvCacheEventData::Removed(filtered),
+                    dp_rank,
+                },
+            )
+            .await;
+            emitted = true;
         }
         if let Some(data) = self.pending_stored.take() {
             dedup.track_store(&data);
