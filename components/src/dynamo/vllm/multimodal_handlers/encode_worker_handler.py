@@ -226,8 +226,14 @@ class EncodeWorkerHandler:
                 ), time_and_log_code_section(
                     f"[ENCODE] request: {request_id} image processing"
                 ):
+                    t0_proc = time.perf_counter()
                     image_embeds = await asyncio.to_thread(
                         self.image_processor, images=loaded_images, return_tensors="pt"
+                    )
+                    proc_ms = (time.perf_counter() - t0_proc) * 1000
+                    logger.info(
+                        f"[PERF] hf_processor request_id={request_id} "
+                        f"images={len(loaded_images)} time_ms={proc_ms:.2f}"
                     )
 
                 with _nvtx.annotate(

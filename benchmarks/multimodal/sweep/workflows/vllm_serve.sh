@@ -43,7 +43,10 @@ else
     GPU_MEM_ARGS="--gpu-memory-utilization $GPU_MEM_UTIL"
 fi
 
-vllm serve "$MODEL" \
+# Apply [PERF] monkey-patches to vLLM before serving.
+# We launch via python -m to import the patch module before the CLI runs.
+python -m benchmarks.multimodal.sweep.vllm_serve_patched \
+    serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \
     $GPU_MEM_ARGS \

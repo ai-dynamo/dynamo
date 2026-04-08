@@ -24,6 +24,7 @@ env:
   DYN_NVTX: "1"
   DYN_ENABLE_RUST_NVTX: "1"
   VLLM_NVTX_SCOPES_FOR_PROFILING: "1"
+  DYN_PERF_PATCHES: "1"
 
 input_files:
   - benchmarks/multimodal/jsonl/60req_4img_192pool_400word_base64.jsonl

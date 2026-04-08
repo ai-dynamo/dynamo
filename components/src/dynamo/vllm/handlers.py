@@ -1489,6 +1489,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
+            t0_generate = time.perf_counter()
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -1500,6 +1501,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             num_output_tokens_so_far = 0
+            first_token_logged = False
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -1519,6 +1521,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                 output = res.outputs[0]
                 next_total_toks = len(output.token_ids)
+
+                if not first_token_logged:
+                    llm_fwd_ms = (time.perf_counter() - t0_generate) * 1000
+                    logger.info(
+                        f"[PERF] llm_forward request_id={request_id} "
+                        f"time_ms={llm_fwd_ms:.2f}"
+                    )
+                    first_token_logged = True
+
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available

@@ -8,7 +8,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 class ServerManager:
@@ -33,6 +33,7 @@ class ServerManager:
         model: str,
         extra_args: Optional[List[str]] = None,
         env_overrides: Optional[dict] = None,
+        artifact_dir: Optional[Path] = None,
     ) -> None:
         """Launch the workflow script and block until the model is served."""
         if self.is_running:
@@ -52,10 +53,25 @@ class ServerManager:
             env.update(env_overrides)
 
         print(f"Launching: {' '.join(cmd)}", flush=True)
+
+        # Redirect stdout/stderr to server.log so [PERF] annotations are captured
+        self._log_file: Optional[Any] = None
+        stdout_dest = subprocess.DEVNULL
+        stderr_dest = subprocess.DEVNULL
+        if artifact_dir is not None:
+            log_path = Path(artifact_dir) / "server.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = open(log_path, "w")
+            stdout_dest = self._log_file
+            stderr_dest = self._log_file
+            print(f"Server logs -> {log_path}", flush=True)
+
         self._process = subprocess.Popen(
             cmd,
             start_new_session=True,
             env=env,
+            stdout=stdout_dest,
+            stderr=stderr_dest,
         )
 
         self.wait_for_ready(model)
@@ -121,4 +137,7 @@ class ServerManager:
 
         print(f"Server stopped (PID {pid}).", flush=True)
         self._process = None
+        if hasattr(self, "_log_file") and self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
         time.sleep(5)

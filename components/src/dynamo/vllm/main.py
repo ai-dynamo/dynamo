@@ -62,6 +62,17 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 
+# Opt-in [PERF] monkey-patches for vLLM internals (benchmark profiling)
+if os.environ.get("DYN_PERF_PATCHES", "").lower() in ("1", "true"):
+    try:
+        from benchmarks.multimodal.sweep.vllm_perf_patches import install as _install_perf_patches
+
+        _install_perf_patches()
+    except ImportError:
+        logger.debug("vllm_perf_patches not available; skipping")
+    except Exception as e:
+        logger.warning(f"Failed to install perf patches: {e}")
+
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
     """Build an argparse Namespace from engine_args for vLLM's run_headless().

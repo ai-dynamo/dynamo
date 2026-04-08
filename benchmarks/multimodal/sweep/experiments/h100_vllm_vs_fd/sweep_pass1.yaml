@@ -23,6 +23,7 @@ env:
   CUDA_VISIBLE_DEVICES: "0"
   HF_HOME: /huggingface
   DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
+  DYN_PERF_PATCHES: "1"
 
 input_files:
   - benchmarks/multimodal/jsonl/60req_4img_192pool_400word_base64.jsonl
