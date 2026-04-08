@@ -312,7 +312,7 @@ jobs:
     needs: [changed-files, build, mypy]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
     runs-on: prod-tester-amd-gpu-v1
-    name: Generic GPU tests
+    name: Pytest (GPU)
     timeout-minutes: 35
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
@@ -328,7 +328,7 @@ jobs:
         run: |
           source ./.github/scripts/retry_docker.sh
           retry_pull ${{ env.IMAGE_TAG }}
-      - name: Run generic GPU tests
+      - name: Run pytest (gpu)
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.IMAGE_TAG }}
