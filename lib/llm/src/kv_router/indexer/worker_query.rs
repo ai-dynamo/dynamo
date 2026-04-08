@@ -765,8 +765,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 tracing::warn!(
                     worker_id,
                     elapsed_secs,
-                    "Worker KV query still running after {}s - possible slow tree dump",
-                    elapsed_secs
+                    "Worker KV query still running - possible slow tree dump",
                 );
             }
         });
