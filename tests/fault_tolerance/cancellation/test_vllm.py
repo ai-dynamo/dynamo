@@ -212,7 +212,9 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(660)  # worker startup can take up to 600s; allow headroom for test body
+@pytest.mark.timeout(
+    660
+)  # worker startup can take up to 600s; allow headroom for test body
 @pytest.mark.post_merge
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
@@ -239,8 +241,9 @@ def test_request_cancellation_vllm_aggregated(
         frontend_port: int, stable_seconds: int = 3, timeout_seconds: int = 60
     ):
         """Wait for frontend to reach stable state without errors."""
-        import requests
         import time
+
+        import requests
 
         start_time = time.time()
         stable_start = None
@@ -338,7 +341,9 @@ def test_request_cancellation_vllm_aggregated(
                 )
 
 
-@pytest.mark.timeout(360)  # exceed worker startup timeout (300s) with test-body headroom
+@pytest.mark.timeout(
+    360
+)  # exceed worker startup timeout (300s) with test-body headroom
 @pytest.mark.nightly
 @pytest.mark.gpu_2
 @pytest.mark.xpu_2
@@ -438,7 +443,9 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.timeout(360)  # exceed worker startup timeout (300s) with test-body headroom
+@pytest.mark.timeout(
+    360
+)  # exceed worker startup timeout (300s) with test-body headroom
 @pytest.mark.nightly
 @pytest.mark.gpu_2
 @pytest.mark.xpu_2
