@@ -650,6 +650,8 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
         local_indexer,
+        // only queue 1 request at a time, to not have consecu
+        processing_semaphore: Semaphore::new(1),
     });
 
     let ingress = match Ingress::for_engine(engine) {
@@ -684,6 +686,9 @@ pub(crate) async fn start_worker_kv_query_endpoint(
 struct WorkerKvQueryEngine {
     worker_id: u64,
     local_indexer: Arc<LocalKvIndexer>,
+    /// Semaphore limiting concurrent recovery request processing to 1.
+    /// Prevents multiple routers from overwhelming the worker with heavy tree dump operations.
+    processing_semaphore: Semaphore,
 }
 
 #[async_trait]
@@ -713,6 +718,35 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 ctx.context(),
             ));
         }
+
+        // Acquire semaphore permit before processing - only one request at a time.
+        // This prevents multiple heavy tree dump operations from running concurrently
+        // and overwhelming the worker's indexing capacity.
+        // Handle cancellation (stopped or killed) while waiting for the semaphore.
+        let engine_ctx = ctx.context();
+        let _permit = tokio::select! {
+            result = self.processing_semaphore.acquire() => {
+                result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
+            }
+            _ = engine_ctx.stopped() => {
+                tracing::debug!("Worker KV query request stopped while waiting for semaphore");
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
+                        "Request cancelled".to_string(),
+                    )])),
+                    ctx.context(),
+                ));
+            }
+            _ = engine_ctx.killed() => {
+                tracing::debug!("Worker KV query request killed while waiting for semaphore");
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
+                        "Request cancelled".to_string(),
+                    )])),
+                    ctx.context(),
+                ));
+            }
+        };
 
         let response = self
             .local_indexer
