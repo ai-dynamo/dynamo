@@ -14,7 +14,6 @@ from gpu_memory_service.common.utils import fail
 try:
     from cuda.bindings import driver as cuda
 except ImportError:
-
     # Keep import-time collection working in CPU-only environments and let the
     # first real CUDA call fail with a targeted message instead.
     class _MissingCuda:
