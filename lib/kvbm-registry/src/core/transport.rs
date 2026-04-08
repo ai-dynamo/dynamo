@@ -44,11 +44,10 @@ impl InProcessTransport {
     pub fn pair() -> (Self, InProcessHub) {
         let hub = InProcessHub::new();
         let hub_clone = hub.clone();
-        let (transport, rx) = Self::new(move |data| hub_clone.handle(data));
+        let (transport, mut rx) = Self::new(move |data| hub_clone.handle(data));
 
         let hub_for_publish = hub.clone();
         tokio::spawn(async move {
-            let mut rx = rx;
             while let Some(data) = rx.recv().await {
                 hub_for_publish.handle(&data);
             }
