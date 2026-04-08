@@ -8,7 +8,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 
@@ -21,6 +21,7 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import MULTIMODAL_MODEL_PROFILES, make_multimodal_configs
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -30,11 +31,7 @@ from tests.utils.payload_builder import (
     completion_payload_with_logprobs,
     metric_payload_default,
 )
-from tests.utils.payloads import (
-    ChatPayload,
-    LoraTestChatPayload,
-    ToolCallingChatPayload,
-)
+from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -59,149 +56,6 @@ LOCAL_VIDEO_TEST_PATH = Path(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
 ).resolve()
 LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
-
-
-# ---------------------------------------------------------------------------
-# Multimodal model profile framework
-# ---------------------------------------------------------------------------
-# Generated config keys use the "mm_" prefix. Do not use this prefix for
-# hand-written configs to avoid collisions.
-
-
-@dataclass
-class MultimodalModelProfile:
-    """Describes a multimodal model's test-relevant properties.
-
-    Each profile generates one VLLMConfig per topology in supported_topologies
-    via make_multimodal_configs().
-    """
-
-    name: str  # HuggingFace model ID
-    short_name: str  # kebab-case slug for config key (e.g. "qwen3-vl-2b")
-    supported_topologies: list[str]  # ordered list: ["agg"] for Phase 1
-    image_expected_response: list[str]  # OR-substring keywords (any match = pass)
-    gpu_marker: str  # "gpu_1" or "gpu_2"
-    timeout_s: int  # pytest timeout in seconds
-    extra_vllm_args: list[str] = field(default_factory=list)
-    marks: list[Any] = field(default_factory=list)
-    profiled_vram_gib: Optional[float] = None
-    requested_vllm_kv_cache_bytes: Optional[int] = None
-    gated: bool = False  # if True, skip unless DYN_HF_GATED_MODELS_ENABLED=1
-
-
-TOPOLOGY_SCRIPTS: dict[str, str] = {
-    "agg": "agg_multimodal.sh",
-    "e_pd": "disagg_multimodal_e_pd.sh",
-    "epd": "disagg_multimodal_epd.sh",
-    "p_d": "disagg_multimodal_p_d.sh",
-}
-
-
-def _make_image_payload(expected_response: list[str]) -> ChatPayload:
-    """Standard multimodal image test payload.
-
-    Uses the shared test image (MULTIMODAL_IMG_URL) with a color-identification
-    prompt. Response validation uses case-insensitive OR-substring matching:
-    the check passes if ANY keyword in expected_response appears in the response.
-    """
-    return chat_payload(
-        [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? "
-                "Respond only with the colors.",
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": MULTIMODAL_IMG_URL},
-            },
-        ],
-        repeat_count=1,
-        expected_response=expected_response,
-        temperature=0.0,
-        max_tokens=100,
-    )
-
-
-def make_multimodal_configs(
-    profile: MultimodalModelProfile,
-) -> dict[str, VLLMConfig]:
-    """Generate VLLMConfig entries for each topology in profile.supported_topologies."""
-    configs: dict[str, VLLMConfig] = {}
-    for topology in profile.supported_topologies:
-        script_name = TOPOLOGY_SCRIPTS[topology]  # KeyError if invalid
-        script_args = ["--model", profile.name] + profile.extra_vllm_args
-        if topology != "agg":
-            script_args.append("--single-gpu")
-
-        marks: list[Any] = [
-            getattr(pytest.mark, profile.gpu_marker),
-            pytest.mark.timeout(profile.timeout_s),
-            pytest.mark.post_merge,
-        ]
-        if profile.profiled_vram_gib is not None:
-            marks.append(pytest.mark.profiled_vram_gib(profile.profiled_vram_gib))
-        if profile.requested_vllm_kv_cache_bytes is not None:
-            marks.append(
-                pytest.mark.requested_vllm_kv_cache_bytes(
-                    profile.requested_vllm_kv_cache_bytes
-                )
-            )
-        if profile.gated:
-            marks.append(
-                pytest.mark.skipif(
-                    not os.environ.get("DYN_HF_GATED_MODELS_ENABLED"),
-                    reason=(
-                        f"{profile.name} is gated; set DYN_HF_GATED_MODELS_ENABLED=1 "
-                        "with an HF_TOKEN that has accepted the license"
-                    ),
-                )
-            )
-        marks.extend(profile.marks)
-
-        key = f"mm_{topology}_{profile.short_name}"
-        configs[key] = VLLMConfig(
-            name=key,
-            directory=vllm_dir,
-            script_name=script_name,
-            model=profile.name,
-            script_args=script_args,
-            marks=marks,
-            request_payloads=[_make_image_payload(profile.image_expected_response)],
-        )
-    return configs
-
-
-# ---------------------------------------------------------------------------
-# Multimodal model profiles — add new models here
-# ---------------------------------------------------------------------------
-MULTIMODAL_MODEL_PROFILES: list[MultimodalModelProfile] = [
-    MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
-        short_name="qwen3-vl-2b",
-        supported_topologies=["agg"],
-        image_expected_response=["green"],
-        gpu_marker="gpu_1",
-        timeout_s=220,
-        profiled_vram_gib=9.6,
-    ),
-    MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
-        supported_topologies=["agg"],
-        image_expected_response=["green"],
-        gpu_marker="gpu_1",
-        timeout_s=300,
-        extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
-        profiled_vram_gib=12.0,
-    ),
-]
-
-# Generate and merge multimodal configs into the main config dict (populated below)
-_generated_mm_configs: dict[str, VLLMConfig] = {}
-for _profile in MULTIMODAL_MODEL_PROFILES:
-    _generated_mm_configs.update(make_multimodal_configs(_profile))
 
 
 # vLLM test configurations
@@ -474,44 +328,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
-    # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
-    # PD worker honors build_vllm_gpu_mem_args for parallel execution.
-    "multimodal_e_pd_qwen": VLLMConfig(
-        name="multimodal_e_pd_qwen",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_e_pd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
-            # uses hardcoded fractions (encode=0.1, PD=0.7) that scale with GPU size.
-            pytest.mark.timeout(340),  # ~5x observed 68.4s; 2B model loads slower on CI
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                # With proper prompt templating, the model actually only returns "green",
-                # verified behavior with native vLLM.
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
@@ -550,117 +366,6 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=100,
             )
-        ],
-    ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
-    # NOTE: disagg_multimodal_epd.sh uses --kv-cache-memory-bytes=512MB for P/D
-    # workers. Per vLLM CacheConfig, kv_cache_memory_bytes (when not-None) ignores
-    # gpu_memory_utilization (ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/),
-    # so KV cache overrides have no effect. Regardless of GPU_MEM
-    # fractions (0.1/0.4/0.4), the 3 workers combined consistently use ~17.6 GiB
-    # total on this GPU.
-    # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
-    # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
-    # P/D workers honor build_vllm_gpu_mem_args for parallel execution.
-    "multimodal_disagg_qwen": VLLMConfig(
-        name="multimodal_disagg_qwen",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_epd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
-            # uses hardcoded fractions via DYN_*_GPU_MEM that scale with GPU size.
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=300,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    # P/D multimodal (no encoder): prefill loads images via PIL,
-    # computes grid_thw for decode using smart_resize.
-    "multimodal_p_d_qwen": VLLMConfig(
-        name="multimodal_p_d_qwen",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_p_d.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=300,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                922_354_000
-            ),  # KV cache cap (2x safety over min=461_176_832)
-            pytest.mark.timeout(
-                360
-            ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
-            pytest.mark.post_merge,
-        ],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
-            ),
         ],
     ),
     "multimodal_agg_llava": VLLMConfig(
@@ -1009,7 +714,8 @@ vllm_configs = {
 }
 
 # Merge generated multimodal configs
-vllm_configs.update(_generated_mm_configs)
+for _profile in MULTIMODAL_MODEL_PROFILES:
+    vllm_configs.update(make_multimodal_configs(_profile, VLLMConfig, vllm_dir))
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
