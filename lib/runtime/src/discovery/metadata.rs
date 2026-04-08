@@ -36,6 +36,9 @@ pub struct DiscoveryMetadata {
     /// Registered endpoint instances (key: path string from EndpointInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     endpoints: HashMap<String, DiscoveryInstance>,
+    /// Registered Velo peer instances (key: path string from VeloPeerInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    velo_peers: HashMap<String, DiscoveryInstance>,
     /// Registered model card instances (key: path string from ModelCardInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     model_cards: HashMap<String, DiscoveryInstance>,
@@ -49,6 +52,7 @@ impl DiscoveryMetadata {
     pub fn new() -> Self {
         Self {
             endpoints: HashMap::new(),
+            velo_peers: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
         }
@@ -60,6 +64,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Endpoint(key) => {
                 self.endpoints.insert(key.to_path(), instance);
                 Ok(())
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as endpoint")
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register non-endpoint instance as endpoint")
@@ -80,8 +87,30 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot register non-model-card instance as model card")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as model card")
+            }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as model card")
+            }
+        }
+    }
+
+    /// Register a Velo peer instance
+    pub fn register_velo_peer(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::VeloPeer(key) => {
+                self.velo_peers.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register Endpoint instance as VeloPeer")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register Model instance as VeloPeer")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as VeloPeer")
             }
         }
     }
@@ -92,6 +121,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Endpoint(key) => {
                 self.endpoints.remove(&key.to_path());
                 Ok(())
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as endpoint")
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
@@ -112,8 +144,30 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot unregister non-model-card instance as model card")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as model card")
+            }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as model card")
+            }
+        }
+    }
+
+    /// Unregister a Velo peer instance
+    pub fn unregister_velo_peer(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::VeloPeer(key) => {
+                self.velo_peers.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister Endpoint instance as VeloPeer")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister Model instance as VeloPeer")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as VeloPeer")
             }
         }
     }
@@ -127,6 +181,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot register Endpoint instance as event channel")
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as event channel")
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register Model instance as event channel")
@@ -144,6 +201,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot unregister Endpoint instance as event channel")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as event channel")
+            }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister Model instance as event channel")
             }
@@ -153,6 +213,11 @@ impl DiscoveryMetadata {
     /// Get all registered endpoints
     pub fn get_all_endpoints(&self) -> Vec<DiscoveryInstance> {
         self.endpoints.values().cloned().collect()
+    }
+
+    /// Get all registered Velo peers
+    pub fn get_all_velo_peers(&self) -> Vec<DiscoveryInstance> {
+        self.velo_peers.values().cloned().collect()
     }
 
     /// Get all registered model cards
@@ -169,6 +234,7 @@ impl DiscoveryMetadata {
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
+            .chain(self.velo_peers.values())
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
             .cloned()
@@ -182,6 +248,10 @@ impl DiscoveryMetadata {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. } => self.get_all_endpoints(),
+
+            DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::NamespacedVeloPeers { .. }
+            | DiscoveryQuery::ComponentVeloPeers { .. } => self.get_all_velo_peers(),
 
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
@@ -243,6 +313,31 @@ fn filter_instances(
                         && &i.component == component
                         && &i.endpoint == endpoint
                 }
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::AllVeloPeers => instances,
+
+        DiscoveryQuery::NamespacedVeloPeers { namespace } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::VeloPeer { namespace: ns, .. } => ns == namespace,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::ComponentVeloPeers {
+            namespace,
+            component,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::VeloPeer {
+                    namespace: ns,
+                    component: comp,
+                    ..
+                } => ns == namespace && comp == component,
                 _ => false,
             })
             .collect(),

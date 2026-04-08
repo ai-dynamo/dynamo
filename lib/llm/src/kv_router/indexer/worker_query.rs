@@ -9,16 +9,15 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
-use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
-    SingleIn, network::Ingress,
+use dynamo_runtime::discovery::{
+    DiscoveredVeloMessenger, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery,
+    build_default_messenger, register_local_component_peer,
 };
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
+use upstream_velo_messenger::{Handler, TypedContext};
 
 use super::Indexer;
 use crate::kv_router::worker_kv_indexer_query_endpoint;
@@ -35,6 +34,7 @@ const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 
 /// Prefix for worker KV indexer query endpoint names.
 const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
+const VELO_WORKER_KV_QUERY_HANDLER: &str = "worker_kv_indexer_query";
 
 type RecoveryKey = (WorkerId, DpRank);
 
@@ -81,40 +81,39 @@ trait WorkerQueryTransport: Send + Sync {
     ) -> Result<WorkerKvQueryResponse>;
 }
 
-struct RuntimeWorkerQueryTransport {
-    component: Component,
-    routers: DashMap<DpRank, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
+struct VeloWorkerQueryTransport {
+    discovered: DiscoveredVeloMessenger,
 }
 
-impl RuntimeWorkerQueryTransport {
-    fn new(component: Component) -> Self {
-        Self {
-            component,
-            routers: DashMap::new(),
-        }
+impl VeloWorkerQueryTransport {
+    async fn new(component: Component) -> Result<Self> {
+        Ok(Self {
+            discovered: DiscoveredVeloMessenger::new(component).await?,
+        })
     }
 
-    async fn get_router_for_dp_rank(
+    async fn send_query_request(
         &self,
+        worker_id: WorkerId,
         dp_rank: DpRank,
-    ) -> Result<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>> {
-        if let Some(router) = self.routers.get(&dp_rank) {
-            return Ok(router.clone());
-        }
-
-        let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
-        let endpoint = self.component.endpoint(&endpoint_name);
-        let client = endpoint.client().await?;
-        let router = Arc::new(
-            PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?,
-        );
-
-        Ok(self.routers.entry(dp_rank).or_insert(router).clone())
+        target_instance_id: upstream_velo_messenger::InstanceId,
+        request: WorkerKvQueryRequest,
+    ) -> Result<WorkerKvQueryResponse> {
+        self.discovered
+            .messenger()
+            .typed_unary::<WorkerKvQueryResponse>(VELO_WORKER_KV_QUERY_HANDLER)?
+            .instance(target_instance_id)
+            .payload(request)?
+            .send()
+            .await
+            .with_context(|| {
+                format!("Failed to send worker KV query over Velo to worker {worker_id} dp_rank {dp_rank}")
+            })
     }
 }
 
 #[async_trait]
-impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
+impl WorkerQueryTransport for VeloWorkerQueryTransport {
     async fn query_worker(
         &self,
         worker_id: WorkerId,
@@ -122,24 +121,30 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
-        let router = self.get_router_for_dp_rank(dp_rank).await?;
-
         let request = WorkerKvQueryRequest {
             worker_id,
             start_event_id,
             end_event_id,
         };
-        let mut stream = router
-            .direct(SingleIn::new(request), worker_id)
-            .await
-            .with_context(|| {
-                format!("Failed to send worker KV query to worker {worker_id} dp_rank {dp_rank}")
-            })?;
 
-        let response = stream
-            .next()
+        let peer_info = self.discovered.resolve_peer_info(worker_id).await?;
+        let response = match self
+            .send_query_request(worker_id, dp_rank, peer_info.instance_id(), request.clone())
             .await
-            .context("Worker KV query returned an empty response stream")?;
+        {
+            Ok(response) => response,
+            Err(first_error) => {
+                self.discovered.invalidate_peer_info(worker_id);
+                let peer_info = self.discovered.resolve_peer_info(worker_id).await?;
+                self.send_query_request(worker_id, dp_rank, peer_info.instance_id(), request)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Worker KV query retry after refreshing peer info failed for worker {worker_id} dp_rank {dp_rank}; initial error: {first_error}"
+                        )
+                    })?
+            }
+        };
 
         if let Some(err) = response.err() {
             return Err(err).context("Worker KV query response error");
@@ -189,7 +194,7 @@ impl WorkerQueryClient {
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
     pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
-        let transport = Arc::new(RuntimeWorkerQueryTransport::new(component.clone()));
+        let transport = Arc::new(VeloWorkerQueryTransport::new(component.clone()).await?);
         let client = Self::new(component.clone(), indexer, transport);
 
         let client_bg = client.clone();
@@ -637,26 +642,68 @@ impl WorkerQueryClient {
 }
 
 // ============================================================================
-// Worker-side endpoint registration (unchanged)
+// Worker-side endpoint registration
 // ============================================================================
 
-/// Worker-side endpoint registration for Router -> LocalKvIndexer query service
+async fn query_local_indexer(
+    worker_id: WorkerId,
+    local_indexer: Arc<LocalKvIndexer>,
+    request: WorkerKvQueryRequest,
+) -> WorkerKvQueryResponse {
+    tracing::debug!(
+        "Received query request for worker {}: {:?}",
+        worker_id,
+        request
+    );
+
+    if request.worker_id != worker_id {
+        return WorkerKvQueryResponse::Error(format!(
+            "worker KV query worker_id mismatch: request.worker_id={} this.worker_id={worker_id}",
+            request.worker_id,
+        ));
+    }
+
+    local_indexer
+        .get_events_in_id_range(request.start_event_id, request.end_event_id)
+        .await
+}
+
+async fn build_worker_query_messenger(
+    worker_id: WorkerId,
+    local_indexer: Arc<LocalKvIndexer>,
+) -> Result<Arc<upstream_velo_messenger::Messenger>> {
+    let messenger = build_default_messenger().await?;
+
+    let handler = Handler::typed_unary_async(
+        VELO_WORKER_KV_QUERY_HANDLER,
+        move |ctx: TypedContext<WorkerKvQueryRequest>| {
+            let local_indexer = local_indexer.clone();
+            async move { Ok(query_local_indexer(worker_id, local_indexer, ctx.input).await) }
+        },
+    )
+    .build();
+    messenger
+        .register_handler(handler)
+        .context("Failed to register worker-query Velo handler")?;
+
+    Ok(messenger)
+}
+
+/// Worker-side endpoint registration for Router -> LocalKvIndexer query service.
+///
+/// The runtime endpoint is registered only for service discovery / dp-rank
+/// presence. The query itself is served over Velo typed-unary messaging.
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
 ) {
-    let engine = Arc::new(WorkerKvQueryEngine {
-        worker_id,
-        local_indexer,
-    });
-
-    let ingress = match Ingress::for_engine(engine) {
-        Ok(ingress) => ingress,
+    let messenger = match build_worker_query_messenger(worker_id, local_indexer).await {
+        Ok(messenger) => messenger,
         Err(e) => {
             tracing::error!(
-                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id} dp_rank {dp_rank}: {e}"
+                "Failed to start worker-query Velo server for worker {worker_id} dp_rank {dp_rank}: {e}"
             );
             return;
         }
@@ -664,65 +711,24 @@ pub(crate) async fn start_worker_kv_query_endpoint(
 
     let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
     tracing::info!(
-        "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} on endpoint '{endpoint_name}'"
+        "Registering worker-query discovery endpoint for worker {worker_id} dp_rank {dp_rank} on endpoint '{endpoint_name}'"
     );
 
     if let Err(e) = component
         .endpoint(&endpoint_name)
-        .endpoint_builder()
-        .handler(ingress)
-        .graceful_shutdown(true)
-        .start()
+        .register_endpoint_instance()
         .await
     {
         tracing::error!(
-            "WorkerKvQuery endpoint failed for worker {worker_id} dp_rank {dp_rank}: {e}"
+            "Worker-query discovery endpoint registration failed for worker {worker_id} dp_rank {dp_rank}: {e}"
         );
+        return;
     }
-}
 
-struct WorkerKvQueryEngine {
-    worker_id: u64,
-    local_indexer: Arc<LocalKvIndexer>,
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
-    for WorkerKvQueryEngine
-{
-    async fn generate(
-        &self,
-        request: SingleIn<WorkerKvQueryRequest>,
-    ) -> anyhow::Result<ManyOut<WorkerKvQueryResponse>> {
-        let (request, ctx) = request.into_parts();
-
-        tracing::debug!(
-            "Received query request for worker {}: {:?}",
-            self.worker_id,
-            request
+    if let Err(e) = register_local_component_peer(&component, &messenger.peer_info()).await {
+        tracing::error!(
+            "Worker-query Velo peer registration failed for worker {worker_id} dp_rank {dp_rank}: {e}"
         );
-
-        if request.worker_id != self.worker_id {
-            let error_message = format!(
-                "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
-                request.worker_id, self.worker_id
-            );
-            let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
-        }
-
-        let response = self
-            .local_indexer
-            .get_events_in_id_range(request.start_event_id, request.end_event_id)
-            .await;
-
-        Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
-            ctx.context(),
-        ))
     }
 }
 
@@ -917,7 +923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_kv_query_engine_returns_buffered_events() {
+    async fn test_worker_local_kv_query_returns_buffered_events() {
         let worker_id = 7u64;
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -936,27 +942,13 @@ mod tests {
             .await
             .expect("apply_event_with_buffer should succeed");
 
-        let engine = WorkerKvQueryEngine {
-            worker_id,
-            local_indexer,
-        };
-
         let request = WorkerKvQueryRequest {
             worker_id,
             start_event_id: Some(1),
             end_event_id: Some(1),
         };
 
-        let mut stream = engine
-            .generate(SingleIn::new(request))
-            .await
-            .expect("generate should succeed");
-
-        let response = stream
-            .next()
-            .await
-            .expect("response stream should yield one item");
-
+        let response = query_local_indexer(worker_id, local_indexer, request).await;
         match response {
             WorkerKvQueryResponse::Events(events) => {
                 assert_eq!(events.len(), 1);
