@@ -636,7 +636,24 @@ jobs:
   # ============================================================================
 
   allure-report:
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs:
+      - changed-files
+      - operator
+      - vllm-build
+      - vllm-test
+      - vllm-multi-gpu-test
+      - vllm-copy-to-acr
+      - sglang-build
+      - sglang-test
+      - sglang-multi-gpu-test
+      - sglang-copy-to-acr
+      - trtllm-build
+      - trtllm-test
+      - trtllm-multi-gpu-test
+      - trtllm-copy-to-acr
+      - deploy-test-vllm
+      - deploy-test-sglang
+      - deploy-test-trtllm
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/generate-allure-report.yml
     with:
