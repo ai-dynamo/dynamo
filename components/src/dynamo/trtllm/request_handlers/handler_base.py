@@ -38,7 +38,8 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None: ...
+    def abort(self) -> None:
+        ...
 
 
 class _DeferredAbort:
@@ -78,6 +79,8 @@ class _DeferredAbort:
             pass
         self._generation_result.abort()
         logging.debug("Deferred abort: background task completed, abort fired")
+
+
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor

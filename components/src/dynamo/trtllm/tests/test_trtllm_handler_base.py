@@ -486,9 +486,7 @@ class TestDeferredAbortGuard:
         context.async_killed_or_stopped.return_value = killed_future
         context.id.return_value = "test-shutdown"
 
-        task = asyncio.create_task(
-            handler._handle_cancellation(guard, context)
-        )
+        task = asyncio.create_task(handler._handle_cancellation(guard, context))
         await asyncio.sleep(0.05)
 
         # Trigger shutdown
