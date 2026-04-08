@@ -472,7 +472,8 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
