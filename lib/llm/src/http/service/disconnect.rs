@@ -269,14 +269,14 @@ pub fn monitor_for_disconnects(
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    inflight_guard.mark_error(ErrorType::Cancelled);
+                    inflight_guard.mark_error(ErrorType::ResponseTimeout);
                     stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
                         endpoint = %inflight_guard.endpoint(),
                         request_type = %inflight_guard.request_type(),
-                        error_type = "cancelled",
+                        error_type = "response_timeout",
                         elapsed_ms = %inflight_guard.elapsed_ms(),
                         timeout_secs = ?inactivity_timeout.map(|d| d.as_secs()),
                         "backend stream inactivity timeout; killing engine context to release inflight gauge"
@@ -293,7 +293,7 @@ pub fn monitor_for_disconnects(
 mod tests {
     use super::*;
     use crate::http::client::HttpRequestContext;
-    use crate::http::service::metrics::Endpoint;
+    use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
     use serial_test::serial;
 
@@ -369,6 +369,30 @@ mod tests {
             metrics.get_inflight_count(model),
             0,
             "inflight gauge leaked"
+        );
+
+        // Verify the error was categorized as ResponseTimeout, not Cancelled
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::ResponseTimeout,
+            ),
+            1,
+            "inactivity timeout should be recorded as ResponseTimeout"
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            0,
+            "inactivity timeout should NOT be recorded as Cancelled"
         );
     }
 
