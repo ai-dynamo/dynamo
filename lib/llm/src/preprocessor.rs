@@ -480,6 +480,8 @@ impl OpenAIPreprocessor {
             }
         }
 
+        let n_media: usize = media_map.values().map(|v| v.len()).sum();
+
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
@@ -507,7 +509,7 @@ impl OpenAIPreprocessor {
 
         tracing::info!(
             "[PERF] gather_mm_data n_media={} time_ms={:.2}",
-            media_map.values().map(|v| v.len()).sum::<usize>(),
+            n_media,
             gather_start.elapsed().as_secs_f64() * 1000.0,
         );
 
