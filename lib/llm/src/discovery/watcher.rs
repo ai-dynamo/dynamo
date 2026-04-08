@@ -72,6 +72,7 @@ pub struct ModelWatcher {
     drt: DistributedRuntime,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
@@ -119,6 +120,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
@@ -128,6 +130,7 @@ impl ModelWatcher {
             drt: runtime,
             router_config,
             migration_limit,
+            migration_max_seq_len,
             notify_on_model: Notify::new(),
             model_update_tx: None,
             chat_engine_factory,
@@ -577,6 +580,7 @@ impl ModelWatcher {
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
                         self.migration_limit,
+                        self.migration_max_seq_len,
                         self.metrics.clone(),
                     )
                     .await
@@ -610,6 +614,7 @@ impl ModelWatcher {
                         prefill_chooser,
                         self.router_config.enforce_disagg,
                         self.migration_limit,
+                        self.migration_max_seq_len,
                         self.metrics.clone(),
                     )
                     .await

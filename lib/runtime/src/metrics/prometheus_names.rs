@@ -232,6 +232,11 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Total number of times migration was disabled because the sequence length
+    /// exceeded the configured max_seq_len limit
+    pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
+        "model_migration_max_seq_len_exceeded_total";
+
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
 
