@@ -15,6 +15,7 @@ Compared to aggregated mode, disaggregated mode has some known randomness.
 Example reference: https://github.com/vllm-project/vllm/issues/7779#issuecomment-2304967870
 """
 
+import json
 import logging
 import os
 import signal
@@ -29,6 +30,10 @@ import pytest
 import requests
 import yaml
 
+from tests.utils.device import (
+    build_nixl_kv_transfer_config,
+    build_nixl_kv_transfer_config_json,
+)
 from tests.utils.test_output import resolve_test_output_path
 
 from .common import DeterminismTester, ServerType
@@ -154,7 +159,7 @@ class LLMServerManager:
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            build_nixl_kv_transfer_config_json(),
         ]
 
         # Construct prefiller command
@@ -171,7 +176,23 @@ class LLMServerManager:
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
             "--kv-transfer-config",
-            '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}',
+            json.dumps(
+                {
+                    "kv_connector": "PdConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "connectors": [
+                            {
+                                "kv_connector": "DynamoConnector",
+                                "kv_connector_module_path": "kvbm.vllm_integration.connector",
+                                "kv_role": "kv_both",
+                            },
+                            build_nixl_kv_transfer_config(),
+                        ]
+                    },
+                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
+                }
+            ),
         ]
 
         # GPU blocks override
