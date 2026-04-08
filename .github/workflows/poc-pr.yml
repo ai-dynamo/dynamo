@@ -629,3 +629,20 @@ jobs:
         shell: bash
         run: |
           docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+
+  # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/generate-allure-report.yml
+    with:
+      run_id: ${{ github.run_id }}
+      subdir: pr
+      workflow_label: PR
+    permissions:
+      contents: write
+      actions: read
