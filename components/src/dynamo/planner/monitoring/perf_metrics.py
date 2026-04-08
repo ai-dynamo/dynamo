@@ -112,9 +112,18 @@ async def _try_endpoint(
             )
             return []
 
-        return _extract_fpms_from_benchmark(benchmark_data, component_type)
-    except Exception as e:
+        fpms = _extract_fpms_from_benchmark(benchmark_data, component_type)
+        if not fpms:
+            logger.warning(
+                "get_perf_metrics returned data but no valid FPMs were extracted "
+                "(possible schema mismatch)"
+            )
+        return fpms
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.info(f"get_perf_metrics endpoint not available: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"get_perf_metrics unexpected error: {e}")
         return []
 
 
@@ -147,7 +156,8 @@ def _extract_fpms_from_benchmark(
                 fpm = msgspec.json.decode(raw, type=ForwardPassMetrics)
                 if fpm.wall_time > 0:
                     fpms.append(fpm)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to decode FPM entry: {e}")
                 continue
 
     return fpms

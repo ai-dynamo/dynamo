@@ -86,7 +86,7 @@ class DecodeRegressionModel(_BaseRegressionModel):
             (model not fitted or invalid input); positive rps is
             the best achievable rate with the predicted ITL.
         """
-        if not self._ensure_fitted() or context_length <= 0 or osl <= 0:
+        if not self._ensure_fitted() or context_length <= 0 or osl <= 0 or itl <= 0:
             return (0.0, 0.0)
 
         max_batch = (

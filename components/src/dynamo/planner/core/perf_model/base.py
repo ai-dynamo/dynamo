@@ -134,20 +134,37 @@ class _BaseRegressionModel:
                 key.append(max(0, min(idx, self._buckets_per_axis - 1)))
         return tuple(key)
 
-    def _update_axis_bounds(self, x: Union[float, list[float]]) -> None:
+    def _update_axis_bounds(self, x: Union[float, list[float]]) -> bool:
+        """Update min/max per axis. Returns True if bounds changed."""
         vals = self._to_vals(x)
+        changed = False
         for i, v in enumerate(vals):
             if v < self._axis_min[i]:
                 self._axis_min[i] = v
+                changed = True
             if v > self._axis_max[i]:
                 self._axis_max[i] = v
+                changed = True
+        return changed
+
+    def _rebuild_buckets(self) -> None:
+        """Re-index all observations into buckets using current axis bounds."""
+        all_obs = self._gather_observations()
+        self._buckets.clear()
+        for x, wt in all_obs:
+            key = self._bucket_key(x)
+            self._buckets[key].append((x, wt))
 
     def add_observation(self, fpm: ForwardPassMetrics) -> None:
         self._update_moving_averages(fpm)
         if fpm.wall_time == 0.0:
             return
         x = self._extract_x(fpm)
-        self._update_axis_bounds(x)
+        bounds_changed = self._update_axis_bounds(x)
+
+        if bounds_changed and self._total_observations > 0:
+            self._rebuild_buckets()
+
         key = self._bucket_key(x)
         self._buckets[key].append((x, fpm.wall_time))
         self._total_observations += 1
