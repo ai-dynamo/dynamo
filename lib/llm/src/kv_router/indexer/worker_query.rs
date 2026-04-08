@@ -20,7 +20,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::kv_router::Indexer;
+use super::Indexer;
 use crate::kv_router::worker_kv_indexer_query_endpoint;
 use dynamo_kv_router::{
     indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},

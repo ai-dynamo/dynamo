@@ -1998,7 +1998,9 @@ async fn images(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Images);
         }
-        ErrorMessage::from_anyhow(e, "Failed to generate images")
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
     })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first response
@@ -2018,27 +2020,53 @@ async fn images(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold images stream")
+            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
     Ok(Json(response).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Images endpoint
-/// If not path is provided, the default path is `/v1/images/generations`
+/// Handler for `/v1/images/edits` (I2I). Requires `input_reference`.
+async fn images_edits(
+    state: State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    if request.input_reference.is_none() {
+        let code = StatusCode::BAD_REQUEST;
+        return Err((
+            code,
+            Json(ErrorMessage {
+                message: "input_reference is required for /v1/images/edits".to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+            }),
+        ));
+    }
+    images(state, headers, Json(request)).await
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Images endpoints.
+/// `/v1/images/generations` accepts optional `input_reference` (T2I or TI2I).
+/// `/v1/images/edits` requires `input_reference` (I2I).
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/images/generations".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let generations_path = path.unwrap_or("/v1/images/generations".to_string());
+    let edits_path = generations_path.replace("/generations", "/edits");
+    let doc = RouteDoc::new(axum::http::Method::POST, &generations_path);
+    let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
-        .route(&path, post(images))
+        .route(&generations_path, post(images))
+        .route(&edits_path, post(images_edits))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc], router)
+    (vec![doc, edits_doc], router)
 }
 
 async fn videos(
@@ -2085,7 +2113,9 @@ async fn videos(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
-        ErrorMessage::from_anyhow(e, "Failed to generate videos")
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
     })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
@@ -2105,7 +2135,9 @@ async fn videos(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold videos stream")
+            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
@@ -2150,7 +2182,9 @@ async fn video_stream(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
-        ErrorMessage::from_anyhow(e, "Failed to start video stream")
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
     })?;
 
     // Capture the context to cancel the stream if the client disconnects.
@@ -2234,6 +2268,7 @@ async fn video_stream(
                 }
                 _ = ctx.stopped() => {
                     tracing::trace!("Context stopped; breaking MJPEG stream");
+                    inflight.mark_error(ErrorType::Cancelled);
                     break;
                 }
             }
@@ -2249,6 +2284,8 @@ async fn video_stream(
         .body(Body::from_stream(monitored_stream))
         .map(|r| r.into_response())
         .map_err(|e| {
+            // inflight is already owned by the monitored_stream which handles
+            // mark_ok (stream end) and mark_error (cancellation).
             ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
         })
 }

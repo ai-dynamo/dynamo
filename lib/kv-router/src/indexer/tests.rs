@@ -13,6 +13,7 @@ use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::PositionalIndexer;
 use super::*;
+use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
@@ -325,13 +326,13 @@ mod interface_tests {
         let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
         let prefix_remove = make_remove_event(0, &[1, 2, 3]);
 
-        // TODO: The radix-family implementations still have a broader tree-size
-        // accounting gap after mid-chain removes because descendant lookup entries
-        // are cleaned up lazily. That means "store -> partial remove -> restore
-        // continuation" can still miscount restored coverage in single, sharded,
-        // concurrent, and concurrent_compressed. This test is intentionally scoped
-        // to duplicate store/remove replay, which was the concrete compressed-tree
-        // regression fixed on this branch.
+        // TODO: The non-compressed radix-family implementations still have a broader
+        // tree-size accounting gap after mid-chain removes because descendant
+        // lookup entries are cleaned up lazily. That means "store -> partial
+        // remove -> restore continuation" can still miscount restored coverage
+        // in single, sharded, and concurrent. This test is intentionally scoped
+        // to duplicate store/remove replay so all tree-size variants share the
+        // same stable baseline.
 
         index.apply_event(prefix_event.clone()).await;
         flush_and_settle(index.as_ref()).await;
@@ -412,6 +413,52 @@ mod interface_tests {
             .unwrap();
         assert!(duplicate_empty_scores.scores.is_empty());
         assert!(snapshot_tree(index.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_restore_after_mid_chain_remove_updates_tree_size() {
+        let index = make_indexer("concurrent_compressed");
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 1, 1).await;
+
+        index
+            .apply_event(make_store_event_with_parent(0, &[1], &[2, 3]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_partial_node_drops_unreachable_descendants() {
+        let index = make_indexer("concurrent_compressed");
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            snapshot_tree(index.as_ref()).await,
+            vec![make_store_event(0, &[1])]
+        );
     }
 
     #[tokio::test]
@@ -1841,6 +1888,37 @@ fn make_tree_indexer_with_frequency(
         )),
         _ => panic!("Unknown variant: {}", variant),
     }
+}
+
+#[tokio::test]
+async fn test_sharded_routing_decision_assigns_first_seen_worker() {
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let index = KvIndexerSharded::new_with_frequency(
+        token,
+        4,
+        Some(Duration::from_secs(60)),
+        32,
+        metrics,
+        Some(PruneConfig::default()),
+    );
+    let worker = WorkerWithDpRank::new(42, 0);
+    let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
+    let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+
+    index
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .await
+        .unwrap();
+    flush_and_settle(&index).await;
+
+    assert_score(&index, &[11, 22], worker, 2).await;
+
+    index.remove_worker(worker.worker_id).await;
+    flush_and_settle(&index).await;
+
+    let scores = query_scores(&index, &[11, 22]).await;
+    assert!(!scores.scores.contains_key(&worker));
 }
 
 mod tree_specific_tests {
