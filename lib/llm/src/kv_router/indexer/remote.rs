@@ -25,6 +25,8 @@ use futures::StreamExt;
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
+use crate::kv_router::metrics::RemoteIndexerMetrics;
+
 use super::Indexer;
 
 pub struct RemoteIndexer {
@@ -36,6 +38,7 @@ pub struct RemoteIndexer {
     record_client: Client,
     component: Component,
     model_name: String,
+    metrics: Arc<RemoteIndexerMetrics>,
     use_kv_events: bool,
 }
 
@@ -69,6 +72,7 @@ impl RemoteIndexer {
                 .await?,
             )
         };
+        let metrics = RemoteIndexerMetrics::from_component(component);
         Ok(Self {
             query_router,
             query_client,
@@ -76,6 +80,7 @@ impl RemoteIndexer {
             record_client,
             component: component.clone(),
             model_name,
+            metrics,
             use_kv_events,
         })
     }
@@ -84,7 +89,9 @@ impl RemoteIndexer {
         &self,
         block_hashes: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores> {
-        self.validate_topology_if_ready().await?;
+        self.validate_topology_if_ready().await.inspect_err(|_| {
+            self.metrics.increment_query_failures();
+        })?;
 
         let request = IndexerQueryRequest {
             model_name: self.model_name.clone(),
@@ -93,14 +100,21 @@ impl RemoteIndexer {
         let mut stream: ManyOut<IndexerQueryResponse> = self
             .query_router
             .round_robin(SingleIn::new(request))
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.metrics.increment_query_failures();
+            })?;
 
         match stream.next().await {
             Some(IndexerQueryResponse::Scores(scores)) => Ok(scores.into()),
             Some(IndexerQueryResponse::Error(msg)) => {
+                self.metrics.increment_query_failures();
                 Err(anyhow::anyhow!("Remote indexer error: {}", msg))
             }
-            None => Err(anyhow::anyhow!("Remote indexer returned empty response")),
+            None => {
+                self.metrics.increment_query_failures();
+                Err(anyhow::anyhow!("Remote indexer returned empty response"))
+            }
         }
     }
 
@@ -110,9 +124,12 @@ impl RemoteIndexer {
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<()> {
-        self.validate_topology_if_ready().await?;
+        self.validate_topology_if_ready().await.inspect_err(|_| {
+            self.metrics.increment_write_failures();
+        })?;
 
         let record_router = self.record_router.as_ref().ok_or_else(|| {
+            self.metrics.increment_write_failures();
             anyhow::anyhow!("remote approximate indexer is not configured for writes")
         })?;
         let request = IndexerRecordRoutingDecisionRequest {
@@ -121,17 +138,25 @@ impl RemoteIndexer {
             local_hashes,
             sequence_hashes,
         };
-        let mut stream: ManyOut<IndexerRecordRoutingDecisionResponse> =
-            record_router.round_robin(SingleIn::new(request)).await?;
+        let mut stream: ManyOut<IndexerRecordRoutingDecisionResponse> = record_router
+            .round_robin(SingleIn::new(request))
+            .await
+            .inspect_err(|_| {
+                self.metrics.increment_write_failures();
+            })?;
 
         match stream.next().await {
             Some(IndexerRecordRoutingDecisionResponse::Recorded) => Ok(()),
             Some(IndexerRecordRoutingDecisionResponse::Error(msg)) => {
+                self.metrics.increment_write_failures();
                 Err(anyhow::anyhow!("Remote indexer write error: {}", msg))
             }
-            None => Err(anyhow::anyhow!(
-                "Remote indexer returned empty write response"
-            )),
+            None => {
+                self.metrics.increment_write_failures();
+                Err(anyhow::anyhow!(
+                    "Remote indexer returned empty write response"
+                ))
+            }
         }
     }
 
