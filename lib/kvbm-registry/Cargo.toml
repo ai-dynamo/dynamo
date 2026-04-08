@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bincode = { version = "2.0.1", features = ["serde", "derive"] }
+bytes = { workspace = true }
+dashmap = { version = "5.5.3" }
+futures-util = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+velo-transports = { workspace = true }
+
+# ZMQ hub transport (still present in hub_transport.rs from R6)
+tmq = { workspace = true }
+
+[dependencies.kvbm-bench]
+path = "../kvbm-bench"
+optional = true
+
+[dependencies.clap]
+version = "4.5"
+features = ["derive"]
+optional = true
+
+[dependencies.serde_yaml]
+version = "0.9"
+optional = true
+
+[dependencies.serde_json]
+version = "1"
+optional = true
+
+[[bin]]
+name = "bench"
+path = "bin/bench.rs"
+required-features = ["bench"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+bench = ["dep:kvbm-bench", "dep:clap", "dep:serde_yaml", "dep:serde_json"]

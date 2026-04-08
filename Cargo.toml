@@ -22,6 +22,8 @@ members = [
     "lib/velo-common",
     "lib/velo-transports",
     "lib/velo-events",
+    "lib/kvbm-bench",
+    "lib/kvbm-registry",
 ]
 resolver = "3"
 
@@ -58,6 +60,10 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "0.1.0" }
 velo-common = { path = "lib/velo-common", version = "0.1.0" }
 velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
 velo-events = { path = "lib/velo-events", version = "0.1.0" }
+
+# kvbm-bench and kvbm-registry
+kvbm-bench = { path = "lib/kvbm-bench" }
+kvbm-registry = { path = "lib/kvbm-registry" }
 
 # External dependencies
 anyhow = { version = "1" }
