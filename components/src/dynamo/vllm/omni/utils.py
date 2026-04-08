@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from huggingface_hub import scan_cache_dir
-from omegaconf import OmegaConf
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -84,6 +83,8 @@ def parse_omni_request(
 
 def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | None:
     """Construct typed sampling params from YAML default_sampling_params."""
+    from omegaconf import OmegaConf
+
     defaults = getattr(stage_config, "default_sampling_params", None)
     if not defaults:
         return None

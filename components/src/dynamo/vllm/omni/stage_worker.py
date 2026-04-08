@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import yaml
-from omegaconf import OmegaConf
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
@@ -369,6 +368,7 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
     """Convert a parsed stage config to a single-stage YAML dict."""
+    from omegaconf import OmegaConf
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):
