@@ -114,8 +114,9 @@ def build_conversation(
             "max_tokens": phase["max_output_tokens"],
             "model": model,
         }
-        if config.get("extra_inputs"):
-            payload.update(config["extra_inputs"])
+        if config.get("extra_inputs") or phase.get("extra_inputs"):
+            merged = {**config.get("extra_inputs", {}), **phase.get("extra_inputs", {})}
+            payload.update(merged)
         lines.append(payload)
 
         assistant_msg = {

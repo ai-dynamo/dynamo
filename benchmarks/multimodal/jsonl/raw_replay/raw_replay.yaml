@@ -32,6 +32,8 @@ phases:
     system_tokens: 200
     user_tokens: 600
     max_output_tokens: 20
+    extra_inputs:
+      min_tokens: 500
 
   - name: "turn_3"
     system_tokens: 300
