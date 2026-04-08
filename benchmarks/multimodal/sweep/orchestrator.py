@@ -120,11 +120,15 @@ def _run_config(
         return
 
     if not config.restart_server_every_benchmark:
+        first_artifact_dir = pending_runs[0][3]
+        first_artifact_dir.mkdir(parents=True, exist_ok=True)
+        server_log = str(first_artifact_dir / f"{bench_cfg.label}_server.log")
         server.start(
             workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
             env_overrides=env_overrides,
+            log_file=server_log,
         )
 
     try:
@@ -135,11 +139,14 @@ def _run_config(
             )
 
             if config.restart_server_every_benchmark:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                server_log = str(artifact_dir / f"{bench_cfg.label}_server.log")
                 server.start(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
                     env_overrides=env_overrides,
+                    log_file=server_log,
                 )
 
             try:

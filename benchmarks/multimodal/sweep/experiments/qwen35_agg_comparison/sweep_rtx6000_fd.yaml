@@ -1,0 +1,50 @@
+# RTX 6000: vllm-baseline vs dynamo-fd (no embedding cache)
+# NVTX + [PERF] instrumentation enabled for TTFT breakdown.
+
+model: Qwen/Qwen3.5-35B-A3B-FP8
+request_rates: [0.4]
+osl: 1
+request_count: 60
+warmup_count: 3
+port: 8000
+timeout: 600
+output_dir: logs/2026-04-07/rtx6000
+
+env:
+  CUDA_VISIBLE_DEVICES: "2"
+  HF_HOME: /data/huggingface
+  DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
+  DYN_ENABLE_RUST_NVTX: "1"
+  DYN_NVTX: "1"
+  LD_LIBRARY_PATH: "/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/nvidia/nvtx/lib:/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs:/usr/local/cuda/lib64"
+
+input_files:
+  - logs/2026-04-07/ttft-profiling/dataset/60req_4img_240pool_400word_base64.jsonl
+
+configs:
+  - label: vllm-baseline
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    extra_args:
+      - --no-enable-prefix-caching
+      - --multimodal-embedding-cache-capacity-gb
+      - "0"
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"
+
+  - label: dynamo-fd
+    workflow: examples/backends/vllm/launch/agg_multimodal.sh
+    extra_args:
+      - --no-enable-prefix-caching
+      - --frontend-decoding
+      - --multimodal-embedding-cache-capacity-gb
+      - "0"
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"
