@@ -359,7 +359,6 @@ class WorkerFactory:
             logger.info("[Shadow] Lock acquired, waking engine")
 
             await handler._quiesce_controller.resume()
-            handler._quiesce_controller.mark_resumed()
             logger.info("[Shadow] Engine awake, registering with discovery")
 
         # Wait for self-benchmark to complete before registering.
