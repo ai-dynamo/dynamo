@@ -163,13 +163,11 @@ fn select_direct_strategy(
         }
 
         // Host → Device - direct CUDA/XPU
-        // (System, Device(_)) => TransferPlan::Direct(BlockingH2D),
-        (System, Device(_)) => panic!("System to Device transfers are not supported"),
+        (System, Device(_)) => TransferPlan::Direct(BlockingH2D),
         (Pinned, Device(_)) => TransferPlan::Direct(AsyncH2D),
 
         // Device → Host - direct CUDA/XPU
-        //(Device(_), System) => TransferPlan::Direct(BlockingD2H),
-        (Device(_), System) => panic!("Device to System transfers are not supported"),
+        (Device(_), System) => TransferPlan::Direct(BlockingD2H),
         (Device(_), Pinned) => TransferPlan::Direct(AsyncD2H),
 
         // Device ↔ Device - direct CUDA/XPU
