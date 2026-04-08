@@ -31,6 +31,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -184,6 +185,45 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
         "p2c selection"
     );
     selected
+}
+
+fn device_aware_candidate_group(
+    state: &RoutingOccupancyState,
+    instance_ids: &[u64],
+    device_type_map: &HashMap<u64, Option<DeviceType>>,
+    non_cpu_to_cpu_ratio: usize,
+) -> Vec<u64> {
+    let cpu_ids: Vec<u64> = instance_ids
+        .iter()
+        .copied()
+        .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+        .collect();
+    let non_cpu_ids: Vec<u64> = instance_ids
+        .iter()
+        .copied()
+        .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+        .collect();
+
+    if cpu_ids.is_empty() {
+        return non_cpu_ids;
+    }
+    if non_cpu_ids.is_empty() {
+        return cpu_ids;
+    }
+
+    // Both classes exist: compute a budget for CPU in-flight requests.
+    let total_non_cpu_inflight: u64 = non_cpu_ids.iter().map(|id| state.load(*id)).sum();
+    let total_cpu_inflight: u64 = cpu_ids.iter().map(|id| state.load(*id)).sum();
+    let cpu_count = cpu_ids.len() as u64;
+    let non_cpu_count = non_cpu_ids.len() as u64;
+    let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
+        / ((non_cpu_to_cpu_ratio as u64).saturating_mul(non_cpu_count));
+
+    if total_cpu_inflight < allowed_cpu_inflight {
+        cpu_ids
+    } else {
+        non_cpu_ids
+    }
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
@@ -377,10 +417,14 @@ where
             .await
     }
 
-    /// Issue a request using device-aware weighted routing:
-    /// For encoder endpoints: partition instances by device type (CPU/CUDA),
-    /// route based on budget calculation, then select least-loaded within group.
-    /// For other endpoints: falls back to round-robin.
+    /// Issue a request using device-aware weighted routing.
+    ///
+    /// Instances are partitioned by device type (CPU vs non-CPU), then the router
+    /// applies a budget policy and selects the least-loaded instance within the
+    /// chosen group.
+    ///
+    /// If only one device class exists (all CPU or all non-CPU), this naturally
+    /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_ids = self
@@ -397,7 +441,7 @@ where
             ));
         }
 
-        // For non-encoder endpoints, fall back to round-robin
+        // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
         // For encoder endpoints, partition by device type
@@ -407,73 +451,22 @@ where
             .map(|inst| (inst.instance_id, inst.device_type.clone()))
             .collect();
 
-        let cpu_ids: Vec<u64> = instance_ids
-            .iter()
-            .copied()
-            .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-            .collect();
-        let non_cpu_ids: Vec<u64> = instance_ids
-            .iter()
-            .copied()
-            .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-            .collect();
-
         // Apply budget-based routing to determine which group to send to
         let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1)
             .unwrap_or(8);
-
-        let candidates: &[u64] = if cpu_ids.is_empty() {
-            tracing::debug!(
-                endpoint = %endpoint_id,
-                "DeviceAwareWeighted: no CPU instances, routing to non-CPU only"
-            );
-            &non_cpu_ids
-        } else if non_cpu_ids.is_empty() {
-            tracing::debug!(
-                endpoint = %endpoint_id,
-                "DeviceAwareWeighted: no non-CPU instances, routing to CPU only"
-            );
-            &cpu_ids
-        } else {
-            // Both types present: apply budget-based routing
-            let total_non_cpu_inflight: usize = non_cpu_ids
-                .iter()
-                .map(|id| state.load(*id))
-                .sum();
-            let total_cpu_inflight: usize = cpu_ids
-                .iter()
-                .map(|id| state.load(*id))
-                .sum();
-            let cpu_count = cpu_ids.len();
-            let non_cpu_count = non_cpu_ids.len();
-
-            let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
-                / (cuda_to_cpu_ratio.saturating_mul(non_cpu_count));
-
-            tracing::debug!(
-                endpoint = %endpoint_id,
-                total_non_cpu_inflight,
-                total_cpu_inflight,
-                cpu_count,
-                non_cpu_count,
-                ratio = cuda_to_cpu_ratio,
-                allowed_cpu_inflight,
-                "DeviceAwareWeighted budget calculation"
-            );
-
-            if total_cpu_inflight < allowed_cpu_inflight {
-                &cpu_ids
-            } else {
-                &non_cpu_ids
-            }
-        };
+        let candidates = device_aware_candidate_group(
+            state.as_ref(),
+            &instance_ids,
+            &device_type_map,
+            cuda_to_cpu_ratio,
+        );
 
         // Select least-loaded within the chosen group
         let instance_id = state
-            .select_exact_min_and_increment(candidates)
+            .select_exact_min_and_increment(&candidates)
             .await
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -983,6 +976,117 @@ mod tests {
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
+
+        assert_eq!(router.select_next_worker(), None);
+        assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn device_aware_cpu_only_selects_least_loaded_instance() {
+        let state = RoutingOccupancyState::default();
+        // All candidates are CPU. Make worker 2 the least-loaded one.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        state.increment(3);
+
+        let instance_ids = vec![1, 2, 3];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cpu)),
+            (2, Some(DeviceType::Cpu)),
+            (3, Some(DeviceType::Cpu)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
+        assert_eq!(candidates, vec![1, 2, 3]);
+
+        let selected = state
+            .select_exact_min_and_increment(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[tokio::test]
+    async fn device_aware_non_cpu_only_selects_least_loaded_instance() {
+        let state = RoutingOccupancyState::default();
+        // All candidates are non-CPU. Make worker 2 the least-loaded one.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        state.increment(3);
+
+        let instance_ids = vec![1, 2, 3];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cuda)),
+            (2, Some(DeviceType::Cuda)),
+            (3, Some(DeviceType::Cuda)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
+        assert_eq!(candidates, vec![1, 2, 3]);
+
+        let selected = state
+            .select_exact_min_and_increment(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn device_aware_group_uses_ratio_budget() {
+        let state = RoutingOccupancyState::default();
+        // CPU ids: 1,2 ; non-CPU ids: 3,4
+        for _ in 0..4 {
+            state.increment(3);
+            state.increment(4);
+        }
+        // CPU inflight can differ across instances; budgeting uses total CPU inflight.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        // total_non_cpu_inflight=8, cpu_count=2, non_cpu_count=2, ratio=2
+        // allowed_cpu_inflight = 8*2/(2*2)=4
+        // total_cpu_inflight=3 < 4 => choose CPU group.
+        let instance_ids = vec![1, 2, 3, 4];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cpu)),
+            (2, Some(DeviceType::Cpu)),
+            (3, Some(DeviceType::Cuda)),
+            (4, Some(DeviceType::Cuda)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);
+        assert_eq!(candidates, vec![1, 2]);
+
+        // Within selected CPU group, final choice should be the least-loaded instance (id=2).
+        let selected = futures::executor::block_on(state.select_exact_min_and_increment(&candidates))
+            .unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[tokio::test]
+    async fn device_aware_weighted_select_and_peek_return_none_with_available_worker() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_device_aware_router".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client, RouterMode::DeviceAwareWeighted)
+                .await
+                .unwrap();
 
         assert_eq!(router.select_next_worker(), None);
         assert_eq!(router.peek_next_worker(), None);
