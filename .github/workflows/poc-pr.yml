@@ -189,7 +189,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
-  
+
   vllm-dev-build:
     name: vllm Dev Build
     needs: [changed-files]
