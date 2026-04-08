@@ -1,36 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CUDA device memory storage.
+//! Backend-agnostic device memory storage.
+//!
+//! [`DeviceStorage`] allocates device memory via an [`super::DeviceAllocator`]
+//! implementation, supporting any hardware backend (CUDA, Level-Zero, HPU, …).
 
-use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
-use cudarc::driver::CudaContext;
+use super::{DeviceAllocator, MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-/// Get or create a CUDA context for the given device.
-pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
-    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
-
-    if let Some(existing) = map.get(&device_id) {
-        return Ok(existing.clone());
-    }
-
-    let ctx = CudaContext::new(device_id as usize)?;
-    map.insert(device_id, ctx.clone());
-    Ok(ctx)
-}
-
-/// CUDA device memory allocated via cudaMalloc.
+/// Device memory allocated via a [`DeviceAllocator`].
 #[derive(Debug)]
 pub struct DeviceStorage {
-    /// CUDA context used for allocation and deallocation.
-    ctx: Arc<CudaContext>,
+    /// Device allocator used for allocation and deallocation.
+    ctx: Arc<dyn DeviceAllocator>,
     /// Device pointer to the allocated memory.
     ptr: u64,
-    /// CUDA device ID where memory is allocated.
+    /// Device ID where memory is allocated.
     device_id: u32,
     /// Size of the allocation in bytes.
     len: usize,
@@ -44,17 +31,16 @@ impl DeviceStorage {
     ///
     /// # Arguments
     /// * `len` - Size in bytes to allocate
-    /// * `device_id` - CUDA device on which to allocate
-    pub fn new(len: usize, device_id: u32) -> Result<Self> {
+    /// * `ctx` - Device allocator (CUDA, Level-Zero, etc.)
+    pub fn new(len: usize, ctx: Arc<dyn DeviceAllocator>) -> Result<Self> {
         if len == 0 {
             return Err(StorageError::AllocationFailed(
                 "zero-sized allocations are not supported".into(),
             ));
         }
 
-        let ctx = cuda_context(device_id)?;
-        ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-        let ptr = unsafe { cudarc::driver::result::malloc_sync(len).map_err(StorageError::Cuda)? };
+        let device_id = ctx.device_id();
+        let ptr = ctx.allocate_device(len)?;
 
         Ok(Self {
             ctx,
@@ -69,7 +55,7 @@ impl DeviceStorage {
         self.ptr
     }
 
-    /// Get the CUDA device ID this memory is allocated on.
+    /// Get the device ID this memory is allocated on.
     pub fn device_id(&self) -> u32 {
         self.device_id
     }
@@ -77,14 +63,9 @@ impl DeviceStorage {
 
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
-        if let Err(e) = self.ctx.bind_to_thread() {
-            tracing::debug!("failed to bind CUDA context for free: {e}");
+        if let Err(e) = self.ctx.free_device(self.ptr) {
+            tracing::debug!("failed to free device memory: {e}");
         }
-        unsafe {
-            if let Err(e) = cudarc::driver::result::free_sync(self.ptr) {
-                tracing::debug!("failed to free device memory: {e}");
-            }
-        };
     }
 }
 

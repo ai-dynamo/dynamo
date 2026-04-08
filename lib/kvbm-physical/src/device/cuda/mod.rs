@@ -8,10 +8,72 @@
 use crate::device::traits::*;
 use anyhow::{Result, Context as _};
 use cudarc::driver::result as cuda_result;
-use cudarc::driver::sys::{CUresult, CU_MEMHOSTALLOC_PORTABLE};
+use cudarc::driver::sys::CUresult;
 use cudarc::driver::DriverError;
 use std::sync::Arc;
 use dynamo_memory::CudaMemPool;
+
+/// Whether to use write-combined pinned allocations.
+///
+/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
+/// is set, or if a test allocation reveals the hardware does not support it
+/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
+/// a CUDA context has been bound to the current thread.
+static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    if dynamo_memory::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
+        return false;
+    }
+    // Probe hardware support with a 1-byte test allocation.
+    // SAFETY: called from an allocation path that has already bound a CUDA context.
+    unsafe {
+        match cudarc::driver::result::malloc_host(
+            1,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        ) {
+            Ok(ptr) => {
+                let _ = cudarc::driver::result::free_host(ptr);
+                true
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Write-combined memory not supported on this system; \
+                     will use regular pinned memory"
+                );
+                false
+            }
+        }
+    }
+});
+
+/// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
+/// allows it, otherwise falling back to `CU_MEMHOSTALLOC_DEVICEMAP`.
+///
+/// # Safety
+/// Caller must ensure a valid CUDA context is bound to the current thread.
+unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
+    if *USE_WRITE_COMBINED {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(|e| anyhow::anyhow!("CUDA pinned host allocation failed: {:?}", e))
+    } else {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(|e| anyhow::anyhow!("CUDA pinned host allocation failed: {:?}", e))
+    }
+}
 
 /// CUDA device context wrapping cudarc::CudaContext.
 #[derive(Debug)]
@@ -59,16 +121,50 @@ impl DeviceContextOps for CudaContext {
     }
 
     fn free_device(&self, ptr: u64) -> Result<()> {
-        tracing::warn!("CUDA free_device called with raw pointer {} - memory managed by allocator", ptr);
+        self.context.bind_to_thread()?;
+        unsafe {
+            cuda_result::free_sync(ptr)
+                .context("Failed to free device memory")?;
+        }
         Ok(())
     }
 
     fn allocate_pinned(&self, size: usize) -> Result<u64> {
-        unsafe {
-            let ptr = cuda_result::malloc_host(size, CU_MEMHOSTALLOC_PORTABLE)
-                .context("Failed to allocate pinned host memory")?;
-            Ok(ptr as u64)
+        // Try NUMA-aware allocation on Linux unless explicitly disabled
+        #[cfg(target_os = "linux")]
+        {
+            if dynamo_memory::numa::is_numa_enabled() {
+                match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
+                    .allocate_pinned_for_gpu(size, self.device_id)
+                {
+                    Ok(Some(ptr)) => {
+                        tracing::debug!(
+                            "Using NUMA-aware allocation for {} bytes on GPU {}",
+                            size, self.device_id
+                        );
+                        return Ok(ptr as u64);
+                    }
+                    Ok(None) => {} // NUMA node unknown, fall through
+                    Err(e) => return Err(anyhow::anyhow!(
+                        "NUMA-aware pinned allocation failed: {}", e
+                    )),
+                }
+            }
         }
+
+        // Fall back to write-combined or device-mapped pinned memory.
+        // Bind CUDA context only for the fallback path (NUMA workers
+        // manage their own contexts on pinned NUMA threads).
+        self.context.bind_to_thread()
+            .context("Failed to bind CUDA context for pinned allocation")?;
+
+        let ptr = unsafe { malloc_host_prefer_writecombined(size)? };
+
+        assert!(!ptr.is_null(), "Failed to allocate pinned memory");
+        assert!(ptr.is_aligned(), "Pinned memory is not aligned");
+        assert!(size < isize::MAX as usize);
+
+        Ok(ptr as u64)
     }
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {

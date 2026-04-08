@@ -29,11 +29,25 @@ pub(crate) mod nvml;
 pub mod topology;
 pub mod worker_pool;
 
-use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
+use cudarc::driver::{CudaContext, result::device as cuda_device, sys as cuda_sys};
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Get or create a CUDA context for NUMA-aware operations.
+pub(crate) fn cuda_context(device_id: u32) -> crate::Result<Arc<CudaContext>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
+    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
+    if let Some(existing) = map.get(&device_id) {
+        return Ok(existing.clone());
+    }
+    let ctx = CudaContext::new(device_id as usize).map_err(|e| {
+        crate::StorageError::AllocationFailed(format!("CUDA context creation failed: {e}"))
+    })?;
+    map.insert(device_id, ctx.clone());
+    Ok(ctx)
+}
 use std::{fs, mem, process::Command};
 
 /// Cache for GPU PCI address → NUMA node lookups.

@@ -13,14 +13,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Embedded SPIR-V binary for the vectorized_copy kernel.
-/// Compiled offline from kvbm-kernels/sycl/vectorized_copy_kernel.cpp:
-///   clang++ -fsycl -fsycl-device-only -fsycl-targets=spir64 -O2 \
-///           -o vectorized_copy_kernel.spv vectorized_copy_kernel.cpp
-/// Replace the placeholder .spv with the real binary on the XPU build machine.
+/// Compiled offline from kvbm-kernels/opencl/vectorized_copy.cl:
+///   ocloc compile -file vectorized_copy.cl -spv_only -options "-cl-std=CL2.0"
+/// The resulting .spv is embedded at compile time — no runtime path lookup.
 static VECTORIZED_COPY_SPIRV: &[u8] =
-    include_bytes!("../../../../kvbm-kernels/sycl/vectorized_copy_kernel.spv");
+    include_bytes!("../../../../kvbm-kernels/opencl/vectorized_copy.spv");
 
-const COPY_KERNEL_NAME: &str = "__sycl_kernel_kvbm_vectorized_copy";
+const COPY_KERNEL_NAME: &str = "vectorized_copy";
 const COPY_WG_SIZE: u32 = 128;
 const COPY_MAX_WGS: u32 = 65535;
 
@@ -221,7 +220,15 @@ impl DeviceContextOps for ZeContext {
         // Create a per-stream kernel instance (avoids set_arg races between streams).
         let copy_kernel = self.cache.copy_module.as_ref().and_then(|module| {
             match module.create_kernel(COPY_KERNEL_NAME) {
-                Ok(k) => Some(k),
+                Ok(k) => {
+                    if let Err(e) = k.set_indirect_access(
+                        ze::KERNEL_INDIRECT_ACCESS_FLAG_HOST
+                        | ze::KERNEL_INDIRECT_ACCESS_FLAG_DEVICE,
+                    ) {
+                        tracing::warn!("Failed to set indirect access on copy kernel: {:?}", e);
+                    }
+                    Some(k)
+                }
                 Err(e) => {
                     tracing::warn!("Failed to create copy kernel: {:?}", e);
                     None

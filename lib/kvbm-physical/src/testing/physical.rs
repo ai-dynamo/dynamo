@@ -13,6 +13,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::BlockId;
+use crate::device::{DeviceBackend, DeviceContext};
 use crate::{
     layout::{BlockDimension, LayoutConfig, PhysicalLayout},
     manager::{LayoutHandle, TransferManager},
@@ -393,8 +394,8 @@ pub fn create_fc_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -420,8 +421,8 @@ pub fn create_lw_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }

@@ -176,7 +176,7 @@ impl NumaWorker {
         }
 
         // Get or create CUDA context for this GPU
-        let ctx = crate::device::cuda_context(gpu_id)
+        let ctx = super::cuda_context(gpu_id)
             .map_err(|e| format!("Failed to create CUDA context for device {}: {}", gpu_id, e))?;
 
         unsafe {

@@ -237,6 +237,41 @@ impl std::fmt::Debug for DeviceEvent {
     }
 }
 
+
+// ======================================================================
+// DeviceAllocator — bridge to dynamo-memory's trait
+// ======================================================================
+
+impl dynamo_memory::DeviceAllocator for DeviceContext {
+    fn allocate_device(&self, size: usize) -> dynamo_memory::Result<u64> {
+        self.ops
+            .allocate_device(size)
+            .map_err(|e| dynamo_memory::StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_device(&self, ptr: u64) -> dynamo_memory::Result<()> {
+        self.ops
+            .free_device(ptr)
+            .map_err(|e| dynamo_memory::StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn allocate_pinned(&self, size: usize) -> dynamo_memory::Result<u64> {
+        self.ops
+            .allocate_pinned(size)
+            .map_err(|e| dynamo_memory::StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_pinned(&self, ptr: u64) -> dynamo_memory::Result<()> {
+        self.ops
+            .free_pinned(ptr)
+            .map_err(|e| dynamo_memory::StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
+
 // ======================================================================
 // DeviceMemPool — unified memory pool wrapper
 // ======================================================================
