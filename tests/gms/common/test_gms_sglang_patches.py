@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 
 import pytest
-from gpu_memory_service.integrations.sglang import patches as sglang_patches
+
+torch = pytest.importorskip("torch", reason="torch is required")
+sglang_patches = importlib.import_module(
+    "gpu_memory_service.integrations.sglang.patches"
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_0,
+    pytest.mark.sglang,
 ]
 
 

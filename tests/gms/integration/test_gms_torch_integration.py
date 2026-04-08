@@ -3,20 +3,27 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import cast
 
 import pytest
-from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.client.torch.module import (
-    materialize_module_from_gms,
-    register_module_tensors,
-)
-from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-from gpu_memory_service.common.locks import RequestedLockType
-
-from tests.gms.harness.gms import GMSServerProcess
 
 torch = pytest.importorskip("torch", reason="torch is required")
+
+memory_manager_module = importlib.import_module(
+    "gpu_memory_service.client.memory_manager"
+)
+torch_module = importlib.import_module("gpu_memory_service.client.torch.module")
+tensor_module = importlib.import_module("gpu_memory_service.client.torch.tensor")
+locks_module = importlib.import_module("gpu_memory_service.common.locks")
+gms_harness = importlib.import_module("tests.gms.harness.gms")
+
+GMSClientMemoryManager = memory_manager_module.GMSClientMemoryManager
+materialize_module_from_gms = torch_module.materialize_module_from_gms
+register_module_tensors = torch_module.register_module_tensors
+_tensor_from_pointer = tensor_module._tensor_from_pointer
+RequestedLockType = locks_module.RequestedLockType
+GMSServerProcess = gms_harness.GMSServerProcess
 
 pytestmark = [
     pytest.mark.pre_merge,
