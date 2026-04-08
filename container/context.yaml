@@ -34,7 +34,7 @@ dynamo:
   nixl_libfabric_ref: v2.3.0
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
-  enable_gpu_memory_service: "false"
+  enable_gpu_memory_service: "true"
   ffmpeg_version: "7.1"
   efa_version: 1.45.1
 
