@@ -24,38 +24,44 @@ use super::{DEFAULT_MAX_BATCH_BLOCKS, kv_publisher_metrics};
 /// Reference-counting filter that deduplicates KV cache events.
 ///
 /// vLLM can emit multiple store/remove events for the same block hash.
-/// This filter tracks a refcount per `ExternalSequenceBlockHash`:
-/// - **Store**: always passes through; increments refcount.
+/// Refcounts are tracked **per DP rank** because identical block hashes
+/// on different ranks represent independent blocks.
+///
+/// - **Store**: always passes through; increments refcount for the rank.
 /// - **Remove**: only passes through when refcount decrements to 0.
-/// - **Cleared**: resets all refcounts.
+/// - **Cleared**: resets refcounts for the affected rank only.
 pub(super) struct EventDedupFilter {
-    refcounts: HashMap<ExternalSequenceBlockHash, usize>,
+    /// Per-dp-rank refcounts.
+    per_rank: HashMap<u32, HashMap<ExternalSequenceBlockHash, usize>>,
 }
 
 impl EventDedupFilter {
     pub(super) fn new() -> Self {
         Self {
-            refcounts: HashMap::new(),
+            per_rank: HashMap::new(),
         }
     }
 
-    /// Track a store event. Increments refcount for each block hash.
-    /// Stores always pass through — this only updates bookkeeping.
-    pub(super) fn track_store(&mut self, data: &KvCacheStoreData) {
+    /// Track a store event. Increments refcount for each block hash on the
+    /// given DP rank. Stores always pass through — this only updates bookkeeping.
+    pub(super) fn track_store(&mut self, dp_rank: u32, data: &KvCacheStoreData) {
+        let refcounts = self.per_rank.entry(dp_rank).or_default();
         for block in &data.blocks {
-            *self.refcounts.entry(block.block_hash).or_insert(0) += 1;
+            *refcounts.entry(block.block_hash).or_insert(0) += 1;
         }
     }
 
-    /// Filter a remove event. Retains only block hashes whose refcount
-    /// decrements to 0 (removing them from the map). Returns `None` if
-    /// no hashes survive filtering.
+    /// Filter a remove event. Retains only block hashes whose refcount on the
+    /// given DP rank decrements to 0 (removing them from the map). Returns
+    /// `None` if no hashes survive filtering.
     pub(super) fn filter_remove(
         &mut self,
+        dp_rank: u32,
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
+        let refcounts = self.per_rank.entry(dp_rank).or_default();
         data.block_hashes.retain(|hash| {
-            match self.refcounts.entry(*hash) {
+            match refcounts.entry(*hash) {
                 Entry::Occupied(mut entry) => {
                     *entry.get_mut() -= 1;
                     if *entry.get() == 0 {
@@ -77,9 +83,11 @@ impl EventDedupFilter {
         }
     }
 
-    /// Clear all refcounts (used on Cleared events).
+    /// Clear refcounts for all DP ranks. A `Cleared` event from any rank
+    /// causes the indexer to wipe all blocks for the entire worker, so we
+    /// must reset all ranks' refcounts to stay consistent.
     pub(super) fn clear(&mut self) {
-        self.refcounts.clear();
+        self.per_rank.clear();
     }
 }
 
@@ -152,7 +160,7 @@ impl BatchingState {
         let dp_rank = self.last_dp_rank;
         let mut emitted = false;
         if let Some(data) = self.pending_removed.take()
-            && let Some(filtered) = dedup.filter_remove(data)
+            && let Some(filtered) = dedup.filter_remove(dp_rank, data)
         {
             emit(
                 publisher,
@@ -168,7 +176,7 @@ impl BatchingState {
             emitted = true;
         }
         if let Some(data) = self.pending_stored.take() {
-            dedup.track_store(&data);
+            dedup.track_store(dp_rank, &data);
             emit(
                 publisher,
                 local_indexer,
