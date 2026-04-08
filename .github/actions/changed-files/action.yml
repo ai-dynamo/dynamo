@@ -61,40 +61,12 @@ runs:
           echo "Using default comparison (previous commit)"
         fi
 
-    - name: Mock changed files result
+    - name: Check for changes
+      uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
       id: filter
-      shell: bash
-      run: |
-        # Mock output: only vllm is changed, all others are unchanged.
-        echo "docs_any_modified=false" >> $GITHUB_OUTPUT
-        echo "ci_any_modified=false" >> $GITHUB_OUTPUT
-        echo "core_any_modified=false" >> $GITHUB_OUTPUT
-        echo "operator_any_modified=false" >> $GITHUB_OUTPUT
-        echo "deploy_any_modified=false" >> $GITHUB_OUTPUT
-        echo "planner_any_modified=false" >> $GITHUB_OUTPUT
-        echo "vllm_any_modified=true" >> $GITHUB_OUTPUT
-        echo "sglang_any_modified=false" >> $GITHUB_OUTPUT
-        echo "trtllm_any_modified=false" >> $GITHUB_OUTPUT
-        echo "frontend_any_modified=false" >> $GITHUB_OUTPUT
-        echo "rust_any_modified=false" >> $GITHUB_OUTPUT
-
-        echo "docs_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "ci_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "core_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "operator_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "deploy_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "planner_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "vllm_all_modified_files=mock/vllm_changed_file" >> $GITHUB_OUTPUT
-        echo "sglang_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "trtllm_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "frontend_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "rust_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "examples_all_modified_files=" >> $GITHUB_OUTPUT
-        echo "ignore_all_modified_files=" >> $GITHUB_OUTPUT
-
-        echo "changed_keys=vllm" >> $GITHUB_OUTPUT
-        echo "all_all_modified_files=mock/vllm_changed_file" >> $GITHUB_OUTPUT
-        echo "all_all_modified_files_count=1" >> $GITHUB_OUTPUT
+      with:
+        files_yaml_from_source_file: .github/filters.yaml
+        base_sha: ${{ steps.merge-base.outputs.base_sha }}
 
     - name: Debug changed files
       shell: bash
