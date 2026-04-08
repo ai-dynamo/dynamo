@@ -54,7 +54,10 @@ impl Default for RegistryHubConfig {
 impl RegistryHubConfig {
     /// Create a new config with specified capacity.
     pub fn with_capacity(capacity: u64) -> Self {
-        Self { capacity, ..Default::default() }
+        Self {
+            capacity,
+            ..Default::default()
+        }
     }
 
     /// Create config listening on a specific port on all interfaces.
@@ -105,10 +108,13 @@ impl RegistryHubConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct RegistryClientConfig {
-    /// Hub address to connect to.
+    /// Hub address to connect to, as a `"host:port"` string.
+    ///
+    /// Stored as a string so that DNS hostnames are accepted. Resolution is
+    /// deferred to connection time via [`std::net::ToSocketAddrs`].
     ///
     /// Example: "192.168.1.100:5555", "leader.local:5555"
-    pub hub_addr: SocketAddr,
+    pub hub_addr: String,
 
     /// Worker rank (0-indexed).
     ///
@@ -150,7 +156,7 @@ pub struct RegistryClientConfig {
 impl Default for RegistryClientConfig {
     fn default() -> Self {
         Self {
-            hub_addr: "127.0.0.1:5555".parse().unwrap(),
+            hub_addr: "127.0.0.1:5555".to_string(),
             rank: None,
             world_size: None,
             namespace: default_namespace(None, None),
@@ -184,12 +190,12 @@ impl RegistryClientConfig {
     }
 
     /// Create config connecting to a specific hub address.
+    ///
+    /// Accepts both IP literals and DNS hostnames. Resolution happens at
+    /// connection time via [`std::net::ToSocketAddrs`].
     pub fn connect_to(hub_host: &str, port: u16) -> Self {
         Self {
-            hub_addr: format!("{hub_host}:{port}").parse().unwrap_or_else(|_| {
-                // Fall back to 127.0.0.1 if the host is not an IP literal
-                format!("127.0.0.1:{port}").parse().unwrap()
-            }),
+            hub_addr: format!("{hub_host}:{port}"),
             ..Default::default()
         }
     }
@@ -209,9 +215,7 @@ impl RegistryClientConfig {
     pub fn from_env() -> Self {
         Self {
             hub_addr: std::env::var("DYN_REGISTRY_CLIENT_ADDR")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| "127.0.0.1:5555".parse().unwrap()),
+                .unwrap_or_else(|_| "127.0.0.1:5555".to_string()),
             rank: None,
             world_size: None,
             namespace: std::env::var("DYN_REGISTRY_CLIENT_NAMESPACE")
@@ -260,7 +264,6 @@ impl RegistryClientConfig {
         self.namespace = default_namespace(self.rank, self.world_size);
         self
     }
-
 }
 
 #[cfg(test)]
@@ -289,7 +292,7 @@ mod tests {
     #[test]
     fn test_client_config_default() {
         let config = RegistryClientConfig::default();
-        assert_eq!(config.hub_addr.port(), 5555);
+        assert_eq!(config.hub_addr, "127.0.0.1:5555");
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.batch_timeout, Duration::from_millis(10));
         assert_eq!(config.local_cache_capacity, 0);
@@ -298,13 +301,20 @@ mod tests {
     #[test]
     fn test_client_config_connect_to() {
         let config = RegistryClientConfig::connect_to("127.0.0.1", 6000);
-        assert_eq!(config.hub_addr.port(), 6000);
+        assert_eq!(config.hub_addr, "127.0.0.1:6000");
+    }
+
+    #[test]
+    fn test_client_config_connect_to_hostname() {
+        let config = RegistryClientConfig::connect_to("leader.local", 5555);
+        assert_eq!(config.hub_addr, "leader.local:5555");
     }
 
     #[test]
     fn test_client_config_builder() {
-        let config =
-            RegistryClientConfig::default().with_local_cache(10_000).with_batch_size(50);
+        let config = RegistryClientConfig::default()
+            .with_local_cache(10_000)
+            .with_batch_size(50);
         assert_eq!(config.local_cache_capacity, 10_000);
         assert_eq!(config.batch_size, 50);
     }

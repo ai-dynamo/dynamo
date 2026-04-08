@@ -16,8 +16,11 @@ pub struct LatencyStats {
     pub p99_us: u64,
     pub p999_us: u64,
     pub max_us: u64,
-    pub throughput_ops_sec: f64,
-    pub total_elapsed_secs: f64,
+    /// Cumulative service time divided by count — valid only for serial runs.
+    /// Use wall-clock elapsed from the runner for true throughput.
+    pub cumulative_latency_ops_sec: f64,
+    /// Sum of all per-operation latencies in seconds.
+    pub cumulative_latency_secs: f64,
 }
 
 impl LatencyStats {
@@ -43,9 +46,9 @@ impl LatencyStats {
         let p99_us = percentile(&sorted, 99.0);
         let p999_us = percentile(&sorted, 99.9);
 
-        let total_elapsed_secs = sum as f64 / 1_000_000.0;
-        let throughput_ops_sec = if total_elapsed_secs > 0.0 {
-            count as f64 / total_elapsed_secs
+        let cumulative_latency_secs = sum as f64 / 1_000_000.0;
+        let cumulative_latency_ops_sec = if cumulative_latency_secs > 0.0 {
+            count as f64 / cumulative_latency_secs
         } else {
             0.0
         };
@@ -59,8 +62,8 @@ impl LatencyStats {
             p99_us,
             p999_us,
             max_us,
-            throughput_ops_sec,
-            total_elapsed_secs,
+            cumulative_latency_ops_sec,
+            cumulative_latency_secs,
         })
     }
 

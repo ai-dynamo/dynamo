@@ -27,7 +27,8 @@ impl BenchTable {
 
     /// Add a row of cells to the table.
     pub fn add_row(&mut self, cells: &[String]) {
-        self.table.add_row(cells.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        self.table
+            .add_row(cells.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         self.rows.push(cells.to_vec());
     }
 
@@ -37,12 +38,34 @@ impl BenchTable {
     }
 
     /// Render the table as CSV.
+    ///
+    /// Fields containing commas, double-quotes, or newlines are quoted per RFC 4180.
     pub fn to_csv(&self) -> String {
+        let escape = |s: &str| {
+            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_string()
+            }
+        };
+
         let mut out = String::new();
-        out.push_str(&self.headers.join(","));
+        out.push_str(
+            &self
+                .headers
+                .iter()
+                .map(|s| escape(s))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         out.push('\n');
         for row in &self.rows {
-            out.push_str(&row.join(","));
+            out.push_str(
+                &row.iter()
+                    .map(|s| escape(s))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             out.push('\n');
         }
         out
