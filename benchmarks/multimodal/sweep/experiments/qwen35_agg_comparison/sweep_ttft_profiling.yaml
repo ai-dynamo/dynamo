@@ -14,13 +14,10 @@ env:
   CUDA_VISIBLE_DEVICES: "2"
   HF_HOME: /data/huggingface
   DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
-  DYN_NVTX: "1"
-  DYN_ENABLE_RUST_NVTX: "1"
-  VLLM_NVTX_SCOPES_FOR_PROFILING: "1"
-  LD_LIBRARY_PATH: "/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs:/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/nvidia/nvtx/lib:/usr/local/cuda/lib64"
+  LD_LIBRARY_PATH: "/home/qiwa/workspace/dynamo/.venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs:/usr/local/cuda/lib64"
 
 input_files:
-  - logs/2026-04-06/4way-post-b64strip/dataset/60req_4img_192pool_400word_base64.jsonl
+  - logs/2026-04-07/ttft-profiling/dataset/60req_4img_240pool_400word_base64.jsonl
 
 configs:
   - label: vllm-baseline
