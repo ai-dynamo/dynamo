@@ -95,7 +95,7 @@ pub(crate) fn select_strategy(
             dst.location(),
             false,
             ctx.capabilities(),
-        ));
+        )?);
     }
 
     select_remote_strategy_v2(
@@ -146,7 +146,7 @@ fn select_direct_strategy(
 
     // Handle remote destination
     if dst_is_remote {
-        return select_remote_strategy(src, capabilities);
+        return Ok(select_remote_strategy(src, capabilities));
     }
 
     // Local-to-local transfers
