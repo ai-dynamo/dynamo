@@ -27,20 +27,6 @@ AUDIO_TEST_URL = (
 
 
 # ---------------------------------------------------------------------------
-# Topology scripts
-# ---------------------------------------------------------------------------
-
-TOPOLOGY_SCRIPTS: dict[str, str] = {
-    "agg": "agg_multimodal.sh",
-    "e_pd": "disagg_multimodal_e_pd.sh",
-    "epd": "disagg_multimodal_epd.sh",
-    "p_d": "disagg_multimodal_p_d.sh",
-    "audio_agg": "audio_agg.sh",
-    "audio_disagg": "audio_disagg.sh",
-}
-
-
-# ---------------------------------------------------------------------------
 # Payload factories
 # ---------------------------------------------------------------------------
 
@@ -145,6 +131,7 @@ def make_multimodal_configs(
     profile: MultimodalModelProfile,
     config_cls: Type[EngineConfig],
     directory: str,
+    topology_scripts: dict[str, str],
 ) -> dict[str, EngineConfig]:
     """Generate config entries for each topology in *profile*.
 
@@ -154,12 +141,14 @@ def make_multimodal_configs(
         The concrete config class to instantiate (e.g. ``VLLMConfig``).
     directory:
         Default directory; overridden by ``TopologyConfig.directory`` if set.
+    topology_scripts:
+        Mapping from topology key to shell script filename.
     """
     configs: dict[str, EngineConfig] = {}
     for topology, topo_cfg in profile.topologies.items():
-        script_name = TOPOLOGY_SCRIPTS[topology]
+        script_name = topology_scripts[topology]
         script_args = ["--model", profile.name] + profile.extra_vllm_args
-        if topology not in ("agg", "audio_agg"):
+        if not topology.endswith("agg"):
             script_args.append("--single-gpu")
 
         gpu = topo_cfg.gpu_marker or profile.gpu_marker
@@ -200,98 +189,3 @@ def make_multimodal_configs(
             request_payloads=profile.request_payloads,
         )
     return configs
-
-
-# ---------------------------------------------------------------------------
-# Multimodal model profiles — add new models here
-# ---------------------------------------------------------------------------
-# Generated config keys use the "mm_" prefix. Do not use this prefix for
-# hand-written configs to avoid collisions.
-
-_AUDIO_DIR = os.path.join(WORKSPACE_DIR, "examples/multimodal")
-
-MULTIMODAL_MODEL_PROFILES: list[MultimodalModelProfile] = [
-    MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
-        short_name="qwen3-vl-2b",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=220,
-                profiled_vram_gib=9.6,
-            ),
-            "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=340,
-            ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=300,
-            ),
-        },
-        request_payloads=[make_image_payload(["green"])],
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
-        short_name="qwen3-vl-2b-video",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=600,
-                delayed_start=60,
-            ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=600,
-                delayed_start=60,
-            ),
-        },
-        request_payloads=[make_video_payload(["red", "static", "still"])],
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen2.5-VL-7B-Instruct",
-        short_name="qwen2.5-vl-7b",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=360,
-                profiled_vram_gib=19.9,
-                requested_vllm_kv_cache_bytes=922_354_000,
-            ),
-        },
-        request_payloads=[make_image_payload(["purple"])],
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen2-Audio-7B-Instruct",
-        short_name="qwen2-audio-7b",
-        topologies={
-            "audio_agg": TopologyConfig(
-                marks=[pytest.mark.nightly],
-                timeout_s=600,
-                directory=_AUDIO_DIR,
-            ),
-            "audio_disagg": TopologyConfig(
-                marks=[pytest.mark.nightly],
-                timeout_s=600,
-                directory=_AUDIO_DIR,
-                gpu_marker="gpu_4",
-            ),
-        },
-        gpu_marker="gpu_2",
-        request_payloads=[make_audio_payload(["Hester", "Pynne"])],
-    ),
-    MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=300,
-                profiled_vram_gib=12.0,
-            ),
-        },
-        request_payloads=[make_image_payload(["green"])],
-        extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
-    ),
-]

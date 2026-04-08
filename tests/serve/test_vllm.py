@@ -18,9 +18,13 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.multimodal_profiles.vllm import (
+    VLLM_MULTIMODAL_PROFILES,
+    VLLM_TOPOLOGY_SCRIPTS,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import MULTIMODAL_MODEL_PROFILES, make_multimodal_configs
+from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -590,8 +594,10 @@ vllm_configs = {
 }
 
 # Merge generated multimodal configs
-for _profile in MULTIMODAL_MODEL_PROFILES:
-    vllm_configs.update(make_multimodal_configs(_profile, VLLMConfig, vllm_dir))
+for _profile in VLLM_MULTIMODAL_PROFILES:
+    vllm_configs.update(
+        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
+    )
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
