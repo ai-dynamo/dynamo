@@ -20,6 +20,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
 | **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
 | **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
@@ -30,6 +31,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
+| **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
 
 ### KV Event Transport Modes (within `--router-mode kv`)
@@ -87,12 +89,60 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
-| `--router-queue-threshold <float>` | `2.0` | Queue threshold fraction; enables priority scheduling via `latency_sensitivity` |
-| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
+| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
+| `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
+| `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
+| `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 
 For all available options: `python -m dynamo.frontend --help`
 
 For detailed configuration options and tuning parameters, see [Advanced Router Usage](#advanced-router-usage).
+
+#### AIC Prefill Load Model
+
+The KV router can use AIC to estimate the expected duration of the selected worker's prompt-side prefill work. When enabled, the router:
+
+- computes `prefix = overlap_blocks * block_size` for the chosen worker
+- computes `effective_isl = input_tokens - prefix`
+- stores one prompt-load hint for the admitted request
+- decays only the **oldest** active prefill request on each worker over time
+
+This affects router-side prompt load accounting only. It does not change backend execution or decode-side accounting.
+
+Enable it on the frontend like this:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+The standalone router uses the same AIC flags:
+
+```bash
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+Required when `--router-prefill-load-model=aic` is enabled:
+
+- `--router-mode kv` on the frontend
+- `--router-track-prefill-tokens`
+- `--aic-backend`
+- `--aic-system`
+- `--aic-model-path`
+
+Optional AIC knobs:
+
+- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
+- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
 
 ### Kubernetes Deployment
 
@@ -214,6 +264,8 @@ We can then use the default routing methods exposed by the client class to send 
 - **Random routing**: Default strategy, available via `client.generate()` or `client.random()`
 - **Round-robin routing**: Cycles through available workers via `client.round_robin()`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
+- **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
+  In disaggregated prefill paths it skips bootstrap optimization and uses the synchronous prefill path, matching power-of-two routing.
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
@@ -231,10 +283,15 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 2.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `latency_sensitivity` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
+- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 
-- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Two policies are available:
+- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
+
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `priority` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
+
+- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Three policies are available:
   - **`fcfs`** (first-come first-served): Orders by adjusted arrival time (`priority_jump - arrival_offset`). Optimizes **tail TTFT** — no request waits longer than necessary.
+  - **`lcfs`** (last-come first-served): Orders by adjusted reverse arrival time (`priority_jump + arrival_offset`). Intentionally favors newer arrivals under saturation and is mainly useful for controlled comparison experiments.
   - **`wspt`** (weighted shortest processing time, Smith's rule): Orders by `(1 + priority_jump) / isl_tokens`. Optimizes **average TTFT** — short or high-priority requests are scheduled before long low-priority ones, minimizing total weighted completion time.
 
 ### KV Event Transport and Persistence
@@ -255,6 +312,8 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
 
+- `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. By default (`router_track_prefill_tokens=true`), the router counts uncached prompt tokens toward `active_prefill_tokens`, queue pressure, and potential prefill-token load. Disable this for decode-only routing paths where prompt processing has already happened elsewhere and the decode router should ignore transferred prompt load. In normal live disaggregated serving, the decode-stage override applies this behavior automatically.
+
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
 ### KV Indexer / Approx KV Indexer
@@ -269,7 +328,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
-For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
+For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
 
 ### Tuning Guidelines
 
@@ -279,9 +338,13 @@ Use `--no-router-kv-events` when you are not confident that your backend engine 
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. By default the router assumes KV blocks transferred from prefill to decode will be deduplicated on the decode side, but vLLM and SGLang decode workers currently do not support this — only TensorRT-LLM does. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
 
+Use `--no-router-track-prefill-tokens` when a router is serving decode-only traffic and prompt processing has already completed elsewhere. This keeps decode routing decisions focused on decode-side load instead of briefly charging prompt tokens to the decode worker after handoff. The built-in live disaggregated decode path applies the equivalent per-request override automatically.
+
 Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
-The `--router-queue-threshold` (default: 2.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. Set to None to disable queueing entirely.
+The `--router-queue-threshold` (default: 4.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.priority`. Set to None to disable queueing entirely.
+
+Use `--router-prefill-load-model aic` **(experimental)** when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config (`--aic-backend`, `--aic-system`, and `--aic-model-path`; `--aic-tp-size` defaults to `1`, and `--aic-backend-version` is optional). This path is still experimental because the decay model is based on expected prefill duration rather than observed worker-side progress.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
 
@@ -308,6 +371,11 @@ The prefill router is automatically created when:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers don't perform decode
 - **Seamlessly integrated** into the request pipeline between preprocessing and decode routing
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available
+
+**Key characteristics of the decode routing stage in disaggregated mode:**
+- **Disables overlap scoring** (`overlap_score_weight=0`) because decode routing should not chase prefix reuse
+- **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks
+- **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work
 
 ### Setup Example
 
@@ -449,7 +517,7 @@ When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and
 
 The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
 
-**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details on busy detection, threshold tuning, and the runtime API, see [Request Rejection](../../fault-tolerance/request-rejection.md).
+**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.priority`. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details on busy detection, threshold tuning, and the runtime API, see [Request Rejection](../../fault-tolerance/request-rejection.md).
 
 ## See Also
 

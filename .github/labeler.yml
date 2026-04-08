@@ -64,7 +64,8 @@ planner:
   - changed-files:
       - any-glob-to-any-file:
           - components/src/dynamo/planner/**
-          - tests/planner/**
+          - components/src/dynamo/profiler/**
+          - components/src/dynamo/global_planner/**
 
 # Deployment labels
 deployment::k8s:
@@ -93,14 +94,23 @@ documentation:
           - '**/*.md'
           - '**/*.rst'
 
+xpu:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/xpu/**'
+          - '**/*xpu*'
+
 multimodal:
   - changed-files:
       - any-glob-to-any-file:
           - examples/multimodal/**
+          - components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py
+          - components/src/dynamo/common/multimodal/**
+          - components/src/dynamo/vllm/omni/**
           - components/src/dynamo/vllm/multimodal_handlers/**
           - components/src/dynamo/vllm/multimodal_utils/**
-          - components/src/dynamo/sglang/multimodal_utils/**
+          - components/src/dynamo/sglang/init_multimodal.py
           - components/src/dynamo/sglang/request_handlers/multimodal/**
-          # NOTE: Consider consolidating multimodal trtllm helpers to a subfolder
           - components/src/dynamo/trtllm/encode_helper.py
+          - components/src/dynamo/trtllm/multimodal/**
           - components/src/dynamo/trtllm/multimodal_processor.py

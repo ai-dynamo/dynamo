@@ -33,7 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 
-use crate::http::service::metrics::{ErrorType, InflightGuard, Metrics};
+use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 #[derive(Clone, Copy)]
 pub enum ConnectionStatus {
@@ -100,6 +100,7 @@ impl Drop for ConnectionHandle {
 pub async fn create_connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
     metrics: Option<Arc<Metrics>>,
+    cancellation_labels: CancellationLabels,
 ) -> (ConnectionHandle, ConnectionHandle) {
     // these oneshot channels monitor possible disconnects from the client in two different scopes:
     // - the local task (connection_handle)
@@ -113,6 +114,7 @@ pub async fn create_connection_monitor(
         connection_rx,
         stream_rx,
         metrics,
+        cancellation_labels,
     ));
 
     // Two handles, the first is armed, the second is disarmed
@@ -128,13 +130,15 @@ async fn connection_monitor(
     connection_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
     stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
     metrics: Option<Arc<Metrics>>,
+    cancellation_labels: CancellationLabels,
 ) {
     match connection_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
             // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::trace!("Connection closed unexpectedly; issuing cancellation");
+            tracing::warn!("Connection closed unexpectedly; issuing cancellation");
             if let Some(metrics) = &metrics {
                 metrics.inc_client_disconnect();
+                metrics.inc_cancellation(&cancellation_labels);
             }
             engine_context.kill();
         }
@@ -146,9 +150,10 @@ async fn connection_monitor(
 
     match stream_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            tracing::trace!("Stream closed unexpectedly; issuing cancellation");
+            tracing::warn!("Stream closed unexpectedly; issuing cancellation");
             if let Some(metrics) = &metrics {
                 metrics.inc_client_disconnect();
+                metrics.inc_cancellation(&cancellation_labels);
             }
             engine_context.kill();
         }
@@ -206,9 +211,19 @@ pub fn monitor_for_disconnects(
                     }
                 }
                 _ = context.stopped() => {
-                    tracing::trace!("Context stopped; breaking stream");
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
+                    // Token counts (input_tokens, output_tokens) are recorded on
+                    // the enclosing span by ResponseMetricCollector::Drop.
+                    tracing::warn!(
+                        request_id = %inflight_guard.request_id(),
+                        model = %inflight_guard.model(),
+                        endpoint = %inflight_guard.endpoint(),
+                        request_type = %inflight_guard.request_type(),
+                        error_type = "cancelled",
+                        elapsed_ms = %inflight_guard.elapsed_ms(),
+                        "request cancelled"
+                    );
                     break;
                 }
             }

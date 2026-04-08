@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
@@ -110,12 +111,30 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		// Overwrite PrefillEnabled to false so the decode scorer falls back
+		// to aggregated routing. Without this, the prefill profile "succeeds"
+		// (picker picks a pod) but the prefill header is not set, causing
+		// the sidecar to reject the request in direct routing mode.
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 		return uniformScores(pods, 0)
 	}
 
+	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
+	prefillDpRank := strconv.FormatUint(uint64(result.DpRank), 10)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
-		"prefillWorkerID", fmt.Sprintf("%d", result.WorkerID),
+		"prefillWorkerID", prefillWorkerID,
+		"prefillDpRank", result.DpRank,
 		"tokenCount", len(result.TokenData))
+
+	// Set the prefill worker ID and DP rank headers directly on the request.
+	// The request object is shared across all profile runs in the scheduling
+	// cycle, so the decode scorer (which runs in the next profile) will see it.
+	// This is more reliable than CycleState which may be scoped per profile.
+	if req.Headers == nil {
+		req.Headers = map[string]string{}
+	}
+	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
+	req.Headers[PrefillDpRankHeader] = prefillDpRank
 
 	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
 	// and the FFI router's internal selection is authoritative.

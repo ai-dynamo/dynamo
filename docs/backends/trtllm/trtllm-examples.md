@@ -104,10 +104,6 @@ For comprehensive instructions on multinode serving, see the [Multinode Examples
 
 For complete Kubernetes deployment instructions, configurations, and troubleshooting, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
 
-### Performance Sweep
-
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md).
-
 ## Client
 
 See the [client](../sglang/README.md#testing-the-deployment) section to learn how to send requests to the deployment.

@@ -34,7 +34,7 @@ spec:
             - --speedup-ratio
             - "1.0"
             - --planner-profile-data
-            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
     decode:
@@ -58,6 +58,6 @@ spec:
             - --speedup-ratio
             - "1.0"
             - --planner-profile-data
-            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode

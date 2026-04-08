@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-from collections import defaultdict
 from typing import Any, Dict, List
 
 import torch
@@ -92,32 +91,32 @@ def _accumulate_embeddings(
         image_grid_thw=image_grid_thw,
     )
 
+    if "image" not in multi_modal_data:
+        multi_modal_data["image"] = mm_data["image"]
+        return
+
     if isinstance(mm_data["image"], dict):
         # Qwen-VL style: dict with image_embeds + image_grid_thw tensors
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
-            multi_modal_data["image"]["image_embeds"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_embeds"],
-                    mm_data["image"]["image_embeds"],
-                )
+        multi_modal_data["image"]["image_embeds"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_embeds"],
+                mm_data["image"]["image_embeds"],
             )
-            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
-                (
-                    multi_modal_data["image"]["image_grid_thw"],
-                    mm_data["image"]["image_grid_thw"],
-                )
+        )
+        multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+            (
+                multi_modal_data["image"]["image_grid_thw"],
+                mm_data["image"]["image_grid_thw"],
             )
+        )
+    elif isinstance(mm_data["image"], torch.Tensor):
+        multi_modal_data["image"] = torch.cat(
+            (multi_modal_data["image"], mm_data["image"])
+        )
     else:
-        # [gluo FIXME] embedding with multiple images?
-        if multi_modal_data["image"] == []:
-            multi_modal_data["image"] = mm_data["image"]
-        else:
-            multi_modal_data["image"] = torch.cat(
-                (multi_modal_data["image"], mm_data["image"])
-            )
+        raise ValueError(
+            f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
+        )
 
 
 def _ensure_owned_tensors(multi_modal_data: Dict[str, Any]) -> None:
@@ -205,6 +204,7 @@ async def _fetch_from_encode_workers(
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
             for group in multimodal_groups
+            if group.serialized_request is not None
         ]
         loaded = await asyncio.gather(*tasks)
 
@@ -287,53 +287,66 @@ async def _fetch_embeddings(
 # ── Public API (single entry point) ─────────────────────────────────
 
 
-async def load_multimodal_embeddings(
-    encode_worker_client: Client,
-    image_urls: list[str],
-    request_id: str,
-    receiver: AbstractEmbeddingReceiver,
-    *,
-    model: str,
-    embeddings_dtype: torch.dtype,
-    cache: MultimodalEmbeddingCacheManager | None = None,
-    context=None,
-) -> Dict[str, Any]:
-    """Fetch embeddings and build engine-ready ``multi_modal_data``.
+class MultiModalEmbeddingLoader:
+    """Helper class for requesting remote encode and receive embeddings."""
 
-    Full pipeline:
-      cache check → remote fetch → cache update → accumulate → release NIXL buffers.
-
-    Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
-    """
-    groups, pending = await _fetch_embeddings(
-        encode_worker_client,
-        image_urls,
-        request_id,
-        receiver,
-        cache=cache,
-        context=context,
-    )
-
-    multi_modal_data: Dict[str, Any] = defaultdict(list)
-    with time_and_log_code_section(
-        f"[PREFILL] request: {request_id} accumulate embeddings"
+    def __init__(
+        self,
+        encode_worker_client: Client,
+        receiver: AbstractEmbeddingReceiver,
+        embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None,
     ):
-        for group in groups:
-            assert group.loaded_embedding is not None
-            _accumulate_embeddings(
-                multi_modal_data,
-                model,
-                embeddings_dtype,
-                group.loaded_embedding,
-                group.image_grid_thw,
-            )
+        self._encode_worker_client = encode_worker_client
+        self._receiver = receiver
+        self._embedding_cache_manager = embedding_cache_manager
 
-    if pending is not None:
-        # Multi-image: torch.cat in _accumulate_embeddings already created
-        # owned tensors.  Single-image: the data is still a view into the
-        # NIXL buffer, so we must clone before releasing.
-        if len(groups) == 1:
-            _ensure_owned_tensors(multi_modal_data)
-        pending.release_all()
+    async def load_multimodal_embeddings(
+        self,
+        image_urls: list[str],
+        request_id: str,
+        *,
+        model: str,
+        context=None,
+    ) -> Dict[str, Any]:
+        """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
-    return multi_modal_data
+        Full pipeline:
+        cache check → remote fetch → cache update → accumulate → release NIXL buffers.
+
+        Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
+        """
+        if self._encode_worker_client is None or not image_urls:
+            return {}
+
+        groups, pending = await _fetch_embeddings(
+            self._encode_worker_client,
+            image_urls,
+            request_id,
+            self._receiver,
+            cache=self._embedding_cache_manager,
+            context=context,
+        )
+
+        multi_modal_data: Dict[str, Any] = {}
+        with time_and_log_code_section(
+            f"[PREFILL] request: {request_id} accumulate embeddings"
+        ):
+            for group in groups:
+                assert group.loaded_embedding is not None
+                _accumulate_embeddings(
+                    multi_modal_data,
+                    model,
+                    group.loaded_embedding.dtype,
+                    group.loaded_embedding,
+                    group.image_grid_thw,
+                )
+
+        if pending is not None:
+            # Multi-image: torch.cat in _accumulate_embeddings already created
+            # owned tensors.  Single-image: the data is still a view into the
+            # NIXL buffer, so we must clone before releasing.
+            if len(groups) == 1:
+                _ensure_owned_tensors(multi_modal_data)
+            pending.release_all()
+
+        return multi_modal_data

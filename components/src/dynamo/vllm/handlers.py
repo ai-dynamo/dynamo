@@ -13,7 +13,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
 from vllm.config import VllmConfig
@@ -23,8 +23,17 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-import dynamo.nixl_connect as nixl_connect
+from dynamo._core import Context
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -32,15 +41,22 @@ from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     lora_name_to_id,
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
+from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .args import Config
+from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
+from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -50,6 +66,43 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+class VllmEngineQuiesceController:
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, *args: object) -> bool:
+        if self._is_quiesced:
+            return False
+
+        level = args[0] if args else None
+        await self._engine_client.pause_generation()
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+
+        if tags is None:
+            await self._engine_client.wake_up()
+        else:
+            await self._engine_client.wake_up(tags)
+        await self._engine_client.resume_generation()
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +125,11 @@ def _compute_mm_uuids(
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
     images = multi_modal_data["image"]
+    # [gluo FIXME] Dict being returned when the mm data has been processed,
+    # in this case, we skip computing mm_uuids for now until we better understand
+    # what info should be hash on.
+    if isinstance(images, dict):
+        return None
     if not isinstance(images, list):
         images = [images]
     if not images:
@@ -288,23 +346,30 @@ def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
         )
 
 
-class BaseWorkerHandler(ABC):
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Optional[Client] = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -314,14 +379,9 @@ class BaseWorkerHandler(ABC):
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
-        self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
-        self.enable_frontend_decoding = enable_frontend_decoding
-        # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector: nixl_connect.Connector | None = None
-        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
@@ -329,11 +389,19 @@ class BaseWorkerHandler(ABC):
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
 
+        self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.video_loader = VideoLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
+        self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
+
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._sleep_wake_lock = asyncio.Lock()
-        self._engine_is_sleeping = False
+        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._quiesce_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -343,6 +411,57 @@ class BaseWorkerHandler(ABC):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+
+    def init_embedding_loader(
+        self, config: Config, encode_worker_client: Optional[Client] = None
+    ) -> Optional[MultiModalEmbeddingLoader]:
+        """Initialize the embedding loader with the given encode worker client."""
+        # Without encode worker, the embedding will be generated internally by vLLM.
+        if encode_worker_client is None:
+            return None
+        logger.warning(
+            "Separate multimodal encode-worker routing only applies to image_url "
+            "inputs. video_url inputs are not sent to the encode worker and will "
+            "be processed on the prefill/PD worker instead."
+        )
+        # Embedding loader consist of two main components:
+        # 1) An remote encode worker client and matching embedding receiver,
+        #    which can request remote encode and handle the transfer of embeddings
+        #    from the encode worker to this prefill worker.
+        # 2) A local embedding cache manager, which can store previously fetched embeddings
+        #    and used to determine whether remote encode is necessary for a given mm data.
+        self.encode_worker_client = encode_worker_client
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()  # type: ignore
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)  # type: ignore
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
+        # [gluo FIXME/NOTE] This embedding cache manager is purely used for caching embedding
+        # results from encode worker, but 'config.multimodal_embedding_cache_capacity_gb' is
+        # also used to configure the DynamoMultimodalEmbeddingCacheConnector within the vLLM.
+        # This results in duplication of memory and ideally we should have single cache manager
+        # which can be used by vLLM internal and here. Then we can explore asynchrous embedding
+        # transfer as we can process and block until the embedding is actually used within vLLM.
+        self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
+        if config.multimodal_embedding_cache_capacity_gb > 0:
+            capacity_bytes = int(
+                config.multimodal_embedding_cache_capacity_gb * 1024**3
+            )
+            self.embedding_cache_manager = MultimodalEmbeddingCacheManager(
+                capacity_bytes
+            )
+        return MultiModalEmbeddingLoader(
+            encode_worker_client=self.encode_worker_client,  # type: ignore
+            receiver=self.embedding_receiver,
+            embedding_cache_manager=self.embedding_cache_manager,
+        )
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -357,8 +476,8 @@ class BaseWorkerHandler(ABC):
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._sleep_wake_lock:
-            if self._engine_is_sleeping:
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
@@ -374,11 +493,11 @@ class BaseWorkerHandler(ABC):
 
                 # Step 2: Abort in-flight requests and wait for them to drain so the
                 # GPU is fully quiesced before unmapping memory.
-                await self.engine_client.pause_generation()
-
-                # Step 3: Now safe to sleep - no in-flight GPU work
-                await self.engine_client.sleep(level)
-                self._engine_is_sleeping = True
+                if not await self._quiesce_controller.quiesce(level):
+                    return {
+                        "status": "ok",
+                        "message": "Engine already sleeping",
+                    }
 
                 return {
                     "status": "ok",
@@ -388,33 +507,105 @@ class BaseWorkerHandler(ABC):
                 logger.error(f"Failed to sleep engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale the elastic expert-parallelism data-parallel size live.
+
+        Args:
+            body: Dict with required 'new_data_parallel_size' key (int).
+                Example::
+
+                    {"new_data_parallel_size": 4}
+
+        The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
+        already reserved by the pod, then hot-swap the expert routing table.
+        No pod restart is needed.
+        """
+        body = body or {}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+
+        logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
+        try:
+            # TODO(upstream-vllm): remove this patch once vLLM fixes
+            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+            # instead of ray.util.state.list_nodes().
+            #
+            # Patch ray.util.state.list_nodes to use the GCS API instead of the
+            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+            # installs ray core only (not ray[default]), so the dashboard HTTP server
+            # starts in --minimal mode with the HTTP server disabled. vLLM's
+            # add_dp_placement_groups calls list_nodes() which requires that HTTP
+            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+            # API server".
+            #
+            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+            # needed) and returns the same information. Imported lazily so ray is not
+            # required at module load time (absent in non-elastic-EP deployments).
+            #
+            # Format mapping:
+            #   list_nodes() → objects with .node_ip and .node_id
+            #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            _ray_util_state.list_nodes = lambda **kw: [
+                _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+            ]
+
+            await self.engine_client.scale_elastic_ep(new_dp_size)
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Unused. Wake always restores all sleep-managed memory.
+            body: Optional dict with "tags" to request a partial wake.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        async with self._sleep_wake_lock:
-            if not self._engine_is_sleeping:
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self.engine_client.wake_up()
-
-                # Step 2: Resume generation and re-register.
-                await self.engine_client.resume_generation()
+                await self._quiesce_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-
-                self._engine_is_sleeping = False
+                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -425,13 +616,13 @@ class BaseWorkerHandler(ABC):
                 return {"status": "error", "message": str(e)}
 
     @abstractmethod
-    async def generate(self, request, context) -> AsyncGenerator[dict, None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -463,13 +654,15 @@ class BaseWorkerHandler(ABC):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -477,7 +670,7 @@ class BaseWorkerHandler(ABC):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -491,7 +684,7 @@ class BaseWorkerHandler(ABC):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):
@@ -500,6 +693,14 @@ class BaseWorkerHandler(ABC):
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}
+
+    async def get_perf_metrics(self, request=None):
+        """Return self-benchmark FPM results, or an error dict if none."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
 
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
@@ -657,7 +858,7 @@ class BaseWorkerHandler(ABC):
                     # Publish LoRA as a ModelDeploymentCard with format:
                     # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
                     # This allows the frontend to discover it and route correctly to the worker instance
-                    if self.generate_endpoint is not None and self.config is not None:
+                    if self.generate_endpoint is not None:
                         logger.debug(
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                         )
@@ -672,6 +873,14 @@ class BaseWorkerHandler(ABC):
                                 "lora_id": lora_id,
                             }
 
+                            runtime_config = ModelRuntimeConfig()
+                            runtime_config.tool_call_parser = (
+                                self.config.dyn_tool_call_parser
+                            )
+                            runtime_config.reasoning_parser = (
+                                self.config.dyn_reasoning_parser
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
@@ -679,6 +888,7 @@ class BaseWorkerHandler(ABC):
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
+                                runtime_config=runtime_config,
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
@@ -960,7 +1170,7 @@ class BaseWorkerHandler(ABC):
         return prompt, sequence_length, embeddings_tensor
 
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], request_id: str, context
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -976,30 +1186,53 @@ class BaseWorkerHandler(ABC):
             )
 
         mm_map = request["multi_modal_data"]
+
         vllm_mm_data = {}
 
-        # Lazy-init NIXL connector only when frontend decoding is enabled
-        if self.enable_frontend_decoding:
-            async with self._nixl_connector_lock:
-                if self._nixl_connector is None:
-                    self._nixl_connector = nixl_connect.Connector()
-                    await self._nixl_connector.initialize()
+        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
+        # Still continue below so mixed image+video requests can attach `video`.
+        if self.embedding_loader is not None:
+            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+            # support 'Decoded' variant. Need to update the encode worker to unify handling
+            image_urls = []
+            supported = True
+            for item in mm_map.get(IMAGE_URL_KEY, []):
+                if isinstance(item, dict) and "Url" in item:
+                    image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    supported = False
+            if supported:
+                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
+                    image_urls, request_id, model=self.config.model, context=context
+                )
+                logger.debug(
+                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                )
 
-        # Process image_url entries
-        images = await self.image_loader.load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []),
-            enable_frontend_decoding=self.enable_frontend_decoding,
-            nixl_connector=self._nixl_connector,
-        )
+        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
+        if "image" not in vllm_mm_data and image_mm_items:
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+            )
 
-        if images:
-            # vLLM expects single image or list
-            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
 
-        # Handle video_url entries (future expansion)
-        if VIDEO_URL_KEY in mm_map:
-            logger.warning("Video multimodal data not yet supported in standard worker")
+        video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
+        if video_mm_items:
+            videos = await self.video_loader.load_video_batch(video_mm_items)
+
+            if videos:
+                # vLLM expects single video or list
+                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                logger.debug(
+                    f"Extracted {len(videos)} video(s) for multimodal processing"
+                )
 
         return vllm_mm_data if vllm_mm_data else None
 
@@ -1297,27 +1530,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1343,8 +1578,62 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
-        # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        # Firstly extract disaggregated params from prefill result if available
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
+                "kv_transfer_params"
+            )
+            embedding_params = prefill_result.get("disaggregated_params", {}).get(
+                "embedding_params"
+            )
+        else:
+            kv_params = None
+            embedding_params = None
+
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        has_mm_data = (
+            "multi_modal_data" in request and request["multi_modal_data"] is not None
+        )
+
+        multi_modal_data = None
+        if is_decode_only:
+            # Decode mode: branch on model, not data.
+            if is_qwen_vl_model(self.config.model):
+                # Qwen VL needs embedding_params for mRoPE initialization.
+                if embedding_params is not None:
+                    multi_modal_data = construct_qwen_decode_mm_data(
+                        embedding_params["image_grid_thw"],
+                        embedding_params["embeddings_shape"],
+                        request_id,
+                    )
+                elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
+                    msg = (
+                        "Decode worker received multimodal request without "
+                        "prefill result"
+                        if prefill_result is None
+                        else "Prefill did not produce required multimodal "
+                        "embedding metadata (image_grid_thw) for Qwen VL "
+                        "decode. Use --route-to-encoder or the P/D launcher "
+                        "with grid_thw computation support"
+                    )
+                    logger.error("Request %s: %s", request_id, msg)
+                    yield {"status": "error", "message": msg}
+                    return
+            # TODO(DIS-1661): video/audio re-downloaded on decode.
+            # TODO(DIS-1664): mixed image+video in disagg decode is not
+            # supported — synthetic image data would be overwritten.
+            if multi_modal_data is None and has_mm_data:
+                mm = request["multi_modal_data"]
+                if mm.get(VIDEO_URL_KEY) or mm.get("audio_url"):
+                    multi_modal_data = await self._extract_multimodal_data(
+                        request, request_id, context
+                    )
+        else:
+            # Aggregated mode: load images normally
+            multi_modal_data = await self._extract_multimodal_data(
+                request, request_id, context
+            )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1358,14 +1647,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = build_sampling_params(
             request, self.default_sampling_params, self.model_max_len
         )
-
-        prefill_result = request.get("prefill_result")
-        if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
-        else:
-            kv_params = None
 
         if kv_params is not None:
             if sampling_params.extra_args is None:
@@ -1391,7 +1672,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1438,7 +1719,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1512,27 +1793,29 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
+        config: Config,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
-        config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
         super().__init__(
             runtime,
+            config,
             engine,
             default_sampling_params,
             model_max_len,
             enable_multimodal,
             generate_endpoint,
-            config,
             use_vllm_tokenizer,
             shutdown_event,
             enable_frontend_decoding,
+            encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1548,7 +1831,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(
+            request, request_id, context
+        )
+        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -1600,7 +1886,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = routing.get("priority", 0)
+        priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
 
@@ -1628,10 +1914,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": (
-                        {"kv_transfer_params": res.kv_transfer_params}
-                        if res.kv_transfer_params
-                        else None
+                    "disaggregated_params": self._build_disaggregated_params(
+                        res.kv_transfer_params, embedding_params
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -1651,3 +1935,38 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 )
 
                 yield output
+
+    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+        disaggregated_params = {}
+        if kv_transfer_params is not None:
+            disaggregated_params["kv_transfer_params"] = kv_transfer_params
+        if embedding_params is not None:
+            disaggregated_params["embedding_params"] = embedding_params
+
+        return disaggregated_params if disaggregated_params else None
+
+    def _build_embedding_params(
+        self, multi_modal_data: dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Helper function to build mm embedding parameters to be consumed by the decode worker, typically
+        decode worker doesn't require any metadata for mm embedding as the content has been consumed by
+        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
+        tokens in the prompt which requires such a metadata to pass through the processor.
+        """
+        embedding_params = {}
+        if is_qwen_vl_model(self.config.model) and isinstance(
+            multi_modal_data.get("image"), dict
+        ):
+            image_data = multi_modal_data["image"]
+            image_grid_thw = image_data.get("image_grid_thw")
+            image_embeds = image_data.get("image_embeds")
+            if image_grid_thw is not None:
+                embedding_params["image_grid_thw"] = (
+                    image_grid_thw.tolist()
+                    if isinstance(image_grid_thw, torch.Tensor)
+                    else image_grid_thw
+                )
+            if image_embeds is not None:
+                embedding_params["embeddings_shape"] = list(image_embeds.shape)
+        return embedding_params if embedding_params else None
