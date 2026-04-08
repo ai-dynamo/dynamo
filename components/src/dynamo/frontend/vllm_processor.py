@@ -79,6 +79,7 @@ class VllmProcessor:
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         block_size: int = 16,
+        enable_auto_tool_choice: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -89,6 +90,7 @@ class VllmProcessor:
         self.reasoning_parser_class = reasoning_parser_class
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
+        self.enable_auto_tool_choice = enable_auto_tool_choice
         # Persistent NIXL sender — caches pickled mm_kwargs across requests.
         self._mm_kwargs_sender: Any = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable NIXL mm_kwargs transfer
@@ -266,6 +268,7 @@ class VllmProcessor:
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+                enable_auto_tool_choice=self.enable_auto_tool_choice,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -614,6 +617,8 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
+        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+        enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         trust_remote_code = getattr(self.flags, "trust_remote_code", False)
 
@@ -700,6 +705,7 @@ class EngineFactory:
             tool_parser_class,
             reasoning_parser_class,
             block_size=block_size,
+            enable_auto_tool_choice=enable_auto_tool_choice,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

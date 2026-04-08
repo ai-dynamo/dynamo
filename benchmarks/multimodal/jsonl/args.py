@@ -99,11 +99,9 @@ def parse_args(description: str = "") -> argparse.Namespace:
         "disjoint image slices to different datasets so they share no images.",
     )
     parser.add_argument(
-        "--image-seed",
+        "--seed",
         type=int,
         default=None,
-        help="Fixed RNG seed for image pool generation. When set, the same seed "
-        "is used every run so --image-offset selects a reproducible disjoint slice. "
-        "Default: time-based (random each run).",
+        help="Random seed for reproducible dataset generation (default: time-based)",
     )
     return parser.parse_args()

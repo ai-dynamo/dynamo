@@ -74,7 +74,7 @@ for conc in "${CONC_LEVELS[@]}"; do
             --images-per-request 1 \
             --images-pool "${pool_90}" \
             --image-offset "${offset_90}" \
-            --image-seed "${IMAGE_SEED}" \
+            --seed "${IMAGE_SEED}" \
             --image-mode "${mode}" \
             --image-dir "${IMAGE_DIR}" \
             --prompt "${PROMPT}" \
@@ -88,7 +88,7 @@ for conc in "${CONC_LEVELS[@]}"; do
             --images-per-request 1 \
             --images-pool "${pool_50}" \
             --image-offset "${offset_50}" \
-            --image-seed "${IMAGE_SEED}" \
+            --seed "${IMAGE_SEED}" \
             --image-mode "${mode}" \
             --image-dir "${IMAGE_DIR}" \
             --prompt "${PROMPT}" \
@@ -103,7 +103,7 @@ for conc in "${CONC_LEVELS[@]}"; do
             --images-pool "${n}" \
             --no-reuse \
             --image-offset "${offset_0}" \
-            --image-seed "${IMAGE_SEED}" \
+            --seed "${IMAGE_SEED}" \
             --image-mode "${mode}" \
             --image-dir "${IMAGE_DIR}" \
             --prompt "${PROMPT}" \

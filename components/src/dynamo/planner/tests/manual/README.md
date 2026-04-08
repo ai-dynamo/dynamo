@@ -1,8 +1,4 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+
 
 # SLA Planner Load Test
 
@@ -19,51 +15,12 @@ You have two options to obtain the pre-deployment profiling data:
 ### Option A: Use Test Configuration (Quickstart)
 
 Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for the following models x hardware configurations:
+
 - `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 with max context length 16384, TP1 Prefill, and TP1 Decode. At ISL/OSL 3000/150, it achieves 40k tokens/s/gpu prefill with 80ms TTFT and 10k tokens/s/gpu decode with 10ms ITL. See `../tests/data/profiling_results/H200_TP1P_TP1D/`.
 
 ### Option B: Use Your Own Profiling Results
 
 1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
-
-## Interpolator Testing
-
-SLA planner uses two interpolators to estimate the performance of prefill and decode. You can test the interpolators with the following command:
-
-```bash
-python components/src/dynamo/planner/core/throughput/interpolation.py \
-  --profile_results_dir <path_to_profile_results> \
-  --isl <ISL> \
-  --osl <OSL> \
-  --ttft <TTFT(ms)> \
-  --itl <ITL(ms)>
-```
-
-The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SLAs and advise the load that can saturate the engine.
-
-For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 (target TTFT=200ms, ITL=10ms):
-
-```bash
-python components/src/dynamo/planner/core/throughput/interpolation.py \
-  --profile_results_dir components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/ \
-  --isl 3000 \
-  --osl 300 \
-  --ttft 200 \
-  --itl 10
-
-# output:
-ISL=3000, OSL=300
-TTFT=200ms, ITL=10ms
-Using profile results from components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/
-
-Interpolating prefill performance ...
-        Estimated TTFT=60.00ms <= target TTFT=200.00ms. Requests can queue 140.00ms maximally while meeting TTFT SLA.
-        Estimated throughput: 49481.09 tokens/s/gpu. Request rate at 16.49 requests/s will saturate one GPU.
-
-Interpolating decode performance ...
-        Average context length: isl + osl/2 = 3150.
-        Estimated ITL=9.70ms <= target ITL=10.00ms at 16.16% active kv usage.
-        Estimated throughput: 4555.68 token/s/gpu. Request rate at 15.19 requests/s will saturate one GPU.
-```
 
 ## Generating Load Dataset
 
@@ -89,36 +46,6 @@ python benchmarks/sin_load_generator/sin_synth.py \
 The dataset starts at 5 requests/s, increases to 45 requests/s at t=300s, decreases back to 5 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
 
-## Planner Dry Run
-
-Before testing SLA planner on real deployments, we provide a dry run feature to test the autoscaling behavior on a given dataset. Specifically, in dry run mode,
-- The load predictor will be tested. However, the load metrics will be different from the real deployment because the actual OSL is only known after the requests are processed.
-- There will be no SLA predictions. Instead, sla planner will show the safe throughput limit that will ensure the requests can be processed within the SLA.
-- The correction factor will be disabled because there is no SLA metrics as reference.
-
-To dry run SLA planner,
-
-```bash
-python components/src/dynamo/planner/tests/manual/unit/planner_sla_dryrun.py \
-    --config '{"environment":"kubernetes","backend":"vllm","ttft":200,"itl":10,"profile_results_dir":"components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","throughput_adjustment_interval":60,"no_correction":true}' \
-    --dataset rr-5-45_i3000o300.jsonl \
-    --start-num-p 1 \
-    --start-num-d 1 \
-    --output-plot dryrun_plot.png
-```
-
-Below is the dryrun result:
-
-![Dryrun Plot](./figures/dryrun_plot.png)
-
-The first plot shows the actual request rate and the predicted request rate (in the unit of requests/adjustment_interval).
-
-The second plot shows the actual ISL/OSL and the predicted ISL/OSL. The first two plots are useful when tuning the performance of the load predictor.
-
-The third plot shows the actual prefill throughput, number of prefill workers that planner scales, and the safe throughput limit with the number of prefill workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the TTFT SLA. Note that in the real deployment, due to other factors such as queueing, load balancing, KV cache transfer latency, and ISL variance, it is not guaranteed that the actual deployment can adhere the TTFT SLA.
-
-The fourth plot, similar to the third plot, shows the actual decode throughput, number of decode workers that planner scales, and the safe throughput limit with the number of decode workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the ITL SLA. Note that in the real deployment, due to other factors such as load balancing and OSL variance, it is not guaranteed that the actual deployment can adhere the ITL SLA.
-
 ## Scaling Tests
 
 This directory contains comprehensive tests for validating the SLA planner's scaling behavior. The tests validate both the replica calculation logic and end-to-end scaling behavior. The scaling test uses a graduated load approach rather than dataset files, as it proved more reliable for metric generation and scaling triggers.
@@ -132,6 +59,7 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 ### Quick Start for Unit Tests and End-to-End Tests
 
 #### Run Unit Tests Only
+
 Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
@@ -175,6 +103,7 @@ components/src/dynamo/planner/tests/manual/scaling/run_scaling_test.sh --namespa
 ### Instructions for End-to-End Perf Tests
 
 In this test, we compare performance (goodput and goodput/GPU) on deployments on the following four deployments using the aforementioned 8b FP8 model on H200 and the dataset used in dryrun:
+
 - Config 1 with inefficient P/D ratio: 3xTP1P_1xTP1D_4GPU
  `./perf_test_configs/disagg_8b_3p1d.yaml`
 - Config 2 with best static deployment: 2xTP1P_2xTP1D_4GPU
@@ -214,12 +143,13 @@ aiperf profile \
 
 #### E2E Perf Test Results
 
-![Results](./figures/sla_planner_perf.png)
+Results
 
 The table below shows the performance improvement of SLA planner across different deployment configurations:
 
-| Baseline | Goodput Improvement | Goodput/GPU Improvement |
-|---------------|-----------------|-------------------------|
-| Inefficient P/D ratio | 725% | 600% |
-| Inefficient parallelization mapping | 311% | 249% |
-| Best static deployment | 52% | 29% |
+
+| Baseline                            | Goodput Improvement | Goodput/GPU Improvement |
+| ----------------------------------- | ------------------- | ----------------------- |
+| Inefficient P/D ratio               | 725%                | 600%                    |
+| Inefficient parallelization mapping | 311%                | 249%                    |
+| Best static deployment              | 52%                 | 29%                     |

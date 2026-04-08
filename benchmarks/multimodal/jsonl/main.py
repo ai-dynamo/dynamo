@@ -26,8 +26,6 @@ from generate_images import (
 )
 from generate_input_text import generate_filler
 
-DEFAULT_SEED = int(time.time() * 1000) % (2**32)
-
 
 def main() -> None:
     args = parse_args(__doc__)
@@ -35,7 +33,9 @@ def main() -> None:
     images_per_request: int = args.images_per_request
     image_pool: int = args.images_pool or (num_requests * images_per_request)
     offset: int = args.image_offset
-    seed: int = args.image_seed if args.image_seed is not None else DEFAULT_SEED
+    seed: int = (
+        args.seed if args.seed is not None else int(time.time() * 1000) % (2**32)
+    )
 
     np_rng = np.random.default_rng(seed)
     py_rng = random.Random(seed)

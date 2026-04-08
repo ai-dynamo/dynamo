@@ -19,7 +19,7 @@ from dynamo.common.forward_pass_metrics import (
 )
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.decode import DecodePlanner
-from dynamo.planner.core.load.fpm_regression import (
+from dynamo.planner.core.perf_model import (
     AggRegressionModel,
     DecodeRegressionModel,
     PrefillRegressionModel,
@@ -70,19 +70,24 @@ def _make_fpm(
 
 class TestPrefillRegressionModel:
     def test_insufficient_data(self):
-        model = PrefillRegressionModel(window_size=50, min_observations=5)
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
         assert not model.has_sufficient_data()
         assert model.estimate_next_ttft(0, 2048) is None
 
     def test_heartbeat_skipped(self):
-        model = PrefillRegressionModel(window_size=50, min_observations=3)
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         fpm = _make_fpm(wall_time=0.0, sum_prefill_tokens=100, num_prefill_requests=1)
         model.add_observation(fpm)
         assert model.num_observations == 0
 
     def test_basic_regression_and_ttft_estimate(self):
-        model = PrefillRegressionModel(window_size=50, min_observations=3)
-        # wall_time = 0.001 * prefill_tokens + 0.002 (linear relationship)
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         for tokens in [500, 1000, 1500, 2000, 2500]:
             fpm = _make_fpm(
                 sum_prefill_tokens=tokens,
@@ -93,9 +98,6 @@ class TestPrefillRegressionModel:
 
         assert model.has_sufficient_data()
 
-        # Single iteration: queued=0, avg_isl should be mean of [500..2500]=1500
-        # total_tokens = 0 + avg_isl ≈ 1500
-        # 1 iteration at max_num_batched_tokens=2048 (1500 < 2048)
         est = model.estimate_next_ttft(
             queued_prefill_tokens=0, max_num_batched_tokens=2048
         )
@@ -103,8 +105,9 @@ class TestPrefillRegressionModel:
         assert est > 0
 
     def test_chunked_ttft_simulation(self):
-        model = PrefillRegressionModel(window_size=50, min_observations=3)
-        # Simple: wall_time = 0.001 * prefill_tokens (slope=0.001, intercept≈0)
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         for tokens in [100, 200, 300, 400, 500]:
             fpm = _make_fpm(
                 sum_prefill_tokens=tokens,
@@ -113,11 +116,6 @@ class TestPrefillRegressionModel:
             )
             model.add_observation(fpm)
 
-        # avg_isl = mean([100,200,300,400,500]) = 300
-        # total_tokens = 5000 (queued) + 300 (next ISL) = 5300
-        # max_num_batched_tokens = 2048
-        # iterations: ceil(5300/2048) = 3
-        # chunk1=2048, chunk2=2048, chunk3=1204
         est = model.estimate_next_ttft(
             queued_prefill_tokens=5000, max_num_batched_tokens=2048
         )
@@ -125,7 +123,9 @@ class TestPrefillRegressionModel:
         assert est > 0.003  # at least 3 iterations worth
 
     def test_avg_isl_tracking(self):
-        model = PrefillRegressionModel(window_size=50, min_observations=3)
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         for isl in [1000, 2000, 3000]:
             fpm = _make_fpm(
                 sum_prefill_tokens=isl, num_prefill_requests=1, wall_time=0.01
@@ -133,39 +133,219 @@ class TestPrefillRegressionModel:
             model.add_observation(fpm)
         assert abs(model.avg_isl - 2000.0) < 1.0
 
-    def test_sliding_window_eviction(self):
-        model = PrefillRegressionModel(window_size=5, min_observations=3)
-        for i in range(10):
-            fpm = _make_fpm(sum_prefill_tokens=100 * (i + 1), wall_time=0.01)
+    def test_find_best_engine_prefill_rps(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        for tokens in [500, 1000, 1500, 2000, 2500]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=tokens,
+                num_prefill_requests=1,
+                wall_time=0.001 * tokens + 0.002,
+            )
             model.add_observation(fpm)
+
+        rps, actual_ttft_ms = model.find_best_engine_prefill_rps(
+            ttft_sla=2000.0, isl=1000.0
+        )
+        assert rps > 0
+        # wall_time ~1.002s for 1000 tokens -> rps ~ 1/1.002 ~ 0.998
+        assert 0.5 < rps < 2.0
+        assert actual_ttft_ms > 0
+        assert 1000 < actual_ttft_ms < 2000
+
+    def test_find_best_engine_prefill_rps_zero_isl(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        for tokens in [500, 1000, 1500]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=tokens,
+                num_prefill_requests=1,
+                wall_time=0.001 * tokens,
+            )
+            model.add_observation(fpm)
+        rps, _ = model.find_best_engine_prefill_rps(ttft_sla=1000.0, isl=0.0)
+        assert rps == 0.0
+
+    def test_load_benchmark_fpms(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        fpms = [
+            _make_fpm(sum_prefill_tokens=t, num_prefill_requests=1, wall_time=0.001 * t)
+            for t in [500, 1000, 1500, 2000, 2500]
+        ]
+        model.load_benchmark_fpms(fpms)
         assert model.num_observations == 5
+        assert model.has_sufficient_data()
+        est = model.estimate_next_ttft(
+            queued_prefill_tokens=0, max_num_batched_tokens=2048
+        )
+        assert est is not None
+
+
+# ── Bucketed retirement tests ─────────────────────────────────────────
+
+
+class TestBucketedRetirement:
+    def test_total_capped_at_max(self):
+        """Total observations never exceed max_num_fpm_samples."""
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=10, min_observations=3, bucket_count=4
+        )
+        for i in range(20):
+            fpm = _make_fpm(
+                sum_prefill_tokens=100 * (i + 1),
+                num_prefill_requests=1,
+                wall_time=0.01 * (i + 1),
+            )
+            model.add_observation(fpm)
+        assert model.num_observations == 10
+
+    def test_most_populated_bucket_loses_oldest(self):
+        """When evicting, the oldest entry from the most-populated bucket is removed."""
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=6, min_observations=1, bucket_count=4
+        )
+
+        # 3 observations at low tokens (bucket 0 area)
+        for i in range(3):
+            fpm = _make_fpm(
+                sum_prefill_tokens=10 + i,
+                num_prefill_requests=1,
+                wall_time=0.001 * (10 + i),
+            )
+            model.add_observation(fpm)
+
+        # 3 observations at high tokens (different bucket)
+        for i in range(3):
+            fpm = _make_fpm(
+                sum_prefill_tokens=1000 + i * 100,
+                num_prefill_requests=1,
+                wall_time=0.001 * (1000 + i * 100),
+            )
+            model.add_observation(fpm)
+
+        assert model.num_observations == 6
+
+        # One more at low tokens; total would exceed 6 so most-populated
+        # bucket loses its oldest entry.
+        fpm = _make_fpm(
+            sum_prefill_tokens=15,
+            num_prefill_requests=1,
+            wall_time=0.015,
+        )
+        model.add_observation(fpm)
+        assert model.num_observations == 6
+
+    def test_uniform_distribution_preserved(self):
+        """Bucketed eviction keeps observations across operating points."""
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=10, min_observations=3, bucket_count=16
+        )
+
+        # Many observations at a single operating point
+        for _ in range(15):
+            fpm = _make_fpm(
+                num_decode_requests=32,
+                sum_decode_kv_tokens=32000,
+                wall_time=0.01,
+            )
+            model.add_observation(fpm)
+        assert model.num_observations == 10
+
+        # Add a different operating point; the concentrated bucket loses one
+        fpm = _make_fpm(
+            num_decode_requests=4,
+            sum_decode_kv_tokens=4000,
+            wall_time=0.005,
+        )
+        model.add_observation(fpm)
+        assert model.num_observations == 10
+
+    def test_2d_bucketed_retirement(self):
+        """2D models retire from the most-populated grid cell."""
+        model = AggRegressionModel(
+            max_num_fpm_samples=8, min_observations=1, bucket_count=16
+        )
+
+        # Fill with varied data
+        for p, d in [(100, 500), (200, 1000), (300, 1500), (400, 2000)]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=p,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=d,
+                num_decode_requests=5,
+                wall_time=0.001 * p + 0.0001 * d,
+            )
+            model.add_observation(fpm)
+
+        # Concentrate 4 more in one region
+        for _ in range(4):
+            fpm = _make_fpm(
+                sum_prefill_tokens=100,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=500,
+                num_decode_requests=5,
+                wall_time=0.15,
+            )
+            model.add_observation(fpm)
+
+        assert model.num_observations == 8
+
+        # Overflow triggers retirement from the concentrated cell
+        fpm = _make_fpm(
+            sum_prefill_tokens=350,
+            num_prefill_requests=1,
+            sum_decode_kv_tokens=1800,
+            num_decode_requests=5,
+            wall_time=0.5,
+        )
+        model.add_observation(fpm)
+        assert model.num_observations == 8
 
 
 # ── DecodeRegressionModel tests ──────────────────────────────────────
 
 
 class TestDecodeRegressionModel:
+    def _train_2d(self, model: DecodeRegressionModel) -> None:
+        """Populate with 2D data: wall_time = f(num_decode_requests, sum_decode_kv_tokens)."""
+        for n_req, kv in [
+            (5, 1000),
+            (10, 2000),
+            (15, 3000),
+            (20, 4000),
+            (25, 5000),
+        ]:
+            fpm = _make_fpm(
+                sum_decode_kv_tokens=kv,
+                num_decode_requests=n_req,
+                wall_time=0.0001 * kv + 0.0005 * n_req + 0.001,
+            )
+            model.add_observation(fpm)
+
     def test_insufficient_data(self):
-        model = DecodeRegressionModel(window_size=50, min_observations=5)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
         assert not model.has_sufficient_data()
         assert model.estimate_next_itl(0, 0) is None
 
     def test_heartbeat_skipped(self):
-        model = DecodeRegressionModel(window_size=50, min_observations=3)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         fpm = _make_fpm(wall_time=0.0, sum_decode_kv_tokens=100, num_decode_requests=1)
         model.add_observation(fpm)
         assert model.num_observations == 0
 
     def test_basic_itl_estimate(self):
-        model = DecodeRegressionModel(window_size=50, min_observations=3)
-        # wall_time = 0.0001 * decode_kv + 0.001
-        for kv in [1000, 2000, 3000, 4000, 5000]:
-            fpm = _make_fpm(
-                sum_decode_kv_tokens=kv,
-                num_decode_requests=10,
-                wall_time=0.0001 * kv + 0.001,
-            )
-            model.add_observation(fpm)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_2d(model)
 
         assert model.has_sufficient_data()
         est = model.estimate_next_itl(scheduled_decode_kv=3000, queued_decode_kv=0)
@@ -173,7 +353,9 @@ class TestDecodeRegressionModel:
         assert est > 0
 
     def test_avg_decode_length_tracking(self):
-        model = DecodeRegressionModel(window_size=50, min_observations=3)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         for total_kv, num_req in [(1000, 10), (2000, 10), (3000, 10)]:
             fpm = _make_fpm(
                 sum_decode_kv_tokens=total_kv,
@@ -183,26 +365,68 @@ class TestDecodeRegressionModel:
             model.add_observation(fpm)
         assert abs(model.avg_decode_length - 200.0) < 1.0
 
+    def _train_thpt_model(self, model: DecodeRegressionModel) -> None:
+        """Populate with 2D data at decode-realistic wall-time scale."""
+        for n_req, kv in [
+            (5, 5000),
+            (10, 10000),
+            (20, 20000),
+            (30, 30000),
+            (40, 40000),
+        ]:
+            fpm = _make_fpm(
+                sum_decode_kv_tokens=kv,
+                num_decode_requests=n_req,
+                wall_time=0.00001 * kv + 0.001,
+            )
+            model.add_observation(fpm)
+
+    def test_find_best_engine_decode_rps(self):
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_thpt_model(model)
+
+        rps, actual_itl = model.find_best_engine_decode_rps(
+            itl=50.0, context_length=1000.0, osl=150.0
+        )
+        assert rps > 0
+        assert actual_itl > 0
+        assert actual_itl <= 50.0
+
+    def test_find_best_engine_decode_rps_zero_context(self):
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_2d(model)
+        rps, itl_ms = model.find_best_engine_decode_rps(
+            itl=50.0, context_length=0.0, osl=150.0
+        )
+        assert rps == 0.0
+        assert itl_ms == 0.0
+
+    def test_load_benchmark_fpms(self):
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        fpms = [
+            _make_fpm(
+                num_decode_requests=n,
+                sum_decode_kv_tokens=n * 1000,
+                wall_time=0.001 * n,
+            )
+            for n in [5, 10, 15, 20, 25]
+        ]
+        model.load_benchmark_fpms(fpms)
+        assert model.num_observations == 5
+        assert model.has_sufficient_data()
+
 
 # ── AggRegressionModel tests ─────────────────────────────────────────
 
 
 class TestAggRegressionModel:
-    def test_insufficient_data(self):
-        model = AggRegressionModel(window_size=50, min_observations=5)
-        assert not model.has_sufficient_data()
-        assert model.estimate_next_ttft(0, 2048, 0) is None
-        assert model.estimate_next_itl(0, 0) is None
-
-    def test_heartbeat_skipped(self):
-        model = AggRegressionModel(window_size=50, min_observations=3)
-        fpm = _make_fpm(wall_time=0.0, sum_prefill_tokens=100, sum_decode_kv_tokens=200)
-        model.add_observation(fpm)
-        assert model.num_observations == 0
-
-    def test_2d_regression(self):
-        model = AggRegressionModel(window_size=50, min_observations=3)
-        # wall_time = 0.001 * prefill + 0.0001 * decode_kv + 0.001
+    def _train_agg(self, model: AggRegressionModel) -> None:
         for p, d in [(100, 1000), (200, 2000), (300, 3000), (400, 4000), (500, 5000)]:
             fpm = _make_fpm(
                 sum_prefill_tokens=p,
@@ -212,6 +436,28 @@ class TestAggRegressionModel:
                 wall_time=0.001 * p + 0.0001 * d + 0.001,
             )
             model.add_observation(fpm)
+
+    def test_insufficient_data(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
+        assert not model.has_sufficient_data()
+        assert model.estimate_next_ttft(0, 2048, 0) is None
+        assert model.estimate_next_itl(0, 0) is None
+
+    def test_heartbeat_skipped(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        fpm = _make_fpm(wall_time=0.0, sum_prefill_tokens=100, sum_decode_kv_tokens=200)
+        model.add_observation(fpm)
+        assert model.num_observations == 0
+
+    def test_2d_regression(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
 
         assert model.has_sufficient_data()
 
@@ -226,6 +472,37 @@ class TestAggRegressionModel:
         itl = model.estimate_next_itl(scheduled_decode_kv=3000, queued_decode_kv=0)
         assert itl is not None
         assert itl > 0
+
+    def test_find_best_engine_agg_rps(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+
+        thpt, actual_ttft, actual_itl = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+        )
+        assert isinstance(thpt, float)
+        assert thpt > 0
+        assert actual_ttft >= 0
+        assert actual_itl >= 0
+
+    def test_find_best_engine_agg_rps_insufficient_data(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
+        thpt, _, _ = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+        )
+        assert thpt == 0.0
 
 
 # ── Planner integration tests (with mocked FPM subscriber) ──────────
@@ -249,7 +526,6 @@ def _build_load_config(**overrides) -> PlannerConfig:
         itl=50.0,
         backend="vllm",
         no_operation=True,
-        no_correction=True,
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,
         load_predictor="constant",
@@ -266,7 +542,8 @@ def _build_load_config(**overrides) -> PlannerConfig:
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_adjustment_interval=5,
-        load_learning_window=50,
+        max_num_fpm_samples=50,
+        fpm_sample_bucket_size=16,
         load_scaling_down_sensitivity=80,
         load_metric_samples=10,
         load_min_observations=5,
@@ -294,7 +571,6 @@ class TestPrefillFpmScaling:
         planner.model_name = "test-model"
         planner.prefill_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
-        # Train regression: wall_time grows linearly with prefill tokens
         for tokens in range(200, 1200, 100):
             fpm = _make_fpm(
                 sum_prefill_tokens=tokens,
@@ -303,7 +579,6 @@ class TestPrefillFpmScaling:
             )
             planner.ttft_regression.add_observation(fpm)
 
-        # Both engines have heavy queued prefill -> high estimated TTFT
         stats = {
             ("w1", 0): _make_fpm(
                 worker_id="w1",
@@ -335,8 +610,6 @@ class TestPrefillFpmScaling:
         planner.model_name = "test-model"
         planner.prefill_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
-        # Train with short ISL (100 tokens each) so avg_isl stays low.
-        # Regression: wall_time ≈ 0.001 * prefill_tokens
         for tokens in range(100, 600, 50):
             fpm = _make_fpm(
                 sum_prefill_tokens=tokens,
@@ -345,9 +618,6 @@ class TestPrefillFpmScaling:
             )
             planner.ttft_regression.add_observation(fpm)
 
-        # All engines idle (no queued prefill).
-        # estimate_next_ttft: total = 0 + avg_isl(~100) = ~100 tokens
-        # predicted wall_time ≈ 0.001 * 100 = 0.1s = 100ms < 500ms SLA
         stats = {
             (f"w{i}", 0): _make_fpm(
                 worker_id=f"w{i}",
@@ -372,7 +642,6 @@ class TestPrefillFpmScaling:
         planner.model_name = "test-model"
         planner.prefill_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
-        # Only 2 observations, need 5
         for tokens in [100, 200]:
             fpm = _make_fpm(sum_prefill_tokens=tokens, wall_time=0.01)
             planner.ttft_regression.add_observation(fpm)
@@ -394,11 +663,18 @@ class TestDecodeFpmScaling:
         planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        for kv in range(1000, 6000, 500):
+        # 2D regression: vary both num_decode_requests and sum_decode_kv_tokens
+        for n_req, kv in [
+            (5, 1000),
+            (10, 2000),
+            (15, 3000),
+            (20, 4000),
+            (25, 5000),
+        ]:
             fpm = _make_fpm(
                 sum_decode_kv_tokens=kv,
-                num_decode_requests=10,
-                wall_time=0.0001 * kv + 0.001,
+                num_decode_requests=n_req,
+                wall_time=0.0001 * kv + 0.0005 * n_req + 0.001,
             )
             planner.itl_regression.add_observation(fpm)
 
@@ -431,40 +707,17 @@ class TestDecodeFpmScaling:
         planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        fpm = _make_fpm(sum_decode_kv_tokens=1000, wall_time=0.01)
+        fpm = _make_fpm(
+            sum_decode_kv_tokens=1000, num_decode_requests=5, wall_time=0.01
+        )
         planner.itl_regression.add_observation(fpm)
 
-        stats = {("w1", 0): _make_fpm(sum_decode_kv_tokens=5000, wall_time=0.5)}
+        stats = {
+            ("w1", 0): _make_fpm(
+                sum_decode_kv_tokens=5000, num_decode_requests=10, wall_time=0.5
+            )
+        }
         planner.fpm_subscriber = _mock_fpm_subscriber(stats)
 
         result = planner.load_plan_adjustment()
         assert result is None
-
-
-# ── Correction factor auto-disable tests ─────────────────────────────
-
-
-class TestCorrectionFactorAutoDisable:
-    def test_correction_factor_disabled_when_load_enabled(self):
-        config = PlannerConfig(
-            enable_load_scaling=True,
-            enable_throughput_scaling=True,
-            no_correction=False,
-        )
-        assert config.no_correction is True
-
-    def test_correction_factor_stays_disabled_if_already_set(self):
-        config = PlannerConfig(
-            enable_load_scaling=True,
-            enable_throughput_scaling=True,
-            no_correction=True,
-        )
-        assert config.no_correction is True
-
-    def test_correction_factor_not_disabled_without_loadbased(self):
-        config = PlannerConfig(
-            enable_load_scaling=False,
-            enable_throughput_scaling=True,
-            no_correction=False,
-        )
-        assert config.no_correction is False
