@@ -95,6 +95,7 @@ print(f'INPUT_FILE={cfg.input_files[0]!r}')
 OUTPUT_BASE="$REPO_ROOT/$OUTPUT_BASE"
 
 export HF_HOME="${HF_HOME:-/data/huggingface}"
+export PATH="/opt/nvidia/nsight-systems/2025.5.1/bin:$PATH"
 
 # ---------------------------------------------------------------------------
 # Preflight checks
