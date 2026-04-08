@@ -198,6 +198,7 @@ class ImageLoader:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
 
+    @_nvtx.annotate("mm:img:load_batch", color="lime")
     async def load_image_batch(
         self,
         image_mm_items: List[Dict[str, Any]],

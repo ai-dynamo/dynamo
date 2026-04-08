@@ -262,9 +262,17 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
-            .await
-            .with_context(|| "Failed to gather multimodal data")?;
+        {
+            let mm_start = Instant::now();
+            let _nvtx = dynamo_nvtx_range!("preprocess.gather_mm_data");
+            self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
+                .await
+                .with_context(|| "Failed to gather multimodal data")?;
+            let mm_ms = mm_start.elapsed().as_millis();
+            if mm_ms > 1 {
+                tracing::info!(mm_gather_ms = mm_ms, "[PERF] rust_mm_gather: {}ms", mm_ms);
+            }
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["preprocess"])
@@ -489,6 +497,7 @@ impl OpenAIPreprocessor {
             // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
             // other backends that pass URLs through still need the original data: URIs.
             if self.media_loader.is_some() {
+                let _nvtx = dynamo_nvtx_range!("preprocess.strip_b64_urls");
                 Self::strip_inline_data_urls(&mut extra_args["messages"]);
             }
 

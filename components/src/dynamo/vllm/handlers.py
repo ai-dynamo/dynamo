@@ -34,6 +34,7 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -1169,6 +1170,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
+    @_nvtx.annotate("mm:extract_mm_data", color="cyan")
     async def _extract_multimodal_data(
         self, request: Dict[str, Any], request_id: str, context
     ) -> Dict[str, Any] | None:
@@ -1631,9 +1633,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
         else:
             # Aggregated mode: load images normally
+            _t_mm_start = time.perf_counter()
             multi_modal_data = await self._extract_multimodal_data(
                 request, request_id, context
             )
+            _t_mm_end = time.perf_counter()
+            _mm_ms = (_t_mm_end - _t_mm_start) * 1000
+            if _mm_ms > 1:
+                logger.warning(
+                    "[PERF] extract_mm_data: %.0fms req=%s", _mm_ms, request_id
+                )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(

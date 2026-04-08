@@ -4,9 +4,12 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use std::time::Instant;
+
 use anyhow::Result;
 
 use dynamo_memory::nixl::NixlAgent;
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
@@ -101,6 +104,8 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
     ) -> Result<RdmaMediaDataDescriptor> {
+        let part_start = Instant::now();
+        let _nvtx = dynamo_nvtx_range!("mm.fetch_and_decode");
         // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
@@ -112,12 +117,27 @@ impl MediaLoader {
 
                 let url = &image_part.image_url.url;
                 self.media_fetcher.check_if_url_allowed(url)?;
-                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                let fetch_start = Instant::now();
+                let data = {
+                    let _nvtx = dynamo_nvtx_range!("mm.fetch_url");
+                    EncodedMediaData::from_url(url, &self.http_client).await?
+                };
+                let fetch_ms = fetch_start.elapsed().as_millis();
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
                     mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                decoder.decode_async(data).await?
+                let decode_start = Instant::now();
+                let _nvtx = dynamo_nvtx_range!("mm.image_decode");
+                let result = decoder.decode_async(data).await?;
+                let decode_ms = decode_start.elapsed().as_millis();
+                tracing::info!(
+                    fetch_ms = fetch_ms,
+                    decode_ms = decode_ms,
+                    "[PERF] rust_image: fetch={}ms decode={}ms",
+                    fetch_ms, decode_ms,
+                );
+                result
             }
             #[allow(unused_variables)]
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
@@ -147,7 +167,19 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        let nixl_start = Instant::now();
+        let rdma_descriptor = {
+            let _nvtx = dynamo_nvtx_range!("mm.nixl_register");
+            decoded.into_rdma_descriptor(&self.nixl_agent)?
+        };
+        let nixl_ms = nixl_start.elapsed().as_millis();
+        let total_ms = part_start.elapsed().as_millis();
+        tracing::info!(
+            nixl_register_ms = nixl_ms,
+            total_ms = total_ms,
+            "[PERF] rust_fetch_decode_register: nixl={}ms total={}ms",
+            nixl_ms, total_ms,
+        );
         Ok(rdma_descriptor)
     }
 }
