@@ -10,9 +10,21 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
+        ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
     ];
     match_error_chain(err, INHIBITED, &[])
+}
+
+/// Read the backend response inactivity timeout from the environment.
+/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
+/// as the HTTP-layer safety net in `disconnect.rs`.
+fn response_inactivity_timeout() -> Option<std::time::Duration> {
+    std::env::var("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
 }
 use crate::{
     component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
@@ -586,6 +598,7 @@ where
                 }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
+                let client_for_timeout = self.client.clone();
                 let stream = stream.map(move |res| {
                     // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
@@ -598,7 +611,45 @@ where
                     }
                     res
                 });
-                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+
+                // Request-plane inactivity timeout: emit a ResponseTimeout error item
+                // when the backend stops producing output. This triggers is_inhibited()
+                // → report_instance_down() to quarantine the worker.
+                let stream: Pin<Box<dyn Stream<Item = U> + Send>> =
+                    if let Some(timeout) = response_inactivity_timeout() {
+                        Box::pin(async_stream::stream! {
+                            let mut inner = Box::pin(stream);
+                            loop {
+                                tokio::select! {
+                                    item = inner.next() => {
+                                        match item {
+                                            Some(item) => yield item,
+                                            None => break,
+                                        }
+                                    }
+                                    _ = tokio::time::sleep(timeout) => {
+                                        tracing::warn!(
+                                            instance_id,
+                                            timeout_secs = timeout.as_secs(),
+                                            "backend response inactivity timeout — quarantining worker"
+                                        );
+                                        client_for_timeout.report_instance_down(instance_id);
+                                        yield U::from_err(
+                                            crate::error::DynamoError::builder()
+                                                .error_type(crate::error::ErrorType::ResponseTimeout)
+                                                .message("backend response inactivity timeout")
+                                                .build()
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        })
+                    } else {
+                        Box::pin(stream)
+                    };
+
+                Ok(ResponseStream::new(stream, engine_ctx))
             }
             Err(err) => {
                 if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
