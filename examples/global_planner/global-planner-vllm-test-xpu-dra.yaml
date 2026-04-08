@@ -221,7 +221,7 @@ spec:
             - --block-size
             - "64"
             - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"xpu"}'
           volumeMounts:
             - name: hf-model-cache
               mountPath: /home/dynamo/.cache/huggingface/hub
