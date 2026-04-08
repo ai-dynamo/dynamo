@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import logging
+import os
+import tempfile
+from collections.abc import AsyncGenerator
+
+from vllm.inputs import TokensPrompt
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
+
+from dynamo._core import Context
+from dynamo.common.backend.engine import DynamoEngine, EngineConfig
+from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
+
+from .handlers import build_sampling_params
+
+logger = logging.getLogger(__name__)
+
+
+class VllmDynamoEngine(DynamoEngine):
+    def __init__(self, engine_args):
+        self.engine_args = engine_args
+        self.engine_client = None
+        self._vllm_config = None
+        self._default_sampling_params = None
+        self._prometheus_temp_dir = None
+        self._model_max_len = None
+
+    async def init(self) -> EngineConfig:
+        os.environ["VLLM_NO_USAGE_STATS"] = "1"
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            self._prometheus_temp_dir = tempfile.TemporaryDirectory(
+                prefix="vllm_prometheus_"
+            )
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = self._prometheus_temp_dir.name
+
+        self._default_sampling_params = (
+            self.engine_args.create_model_config().get_diff_sampling_param()
+        )
+
+        vllm_config = self.engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+        self._vllm_config = vllm_config
+
+        self.engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=UsageContext.OPENAI_API_SERVER,
+        )
+
+        self._model_max_len = getattr(
+            getattr(vllm_config, "model_config", None), "max_model_len", None
+        )
+
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        block_size = vllm_config.cache_config.block_size
+
+        return EngineConfig(
+            model=self.engine_args.model,
+            served_model_name=self.engine_args.served_model_name,
+            context_length=self._model_max_len,
+            kv_cache_block_size=block_size,
+            total_kv_blocks=num_gpu_blocks,
+            max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
+        request_id = context.id()
+
+        token_ids = request.get("token_ids", [])
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+        sampling_params = build_sampling_params(
+            request, self._default_sampling_params, self._model_max_len
+        )
+
+        gen = self.engine_client.generate(prompt, sampling_params, request_id)
+
+        num_output_tokens_so_far = 0
+        async for res in gen:
+            if not res.outputs:
+                yield {
+                    "finish_reason": "error: No outputs from vLLM engine",
+                    "token_ids": [],
+                }
+                break
+
+            output = res.outputs[0]
+            next_total = len(output.token_ids)
+            out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+            if output.finish_reason:
+                out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                prompt_tokens = len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                out["completion_usage"] = build_completion_usage(
+                    prompt_tokens, next_total
+                )
+
+            yield out
+            num_output_tokens_so_far = next_total
+
+    async def cleanup(self) -> None:
+        if self._prometheus_temp_dir is not None:
+            self._prometheus_temp_dir.cleanup()
