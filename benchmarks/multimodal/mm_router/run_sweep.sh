@@ -83,14 +83,19 @@ scrape_metrics() {
     } > "${out_file}"
 }
 
-summarize_worker_requests() {
-    # Extract per-worker request counts from a metrics snapshot
-    local metrics_file="$1"
-    grep 'dynamo_component_requests_total.*generate' "${metrics_file}" 2>/dev/null | while read -r line; do
-        local port=$(echo "${line}" | grep -oP 'port \K[0-9]+' || echo "?")
-        local count=$(echo "${line}" | awk '{print $NF}')
-        echo "  ${line}"
-    done
+# Extract a single worker's section from the metrics file (between its header
+# and the next worker header or EOF).
+_worker_section() {
+    local file="$1" worker_idx="$2"
+    # Extract lines between "Backend worker N" header and the next worker header (or EOF).
+    awk -v idx="${worker_idx}" '
+        /^# === Backend worker / {
+            if (found) exit          # hit next worker -> stop
+            if ($5 == idx) found=1   # $5 is the worker index in "# === Backend worker N metrics ..."
+            next
+        }
+        found { print }
+    ' "${file}"
 }
 
 diff_worker_requests() {
@@ -102,11 +107,11 @@ diff_worker_requests() {
         echo "=== Per-worker request counts ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
             local port=$(( VLLM_SYSTEM_PORT_BASE + i * 2 ))
-            local before_count=$(grep "# === Backend worker ${i}" -A 500 "${before}" | grep 'dynamo_component_requests_total.*generate' | head -1 | awk '{print $NF}')
-            local after_count=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep 'dynamo_component_requests_total.*generate' | head -1 | awk '{print $NF}')
+            local before_count=$(_worker_section "${before}" "${i}" | grep 'dynamo_component_requests_total.*generate' | head -1 | awk '{print $NF}')
+            local after_count=$(_worker_section "${after}" "${i}" | grep 'dynamo_component_requests_total.*generate' | head -1 | awk '{print $NF}')
             before_count=${before_count:-0}
             after_count=${after_count:-0}
-            local delta=$(( after_count - before_count ))
+            local delta=$(python3 -c "print(int(float(${after_count})-float(${before_count})))" 2>/dev/null || echo "?")
             echo "  Worker ${i} (port ${port}): ${delta} requests (${before_count} -> ${after_count})"
         done
 
@@ -134,10 +139,10 @@ diff_worker_requests() {
         echo ""
         echo "=== Per-worker prefix cache hit rate ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
-            local queries=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local hits=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
-            local b_queries=$(grep "# === Backend worker ${i}" -A 500 "${before}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local b_hits=$(grep "# === Backend worker ${i}" -A 500 "${before}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
+            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
+            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
             queries=${queries:-0}; hits=${hits:-0}; b_queries=${b_queries:-0}; b_hits=${b_hits:-0}
             local dq=$(python3 -c "print(float(${queries})-float(${b_queries}))" 2>/dev/null || echo "0")
             local dh=$(python3 -c "print(float(${hits})-float(${b_hits}))" 2>/dev/null || echo "0")
@@ -148,10 +153,10 @@ diff_worker_requests() {
         echo ""
         echo "=== Per-worker MM cache (hit/query) ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
-            local queries=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local hits=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
-            local b_queries=$(grep "# === Backend worker ${i}" -A 500 "${before}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local b_hits=$(grep "# === Backend worker ${i}" -A 500 "${before}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
+            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
+            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
             queries=${queries:-0}; hits=${hits:-0}; b_queries=${b_queries:-0}; b_hits=${b_hits:-0}
             local dq=$(python3 -c "print(float(${queries})-float(${b_queries}))" 2>/dev/null || echo "0")
             local dh=$(python3 -c "print(float(${hits})-float(${b_hits}))" 2>/dev/null || echo "0")
@@ -162,22 +167,24 @@ diff_worker_requests() {
         echo ""
         echo "=== Per-worker GPU KV cache usage ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
-            local usage=$(grep "# === Backend worker ${i}" -A 500 "${after}" | grep '^vllm:kv_cache_usage_perc ' | head -1 | awk '{print $NF}')
+            local usage=$(_worker_section "${after}" "${i}" | grep '^vllm:kv_cache_usage_perc ' | head -1 | awk '{print $NF}')
             usage=${usage:-0}
             local pct=$(python3 -c "print(f'{float(${usage})*100:.1f}%')" 2>/dev/null || echo "?")
             echo "  Worker ${i}: ${pct}"
         done
 
         echo ""
-        echo "=== Network transit time (frontend->backend) ==="
-        local transit_count=$(grep 'dynamo_work_handler_network_transit_seconds_count.*generate' "${after}" | head -1 | awk '{print $NF}')
-        local transit_sum=$(grep 'dynamo_work_handler_network_transit_seconds_sum.*generate' "${after}" | head -1 | awk '{print $NF}')
-        if [[ -n "${transit_count}" && -n "${transit_sum}" && "${transit_count}" != "0" ]]; then
-            local avg=$(python3 -c "print(f'{float(${transit_sum})/float(${transit_count})*1000:.2f}')" 2>/dev/null || echo "?")
-            echo "  avg=${avg}ms (${transit_count} requests)"
-        else
-            echo "  n/a"
-        fi
+        echo "=== Network transit time (frontend->backend, per worker) ==="
+        for i in $(seq 1 "${NUM_WORKERS}"); do
+            local transit_count=$(_worker_section "${after}" "${i}" | grep 'dynamo_work_handler_network_transit_seconds_count.*generate' | head -1 | awk '{print $NF}')
+            local transit_sum=$(_worker_section "${after}" "${i}" | grep 'dynamo_work_handler_network_transit_seconds_sum.*generate' | head -1 | awk '{print $NF}')
+            if [[ -n "${transit_count}" && -n "${transit_sum}" && "${transit_count}" != "0" ]]; then
+                local avg=$(python3 -c "print(f'{float(${transit_sum})/float(${transit_count})*1000:.2f}')" 2>/dev/null || echo "?")
+                echo "  Worker ${i}: avg=${avg}ms (${transit_count} requests)"
+            else
+                echo "  Worker ${i}: n/a"
+            fi
+        done
     } > "${summary_file}"
     cat "${summary_file}"
 }
