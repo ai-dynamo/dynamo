@@ -213,6 +213,14 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
+    # XPU: Check if running on XPU and configure kv_buffer_device
+    import torch
+    is_xpu = hasattr(torch, 'xpu') and torch.xpu.is_available()
+    device_type = "xpu" if is_xpu else "cuda"
+
+    if is_xpu:
+        logger.info("XPU detected: Configuring NIXL KV transfer for XPU device")
+
     defaults = {
         # vLLM 0.13+ renamed 'task' to 'runner'
         "runner": "generate",
@@ -224,8 +232,11 @@ def overwrite_args(config):
         # Enable multimodal embeddings input
         "enable_mm_embeds": True,
         # Always setting up kv transfer for disagg
+        # XPU: Set kv_buffer_device to match the device type
         "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+            kv_buffer_device=device_type,
         ),
         "kv_events_config": KVEventsConfig(
             enable_kv_cache_events=True,
