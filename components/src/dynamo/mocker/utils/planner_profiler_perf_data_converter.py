@@ -80,6 +80,8 @@ def convert_profile_results_to_npz(
         min_observations=1,
     )
     prefill_model.load_benchmark_fpms(prefill_fpms)
+    if not prefill_model._ensure_fitted():
+        raise RuntimeError("Failed to fit prefill regression from profiling data")
 
     isl_values = [
         float(fpm.scheduled_requests.sum_prefill_tokens) for fpm in prefill_fpms
@@ -104,6 +106,8 @@ def convert_profile_results_to_npz(
         min_observations=1,
     )
     decode_model.load_benchmark_fpms(decode_fpms)
+    if not decode_model._ensure_fitted():
+        raise RuntimeError("Failed to fit decode regression from profiling data")
 
     max_kv = max(
         float(fpm.scheduled_requests.sum_decode_kv_tokens) for fpm in decode_fpms
