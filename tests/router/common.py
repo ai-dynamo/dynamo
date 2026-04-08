@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
 import nats
+import requests
 
 from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
@@ -604,6 +606,66 @@ def _test_router_query_instance_id(
         logger.info(f"Token count: {result['token_count']}")
 
 
+def _parse_frontend_rejection_metric(
+    metrics_text: str, model_name: str, endpoint: str
+) -> int:
+    """Parse frontend model_rejection_total from Prometheus metrics text.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        model_name: The model name label value
+        endpoint: The endpoint label value (e.g. "chat_completions")
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    metric_name = f"{name_prefix.FRONTEND}_{frontend_service.MODEL_REJECTION_TOTAL}"
+    for line in metrics_text.splitlines():
+        if not line.startswith(f"{metric_name}{{"):
+            continue
+        if f'model="{model_name}"' in line and f'endpoint="{endpoint}"' in line:
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(float(parts[1]))
+                except ValueError:
+                    pass
+    return 0
+
+
+def _verify_frontend_rejection_metrics(
+    frontend_port: int,
+    model_name: str,
+    endpoint: str,
+    expected_count: int,
+) -> None:
+    """Verify frontend rejection metrics by scraping the /metrics endpoint.
+
+    Args:
+        frontend_port: Port where the frontend /metrics is served
+        model_name: The model name label value
+        endpoint: The endpoint label value (e.g. "chat_completions")
+        expected_count: Expected rejection count to match exactly
+    """
+    metrics_url = f"http://localhost:{frontend_port}/metrics"
+    try:
+        metrics_response = requests.get(metrics_url, timeout=5)
+        metrics_response.raise_for_status()
+    except requests.RequestException as e:
+        raise AssertionError(
+            f"Failed to fetch frontend metrics from {metrics_url}: {e}"
+        ) from e
+
+    metric_count = _parse_frontend_rejection_metric(
+        metrics_response.text, model_name, endpoint
+    )
+    logger.info(f"Frontend rejection metric: model_rejection_total={metric_count}")
+    assert metric_count == expected_count, (
+        f"Frontend model_rejection_total ({metric_count}) does not match "
+        f"expected count ({expected_count})"
+    )
+
+
 def _test_router_overload_503(
     engine_workers,
     block_size: int,
@@ -612,10 +674,15 @@ def _test_router_overload_503(
     test_payload: dict,
     blocks_threshold: float = 0.2,
 ):
-    """Test that KV router returns 503 when all workers are busy.
+    """Test that 503 is returned when all workers are busy, and verify rejection metrics.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Uses limited resources to intentionally trigger the overload condition.
+
+    Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
+    1. At least one request succeeds (routed before busy state propagates)
+    2. At least one request is rejected with 503 (worker busy)
+    3. The frontend model_rejection_total metric matches the observed 503 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -626,9 +693,8 @@ def _test_router_overload_503(
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
 
     Raises:
-        AssertionError: If 503 response is not received when expected
+        AssertionError: If success/rejection counts or metrics don't meet expectations
     """
-
     logger.info(
         f"Starting KV router frontend on port {frontend_port} with limited resources"
     )
@@ -662,8 +728,6 @@ def _test_router_overload_503(
 
         async def exhaust_resources_and_verify_503():
             stop_event = asyncio.Event()
-            overload_response = {}
-            unexpected_statuses = []
 
             async with aiohttp.ClientSession() as session:
                 tasks = []
@@ -681,23 +745,24 @@ def _test_router_overload_503(
                                 logger.info(
                                     f"Request {req_id} got expected 503: {body}"
                                 )
-                                overload_response["status"] = response.status
-                                overload_response["body"] = body
                                 stop_event.set()
+                                error_msg = body.get("message", "")
+                                assert (
+                                    "Service temporarily unavailable" in error_msg
+                                    or "All workers are busy" in error_msg
+                                ), f"Expected service overload error message, got: {body}"
                                 return response.status
 
                             body = await response.text()
                             logger.info(
                                 f"Request {req_id} got unexpected status {response.status}: {body}"
                             )
-                            unexpected_statuses.append((response.status, body))
                             return response.status
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
                         logger.info(f"Request {req_id} failed: {e}")
-                        unexpected_statuses.append(("exception", str(e)))
-                        return None
+                        raise
 
                 try:
                     for i in range(50):
@@ -732,27 +797,42 @@ def _test_router_overload_503(
                     for task in pending:
                         task.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
-                    for task in done:
-                        task.result()
 
-                if overload_response.get("status") != 503:
-                    logger.error(
-                        f"Observed statuses before timeout: {unexpected_statuses}"
-                    )
-                    return False
+                return [t.result() for t in done]
 
-                error_msg = overload_response["body"].get("message", "")
-                assert (
-                    "Service temporarily unavailable" in error_msg
-                    or "All workers are busy" in error_msg
-                ), f"Expected service overload error message, got: {overload_response['body']}"
-                return True
+        results = asyncio.run(exhaust_resources_and_verify_503())
 
-        # Run the test
-        success = asyncio.run(exhaust_resources_and_verify_503())
-        assert success, "Failed to verify 503 response when resources are exhausted"
+        # Count outcomes
+        num_succeeded = sum(1 for s in results if s == 200)
+        num_rejected = sum(1 for s in results if s == 503)
+        num_other = sum(1 for s in results if s not in (200, 503))
 
-        logger.info("Successfully verified 503 response when all workers are busy")
+        logger.info(
+            f"Results: {num_succeeded} succeeded, {num_rejected} rejected (503), "
+            f"{num_other} other"
+        )
+
+        # Assert minimum thresholds
+        assert (
+            num_other == 0
+        ), f"Expected only 200 or 503 responses, but got {num_other} other"
+        assert (
+            num_rejected > 0
+        ), f"Expected at least 1 rejection, but got {num_rejected}"
+        assert (
+            num_succeeded > 0
+        ), f"Expected at least 1 success, but got {num_succeeded}"
+
+        # Verify rejection metrics from frontend /metrics endpoint
+        model_name = test_payload.get("model", "")
+        _verify_frontend_rejection_metrics(
+            frontend_port, model_name, "chat_completions", num_rejected
+        )
+
+        logger.info(
+            f"Successfully verified overload 503: {num_rejected} rejected, "
+            f"{num_succeeded} succeeded, metrics match"
+        )
 
 
 async def _zmq_replay_cycle(
