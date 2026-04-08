@@ -140,7 +140,7 @@ fn select_direct_strategy(
     dst: StorageKind,
     dst_is_remote: bool,
     capabilities: &TransferCapabilities,
-) -> TransferPlan {
+) -> anyhow::Result<TransferPlan> {
     use StorageKind::*;
     use TransferStrategy::*;
 
@@ -153,59 +153,63 @@ fn select_direct_strategy(
     match (src, dst) {
         // Host ↔ Host - direct memcpy
         (System, System) | (System, Pinned) | (Pinned, System) | (Pinned, Pinned) => {
-            TransferPlan::Direct(Memcpy)
+            Ok(TransferPlan::Direct(Memcpy))
         }
 
         // Host → Device - direct CUDA
-        (System, Device(_)) => panic!("System to Device transfers are not supported"),
-        (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
+        (System, Device(_)) => Err(anyhow::anyhow!(
+            "System to Device transfers are not supported; use Pinned memory for CUDA transfers."
+        )),
+        (Pinned, Device(_)) => Ok(TransferPlan::Direct(CudaAsyncH2D)),
 
         // Device → Host - direct CUDA
-        (Device(_), System) => panic!("Device to System transfers are not supported"),
-        (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
+        (Device(_), System) => Err(anyhow::anyhow!(
+            "Device to System transfers are not supported; use Pinned memory for CUDA transfers."
+        )),
+        (Device(_), Pinned) => Ok(TransferPlan::Direct(CudaAsyncD2H)),
 
         // Device ↔ Device - direct CUDA
-        (Device(_), Device(_)) => TransferPlan::Direct(CudaAsyncD2D),
+        (Device(_), Device(_)) => Ok(TransferPlan::Direct(CudaAsyncD2D)),
 
         // Host ↔ Disk - direct NIXL
-        (System, Disk(_)) | (Pinned, Disk(_)) => TransferPlan::Direct(NixlWrite),
-        (Disk(_), System) | (Disk(_), Pinned) => TransferPlan::Direct(NixlReadFlipped),
+        (System, Disk(_)) | (Pinned, Disk(_)) => Ok(TransferPlan::Direct(NixlWrite)),
+        (Disk(_), System) | (Disk(_), Pinned) => Ok(TransferPlan::Direct(NixlReadFlipped)),
 
         // Disk ↔ Disk - NIXL doesn't seem to support direct transfers here.
         // Leaving this as two-hop for now.
-        (Disk(_), Disk(_)) => TransferPlan::TwoHop {
+        (Disk(_), Disk(_)) => Ok(TransferPlan::TwoHop {
             first: NixlReadFlipped,
             bounce_location: Pinned,
             second: NixlWrite,
-        },
+        }),
 
         // Device ↔ Disk - check GDS capability
         (Device(_), Disk(_)) => {
             if capabilities.allows_device_disk_direct() {
                 // Direct GDS transfer
-                TransferPlan::Direct(NixlWrite)
+                Ok(TransferPlan::Direct(NixlWrite))
             } else {
                 // Stage through host: Device → Pinned → Disk
-                TransferPlan::TwoHop {
+                Ok(TransferPlan::TwoHop {
                     first: CudaAsyncD2H,
                     bounce_location: Pinned,
                     second: NixlWrite,
-                }
+                })
             }
-        }
+        },
         (Disk(_), Device(_)) => {
             if capabilities.allows_device_disk_direct() {
                 // Direct GDS transfer
-                TransferPlan::Direct(NixlRead)
+                Ok(TransferPlan::Direct(NixlRead))
             } else {
                 // Stage through host: Disk → Pinned → Device
-                TransferPlan::TwoHop {
+                Ok(TransferPlan::TwoHop {
                     first: NixlReadFlipped,
                     bounce_location: Pinned,
                     second: CudaAsyncH2D,
-                }
+                })
             }
-        }
+        },
     }
 }
 
