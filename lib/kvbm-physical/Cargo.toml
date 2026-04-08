@@ -10,7 +10,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dynamo-config = { workspace = true }
 dynamo-memory = { workspace = true }
+libc = { workspace = true }
 kvbm-common = { workspace = true }
 kvbm-kernels = { workspace = true }
 velo = { workspace = true }
@@ -41,6 +43,11 @@ testing-kvbm = []
 testing-nixl-gds = []
 testing-xpu = ["xpu"]
 xpu = ["dep:level-zero", "dynamo-memory/level-zero"]
+
+[[bin]]
+name = "validate_numa_placement"
+path = "bin/validate_numa_placement.rs"
+required-features = ["cuda"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

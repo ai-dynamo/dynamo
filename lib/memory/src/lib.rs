@@ -26,6 +26,7 @@ pub mod pool;
 /// Common imports for working with memory types.
 pub mod prelude;
 
+mod allocator;
 mod device;
 #[cfg(target_os = "linux")]
 mod disk;
@@ -37,6 +38,7 @@ mod tensor;
 #[cfg(test)]
 mod tests;
 
+pub use allocator::DeviceAllocator;
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 #[cfg(target_os = "linux")]
@@ -100,10 +102,6 @@ pub enum StorageError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-
-    // #[cfg(feature = "cuda")]
-    #[error("CUDA error: {0}")]
-    Cuda(#[from] cudarc::driver::DriverError),
 
     #[error("NIXL error: {0}")]
     Nixl(#[from] nixl_sys::NixlError),
