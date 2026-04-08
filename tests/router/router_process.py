@@ -30,6 +30,8 @@ class FrontendRouterProcess(ManagedProcess):
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
         router_aic_config: dict[str, str | int] | None = None,
+        serve_indexer: bool = False,
+        use_remote_indexer: bool = False,
     ):
         command = [
             "python3",
@@ -64,6 +66,12 @@ class FrontendRouterProcess(ManagedProcess):
 
         if durable_kv_events:
             command.append("--router-durable-kv-events")
+
+        if serve_indexer:
+            command.append("--serve-indexer")
+
+        if use_remote_indexer:
+            command.append("--use-remote-indexer")
 
         if router_aic_config is not None:
             command.extend(
