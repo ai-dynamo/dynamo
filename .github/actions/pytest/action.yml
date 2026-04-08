@@ -52,6 +52,9 @@ runs:
         # Setup test directories
         mkdir -p test-results
 
+        # Record job start time for overall elapsed reporting
+        echo "JOB_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
         if [[ -z "${PLATFORM_ARCH}" ]]; then
@@ -113,6 +116,7 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+        STEP_START_TIME=$(date +%s)
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -121,13 +125,20 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
           if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
+          elif ls /dev/dri/renderD* &>/dev/null 2>&1; then
+            echo "✓ Intel XPU device detected, enabling /dev/dri device flags"
+            RENDER_DEVICE=$(ls /dev/dri/renderD* | head -n 1)
+            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            VLLM_TARGET_DEVICE="xpu"
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
@@ -142,16 +153,58 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}")
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        DOCKER_EXTRA_FLAGS=(
+          --privileged
+          --group-add render
+          --group-add video
+        )
+        if [[ -e /dev/dri/renderD128 ]]; then
+          DOCKER_EXTRA_FLAGS+=(--group-add "$(stat -c '%g' /dev/dri/renderD128)")
+        fi
+
+        # Mount optional host paths when present to support XPU/RDMA test binds.
+        DOCKER_MOUNT_FLAGS=()
+        if [[ -d /dev/dri/by-path ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/dev/dri/by-path:/dev/dri/by-path" )
+        fi
+        if [[ -d /dev/infiniband ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/dev/infiniband:/dev/infiniband" )
+        fi
+        if [[ -d /sys/class/net ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/net:/sys/class/net" )
+        fi
+        if [[ -d /sys/class/infiniband_verbs ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/infiniband_verbs:/sys/class/infiniband_verbs" )
+        fi
+
+        # if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
+        #   PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
+        #   PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
+        # fi
+
+        echo "🐳 Docker run command (runner v1):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Pre-cleanup: remove any leftover containers with the same name
+        echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
+        docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
+
+        docker run ${GPU_FLAGS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
+          "${DOCKER_MOUNT_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -160,6 +213,10 @@ runs:
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        STEP_END_TIME=$(date +%s)
+        STEP_ELAPSED=$((STEP_END_TIME - STEP_START_TIME))
+        echo "⏱️  Runner v1 test step elapsed: $((STEP_ELAPSED / 60))m $((STEP_ELAPSED % 60))s"
 
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
@@ -184,6 +241,7 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+        STEP_START_TIME=$(date +%s)
 
         # /dev/shm sizing: NIXL uses UCX which allocates shared memory segments in /dev/shm
         # via shm_open(). Each NIXL agent with num_threads=8 creates 9 UCX workers, each needing
@@ -206,8 +264,14 @@ runs:
           if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
+          elif ls /dev/dri/renderD* &>/dev/null 2>&1; then
+            echo "✓ Intel XPU device detected, enabling /dev/dri device flags"
+            RENDER_DEVICE=$(ls /dev/dri/renderD* | head -n 1)
+            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            VLLM_TARGET_DEVICE="xpu"
           else
-            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -228,7 +292,8 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --log-cli-level=DEBUG --log-level=DEBUG --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -241,14 +306,55 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}")
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        DOCKER_EXTRA_FLAGS=(
+          --privileged
+          --group-add render
+          --group-add video
+        )
+        if [[ -e /dev/dri/renderD128 ]]; then
+          DOCKER_EXTRA_FLAGS+=(--group-add "$(stat -c '%g' /dev/dri/renderD128)")
+        fi
+
+        DOCKER_MOUNT_FLAGS=()
+        if [[ -d /dev/dri/by-path ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/dev/dri/by-path:/dev/dri/by-path" )
+        fi
+        if [[ -d /dev/infiniband ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/dev/infiniband:/dev/infiniband" )
+        fi
+        if [[ -d /sys/class/net ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/net:/sys/class/net" )
+        fi
+        if [[ -d /sys/class/infiniband_verbs ]]; then
+          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/infiniband_verbs:/sys/class/infiniband_verbs" )
+        fi
+
+        if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
+          PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
+          PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
+        fi
+
+        echo "🐳 Docker run command (dind sidecar):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Pre-cleanup: remove any leftover containers with the same name
+        echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
+        docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
+
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
+          "${DOCKER_MOUNT_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -257,6 +363,10 @@ runs:
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        STEP_END_TIME=$(date +%s)
+        STEP_ELAPSED=$((STEP_END_TIME - STEP_START_TIME))
+        echo "⏱️  dind sidecar test step elapsed: $((STEP_ELAPSED / 60))m $((STEP_ELAPSED % 60))s"
 
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
@@ -273,6 +383,14 @@ runs:
     - name: Process Test Results
       shell: bash
       run: |
+        # Print overall job elapsed time
+        if [[ -n "${{ env.JOB_START_TIME }}" ]]; then
+          JOB_END_TIME=$(date +%s)
+          JOB_ELAPSED=$((JOB_END_TIME - ${{ env.JOB_START_TIME }}))
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "⏱️  Total job elapsed time: $((JOB_ELAPSED / 60))m $((JOB_ELAPSED % 60))s"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
 
         # Sanitize test_type for filenames (always set this for artifact upload)
         # Remove commas and spaces from test_type for use in filenames
@@ -304,11 +422,37 @@ runs:
         exit ${TEST_EXIT_CODE}
 
     - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true'
+      if: always()
       shell: bash
       run: |
         echo "🧹 Cleaning up MinIO container..."
         docker rm -f dynamo-minio-test 2>/dev/null || true
+
+        echo "🧹 Cleaning up pytest containers..."
+        # Clean up pytest containers that may be left over (especially from runner v1)
+        CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+        PYTEST_CONTAINERS=$(docker ps -aq --filter "name=${CONTAINER_ID_PREFIX}" 2>/dev/null || true)
+        if [[ -n "${PYTEST_CONTAINERS}" ]]; then
+          echo "Found pytest containers: ${PYTEST_CONTAINERS}"
+          echo "Stopping and removing pytest containers..."
+          docker stop ${PYTEST_CONTAINERS} 2>/dev/null || true
+          docker rm -f ${PYTEST_CONTAINERS} 2>/dev/null || true
+          echo "✓ Pytest containers cleaned up"
+        else
+          echo "No pytest containers found"
+        fi
+
+        # Cleanup any test containers by pattern (from previous failed cleanup)
+        ALL_TEST_CONTAINERS=$(docker ps -aq --filter "name=test_" 2>/dev/null || true)
+        if [[ -n "${ALL_TEST_CONTAINERS}" ]]; then
+          echo "⚠️  Found other test containers. Attempting cleanup..."
+          docker stop ${ALL_TEST_CONTAINERS} 2>/dev/null || true
+          docker rm -f ${ALL_TEST_CONTAINERS} 2>/dev/null || true
+        fi
+
+        # Final listing of remaining containers
+        echo "📋 Remaining containers with 'test' in name:"
+        docker ps -a --filter "name=test_" 2>/dev/null | tail -n +2 | wc -l | xargs echo "Total:"
 
     - name: Upload Test Results
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

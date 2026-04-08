@@ -44,6 +44,10 @@ inputs:
     description: 'SCCache S3 Bucket'
     required: false
     default: ''
+  use_sccache:
+    description: 'Enable sccache for the build'
+    required: false
+    default: 'true'
   aws_access_key_id:
     description: 'AWS Access Key ID'
     required: false
@@ -77,9 +81,10 @@ inputs:
     required: false
     default: 'false'
   extra_tags:
-    description: 'Additional tags (newline-separated)'
+    description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
     required: false
     default: ''
+
   show_summary:
     description: 'Show build summary (caller decides when to show)'
     required: false
@@ -88,6 +93,10 @@ inputs:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
     required: false
     default: ''
+  device:
+    description: 'Build device (cuda, xpu, cpu - used for container.render.py and cache tagging)'
+    required: false
+    default: 'cuda'
   fresh_builder:
     description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
     required: false
@@ -136,6 +145,12 @@ runs:
           IMAGE_VARIANT_LABEL="cpu"
           IMAGE_TAG_SUFFIX="-cpu"
           BUILDER_CUDA_VERSION=""
+        elif [[ "${{ inputs.device }}" == "xpu" ]]; then
+          CUDA_VERSION_RAW=""
+          CUDA_VERSION=""
+          IMAGE_VARIANT_LABEL="xpu"
+          IMAGE_TAG_SUFFIX="-xpu"
+          BUILDER_CUDA_VERSION=""
         else
           CUDA_VERSION_RAW="${{ inputs.cuda_version }}"
           if [[ -z "$CUDA_VERSION_RAW" ]]; then
@@ -172,6 +187,7 @@ runs:
         arch: ${{ inputs.platform }}
         cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
         fresh_builder: ${{ inputs.fresh_builder }}
+        use_runner_docker_builder: ${{ inputs.device == 'xpu' && 'true' || 'false' }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
@@ -189,6 +205,7 @@ runs:
             fi
           done <<< "$EXTRA_TAGS"
         fi
+
         if [ -n "$RESULT" ]; then
           echo "tags<<EOF" >> $GITHUB_OUTPUT
           echo "$RESULT" >> $GITHUB_OUTPUT
@@ -223,6 +240,7 @@ runs:
             --target=${{ inputs.target }} \
             --framework=${{ inputs.framework }} \
             --platform=${{ inputs.platform }} \
+            --device=${{ inputs.device }} \
             --cuda-version=${{ steps.calculate-target-tag.outputs.effective_cuda_version }} \
             ${MAKE_EFA_FLAG} \
             --show-result \
@@ -235,6 +253,7 @@ runs:
         framework: ${{ inputs.framework }}
         target: ${{ inputs.target }}
         platform: ${{ inputs.platform }}
+        device: ${{ inputs.device }}
         cuda_version: ${{ steps.calculate-target-tag.outputs.effective_cuda_version }}
         aws_default_region: ${{ inputs.aws_default_region }}
         sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
@@ -245,6 +264,7 @@ runs:
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
         no_load: ${{ inputs.no_load }}
+        use_sccache: ${{ inputs.use_sccache }}
         extra_build_args: |
           DYNAMO_COMMIT_SHA=${{ github.sha }}
           ${{ inputs.extra_build_args }}
