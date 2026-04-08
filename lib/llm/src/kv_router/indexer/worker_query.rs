@@ -18,6 +18,7 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
+use rand::Rng;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::Indexer;
@@ -447,6 +448,13 @@ impl WorkerQueryClient {
         let client = self.clone();
 
         tokio::spawn(async move {
+            // Add small random jitter to permute semaphore acquisition order load when multiple routers
+            // start simultaneously, and etcd order is deterministic.
+            let jitter_ms = rand::rng().random_range(0..100u64);
+            if jitter_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+            }
+
             let Ok(_permit) = client.recovery_semaphore.clone().acquire_owned().await else {
                 return;
             };
