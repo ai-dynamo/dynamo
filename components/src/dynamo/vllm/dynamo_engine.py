@@ -72,6 +72,9 @@ class VllmDynamoEngine(DynamoEngine):
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        assert self.engine_client is not None, "Engine not initialized"
+        assert self._default_sampling_params is not None, "Engine not initialized"
+
         request_id = context.id()
 
         token_ids = request.get("token_ids", [])
@@ -105,6 +108,12 @@ class VllmDynamoEngine(DynamoEngine):
 
             yield out
             num_output_tokens_so_far = next_total
+
+    async def abort(self, context: Context) -> None:
+        request_id = context.id()
+        if self.engine_client is not None and request_id is not None:
+            await self.engine_client.abort(request_id)
+            logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
         if self._prometheus_temp_dir is not None:

@@ -62,7 +62,8 @@ implementation.
 
 ## Implementing a New Engine
 
-Subclass `DynamoEngine` and implement three methods:
+Subclass `DynamoEngine` and implement three required methods (`init`,
+`generate`, `cleanup`) plus the optional `abort` method:
 
 ```python
 from dynamo.common.backend import DynamoEngine, EngineConfig
@@ -88,6 +89,11 @@ class MyEngine(DynamoEngine):
                 prompt_tokens, completion_tokens
             ),
         }
+
+    async def abort(self, context):
+        # Cancel an in-flight request (optional, default is no-op).
+        # Called when the client disconnects or the request is cancelled.
+        await my_engine.cancel(context.id())
 
     async def cleanup(self):
         # Shut down the engine.
@@ -130,6 +136,64 @@ All engines yield dicts conforming to this contract:
 
 Use `build_completion_usage()` and `normalize_finish_reason()` from
 `dynamo.common.engine_utils` to build these.
+
+## Request Cancellation
+
+`DynamoPythonBackendModel.generate()` automatically monitors for client
+disconnections and request cancellations via `context.async_killed_or_stopped()`.
+When triggered, it:
+
+1. Calls `engine.abort(context)` to release engine resources (KV cache,
+   scheduler slots, etc.)
+2. Breaks out of the generation loop
+3. Cleans up the monitoring task
+
+Engine implementations should override `abort(context)` to perform
+backend-specific cleanup:
+
+| Engine | Abort method | ID used |
+|--------|-------------|---------|
+| vLLM | `engine_client.abort(request_id)` | `context.id()` |
+| SGLang | `tokenizer_manager.abort_request(rid=...)` | `context.trace_id` |
+| TRT-LLM | `generation_result.abort()` | Tracked per-request via `context.id()` |
+| Sample | *(no-op, default)* | — |
+
+Engines that don't support cancellation can skip overriding `abort()` —
+the default implementation is a no-op. The generation loop will still
+break on `context.is_stopped()`.
+
+## Error Handling
+
+`DynamoPythonBackendModel` wraps errors in `DynamoException` subclasses from
+`dynamo.llm.exceptions` so the Rust bridge can map them to typed
+`DynamoError::Backend(...)` responses with proper error chains.
+
+| Phase | Exception raised | When |
+|-------|-----------------|------|
+| Runtime creation | `CannotConnect` | etcd/NATS unreachable |
+| Engine init | `EngineShutdown` | Engine fails to start (OOM, bad config, etc.) |
+| Generate | `Unknown` | Untyped exception from engine `generate()` |
+| Generate | *(pass-through)* | Engine raises a `DynamoException` subclass directly |
+
+Engine implementations can raise `DynamoException` subclasses directly from
+`generate()` for fine-grained error reporting — these propagate unchanged.
+Any non-`DynamoException` errors are wrapped as `Unknown`.
+
+Available exception types (from `dynamo.llm.exceptions`):
+
+```python
+from dynamo.llm.exceptions import (
+    DynamoException,     # Base class
+    Unknown,             # Uncategorized error
+    InvalidArgument,     # Bad input (e.g., prompt too long)
+    CannotConnect,       # Connection failed
+    Disconnected,        # Connection lost
+    ConnectionTimeout,   # Timeout
+    Cancelled,           # Client cancelled
+    EngineShutdown,      # Engine crashed or shutting down
+    StreamIncomplete,    # Response stream cut short
+)
+```
 
 ## Common Engine Utilities
 

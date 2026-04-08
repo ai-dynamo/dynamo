@@ -32,6 +32,14 @@ class DynamoEngine(ABC):
         ...
         yield  # type: ignore[misc]
 
+    async def abort(self, context: Context) -> None:
+        """Abort an in-flight request.
+
+        Called by DynamoPythonBackendModel when the client disconnects or
+        the request is cancelled.  Override to release engine resources
+        (KV cache, scheduler slots, etc.).  Default is no-op.
+        """
+
     @abstractmethod
     async def cleanup(self) -> None:
         ...

@@ -42,6 +42,8 @@ class SglangDynamoEngine(DynamoEngine):
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        assert self.engine is not None, "Engine not initialized"
+
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -75,6 +77,16 @@ class SglangDynamoEngine(DynamoEngine):
             if not context.is_stopped():
                 yield out
 
+    async def abort(self, context: Context) -> None:
+        rid = context.trace_id
+        if self.engine is not None and rid is not None:
+            if (
+                hasattr(self.engine, "tokenizer_manager")
+                and self.engine.tokenizer_manager
+            ):
+                self.engine.tokenizer_manager.abort_request(rid=rid, abort_all=False)
+                logger.debug("Aborted request %s", rid)
+
     async def cleanup(self) -> None:
         if self.engine is not None:
             self.engine.shutdown()
@@ -101,6 +113,7 @@ class SglangDynamoEngine(DynamoEngine):
         return {k: v for k, v in param_mapping.items() if v is not None}
 
     def _get_input_param(self, request: dict) -> dict:
+        assert self._input_param_manager is not None, "Engine not initialized"
         request_input = self._input_param_manager.get_input_param(
             request, use_tokenizer=not self._skip_tokenizer_init
         )

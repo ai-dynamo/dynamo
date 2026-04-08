@@ -17,10 +17,12 @@ Two-class abstraction: `DynamoPythonBackendModel` (runtime integration) and
 - **Exactly two classes.** `DynamoPythonBackendModel` owns runtime lifecycle.
   `DynamoEngine` owns inference. Do not add intermediate base classes or mixins.
 
-- **`generate()` is a thin pass-through.** `DynamoPythonBackendModel.generate()`
-  delegates directly to `DynamoEngine.generate()`. Common pre/post-processing
-  may be added here later, but sampling params, prompt building, and output
-  formatting stay inside each engine -- they are deeply engine-specific.
+- **`generate()` delegates to engine with cancellation monitoring.**
+  `DynamoPythonBackendModel.generate()` runs a background task that watches
+  `context.async_killed_or_stopped()` and calls `engine.abort(context)` on
+  cancellation. It also checks `context.is_stopped()` after each yielded
+  chunk. Sampling params, prompt building, and output formatting stay inside
+  each engine -- they are deeply engine-specific.
 
 - **`init()` returns `EngineConfig`.** The model class needs registration
   metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
@@ -48,9 +50,35 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 ## Adding a New Engine
 
 1. Create `<backend>/dynamo_engine.py` subclassing `DynamoEngine`
-2. Create `<backend>/unified_main.py` wiring `BackendConfig` + your engine
-3. Reuse the backend's existing `parse_args()`
-4. Use `sample_engine.py` as the reference implementation
+2. Implement `init()`, `generate()`, `cleanup()` (required) and `abort()` (optional)
+3. Create `<backend>/unified_main.py` wiring `BackendConfig` + your engine
+4. Reuse the backend's existing `parse_args()`
+5. Use `sample_engine.py` as the reference implementation
+
+## Error Handling
+
+`DynamoPythonBackendModel` wraps lifecycle and generate errors in
+`DynamoException` subclasses (`dynamo.llm.exceptions`). The Rust bridge
+(`engine.rs`) converts these into typed `DynamoError::Backend(...)` for
+proper error chain observability. Engines can raise `DynamoException`
+subclasses directly from `generate()` -- these pass through unchanged.
+Non-`DynamoException` errors are wrapped as `Unknown`.
+
+## Logging
+
+Keep logging **standardized across all three engines** (vllm, sglang, trtllm).
+When adding or changing a log message in one `dynamo_engine.py`, check
+whether the same lifecycle event is logged in the other two and update them
+to match. The goal is that operators see the same log shape regardless of
+backend, making it easier to triage issues across mixed deployments.
+
+Standardize on:
+- `logger.info` for lifecycle milestones: engine init complete, serving
+  started, engine shutdown.
+- `logger.debug` for per-request events: request abort, cancellation.
+- `logger.warning` for recoverable problems: empty outputs, unexpected
+  finish reasons.
+- `logger.error` only for unrecoverable failures.
 
 ## What Does NOT Belong Here
 

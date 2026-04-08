@@ -38,6 +38,7 @@ class TrtllmDynamoEngine(DynamoEngine):
         self.kv_block_size = kv_block_size
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
+        self._active_requests: dict[str, Any] = {}
 
     async def init(self) -> EngineConfig:
         self._engine = TensorRTLLMEngine(self.engine_args)
@@ -55,6 +56,8 @@ class TrtllmDynamoEngine(DynamoEngine):
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        assert self._engine is not None, "Engine not initialized"
+
         normalize_request_format(request)
 
         token_ids = request.get("token_ids", [])
@@ -78,28 +81,44 @@ class TrtllmDynamoEngine(DynamoEngine):
             streaming=True,
         )
 
-        num_output_tokens_so_far = 0
-        async for res in generation_result:
-            if not res.outputs and not res.finished:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
+        request_id = context.id()
+        if request_id is not None:
+            self._active_requests[request_id] = generation_result
 
-            output = res.outputs[0]
-            next_total = len(output.token_ids)
-            out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+        try:
+            num_output_tokens_so_far = 0
+            async for res in generation_result:
+                if not res.outputs and not res.finished:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
 
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
+                output = res.outputs[0]
+                next_total = len(output.token_ids)
+                out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
-            if out.get("finish_reason") or res.finished:
-                if not out.get("finish_reason"):
-                    out["finish_reason"] = "unknown"
-                out["completion_usage"] = build_completion_usage(
-                    len(token_ids), next_total
-                )
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
 
-            yield out
-            num_output_tokens_so_far = next_total
+                if out.get("finish_reason") or res.finished:
+                    if not out.get("finish_reason"):
+                        out["finish_reason"] = "unknown"
+                    out["completion_usage"] = build_completion_usage(
+                        len(token_ids), next_total
+                    )
+
+                yield out
+                num_output_tokens_so_far = next_total
+        finally:
+            if request_id is not None:
+                self._active_requests.pop(request_id, None)
+
+    async def abort(self, context: Context) -> None:
+        request_id = context.id()
+        if request_id is not None:
+            generation_result = self._active_requests.get(request_id)
+            if generation_result is not None:
+                generation_result.abort()
+                logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
         if self._engine is not None:

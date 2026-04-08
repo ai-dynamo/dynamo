@@ -12,6 +12,12 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelRuntimeConfig, register_model
+from dynamo.llm.exceptions import (
+    CannotConnect,
+    DynamoException,
+    EngineShutdown,
+    Unknown,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import DynamoEngine
@@ -80,27 +86,59 @@ class DynamoPythonBackendModel:
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
-        async for chunk in self.engine.generate(request, context):
-            yield chunk
+        async def _monitor_cancel():
+            await context.async_killed_or_stopped()
+            try:
+                await self.engine.abort(context)
+            except Exception:
+                logger.debug("Error during request abort", exc_info=True)
+
+        cancel_task = asyncio.create_task(_monitor_cancel())
+        try:
+            async for chunk in self.engine.generate(request, context):
+                if context.is_stopped():
+                    break
+                yield chunk
+        except DynamoException:
+            raise
+        except Exception as exc:
+            raise Unknown(f"Engine generate failed: {exc}") from exc
+        finally:
+            if not cancel_task.done():
+                cancel_task.cancel()
+                try:
+                    await cancel_task
+                except asyncio.CancelledError:
+                    pass
 
     async def run(self) -> None:
         configure_dynamo_logging()
         cfg = self.config
         shutdown_event = asyncio.Event()
 
-        runtime, loop = create_runtime(
-            discovery_backend=cfg.discovery_backend,
-            request_plane=cfg.request_plane,
-            event_plane=cfg.event_plane,
-            use_kv_events=cfg.use_kv_events,
-        )
+        try:
+            runtime, loop = create_runtime(
+                discovery_backend=cfg.discovery_backend,
+                request_plane=cfg.request_plane,
+                event_plane=cfg.event_plane,
+                use_kv_events=cfg.use_kv_events,
+            )
+        except DynamoException:
+            raise
+        except Exception as exc:
+            raise CannotConnect(f"Failed to create runtime: {exc}") from exc
 
         endpoint = runtime.endpoint(f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}")
         shutdown_endpoints = [endpoint]
 
         install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
-        engine_config = await self.engine.init()
+        try:
+            engine_config = await self.engine.init()
+        except DynamoException:
+            raise
+        except Exception as exc:
+            raise EngineShutdown(f"Engine initialization failed: {exc}") from exc
 
         try:
             runtime_config = ModelRuntimeConfig()
