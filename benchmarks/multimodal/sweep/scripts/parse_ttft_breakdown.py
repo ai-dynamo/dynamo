@@ -26,10 +26,8 @@ def parse_perf_lines(log_path: str) -> Dict[str, List[float]]:
                 components["image_decode"].append(float(m.group(1)))
                 continue
 
-            # [PERF] _process_multimodal HF processor: 400ms for ...
-            m = re.search(
-                r"\[PERF\]\s+_process_multimodal HF processor:\s+([\d.]+)ms", line
-            )
+            # [PERF] hf_processor: 400ms for ...
+            m = re.search(r"\[PERF\]\s+hf_processor:\s+([\d.]+)ms", line)
             if m:
                 components["hf_processor"].append(float(m.group(1)))
                 continue
@@ -38,6 +36,12 @@ def parse_perf_lines(log_path: str) -> Dict[str, List[float]]:
             m = re.search(r"\[PERF\]\s+render_chat_request:\s+([\d.]+)ms", line)
             if m:
                 components["render_chat_request"].append(float(m.group(1)))
+                continue
+
+            # [PERF] render_to_generate: 941ms for ...
+            m = re.search(r"\[PERF\]\s+render_to_generate:\s+([\d.]+)ms", line)
+            if m:
+                components["render_to_generate"].append(float(m.group(1)))
                 continue
 
             # [PERF] vision_encoder: 800ms reqs=[...]
