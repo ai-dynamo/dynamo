@@ -77,6 +77,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        enable_auto_tool_choice: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -86,6 +87,7 @@ class VllmProcessor:
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
         self.exclude_tools_when_tool_choice_none = True
+        self.enable_auto_tool_choice = enable_auto_tool_choice
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -144,6 +146,7 @@ class VllmProcessor:
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
             exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+            enable_auto_tool_choice=self.enable_auto_tool_choice,
         )
 
         request_for_sampling = pre.request_for_sampling
@@ -433,11 +436,14 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
+        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+        enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
             model=source_path,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
+            trust_remote_code=trust_remote_code,
         )
         vllm_config = VllmConfig(
             model_config=model_config,
@@ -496,6 +502,7 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            enable_auto_tool_choice=enable_auto_tool_choice,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

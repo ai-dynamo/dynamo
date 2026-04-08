@@ -15,7 +15,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 
 
@@ -25,6 +25,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
     namespace: str
     endpoint: str
     router_block_size: int
+    serve_indexer: bool = False
 
     def validate(self) -> None:
         """Validate config invariants (aligned with Rust KvRouterConfig where applicable)."""
@@ -40,6 +41,10 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                 "Expected format: namespace.component.endpoint"
             )
         self.namespace = parts[0]
+        if self.serve_indexer and self.use_remote_indexer:
+            raise ValueError(
+                "--serve-indexer and --use-remote-indexer are mutually exclusive"
+            )
         if self.router_prefill_load_model == "aic":
             missing = [
                 flag
@@ -87,6 +92,15 @@ class DynamoRouterArgGroup(ArgGroup):
             help="KV cache block size for routing decisions",
             arg_type=int,
             obsolete_flag="--block-size",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this router's local KV indexer over the request plane.",
+            dest="serve_indexer",
         )
 
         # KV router options (shared with dynamo.frontend)

@@ -320,6 +320,234 @@ def _test_router_two_routers(
             kv_router.__exit__(None, None, None)
 
 
+def _test_remote_indexer_decisions(
+    engine_workers,
+    model_name: str,
+    block_size: int = 8,
+    use_kv_events: bool = True,
+    test_dp_rank: bool = True,
+    request_plane: str = "nats",
+    store_backend: str = "etcd",
+):
+    """Validate remote-indexer-backed routing decisions using direct KvRouter instances."""
+
+    async def wait_for_worker_ids(endpoint, expected_num_workers: int) -> list[int]:
+        client = await endpoint.client()
+
+        for _ in range(120):
+            worker_ids = sorted(set(client.instance_ids()))
+            if len(worker_ids) >= expected_num_workers:
+                return worker_ids
+            await asyncio.sleep(1)
+
+        raise TimeoutError("Timed out waiting for backend worker IDs")
+
+    async def wait_for_served_indexer(
+        runtime,
+        expected_query_instances: int,
+        expected_record_instances: int,
+    ) -> None:
+        query_endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
+        )
+        query_client = await query_endpoint.client()
+        record_endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_record_routing_decision"
+        )
+        record_client = await record_endpoint.client()
+
+        for _ in range(120):
+            query_ids = set(query_client.instance_ids())
+            record_ids = set(record_client.instance_ids())
+
+            if use_kv_events:
+                if len(query_ids) >= expected_query_instances and len(record_ids) == 0:
+                    return
+            elif (
+                len(query_ids) == expected_query_instances
+                and len(record_ids) == expected_record_instances
+                and query_ids == record_ids
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+        raise TimeoutError("Timed out waiting for served indexer endpoints to register")
+
+    async def test_sync():
+        endpoint_path = (
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
+        expected_num_instances = engine_workers.num_workers
+
+        async def make_router(*, serve_indexer: bool, use_remote_indexer: bool):
+            kv_router_config = KvRouterConfig(
+                router_snapshot_threshold=20,
+                use_kv_events=use_kv_events,
+                router_track_prefill_tokens=True,
+                serve_indexer=serve_indexer,
+                use_remote_indexer=use_remote_indexer,
+            )
+            last_error: Exception | None = None
+            for _ in range(60):
+                runtime = get_runtime(
+                    store_backend=store_backend, request_plane=request_plane
+                )
+                endpoint = runtime.endpoint(endpoint_path)
+                try:
+                    with min_initial_workers_env(expected_num_instances):
+                        kv_router = KvRouter(
+                            endpoint=endpoint,
+                            block_size=block_size,
+                            kv_router_config=kv_router_config,
+                        )
+                    return runtime, endpoint, kv_router
+                except Exception as error:
+                    last_error = error
+                    if not (serve_indexer or use_remote_indexer):
+                        raise
+                    del endpoint
+                    del runtime
+                    await asyncio.sleep(1.0)
+
+            raise AssertionError(
+                "Timed out waiting for model discovery before creating remote-indexer router"
+            ) from last_error
+
+        serving_runtimes = []
+        serving_endpoints = []
+        serving_routers = []
+
+        runtime_a, endpoint_a, router_a = await make_router(
+            serve_indexer=True, use_remote_indexer=False
+        )
+        serving_runtimes.append(runtime_a)
+        serving_endpoints.append(endpoint_a)
+        serving_routers.append(router_a)
+
+        if use_kv_events:
+            runtime_b, endpoint_b, router_b = await make_router(
+                serve_indexer=True, use_remote_indexer=False
+            )
+            serving_runtimes.append(runtime_b)
+            serving_endpoints.append(endpoint_b)
+            serving_routers.append(router_b)
+
+        await wait_for_served_indexer(
+            serving_runtimes[0],
+            expected_query_instances=len(serving_routers),
+            expected_record_instances=0 if use_kv_events else 1,
+        )
+
+        _, consumer_endpoint, consumer_router = await make_router(
+            serve_indexer=False, use_remote_indexer=True
+        )
+
+        worker_ids = await wait_for_worker_ids(
+            serving_endpoints[0], expected_num_instances
+        )
+        if len(worker_ids) >= 2:
+            worker_a_id = worker_ids[0]
+            worker_b_id = worker_ids[1]
+        elif len(worker_ids) == 1 and test_dp_rank:
+            worker_a_id = worker_ids[0]
+            worker_b_id = worker_ids[0]
+        else:
+            raise AssertionError(
+                f"Need at least 2 routing targets but got {len(worker_ids)} worker(s) "
+                f"with test_dp_rank={test_dp_rank}"
+            )
+
+        dp_rank_a = 0 if test_dp_rank else None
+        dp_rank_b = 1 if test_dp_rank else None
+        logger.info(
+            "Remote-indexer routing targets: worker_a=%s/%s worker_b=%s/%s",
+            worker_a_id,
+            dp_rank_a,
+            worker_b_id,
+            dp_rank_b,
+        )
+
+        blocks = [
+            [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
+        ]
+        A, B, C, D, E, F, G = blocks
+        request_specs = [
+            (serving_routers[0], A + B, worker_a_id, dp_rank_a, 0.1),
+            (serving_routers[0], A + C + D, worker_a_id, dp_rank_a, 0.1),
+            (serving_routers[-1], A + C + E, worker_b_id, dp_rank_b, 2.0),
+            (consumer_router, A + C + D + F, None, None, 2.0),
+            (consumer_router, A + C + G, None, None, 2.0),
+        ]
+
+        responses: list[dict[str, Optional[int]]] = []
+        for i, (
+            kv_router,
+            token_ids,
+            forced_worker_id,
+            forced_dp_rank,
+            sleep_after,
+        ) in enumerate(request_specs, start=1):
+            logger.info(
+                "Sending remote-indexer request %s/5%s%s",
+                i,
+                (
+                    f" forced_worker_id={forced_worker_id}"
+                    if forced_worker_id is not None
+                    else ""
+                ),
+                (
+                    f" forced_dp_rank={forced_dp_rank}"
+                    if forced_dp_rank is not None
+                    else ""
+                ),
+            )
+            result = await send_request_via_python_kv_router(
+                kv_python_router=kv_router,
+                model_name=model_name,
+                token_ids=token_ids,
+                initial_wait=1.0,
+                max_retries=8,
+                stop_conditions={
+                    "ignore_eos": True,
+                    "max_tokens": 2,
+                },
+                worker_id=forced_worker_id,
+                dp_rank=forced_dp_rank,
+                return_worker_ids=True,
+            )
+            assert isinstance(result, dict), f"Expected dict result, got {type(result)}"
+            responses.append(result)
+            if sleep_after > 0:
+                await asyncio.sleep(sleep_after)
+
+        req4 = responses[3]
+        assert req4["prefill_worker_id"] == worker_a_id, (
+            f"Request 4: expected prefill_worker_id={worker_a_id} (longest prefix match), "
+            f"got {req4['prefill_worker_id']}"
+        )
+        if test_dp_rank:
+            assert req4["prefill_dp_rank"] == dp_rank_a, (
+                f"Request 4: expected prefill_dp_rank={dp_rank_a} "
+                f"(longest prefix match), got {req4['prefill_dp_rank']}"
+            )
+
+        req5 = responses[4]
+        assert req5["prefill_worker_id"] == worker_b_id, (
+            f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+            f"got {req5['prefill_worker_id']}"
+        )
+        if test_dp_rank:
+            assert req5["prefill_dp_rank"] == dp_rank_b, (
+                f"Request 5: expected prefill_dp_rank={dp_rank_b} "
+                f"(tiebreak by smaller tree), got {req5['prefill_dp_rank']}"
+            )
+
+        await wait_for_worker_ids(consumer_endpoint, expected_num_instances)
+
+    asyncio.run(test_sync())
+
+
 def _test_python_router_bindings(
     engine_workers,
     endpoint,

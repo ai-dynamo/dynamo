@@ -770,3 +770,116 @@ func TestAppendUniqueImagePullSecrets(t *testing.T) {
 		})
 	}
 }
+
+func TestGetSpecChangeResult_ConfigMap(t *testing.T) {
+	baseHash := func(t *testing.T, obj client.Object) string {
+		t.Helper()
+		h, err := GetSpecHash(obj)
+		if err != nil {
+			t.Fatalf("GetSpecHash: %v", err)
+		}
+		return h
+	}
+
+	baseCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+		Data:       map[string]string{"script.py": "print('v1')"},
+	}
+
+	tests := []struct {
+		name        string
+		current     client.Object
+		desired     client.Object
+		needsUpdate bool
+	}{
+		{
+			name: "same ConfigMap data does not need update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: false,
+		},
+		{
+			name: "changed ConfigMap data needs update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v2')"},
+			},
+			needsUpdate: true,
+		},
+		{
+			name: "metadata-only change does not need update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "different-name", Namespace: "ns", Labels: map[string]string{"foo": "bar"}},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: false,
+		},
+		{
+			name: "added key needs update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')", "extra.py": "pass"},
+			},
+			needsUpdate: true,
+		},
+		{
+			name: "no hash annotation needs update (pre-upgrade resource)",
+			current: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			result, err := GetSpecChangeResult(tt.current, tt.desired)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.needsUpdate))
+		})
+	}
+}
