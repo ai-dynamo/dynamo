@@ -330,7 +330,7 @@ vllm_configs = {
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
-    # PD worker honors build_gpu_mem_args for parallel execution.
+    # PD worker honors build_vllm_gpu_mem_args for parallel execution.
     "multimodal_e_pd_qwen": VLLMConfig(
         name="multimodal_e_pd_qwen",
         directory=vllm_dir,
@@ -414,7 +414,7 @@ vllm_configs = {
     # total on this GPU.
     # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
     # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
-    # P/D workers honor build_gpu_mem_args for parallel execution.
+    # P/D workers honor build_vllm_gpu_mem_args for parallel execution.
     "multimodal_disagg_qwen": VLLMConfig(
         name="multimodal_disagg_qwen",
         directory=vllm_dir,

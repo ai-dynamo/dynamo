@@ -96,7 +96,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
     python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 CUDA_VISIBLE_DEVICES=0 \
     DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \

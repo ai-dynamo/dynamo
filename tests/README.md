@@ -192,7 +192,7 @@ Markers differ by engine:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
 - **`requested_trtllm_kv_tokens(N)`** — max KV cache tokens for text models. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON. Deterministic and parallel-safe.
 - **`requested_trtllm_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion). Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args` JSON. Note: diffusion models don't use KV cache, so this parameter may have no effect — `profiled_vram_gib` alone is sufficient for scheduler budget tracking.
-- TRT-LLM requires JSON merging for `--override-engine-args`, handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate from `build_gpu_mem_args` used by vLLM/SGLang).
+- TRT-LLM requires JSON merging for `--override-engine-args`, handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args`).
 
 `--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
 
@@ -203,9 +203,9 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 1. **VRAM budget**: xdist has no GPU memory awareness — two 20 GiB tests on a 48 GiB GPU will OOM.
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
-   - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
-   - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` (not `build_gpu_mem_args`) because TRT-LLM requires JSON merging for `--override-engine-args`.
+   - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_sglang_gpu_mem_args` in `gpu_utils.sh`.
+   - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
 # Dry-run: preview which tests fit and the GPU plan
@@ -546,19 +546,23 @@ The profiler automatically detects the engine type and uses the appropriate bina
 - **SGLang**: bisects `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` (token count) → `--max-total-tokens`. Finds the minimum KV cache tokens where the test passes, applies a 2x safety factor, then runs a final probe at the safe token count to measure the actual VRAM. Outputs `profiled_vram_gib` and `requested_sglang_kv_tokens` markers.
 - **TRT-LLM**: bisects `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (token count) → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON. Same logic as SGLang (token-based bisection, 2x safety). Outputs `profiled_vram_gib` and `requested_trtllm_kv_tokens` markers. For non-text models (video/image diffusion) that don't use KV cache, use `--no-find-min-vram` for a single-pass VRAM measurement — binary search won't work because the model doesn't log KV token allocation.
 
-**Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
+**Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
 
-**Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_gpu_mem_args` because TRT-LLM requires JSON merging.
+**Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
 ### Engine-specific mapping
 
-Launch scripts call `build_gpu_mem_args` (vLLM/SGLang) or `build_trtllm_override_args_with_mem` (TRT-LLM) from `examples/common/gpu_utils.sh`, which check env var overrides and return the appropriate CLI flags:
+Launch scripts call engine-specific functions from `examples/common/gpu_utils.sh` which check env var overrides and return the appropriate CLI flags:
 
 ```bash
-# vLLM / SGLang
-GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
+# vLLM
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+python -m dynamo.vllm --model "$MODEL" $GPU_MEM_ARGS &
+
+# SGLang
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
 
 # TRT-LLM (requires JSON merging, separate function)

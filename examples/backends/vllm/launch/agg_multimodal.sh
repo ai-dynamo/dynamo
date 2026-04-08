@@ -97,7 +97,7 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
