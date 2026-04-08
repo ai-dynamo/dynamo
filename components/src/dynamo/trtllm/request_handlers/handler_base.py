@@ -47,7 +47,7 @@ class _DeferredAbort:
     When abort() is called before the first generation result, spawns a
     background asyncio.Task that reads from GenerationResult.aqueue (TRT-LLM's
     internal asyncio.Queue, decoupled from Dynamo RPC transport) until the
-    first result arrives, then calls the real abort(). See NVBugs 5969206.
+    first result arrives, then calls the real abort().
     """
 
     def __init__(self, generation_result: GenerationResult):
@@ -253,7 +253,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         In disaggregated decode mode, generation_result may be a _DeferredAbort
         wrapper that defers abort() until the first token is received (KV
-        transfer complete). See NVBugs 5969206.
+        transfer complete).
 
         Raise EngineShutdown if shutdown event is triggered.
         """
@@ -310,7 +310,7 @@ class HandlerBase(BaseGenerativeHandler):
         generation_result.abort().
 
         In disaggregated decode mode, generation_result may be a _DeferredAbort
-        wrapper that defers abort() until the first token. See NVBugs 5969206.
+        wrapper that defers abort() until the first token.
 
         Raise EngineShutdown if shutdown event is triggered.
 
@@ -882,7 +882,7 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete). See NVBugs 5969206.
+            # (KV transfer complete).
             abort_guard = (
                 _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE

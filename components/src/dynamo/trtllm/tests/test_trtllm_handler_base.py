@@ -382,10 +382,10 @@ class TestHandleCancellationAbortToggle:
 class TestDeferredAbortGuard:
     """Tests for _DeferredAbort in disaggregated decode cancellation.
 
-    NVBugs 5969206: In disaggregated serving, decode abort must be deferred
-    until the first generation result is received (indicating KV cache transfer
-    is complete). _DeferredAbort wraps GenerationResult.abort() to spawn a
-    background task that waits for the first token before calling real abort.
+    In disaggregated serving, decode abort must be deferred until the first
+    generation result is received (indicating KV cache transfer is complete).
+    _DeferredAbort wraps GenerationResult.abort() to spawn a background task
+    that waits for the first token before calling real abort.
     """
 
     def _make_handler(self, disable_request_abort: bool = False) -> HandlerBase:
