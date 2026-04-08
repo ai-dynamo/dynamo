@@ -9,7 +9,6 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
-use crate::transfer::TransferCapabilities;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
@@ -188,15 +187,17 @@ async fn test_unsupported_system_device_transfer_returns_error(
     let dst_blocks = vec![0];
     let ctx = create_transfer_context(agent, None).unwrap();
 
-    let err = execute_transfer(
+    let err = match execute_transfer(
         &src,
         &dst,
         &src_blocks,
         &dst_blocks,
         TransferOptionsInternal::default(),
         ctx.context(),
-    )
-    .unwrap_err();
+    ) {
+        Ok(_) => anyhow::bail!("expected transfer to fail for System <-> Device"),
+        Err(err) => err,
+    };
     assert!(
         err.to_string().contains("use Pinned memory"),
         "unexpected error: {err}"
