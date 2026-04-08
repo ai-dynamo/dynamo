@@ -1,6 +1,6 @@
 # Dynamo + SGLang DeepSeek-V3.1 on GKE B200
 
-Aggregated and disaggregated DeepSeek-V3.1 (FP8 and [NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) on B200 GPUs, using **Dynamo-native KV routing** (no Inference Gateway).
+Aggregated and disaggregated DeepSeek-V3.1 (FP8 and [NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)) on B200 GPUs. Includes both **Dynamo-native** (direct Frontend) and **GAIE** (GKE Inference Gateway + EPP) deployment variants.
 
 **Stack**: Dynamo Operator 1.0.0 · SGLang Runtime 0.9.1 (FP8) / 1.0.0 (NVFP4) · GKE with RDMA/RoCE · NIXL KV Transfer
 
@@ -40,13 +40,25 @@ flowchart TB
 
 ## Files
 
+### FP8 — Dynamo-native (no Gateway)
+
 | File | Resource | Purpose |
 |---|---|---|
-| `dgd-agg.yaml` | DynamoGraphDeployment | Aggregated: Frontend (KV router) + Worker (TP=8, EP=8, 8 GPUs) — FP8 |
-| `dgd-disagg-1p1d.yaml` | DynamoGraphDeployment | Disaggregated 1P1D: Frontend + Prefill + Decode, NIXL/RoCE, EAGLE spec decode — FP8 |
-| `nvfp4/sglang-dsv31-aggregated-nvfp4.yaml` | DynamoGraphDeployment | Aggregated with [DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4) (FP4 quantized) |
-| `nvfp4/sglang-disagg-dsv31-nvfp4-1p1d-roce.yaml` | DynamoGraphDeployment | Disaggregated 1P1D with DeepSeek-V3.1-NVFP4 (FP4), NIXL/RoCE, EAGLE spec decode |
-| [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md) | Full deployment | **NVFP4 + GAIE**: Agg & disagg with GKE Inference Gateway, EPP, routing policies, benchmark script ([own README](dsv31-nvfp4-gaie/README.md)) |
+| `dsv31-fp8/dgd-agg.yaml` | DynamoGraphDeployment | Aggregated: Frontend (KV router) + Worker (TP=8, EP=8, 8 GPUs) |
+| `dsv31-fp8/dgd-disagg-1p1d.yaml` | DynamoGraphDeployment | Disaggregated 1P1D: Frontend + Prefill + Decode, NIXL/RoCE, EAGLE spec decode |
+
+### NVFP4 — GAIE (GKE Inference Gateway + EPP)
+
+| File | Purpose |
+|---|---|
+| [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md) | **Full GAIE deployment package** — [own README](dsv31-nvfp4-gaie/README.md) |
+| `dsv31-nvfp4-gaie/dgd-agg-gaie.yaml` | Aggregated DGD with EPP |
+| `dsv31-nvfp4-gaie/dgd-agg-native.yaml` | Aggregated DGD native (no Gateway) |
+| `dsv31-nvfp4-gaie/dgd-disagg-gaie-nvfp4.yaml` | Disaggregated 1P1D DGD with EPP |
+| `dsv31-nvfp4-gaie/httproute.yaml` | HTTPRoute (agg/disagg pool routing) |
+| `dsv31-nvfp4-gaie/health-check-policy.yaml` | HealthCheckPolicy for both pools |
+| `dsv31-nvfp4-gaie/backend-policy.yaml` | GCPBackendPolicy (600s timeout) |
+| `dsv31-nvfp4-gaie/benchmark-aiperf.sh` | Parameterized aiperf benchmark script |
 
 ---
 
@@ -79,7 +91,7 @@ Verify the operator is running:
 kubectl get pods -n dynamo-system | grep dynamo-operator
 ```
 
-> **Note**: If Grove/KAI causes scheduling issues (see [NOTES-multinode-kai-scheduler.md](../NOTES-multinode-kai-scheduler.md)), use `--set global.grove.enabled=false` and the default Kubernetes scheduler.
+> **Note**: If Grove/KAI causes scheduling issues, use `--set global.grove.enabled=false` and the default Kubernetes scheduler.
 
 ### 3. Model Storage (PVC + HF Token)
 
@@ -98,7 +110,7 @@ The PVC `deepseek-v31-model-rwx` (ReadWriteMany) must exist in `dynamo-system` w
 ### Deploy
 
 ```bash
-kubectl apply -f dgd-agg.yaml -n dynamo-system
+kubectl apply -f dsv31-fp8/dgd-agg.yaml -n dynamo-system
 ```
 
 ### Verify
@@ -140,7 +152,7 @@ kubectl delete dynamographdeployment sglang-dsv31-aggregated -n dynamo-system
 ### Deploy
 
 ```bash
-kubectl apply -f dgd-disagg-1p1d.yaml -n dynamo-system
+kubectl apply -f dsv31-fp8/dgd-disagg-1p1d.yaml -n dynamo-system
 ```
 
 ### Verify
@@ -175,9 +187,9 @@ kubectl delete dynamographdeployment sglang-disagg-1p1d-roce -n dynamo-system
 
 ## DeepSeek-V3.1-NVFP4 Deployment (FP4 Quantized)
 
-NVIDIA provides a pre-quantized FP4 checkpoint of DeepSeek-V3.1 at [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4). This reduces the per-parameter precision from 8 bits to 4 bits, cutting disk size and GPU memory requirements by ~1.6x while maintaining competitive accuracy. The configs for this variant live under the `nvfp4/` folder.
+NVIDIA provides a pre-quantized FP4 checkpoint of DeepSeek-V3.1 at [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4). This reduces the per-parameter precision from 8 bits to 4 bits, cutting disk size and GPU memory requirements by ~1.6x while maintaining competitive accuracy.
 
-> **GAIE variant**: For NVFP4 deployments fronted by the **GKE Inference Gateway** (with EPP, HTTPRoute, health-check/backend policies, and benchmark tooling), see [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md).
+All NVFP4 configs (native + GAIE) live under [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md). See its [README](dsv31-nvfp4-gaie/README.md) for full deployment steps, Gateway setup, and benchmarking.
 
 Key differences from the FP8 configs:
 - Model path: `nvidia/DeepSeek-V3.1-NVFP4` (instead of `deepseek-ai/DeepSeek-V3.1`)
@@ -185,42 +197,6 @@ Key differences from the FP8 configs:
 - Environment variable: `SGLANG_MOE_NVFP4_DISPATCH=1`
 
 > **Note**: NVFP4 requires **Blackwell GPUs** (B200) and a TensorRT-LLM-compatible runtime. The same PVC (`deepseek-v31-model-rwx`) is used; the runtime will download the NVFP4 checkpoint on first boot if not already cached.
-
-### Aggregated (NVFP4)
-
-```bash
-kubectl apply -f nvfp4/sglang-dsv31-aggregated-nvfp4.yaml -n dynamo-system
-
-# Watch pods
-kubectl get pods -n dynamo-system -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv31-aggregated-nvfp4 -w
-
-# Test
-kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
-  curl -s http://sglang-dsv31-aggregated-nvfp4-frontend.dynamo-system.svc.cluster.local:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
-
-# Tear down
-kubectl delete dynamographdeployment sglang-dsv31-aggregated-nvfp4 -n dynamo-system
-```
-
-### Disaggregated 1P1D (NVFP4)
-
-```bash
-kubectl apply -f nvfp4/sglang-disagg-dsv31-nvfp4-1p1d-roce.yaml -n dynamo-system
-
-# Watch pods
-kubectl get pods -n dynamo-system -l nvidia.com/dynamo-graph-deployment-name=sglang-disagg-dsv31-nvfp4-1p1d-roce -w
-
-# Test
-kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
-  curl -s http://sglang-disagg-dsv31-nvfp4-1p1d-roce-frontend.dynamo-system.svc.cluster.local:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
-
-# Tear down
-kubectl delete dynamographdeployment sglang-disagg-dsv31-nvfp4-1p1d-roce -n dynamo-system
-```
 
 
 ---
@@ -259,8 +235,7 @@ These are set in the disagg DGD and tuned for GKE B200 nodes with RoCE networkin
 ## References
 
 - [Dynamo](https://github.com/ai-dynamo/dynamo)
-- [GAIE variant — FP8 (with Inference Gateway)](../gaie/README.md)
-- [GAIE variant — NVFP4 (with Inference Gateway)](dsv31-nvfp4-gaie/README.md)
+- [NVFP4 + GAIE Deployment Guide](dsv31-nvfp4-gaie/README.md)
 - [GPU Recipes - Dynamo Disaggregated Serving](https://github.com/AI-Hypercomputer/gpu-recipes/blob/main/inference/a4x/disaggregated-serving/dynamo/README.md)
 - [nvidia/DeepSeek-V3.1-NVFP4 on HuggingFace](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4)
 
