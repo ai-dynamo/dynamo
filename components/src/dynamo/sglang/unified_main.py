@@ -23,9 +23,7 @@ async def worker():
     dynamo_args = config.dynamo_args
 
     model_input = (
-        ModelInput.Text
-        if not server_args.skip_tokenizer_init
-        else ModelInput.Tokens
+        ModelInput.Text if not server_args.skip_tokenizer_init else ModelInput.Tokens
     )
 
     engine = SglangDynamoEngine(server_args)

@@ -55,12 +55,16 @@ class BackendConfig:
             "endpoint": getattr(runtime_cfg, "endpoint", None) or "generate",
             "model_name": model_name,
             "served_model_name": served_model_name,
-            "endpoint_types": getattr(runtime_cfg, "endpoint_types", "chat,completions"),
+            "endpoint_types": getattr(
+                runtime_cfg, "endpoint_types", "chat,completions"
+            ),
             "discovery_backend": runtime_cfg.discovery_backend,
             "request_plane": runtime_cfg.request_plane,
             "event_plane": runtime_cfg.event_plane,
             "use_kv_events": getattr(runtime_cfg, "use_kv_events", False),
-            "custom_jinja_template": getattr(runtime_cfg, "custom_jinja_template", None),
+            "custom_jinja_template": getattr(
+                runtime_cfg, "custom_jinja_template", None
+            ),
         }
         if model_input is not None:
             kwargs["model_input"] = model_input
@@ -91,9 +95,7 @@ class DynamoPythonBackendModel:
             use_kv_events=cfg.use_kv_events,
         )
 
-        endpoint = runtime.endpoint(
-            f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}"
-        )
+        endpoint = runtime.endpoint(f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}")
         shutdown_endpoints = [endpoint]
 
         install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
@@ -129,7 +131,10 @@ class DynamoPythonBackendModel:
 
             logger.info(
                 "Serving %s on %s.%s.%s",
-                served_name, cfg.namespace, cfg.component, cfg.endpoint,
+                served_name,
+                cfg.namespace,
+                cfg.component,
+                cfg.endpoint,
             )
 
             await endpoint.serve_endpoint(

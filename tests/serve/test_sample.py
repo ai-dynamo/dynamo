@@ -14,10 +14,7 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import (
-    chat_payload_default,
-    completion_payload_default,
-)
+from tests.utils.payload_builder import chat_payload_default, completion_payload_default
 
 logger = logging.getLogger(__name__)
 

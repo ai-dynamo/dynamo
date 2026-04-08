@@ -20,8 +20,5 @@ def normalize_request_format(request: dict) -> None:
 
     if "sampling_options" not in request:
         request["sampling_options"] = {}
-    if (
-        "temperature" in request
-        and "temperature" not in request["sampling_options"]
-    ):
+    if "temperature" in request and "temperature" not in request["sampling_options"]:
         request["sampling_options"]["temperature"] = request.pop("temperature")
