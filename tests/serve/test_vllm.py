@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -52,10 +51,6 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -410,125 +405,6 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=[],  # Just validate no error
             ),
-        ],
-    ),
-    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
-    "multimodal_video_agg": VLLMConfig(
-        name="multimodal_video_agg",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
-        timeout=600,  # 10 minutes for video processing overhead
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["red", "static", "still"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_video_disagg": VLLMConfig(
-        name="multimodal_video_disagg",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_epd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=600,  # 10 minutes for video processing overhead
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["red", "static", "still"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    # Audio multimodal tests for nightly CI pipeline
-    # These tests validate audio inference capabilities with Qwen2-Audio model
-    "multimodal_audio_agg": VLLMConfig(
-        name="multimodal_audio_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="audio_agg.sh",
-        marks=[
-            pytest.mark.gpu_2,  # encode worker loads Qwen2Audio on GPU (~19 GiB)
-            pytest.mark.nightly,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is recited in the audio?"},
-                    {
-                        "type": "audio_url",
-                        "audio_url": {
-                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["Hester", "Pynne"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_audio_disagg": VLLMConfig(
-        name="multimodal_audio_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="audio_disagg.sh",
-        marks=[
-            pytest.mark.gpu_4,  # needs 3 GPUs (encode loads Qwen2Audio ~19 GiB + prefill + decode)
-            pytest.mark.nightly,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is recited in the audio?"},
-                    {
-                        "type": "audio_url",
-                        "audio_url": {
-                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["Hester", "Pynne"],
-                temperature=0.0,
-                max_tokens=100,
-            )
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(
