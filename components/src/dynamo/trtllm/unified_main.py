@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unified entry point for the TensorRT-LLM backend using DynamoPythonBackendModel.
+"""Unified entry point for the TensorRT-LLM backend using DynamoBackend.
 
 Usage:
     python -m dynamo.trtllm.unified_main <trtllm args>
@@ -14,7 +14,7 @@ import uvloop
 from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from torch.cuda import device_count
 
-from dynamo.common.backend import BackendConfig, DynamoPythonBackendModel
+from dynamo.common.backend import BackendConfig, DynamoBackend
 from dynamo.llm import ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.dynamo_engine import TrtllmDynamoEngine
@@ -57,7 +57,7 @@ async def worker():
         served_model_name=config.served_model_name,
         model_input=ModelInput.Tokens,
     )
-    model = DynamoPythonBackendModel(backend_config, engine)
+    model = DynamoBackend(backend_config, engine)
     await model.run()
 
 

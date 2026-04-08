@@ -78,7 +78,7 @@ class BackendConfig:
         return cls(**kwargs)
 
 
-class DynamoPythonBackendModel:
+class DynamoBackend:
     def __init__(self, config: BackendConfig, engine: DynamoEngine):
         self.config = config
         self.engine = engine

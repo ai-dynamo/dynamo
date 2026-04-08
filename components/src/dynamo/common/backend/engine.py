@@ -35,7 +35,7 @@ class DynamoEngine(ABC):
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request.
 
-        Called by DynamoPythonBackendModel when the client disconnects or
+        Called by DynamoBackend when the client disconnects or
         the request is cancelled.  Override to release engine resources
         (KV cache, scheduler slots, etc.).  Default is no-op.
         """

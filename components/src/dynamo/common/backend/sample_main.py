@@ -11,7 +11,7 @@ import argparse
 
 import uvloop
 
-from dynamo.common.backend import BackendConfig, DynamoPythonBackendModel
+from dynamo.common.backend import BackendConfig, DynamoBackend
 from dynamo.common.backend.sample_engine import SampleDynamoEngine
 
 
@@ -45,7 +45,7 @@ async def worker():
         request_plane=args.request_plane,
         event_plane=args.event_plane,
     )
-    model = DynamoPythonBackendModel(backend_config, engine)
+    model = DynamoBackend(backend_config, engine)
     await model.run()
 
 

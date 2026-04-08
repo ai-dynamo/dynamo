@@ -1,6 +1,6 @@
 # Backend Module
 
-Two-class abstraction: `DynamoPythonBackendModel` (runtime integration) and
+Two-class abstraction: `DynamoBackend` (runtime integration) and
 `DynamoEngine` (ABC for engine-specific logic). See `README.md` for full docs.
 
 ## Design Constraints
@@ -10,15 +10,15 @@ Two-class abstraction: `DynamoPythonBackendModel` (runtime integration) and
   that grew across vllm, sglang, and trtllm. Before writing any logic inside
   a `DynamoEngine` subclass, check whether the same logic already exists in
   another engine. If it does, extract it into `common/engine_utils/` or
-  `DynamoPythonBackendModel` and have all engines call the shared version.
+  `DynamoBackend` and have all engines call the shared version.
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
-- **Exactly two classes.** `DynamoPythonBackendModel` owns runtime lifecycle.
+- **Exactly two classes.** `DynamoBackend` owns runtime lifecycle.
   `DynamoEngine` owns inference. Do not add intermediate base classes or mixins.
 
 - **`generate()` delegates to engine with cancellation monitoring.**
-  `DynamoPythonBackendModel.generate()` runs a background task that watches
+  `DynamoBackend.generate()` runs a background task that watches
   `context.async_killed_or_stopped()` and calls `engine.abort(context)` on
   cancellation. It also checks `context.is_stopped()` after each yielded
   chunk. Sampling params, prompt building, and output formatting stay inside
@@ -30,7 +30,7 @@ Two-class abstraction: `DynamoPythonBackendModel` (runtime integration) and
   stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
-  `DynamoPythonBackendModel` or `common/engine_utils/`, not in a hook system.
+  `DynamoBackend` or `common/engine_utils/`, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
   entry points remain untouched. The `unified_main.py` files are a separate
@@ -57,7 +57,7 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 
 ## Error Handling
 
-`DynamoPythonBackendModel` wraps lifecycle and generate errors in
+`DynamoBackend` wraps lifecycle and generate errors in
 `DynamoException` subclasses (`dynamo.llm.exceptions`). The Rust bridge
 (`engine.rs`) converts these into typed `DynamoError::Backend(...)` for
 proper error chain observability. Engines can raise `DynamoException`
@@ -85,7 +85,7 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `DynamoEngine` ABC -- the only interface engines must implement |
-| `model.py` | `DynamoPythonBackendModel` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
+| `model.py` | `DynamoBackend` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 | `../engine_utils/request.py` | `normalize_request_format()` -- call this at the top of `generate()` if your engine receives both OpenAI and internal protocol formats |
 | `../engine_utils/response.py` | `build_completion_usage()`, `normalize_finish_reason()` -- use these to build response dicts |

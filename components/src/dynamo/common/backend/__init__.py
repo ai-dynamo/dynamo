@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from .engine import DynamoEngine, EngineConfig
-from .model import BackendConfig, DynamoPythonBackendModel
+from .model import BackendConfig, DynamoBackend
 
 __all__ = [
     "BackendConfig",
     "DynamoEngine",
-    "DynamoPythonBackendModel",
+    "DynamoBackend",
     "EngineConfig",
 ]

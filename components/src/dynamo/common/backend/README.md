@@ -13,7 +13,7 @@ all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 DynamoRuntime
     |
     v
-DynamoPythonBackendModel          <-- runtime integration (model.py)
+DynamoBackend          <-- runtime integration (model.py)
     |   - creates DistributedRuntime
     |   - sets up endpoints, signal handlers
     |   - registers model with Rust frontend
@@ -107,11 +107,11 @@ class MyEngine(DynamoEngine):
 Then wire it up:
 
 ```python
-from dynamo.common.backend import DynamoPythonBackendModel, BackendConfig
+from dynamo.common.backend import DynamoBackend, BackendConfig
 
 engine = MyEngine(...)
 config = BackendConfig(namespace="dynamo", component="my-backend", ...)
-model = DynamoPythonBackendModel(config, engine)
+model = DynamoBackend(config, engine)
 await model.run()  # handles runtime, registration, serving, shutdown
 ```
 
@@ -143,7 +143,7 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 
 ## Request Cancellation
 
-`DynamoPythonBackendModel.generate()` automatically monitors for client
+`DynamoBackend.generate()` automatically monitors for client
 disconnections and request cancellations via `context.async_killed_or_stopped()`.
 When triggered, it:
 
@@ -168,7 +168,7 @@ break on `context.is_stopped()`.
 
 ## Error Handling
 
-`DynamoPythonBackendModel` wraps errors in `DynamoException` subclasses from
+`DynamoBackend` wraps errors in `DynamoException` subclasses from
 `dynamo.llm.exceptions` so the Rust bridge can map them to typed
 `DynamoError::Backend(...)` responses with proper error chains.
 
@@ -215,9 +215,9 @@ implementations:
 ```
 common/backend/
     __init__.py          # Re-exports: DynamoEngine, EngineConfig,
-                         #   DynamoPythonBackendModel, BackendConfig
+                         #   DynamoBackend, BackendConfig
     engine.py            # DynamoEngine ABC + EngineConfig dataclass
-    model.py             # DynamoPythonBackendModel + BackendConfig
+    model.py             # DynamoBackend + BackendConfig
     sample_engine.py     # SampleDynamoEngine (reference impl)
     sample_main.py       # Entry point for sample engine
 

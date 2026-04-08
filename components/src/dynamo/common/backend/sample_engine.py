@@ -14,7 +14,7 @@ class SampleDynamoEngine(DynamoEngine):
     """Reference DynamoEngine implementation.
 
     Generates rotating token IDs with configurable per-token latency.
-    Useful for testing the DynamoPythonBackendModel lifecycle end-to-end
+    Useful for testing the DynamoBackend lifecycle end-to-end
     and as a template for engine leads implementing real backends.
     """
 

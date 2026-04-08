@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model-path <name>  Specify model (default: $MODEL)"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  --unified            Use unified_main entry point (DynamoPythonBackendModel)"
+            echo "  --unified            Use unified_main entry point (DynamoBackend)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
