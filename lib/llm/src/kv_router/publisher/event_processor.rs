@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +19,66 @@ use dynamo_runtime::transports::nats::NatsQueue;
 use crate::kv_router::KV_EVENT_SUBJECT;
 
 use super::{DEFAULT_MAX_BATCH_BLOCKS, kv_publisher_metrics};
+
+/// Reference-counting filter that deduplicates KV cache events.
+///
+/// vLLM can emit multiple store/remove events for the same block hash.
+/// This filter tracks a refcount per `ExternalSequenceBlockHash`:
+/// - **Store**: always passes through; increments refcount.
+/// - **Remove**: only passes through when refcount decrements to 0.
+/// - **Cleared**: resets all refcounts.
+pub(super) struct EventDedupFilter {
+    refcounts: DashMap<ExternalSequenceBlockHash, usize>,
+}
+
+impl EventDedupFilter {
+    pub(super) fn new() -> Self {
+        Self {
+            refcounts: DashMap::new(),
+        }
+    }
+
+    /// Track a store event. Increments refcount for each block hash.
+    /// Stores always pass through — this only updates bookkeeping.
+    pub(super) fn track_store(&self, data: &KvCacheStoreData) {
+        for block in &data.blocks {
+            *self.refcounts.entry(block.block_hash).or_insert(0) += 1;
+        }
+    }
+
+    /// Filter a remove event. Retains only block hashes whose refcount
+    /// decrements to 0 (removing them from the map). Returns `None` if
+    /// no hashes survive filtering.
+    pub(super) fn filter_remove(&self, mut data: KvCacheRemoveData) -> Option<KvCacheRemoveData> {
+        data.block_hashes.retain(|hash| {
+            match self.refcounts.entry(*hash) {
+                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                    let count = entry.get_mut();
+                    *count -= 1;
+                    if *count == 0 {
+                        entry.remove();
+                        true // refcount hit 0 → pass through
+                    } else {
+                        false // still has references → filter out
+                    }
+                }
+                dashmap::mapref::entry::Entry::Vacant(_) => {
+                    true // not tracked → pass through defensively
+                }
+            }
+        });
+        if data.block_hashes.is_empty() {
+            None
+        } else {
+            Some(data)
+        }
+    }
+
+    /// Clear all refcounts (used on Cleared events).
+    pub(super) fn clear(&self) {
+        self.refcounts.clear();
+    }
+}
 
 /// Accumulator for in-flight KV cache events that will be merged into a single
 /// [`RouterEvent`] before being forwarded to the event sink.
@@ -80,39 +141,47 @@ impl BatchingState {
         publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
+        dedup: &EventDedupFilter,
     ) {
         if !self.has_pending() {
             return;
         }
-        let id = self.next_publish_id;
         let dp_rank = self.last_dp_rank;
+        let mut emitted = false;
         if let Some(data) = self.pending_removed.take() {
-            emit(
-                publisher,
-                local_indexer,
-                worker_id,
-                KvCacheEvent {
-                    event_id: id,
-                    data: KvCacheEventData::Removed(data),
-                    dp_rank,
-                },
-            )
-            .await;
+            if let Some(filtered) = dedup.filter_remove(data) {
+                emit(
+                    publisher,
+                    local_indexer,
+                    worker_id,
+                    KvCacheEvent {
+                        event_id: self.next_publish_id,
+                        data: KvCacheEventData::Removed(filtered),
+                        dp_rank,
+                    },
+                )
+                .await;
+                emitted = true;
+            }
         }
         if let Some(data) = self.pending_stored.take() {
+            dedup.track_store(&data);
             emit(
                 publisher,
                 local_indexer,
                 worker_id,
                 KvCacheEvent {
-                    event_id: id,
+                    event_id: self.next_publish_id,
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
             )
             .await;
+            emitted = true;
         }
-        self.next_publish_id += 1;
+        if emitted {
+            self.next_publish_id += 1;
+        }
         self.record_flush_time();
     }
 }
@@ -160,19 +229,20 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
     max_batch_blocks: usize,
 ) {
     let mut batching_state = BatchingState::new();
+    let dedup = EventDedupFilter::new();
     let mut last_raw_input_id: Option<u64> = None;
 
     loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("KV Event source received cancellation signal");
-                batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
                 break;
             }
             event = rx.recv() => {
                 let Some(placement_event) = event else {
                     tracing::debug!("Event processor channel closed.");
-                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                    batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
                     break;
                 };
 
@@ -223,7 +293,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                 match event.data {
                     KvCacheEventData::Removed(data) => {
                         if batching_state.pending_stored.is_some() || dp_rank_changed {
-                            batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                            batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
                         }
                         match &mut batching_state.pending_removed {
                             Some(pending) => pending.block_hashes.extend(data.block_hashes),
@@ -239,7 +309,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                 data.parent_hash != p.blocks.last().map(|b| b.block_hash)
                             });
                         if should_flush {
-                            batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                            batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
                         }
                         match &mut batching_state.pending_stored {
                             Some(pending) => pending.blocks.extend(data.blocks),
@@ -249,7 +319,8 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                         }
                     }
                     KvCacheEventData::Cleared => {
-                        batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                        batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
+                        dedup.clear();
                         emit(
                             &publisher,
                             &local_indexer,
@@ -271,7 +342,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     && (timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))
                         || batching_state.pending_block_count() > max_batch_blocks)
                 {
-                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                    batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
                 }
             }
             _ = tokio::time::sleep(
@@ -279,7 +350,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     .map(|ms| batching_state.remaining_timeout(ms))
                     .unwrap_or(Duration::from_secs(3600))
             ), if timeout_ms.is_some() && batching_state.has_pending() => {
-                batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                batching_state.flush(&publisher, &local_indexer, worker_id, &dedup).await;
             }
         }
     }
