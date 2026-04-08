@@ -16,17 +16,19 @@ def generate_image_pool_base64(
     pool_size: int,
     image_dir: Path,
     image_size: tuple[int, int] = (512, 512),
+    offset: int = 0,
 ) -> list[str]:
-    """Generate pool_size random PNG files and return their paths."""
+    """Generate pool_size random PNG files starting at img_{offset:04d} and return their paths."""
     image_dir.mkdir(parents=True, exist_ok=True)
     pool: list[str] = []
-    for idx in range(pool_size):
+    for idx in range(offset, offset + pool_size):
         path = image_dir / f"img_{idx:04d}.png"
         pixels = np_rng.integers(0, 256, (*image_size, 3), dtype=np.uint8)
         Image.fromarray(pixels).save(path)
         pool.append(str(path.resolve()))
     print(
-        f"  {pool_size} unique {image_size[0]}x{image_size[1]} images saved to {image_dir}"
+        f"  {pool_size} unique {image_size[0]}x{image_size[1]} images saved to {image_dir} "
+        f"(offset={offset}, range img_{offset:04d}…img_{offset+pool_size-1:04d})"
     )
     return pool
 
@@ -35,20 +37,23 @@ def generate_image_pool_http(
     py_rng: random.Random,
     pool_size: int,
     coco_annotations: Path,
+    offset: int = 0,
 ) -> list[str]:
-    """Pick pool_size unique COCO test2017 URLs."""
+    """Pick pool_size unique COCO test2017 URLs starting after offset URLs in the shuffled list."""
     with open(coco_annotations) as f:
         data = json.load(f)
     all_urls = [img["coco_url"] for img in data["images"]]
-    if pool_size > len(all_urls):
+    if offset + pool_size > len(all_urls):
         raise RuntimeError(
-            f"--images-pool ({pool_size}) exceeds available COCO images ({len(all_urls)}). "
-            f"Reduce --images-pool."
+            f"--image-offset ({offset}) + --images-pool ({pool_size}) = {offset + pool_size} "
+            f"exceeds available COCO images ({len(all_urls)}). "
+            f"Reduce --images-pool or --image-offset."
         )
     py_rng.shuffle(all_urls)
-    pool = all_urls[:pool_size]
+    pool = all_urls[offset : offset + pool_size]
     print(
-        f"  {pool_size} URLs sampled from {coco_annotations.name} ({len(all_urls)} available)"
+        f"  {pool_size} URLs sampled from {coco_annotations.name} ({len(all_urls)} available, "
+        f"offset={offset})"
     )
     return pool
 
@@ -59,41 +64,18 @@ def sample_slots(
     num_requests: int,
     images_per_request: int,
 ) -> list[str]:
-    """Sample image slots from a fixed pool, no duplicates within each request.
-
-    Every image in the pool is guaranteed to appear at least once.
-    """
-    pool_size = len(pool)
-    total_slots = num_requests * images_per_request
+    """Sample image slots from a fixed pool, no duplicates within each request."""
     assert (
-        pool_size >= images_per_request
-    ), f"images-pool ({pool_size}) must be >= images-per-request ({images_per_request})"
-    assert total_slots >= pool_size, (
-        f"total slots ({num_requests}×{images_per_request}={total_slots}) < "
-        f"images-pool ({pool_size}). Increase --num-requests or --images-per-request, "
-        f"or reduce --images-pool."
-    )
+        len(pool) >= images_per_request
+    ), f"images-pool ({len(pool)}) must be >= images-per-request ({images_per_request})"
+    total_slots = num_requests * images_per_request
+    slot_refs: list[str] = []
+    for _ in range(num_requests):
+        slot_refs.extend(py_rng.sample(pool, images_per_request))
 
-    # Round-robin every pool image into requests so each appears at least once
-    shuffled = list(pool)
-    py_rng.shuffle(shuffled)
-    requests: list[list[str]] = [[] for _ in range(num_requests)]
-    for i, img in enumerate(shuffled):
-        requests[i % num_requests].append(img)
-
-    # Fill remaining slots with random pool samples (no intra-request duplicates)
-    for req in requests:
-        remaining = images_per_request - len(req)
-        if remaining > 0:
-            used = set(req)
-            available = [img for img in pool if img not in used]
-            req.extend(py_rng.sample(available, remaining))
-        py_rng.shuffle(req)
-
-    slot_refs = [img for req in requests for img in req]
     num_unique = len(set(slot_refs))
     print(
-        f"Generated {total_slots} image slots from pool of {pool_size}: "
+        f"Generated {total_slots} image slots from pool of {len(pool)}: "
         f"{num_unique} unique in use, "
         f"{total_slots - num_unique} duplicate references "
         f"({(total_slots - num_unique) / total_slots:.1%} reuse)"

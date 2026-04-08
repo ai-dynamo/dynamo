@@ -1,0 +1,182 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Launch script for NEW Frontend MM Routing benchmark:
+#   Frontend (vLLM processor + KvRouter + ImageLoader + NIXL) -> vLLM backend workers
+#
+# No separate MM Router Worker. The frontend handles:
+#   1. Image downloading via ImageLoader (LRU cache + in-flight dedup)
+#   2. HF processor via vLLM's process_inputs() (model-agnostic)
+#   3. MM routing via mm_features -> block_mm_infos -> KvRouter
+#   4. NIXL transfer of mm_kwargs to skip backend HF processor
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DYNAMO_ROOT="${DYNAMO_ROOT:-/workspace}"
+cd "${DYNAMO_ROOT}"
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
+NAMESPACE="${NAMESPACE:-dynamo}"
+HTTP_PORT="${HTTP_PORT:-8000}"
+BLOCK_SIZE="${BLOCK_SIZE:-16}"
+NUM_WORKERS="${NUM_WORKERS:-8}"
+
+# Defaults for the 30B FP8 model. Each worker is pinned to one GPU (CUDA_VISIBLE_DEVICES=i).
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
+# Set SINGLE_GPU=1 to pin all workers to GPU 0 (single-GPU benchmarking).
+# Default (0): each worker gets its own GPU (worker i -> GPU i-1).
+SINGLE_GPU="${SINGLE_GPU:-0}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-100426}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512}"
+
+NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
+ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
+
+export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-500}"
+
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
+FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
+
+echo "=== Frontend MM Routing Benchmark (${NUM_WORKERS} Workers) ==="
+echo "Working directory: ${DYNAMO_ROOT}"
+echo "MODEL=${MODEL}"
+echo "NUM_WORKERS=${NUM_WORKERS}"
+echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
+echo "SINGLE_GPU=${SINGLE_GPU}"
+echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
+echo
+
+PIDS=()
+
+cleanup() {
+    echo
+    echo "Cleaning up background processes..."
+    for pid in "${PIDS[@]:-}"; do
+        kill "${pid}" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+wait_ready() {
+    local url="$1"
+    local name="$2"
+    local timeout_s="${3:-240}"
+    local deadline=$((SECONDS + timeout_s))
+    echo "Waiting for ${name} at ${url} ..."
+    while (( SECONDS < deadline )); do
+        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
+            echo "${name} is ready"; return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for ${name} (${url})" >&2; return 1
+}
+
+wait_frontend_models() {
+    local url="$1"
+    local timeout_s="${2:-240}"
+    local deadline=$((SECONDS + timeout_s))
+    echo "Waiting for frontend at ${url} ..."
+    while (( SECONDS < deadline )); do
+        if curl -fsS "${url}" >/dev/null 2>&1; then
+            echo "Frontend is ready"; return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for frontend (${url})" >&2; return 1
+}
+
+COMMON_ENV=(
+    "DYN_NAMESPACE=${NAMESPACE}"
+    "DYN_REQUEST_PLANE=tcp"
+    "NATS_SERVER=${NATS_SERVER}"
+    "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
+)
+
+# ---------------------------------------------------------------------------
+# Start backend workers
+# ---------------------------------------------------------------------------
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    if [[ "${SINGLE_GPU}" == "1" ]]; then
+        gpu_id=0
+    else
+        gpu_id=$((i - 1))
+    fi
+    system_port=$((18079 + i * 2))
+    kv_port=$((20079 + i))
+
+    echo "=== Starting vLLM backend worker #${i} (GPU ${gpu_id}, port ${system_port}) ==="
+    env "${COMMON_ENV[@]}" \
+        "CUDA_VISIBLE_DEVICES=${gpu_id}" \
+        "DYN_SYSTEM_PORT=${system_port}" \
+        "${PYTHON_BIN}" -m dynamo.vllm \
+            --model "${MODEL}" \
+            --enable-prefix-caching \
+            --enable-multimodal \
+            --block-size "${BLOCK_SIZE}" \
+            --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${kv_port}\",\"enable_kv_cache_events\":true}" \
+            --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+            --max-model-len "${MAX_MODEL_LEN}" \
+            --max-num-seqs "${MAX_NUM_SEQS}" \
+            --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+            ${VLLM_EXTRA_ARGS} &
+    PIDS+=($!)
+    wait_ready "http://127.0.0.1:${system_port}/health" "vLLM backend #${i}" 900
+    echo
+done
+
+# ---------------------------------------------------------------------------
+# Start frontend with vLLM processor + KV router
+# ---------------------------------------------------------------------------
+echo "=== Starting frontend (vLLM processor + KV router) ==="
+env "${COMMON_ENV[@]}" \
+    "DYN_LOG=info" \
+    "${PYTHON_BIN}" -m dynamo.frontend \
+        --http-port "${HTTP_PORT}" \
+        --dyn-chat-processor vllm \
+        --router-mode kv \
+        --kv-cache-block-size "${BLOCK_SIZE}" \
+        --model-name "${MODEL}" \
+        ${FRONTEND_EXTRA_ARGS} &
+PIDS+=($!)
+
+wait_frontend_models "http://127.0.0.1:${HTTP_PORT}/v1/models" 300
+
+# Wait for processor to warm up
+echo "Warming up frontend processor..."
+DEADLINE=$((SECONDS + 300))
+while (( SECONDS < DEADLINE )); do
+    HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
+        2>/dev/null || echo "000")
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        echo "Frontend processor is ready"
+        break
+    fi
+    sleep 2
+done
+
+echo
+echo "=== All services are ready ==="
+echo "Frontend: http://127.0.0.1:${HTTP_PORT}"
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    echo "Worker ${i}: http://127.0.0.1:$((18079 + i * 2))/health"
+done
+echo
+echo "Architecture: Frontend (vLLM processor + KvRouter + NIXL) -> ${NUM_WORKERS}x vLLM backend"
+echo
+echo "Press Ctrl+C to stop all services"
+
+wait
