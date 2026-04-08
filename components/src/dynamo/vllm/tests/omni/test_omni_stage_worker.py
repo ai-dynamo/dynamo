@@ -11,8 +11,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
-from dynamo.vllm.omni.utils import _build_sampling_params
+try:
+    from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
+    from dynamo.vllm.omni.utils import _build_sampling_params
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,

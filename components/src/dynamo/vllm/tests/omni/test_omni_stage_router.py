@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dynamo.vllm.omni import stage_router
+try:
+    from dynamo.vllm.omni import stage_router
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,

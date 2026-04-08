@@ -10,7 +10,10 @@ import json
 
 import pytest
 
-from dynamo.vllm.omni.types import OmniInterStageRequest, StageEngine, StageOutput
+try:
+    from dynamo.vllm.omni.types import OmniInterStageRequest, StageEngine, StageOutput
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
