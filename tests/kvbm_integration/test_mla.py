@@ -209,6 +209,10 @@ class MlaDynamoWorkerProcess(ManagedProcess):
             MLA_MODEL,
             "--served-model-name",
             MLA_MODEL,
+            "--tensor-parallel-size",
+            "4",
+            "--connector",
+            "kvbm",
             "--extra-engine-args",
             engine_config,
         ]
