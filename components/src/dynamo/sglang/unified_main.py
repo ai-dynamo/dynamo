@@ -5,6 +5,9 @@
 
 Usage:
     python -m dynamo.sglang.unified_main <sglang args>
+
+See dynamo/common/backend/README.md for architecture, response contract,
+and feature gap details.
 """
 
 import sys

@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM DynamoEngine implementation for the unified backend.
+
+See dynamo/common/backend/README.md for architecture, response contract,
+and feature gap details.
+"""
+
 import dataclasses
 import logging
 import re

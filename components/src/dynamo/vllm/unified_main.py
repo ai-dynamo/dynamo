@@ -5,6 +5,9 @@
 
 Usage:
     python -m dynamo.vllm.unified_main <vllm args>
+
+See dynamo/common/backend/README.md for architecture, response contract,
+and feature gap details.
 """
 
 import uvloop

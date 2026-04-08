@@ -5,6 +5,9 @@
 
 Usage:
     python -m dynamo.trtllm.unified_main <trtllm args>
+
+See dynamo/common/backend/README.md for architecture, response contract,
+and feature gap details.
 """
 
 import uvloop

@@ -1,5 +1,9 @@
 # Dynamo Python Backend
 
+> **Work in progress.** The unified backend currently supports minimal
+> aggregated inference only. See [Feature Gaps](#feature-gaps) at the bottom
+> for what remains to be implemented.
+
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
@@ -231,3 +235,81 @@ sglang/unified_main.py   # Entry point
 trtllm/dynamo_engine.py  # TrtllmDynamoEngine
 trtllm/unified_main.py   # Entry point
 ```
+
+## Feature Gaps
+
+The unified path currently supports **minimal aggregated inference** only.
+Below is a summary of what the existing (non-unified) backends provide that
+the unified path does not yet support.
+
+### What works today
+
+- Basic aggregated token-in-token-out inference (all three engines)
+- Model registration with endpoint types
+- Request cancellation via `abort()` + `context.is_stopped()` monitoring
+- `DynamoException` error chain wrapping
+- Graceful shutdown with signal handling
+- `normalize_finish_reason()` and `build_completion_usage()` on all engines
+
+### Common gaps (all engines)
+
+| Feature | Description |
+|---------|-------------|
+| Disaggregated serving | Prefill/decode worker split, bootstrap coordination, KV transfer |
+| Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
+| KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
+| Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
+| Logprobs | Selected token + top-k log probability extraction and streaming |
+| Guided decoding / structured outputs | JSON schema, regex, grammar, choice constraints |
+| OpenTelemetry tracing | `build_trace_headers()`, request performance metrics, OTEL propagation |
+| Engine routes | Profiling (start/stop), memory release/resume, weight update (disk/tensor/distributed/IPC) |
+| Data-parallel routing | DP rank extraction from routing hints, DP-aware scheduling |
+| Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization |
+| Custom Jinja chat templates | `--custom-jinja-template` for model-specific prompt formatting |
+| Snapshot/checkpoint | CRIU-based engine state save/restore, identity reloading |
+
+### vLLM-specific gaps
+
+| Feature | Description |
+|---------|-------------|
+| LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks |
+| Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE |
+| Separate encode worker | `EncodeWorkerHandler` for multimodal encode-only disaggregation |
+| Sleep/wake/quiesce | 3-level engine lifecycle control (weights, buffers, everything) |
+| Elastic EP scaling | `scale_elastic_ep` with Ray node management |
+| GMS shadow mode | GPU Memory Service integration with failover lock |
+| ModelExpress P2P | Distributed model loading via P2P |
+| KV block clearing | Prefix cache reset endpoint |
+
+### SGLang-specific gaps
+
+| Feature | Description |
+|---------|-------------|
+| Embedding inference | `async_encode()` path, OpenAI embedding response format |
+| Image diffusion | `DiffGenerator` for text-to-image (FLUX, etc.) with TP/DP |
+| Video generation | `DiffGenerator` for text-to-video (Wan2.1, etc.) |
+| LLM diffusion (DLLM) | Diffusion language model algorithm support |
+| Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer |
+| Multimodal worker | Aggregated/disaggregated multimodal inference with `EmbeddingsProcessor` |
+| Deferred signal handling | Capturing SGLang's internal signal registrations for coordinated shutdown |
+| Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]`/`["video"]`) |
+
+### TRT-LLM-specific gaps
+
+| Feature | Description |
+|---------|-------------|
+| Custom logits processors | `TrtllmDynamoLogitsAdapter` with CUDA stream support |
+| Attention DP scheduling | `SchedulingParams` with `attention_dp_rank` and `attention_dp_relax` |
+| Video diffusion | Auto-detect pipeline from `model_index.json`, MP4 encoding, MediaOutput |
+| Multimodal processing | `MultimodalRequestProcessor`, image URL processing, embedding injection |
+| Encode helper (EPD) | Remote encode via `encode_client`, NIXL tensor reading |
+| KV cache connector | KVBM connector config, consolidator ZMQ integration |
+| Fatal vs per-request errors | Distinguishing `RequestError` (recoverable) from fatal engine errors |
+
+### Recommended migration order
+
+1. **Metrics & health checks** -- needed for production observability
+2. **Disaggregated serving** -- largest architectural change, unlocks PD split
+3. **KV event publishing** -- required for KV-aware routing
+4. **Logprobs + guided decoding** -- most-requested inference features
+5. **Multimodal / LoRA / diffusion** -- modality-specific, can be parallelized across leads
