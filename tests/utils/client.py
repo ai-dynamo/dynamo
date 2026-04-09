@@ -190,15 +190,17 @@ def wait_for_model_availability(
 
     for attempt in range(max_attempts):
         try:
-            test_payload = deepcopy(request_payload) if request_payload else {}
-            if not test_payload:
+            if request_payload is None:
                 test_payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": "test"}],
                     "max_tokens": 1,
                     "stream": False,
                 }
-            elif "model" not in test_payload:
+            else:
+                test_payload = deepcopy(request_payload)
+
+            if "model" not in test_payload:
                 test_payload["model"] = model
 
             timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]

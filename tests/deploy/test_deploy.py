@@ -256,17 +256,21 @@ async def test_deployment(
         # Wait for model to be available
         endpoint = deployment_spec.endpoint
         deploy_payload = None
+        max_attempts = 30
+        attempt_timeouts = None
         request_timeout = float(DEFAULT_REQUEST_TIMEOUT)
         if deployment_target.request_kind == "video":
             deploy_payload = build_video_generation_payload(model)
             request_timeout = float(FASTVIDEO_REQUEST_TIMEOUT)
+            attempt_timeouts = [request_timeout] * max_attempts
 
         model_ready = wait_for_model_availability(
             url=base_url,
             endpoint=endpoint,
             model=model,
             logger=logger,
-            max_attempts=30,
+            max_attempts=max_attempts,
+            attempt_timeouts=attempt_timeouts,
             request_payload=deploy_payload,
         )
 

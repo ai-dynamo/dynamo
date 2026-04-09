@@ -284,7 +284,7 @@ jobs:
   fastvideo-pipeline:
     name: fastvideo
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: fastvideo
@@ -354,7 +354,7 @@ jobs:
   fastvideo-dev-pipeline:
     name: fastvideo-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: fastvideo

@@ -34,7 +34,12 @@ import pytest
         ),
         pytest.param(
             "predownload_models_fastvideo_gpu1",
-            marks=[pytest.mark.fastvideo, pytest.mark.e2e, pytest.mark.gpu_1],
+            marks=[
+                pytest.mark.fastvideo,
+                pytest.mark.e2e,
+                pytest.mark.gpu_1,
+                pytest.mark.timeout(180),
+            ],
         ),
         pytest.param(
             "predownload_models_vllm_gpu2",

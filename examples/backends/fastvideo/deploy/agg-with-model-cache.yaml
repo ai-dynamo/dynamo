@@ -46,8 +46,6 @@ spec:
       envs:
         - name: DYN_DISCOVERY_BACKEND
           value: kubernetes
-        - name: LD_LIBRARY_PATH
-          value: ""
         - name: PYTORCH_CUDA_ALLOC_CONF
           value: expandable_segments:True
         - name: HF_HOME

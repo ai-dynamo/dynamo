@@ -330,7 +330,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 ## Source Code
 
-The example source lives at [`examples/backends/fastvideo/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/fastvideo) in the Dynamo repository.
+The example source lives at `examples/backends/fastvideo/` in the Dynamo repository.
 
 ## See Also
 
