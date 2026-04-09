@@ -35,9 +35,7 @@ pub use dynamo_memory::MemoryRegion as MemoryDescriptor;
 // === Storage types ===
 // Note: DeviceStorage and PinnedStorage are now local multi-backend implementations
 // (see device_storage.rs and pinned_storage.rs)
-pub use dynamo_memory::{
-    DiskStorage, StorageError, StorageKind, SystemStorage,
-};
+pub use dynamo_memory::{DiskStorage, StorageError, StorageKind, SystemStorage};
 
 // === NIXL types ===
 pub use dynamo_memory::nixl::{

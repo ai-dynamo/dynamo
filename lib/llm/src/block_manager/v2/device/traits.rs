@@ -31,7 +31,7 @@ pub trait DeviceContextOps: Send + Sync + Debug {
 
     /// Bind context to current thread (if needed)
     fn bind_to_thread(&self) -> Result<()> {
-        Ok(())  // Default: no-op
+        Ok(()) // Default: no-op
     }
 
     /// Disable automatic event tracking (CUDA-specific optimization)
@@ -43,7 +43,7 @@ pub trait DeviceContextOps: Send + Sync + Debug {
     /// # Safety
     /// Only safe when caller manually manages event synchronization.
     unsafe fn disable_event_tracking(&self) -> Result<()> {
-        Ok(())  // Default: no-op
+        Ok(()) // Default: no-op
     }
 
     /// Get raw context handle for interop (optional)

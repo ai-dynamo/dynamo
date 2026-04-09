@@ -6,32 +6,31 @@
 //! Wraps Synapse API types with the device abstraction traits.
 
 use crate::block_manager::v2::device::traits::*;
-use anyhow::{Result, Context as _};
-use synapse::{Device, Stream, Event, DeviceBufferView, HostBufferView};
-use synapse::synapse_sys;
-use std::sync::{Arc, Mutex, OnceLock};
+use anyhow::{Context as _, Result};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use synapse::synapse_sys;
+use synapse::{Device, DeviceBufferView, Event, HostBufferView, Stream};
 
 /// Initialize Synapse runtime (called once per process)
 /// CRITICAL: The Context must remain alive for the lifetime of the program,
 /// as dropping it may invalidate the Synapse runtime state.
 fn ensure_synapse_initialized() -> Result<()> {
-    static SYNAPSE_CONTEXT: OnceLock<std::result::Result<synapse::Context, String>> = OnceLock::new();
+    static SYNAPSE_CONTEXT: OnceLock<std::result::Result<synapse::Context, String>> =
+        OnceLock::new();
 
     // Use get_or_init to ensure Context::new() is called exactly once with single-flight semantics
-    match SYNAPSE_CONTEXT.get_or_init(|| {
-        match synapse::Context::new() {
-            Ok(ctx) => {
-                eprintln!("[HPU] ✓ Synapse runtime initialized successfully");
-                Ok(ctx)
-            }
-            Err(e) => {
-                eprintln!("[HPU] ✗ Synapse runtime initialization FAILED: {}", e);
-                Err(e.to_string())
-            }
+    match SYNAPSE_CONTEXT.get_or_init(|| match synapse::Context::new() {
+        Ok(ctx) => {
+            eprintln!("[HPU] ✓ Synapse runtime initialized successfully");
+            Ok(ctx)
+        }
+        Err(e) => {
+            eprintln!("[HPU] ✗ Synapse runtime initialization FAILED: {}", e);
+            Err(e.to_string())
         }
     }) {
-        Ok(_ctx) => Ok(()),  // Context is stored in OnceLock and kept alive for program lifetime
+        Ok(_ctx) => Ok(()), // Context is stored in OnceLock and kept alive for program lifetime
         Err(err) => Err(anyhow::anyhow!("Synapse initialization failed: {}", err)),
     }
 }
@@ -52,7 +51,10 @@ fn get_or_acquire_device(device_id: u32) -> Result<Device> {
 
     // Check if device is already acquired and cached
     if cache.contains_key(&device_id) {
-        eprintln!("[HPU] Device {} already in cache, returning unowned ref", device_id);
+        eprintln!(
+            "[HPU] Device {} already in cache, returning unowned ref",
+            device_id
+        );
         // Return unowned reference - the cache holds the owned device
         return Ok(Device::from_id_unowned(device_id));
     }
@@ -83,8 +85,13 @@ fn get_or_acquire_device(device_id: u32) -> Result<Device> {
         Device::from_id_unowned(device_id)
     } else {
         // For non-zero device IDs, try acquire_by_module_id
-        let dev = Device::acquire_by_module_id(device_id)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire HPU device {} by module_id: {}", device_id, e))?;
+        let dev = Device::acquire_by_module_id(device_id).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to acquire HPU device {} by module_id: {}",
+                device_id,
+                e
+            )
+        })?;
 
         let actual_id = dev.id();
         if actual_id != device_id {
@@ -114,10 +121,7 @@ impl HpuContext {
     pub fn new(device_id: u32) -> Result<Self> {
         let device = get_or_acquire_device(device_id)?;
 
-        Ok(Self {
-            device,
-            device_id,
-        })
+        Ok(Self { device, device_id })
     }
 
     /// Create from an existing Device (for compatibility with existing code)
@@ -137,8 +141,7 @@ impl DeviceContextOps for HpuContext {
     }
 
     fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
-        let stream = Stream::new(&self.device)
-            .context("Failed to create HPU stream")?;
+        let stream = Stream::new(&self.device).context("Failed to create HPU stream")?;
 
         Ok(Box::new(HpuStreamWrapper {
             stream: Arc::new(stream),
@@ -152,8 +155,8 @@ impl DeviceContextOps for HpuContext {
             synapse_sys::runtime::synDeviceMalloc(
                 self.device_id,
                 size as u64,
-                0,  // reqAddr (0 = no preference)
-                0,  // flags
+                0, // reqAddr (0 = no preference)
+                0, // flags
                 &mut addr as *mut _,
             )
         };
@@ -170,7 +173,7 @@ impl DeviceContextOps for HpuContext {
             synapse_sys::runtime::synDeviceFree(
                 self.device_id,
                 ptr,
-                0,  // flags
+                0, // flags
             )
         };
 
@@ -187,7 +190,7 @@ impl DeviceContextOps for HpuContext {
             synapse_sys::runtime::synHostMalloc(
                 self.device_id,
                 size as u64,
-                0,  // flags (no write-combined support in current Synapse)
+                0, // flags (no write-combined support in current Synapse)
                 &mut raw as *mut _,
             )
         };
@@ -204,7 +207,7 @@ impl DeviceContextOps for HpuContext {
             synapse_sys::runtime::synHostFree(
                 self.device_id,
                 ptr as *const std::ffi::c_void,
-                0,  // flags
+                0, // flags
             )
         };
 
@@ -229,7 +232,7 @@ impl DeviceContextOps for HpuContext {
 /// HPU stream wrapper
 struct HpuStreamWrapper {
     stream: Arc<Stream>,
-    device_id: u32,  // Stored for creating events
+    device_id: u32, // Stored for creating events
 }
 
 impl std::fmt::Debug for HpuStreamWrapper {
@@ -245,7 +248,7 @@ impl DeviceStreamOps for HpuStreamWrapper {
     fn copy_h2d(&self, dst_device_ptr: u64, src_host_data: &[u8]) -> Result<()> {
         let src_view = HostBufferView::from_raw_parts(
             src_host_data.as_ptr() as usize as u64,
-            src_host_data.len()
+            src_host_data.len(),
         );
         let dst_view = DeviceBufferView::from_raw_parts(dst_device_ptr, src_host_data.len());
 
@@ -259,7 +262,7 @@ impl DeviceStreamOps for HpuStreamWrapper {
         let src_view = DeviceBufferView::from_raw_parts(src_device_ptr, dst_host_data.len());
         let dst_view = HostBufferView::from_raw_parts(
             dst_host_data.as_mut_ptr() as usize as u64,
-            dst_host_data.len()
+            dst_host_data.len(),
         );
 
         synapse::copy_device_to_host_view(&self.stream, &src_view, &dst_view)
@@ -283,23 +286,24 @@ impl DeviceStreamOps for HpuStreamWrapper {
         let device = Device::from_id_unowned(self.device_id);
 
         // Create and record event (each record_event creates a new event, matching CUDA pattern)
-        let event = Event::new(&device)
-            .context("Failed to create HPU event")?;
-        event.record(&self.stream)
+        let event = Event::new(&device).context("Failed to create HPU event")?;
+        event
+            .record(&self.stream)
             .context("Failed to record HPU event")?;
 
         Ok(Box::new(HpuEventWrapper { event }))
     }
 
     fn synchronize(&self) -> Result<()> {
-        self.stream.synchronize()
+        self.stream
+            .synchronize()
             .context("HPU stream synchronization failed")?;
         Ok(())
     }
 
     fn raw_handle(&self) -> Option<u64> {
         // Return the raw stream handle pointer
-        None  // Stream handle is opaque and not directly exposable
+        None // Stream handle is opaque and not directly exposable
     }
 }
 
@@ -323,12 +327,12 @@ impl std::fmt::Debug for HpuEventWrapper {
 
 impl DeviceEventOps for HpuEventWrapper {
     fn is_complete(&self) -> Result<bool> {
-        self.event.query()
-            .context("HPU event query failed")
+        self.event.query().context("HPU event query failed")
     }
 
     fn synchronize(&self) -> Result<()> {
-        self.event.synchronize()
+        self.event
+            .synchronize()
             .context("HPU event synchronization failed")?;
         Ok(())
     }
@@ -427,26 +431,36 @@ mod tests {
 
         // Allocate device memory
         let size = 1024;
-        let dev_ptr = ctx.allocate_device(size).expect("Failed to allocate device memory");
+        let dev_ptr = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory");
 
         // Prepare host data
         let host_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let mut host_result = vec![0u8; size];
 
         // Copy H2D
-        stream.copy_h2d(dev_ptr, &host_data).expect("H2D copy failed");
+        stream
+            .copy_h2d(dev_ptr, &host_data)
+            .expect("H2D copy failed");
 
         // Copy D2H
-        stream.copy_d2h(&mut host_result, dev_ptr).expect("D2H copy failed");
+        stream
+            .copy_d2h(&mut host_result, dev_ptr)
+            .expect("D2H copy failed");
 
         // Synchronize
         stream.synchronize().expect("Failed to synchronize");
 
         // Verify data
-        assert_eq!(host_data, host_result, "Data mismatch after H2D->D2H roundtrip");
+        assert_eq!(
+            host_data, host_result,
+            "Data mismatch after H2D->D2H roundtrip"
+        );
 
         // Cleanup
-        ctx.free_device(dev_ptr).expect("Failed to free device memory");
+        ctx.free_device(dev_ptr)
+            .expect("Failed to free device memory");
     }
 
     #[test]
@@ -461,21 +475,31 @@ mod tests {
         let stream = ctx.create_stream().expect("Failed to create stream");
 
         let size = 1024;
-        let dev_ptr1 = ctx.allocate_device(size).expect("Failed to allocate device memory 1");
-        let dev_ptr2 = ctx.allocate_device(size).expect("Failed to allocate device memory 2");
+        let dev_ptr1 = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory 1");
+        let dev_ptr2 = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory 2");
 
         // Prepare host data
         let host_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let mut host_result = vec![0u8; size];
 
         // Copy H2D to first buffer
-        stream.copy_h2d(dev_ptr1, &host_data).expect("H2D copy failed");
+        stream
+            .copy_h2d(dev_ptr1, &host_data)
+            .expect("H2D copy failed");
 
         // Copy D2D
-        stream.copy_d2d(dev_ptr2, dev_ptr1, size).expect("D2D copy failed");
+        stream
+            .copy_d2d(dev_ptr2, dev_ptr1, size)
+            .expect("D2D copy failed");
 
         // Copy D2H from second buffer
-        stream.copy_d2h(&mut host_result, dev_ptr2).expect("D2H copy failed");
+        stream
+            .copy_d2h(&mut host_result, dev_ptr2)
+            .expect("D2H copy failed");
 
         // Synchronize
         stream.synchronize().expect("Failed to synchronize");
@@ -484,8 +508,10 @@ mod tests {
         assert_eq!(host_data, host_result, "Data mismatch after H2D->D2D->D2H");
 
         // Cleanup
-        ctx.free_device(dev_ptr1).expect("Failed to free device memory 1");
-        ctx.free_device(dev_ptr2).expect("Failed to free device memory 2");
+        ctx.free_device(dev_ptr1)
+            .expect("Failed to free device memory 1");
+        ctx.free_device(dev_ptr2)
+            .expect("Failed to free device memory 2");
     }
 
     #[test]
@@ -499,7 +525,9 @@ mod tests {
         let ctx = HpuContext::new(0).expect("Failed to create HPU context");
 
         let size = 4096;
-        let pinned_ptr = ctx.allocate_pinned(size).expect("Failed to allocate pinned memory");
+        let pinned_ptr = ctx
+            .allocate_pinned(size)
+            .expect("Failed to allocate pinned memory");
 
         // Verify we can write to it
         unsafe {
@@ -508,6 +536,7 @@ mod tests {
             assert_eq!(slice[0], 42);
         }
 
-        ctx.free_pinned(pinned_ptr).expect("Failed to free pinned memory");
+        ctx.free_pinned(pinned_ptr)
+            .expect("Failed to free pinned memory");
     }
 }

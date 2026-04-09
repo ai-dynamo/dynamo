@@ -31,8 +31,8 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::block_manager::v2::memory::{DeviceStorage, PinnedStorage};
 use crate::block_manager::v2::device::{DeviceBackend, DeviceContext};
+use crate::block_manager::v2::memory::{DeviceStorage, PinnedStorage};
 
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
 
@@ -61,7 +61,9 @@ enum AllocationKind {
         device_backend: DeviceBackend,
         device_id: u32,
     },
-    Disk { path: Option<PathBuf> },
+    Disk {
+        path: Option<PathBuf>,
+    },
 }
 
 /// Memory provisioning plan (either provided regions or an allocation request).
@@ -202,7 +204,8 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
 impl<L, M> PhysicalLayoutBuilder<NoConfig, L, M> {
     /// Attach the [`LayoutConfig`] required to size the layout and allocations.
     pub fn with_config(self, config: LayoutConfig) -> PhysicalLayoutBuilder<HasConfig, L, M> {
-        let (agent, _config, layout_kind, memory_plan, device_backend, device_id) = self.into_parts();
+        let (agent, _config, layout_kind, memory_plan, device_backend, device_id) =
+            self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, L, M>::from_parts(
             agent,
             Some(config),
@@ -371,7 +374,8 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
 impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
     /// Finalize the builder, constructing the [`PhysicalLayout`].
     pub fn build(self) -> Result<PhysicalLayout> {
-        let (agent, config, layout_kind, memory_plan, device_backend, device_id) = self.into_parts();
+        let (agent, config, layout_kind, memory_plan, device_backend, device_id) =
+            self.into_parts();
 
         let config = config.ok_or_else(|| anyhow!("layout config missing despite type state"))?;
         let layout_kind =
@@ -380,7 +384,13 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
             memory_plan.ok_or_else(|| anyhow!("memory plan missing despite type state"))?;
 
         let required_sizes = compute_allocation_sizes(&config, &layout_kind)?;
-        let entries = resolve_memory_plan(&agent, memory_plan, &required_sizes, device_backend, device_id)?;
+        let entries = resolve_memory_plan(
+            &agent,
+            memory_plan,
+            &required_sizes,
+            device_backend,
+            device_id,
+        )?;
 
         validate_memory_sizes(&entries, &required_sizes)?;
         let kind = derive_storage_kind(&entries)?;
@@ -460,13 +470,16 @@ fn allocate_regions(
 
     let base_entry = match strategy {
         AllocationKind::System => allocate_system_entry(reserve_size, agent)?,
-        AllocationKind::Pinned { numa_aware, device_backend, device_id } => {
-            allocate_pinned_entry(reserve_size, agent, numa_aware, device_backend, device_id)?
-        }
+        AllocationKind::Pinned {
+            numa_aware,
+            device_backend,
+            device_id,
+        } => allocate_pinned_entry(reserve_size, agent, numa_aware, device_backend, device_id)?,
 
-        AllocationKind::Device { device_backend, device_id } => {
-            allocate_device_entry(reserve_size, agent, device_backend, device_id)?
-        }
+        AllocationKind::Device {
+            device_backend,
+            device_id,
+        } => allocate_device_entry(reserve_size, agent, device_backend, device_id)?,
         AllocationKind::Disk { path } => allocate_disk_entry(reserve_size, agent, path)?,
     };
 
@@ -486,9 +499,10 @@ fn allocate_pinned_entry(
     device_backend: DeviceBackend,
     device_id: u32,
 ) -> Result<MemoryEntry> {
-    let ctx = Arc::new(DeviceContext::new(device_backend, device_id).map_err(|e| {
-        anyhow!("failed to create device context for pinned allocation: {e}")
-    })?);
+    let ctx = Arc::new(
+        DeviceContext::new(device_backend, device_id)
+            .map_err(|e| anyhow!("failed to create device context for pinned allocation: {e}"))?,
+    );
     let storage = PinnedStorage::new(size, ctx)
         .map_err(|e| anyhow!("failed to allocate pinned memory ({size} bytes): {e}"))?;
     register_storage(storage, agent)
@@ -500,9 +514,10 @@ fn allocate_device_entry(
     device_backend: DeviceBackend,
     device_id: u32,
 ) -> Result<MemoryEntry> {
-    let ctx = Arc::new(DeviceContext::new(device_backend, device_id).map_err(|e| {
-        anyhow!("failed to create device context for device allocation: {e}")
-    })?);
+    let ctx = Arc::new(
+        DeviceContext::new(device_backend, device_id)
+            .map_err(|e| anyhow!("failed to create device context for device allocation: {e}"))?,
+    );
     let storage = DeviceStorage::new(size, ctx).map_err(|e| {
         anyhow!("failed to allocate device memory ({size} bytes) on device {device_id}: {e}")
     })?;

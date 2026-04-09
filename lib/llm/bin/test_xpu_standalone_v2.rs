@@ -81,7 +81,8 @@ fn main() -> Result<()> {
         eprintln!("  All {} bytes match after H2D->D2H roundtrip\n", size);
     } else {
         eprintln!("✗ Data verification FAILED");
-        let mismatches: usize = test_data.iter()
+        let mismatches: usize = test_data
+            .iter()
             .zip(result_data.iter())
             .filter(|(a, b)| a != b)
             .count();

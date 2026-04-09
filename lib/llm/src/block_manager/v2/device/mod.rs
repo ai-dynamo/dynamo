@@ -6,15 +6,15 @@
 //! This module provides a unified interface for different hardware backends
 //! (CUDA, Level-Zero, Synapse) using the Static Enum + Trait Objects pattern.
 
-pub mod traits;
 pub mod detection;
+pub mod traits;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-#[cfg(feature = "xpu")]
-pub mod ze;
 #[cfg(feature = "hpu")]
 pub mod hpu;
+#[cfg(feature = "xpu")]
+pub mod ze;
 
 #[cfg(all(test, feature = "hpu"))]
 mod test_hpu_minimal;
@@ -23,7 +23,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps};
+pub use traits::{DeviceContextOps, DeviceEventOps, DeviceStreamOps};
 
 /// Device backend type selector
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,21 +52,33 @@ impl DeviceBackend {
         match self {
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
-                { cuda::is_available() }
+                {
+                    cuda::is_available()
+                }
                 #[cfg(not(feature = "cuda"))]
-                { false }
+                {
+                    false
+                }
             }
             Self::Ze => {
                 #[cfg(feature = "xpu")]
-                { ze::is_available() }
+                {
+                    ze::is_available()
+                }
                 #[cfg(not(feature = "xpu"))]
-                { false }
+                {
+                    false
+                }
             }
             Self::Hpu => {
                 #[cfg(feature = "hpu")]
-                { hpu::is_available() }
+                {
+                    hpu::is_available()
+                }
                 #[cfg(not(feature = "hpu"))]
-                { false }
+                {
+                    false
+                }
             }
         }
     }
@@ -98,21 +110,33 @@ impl DeviceContext {
         let ops: Box<dyn DeviceContextOps> = match backend {
             DeviceBackend::Cuda => {
                 #[cfg(feature = "cuda")]
-                { Box::new(cuda::CudaContext::new(device_id)?) }
+                {
+                    Box::new(cuda::CudaContext::new(device_id)?)
+                }
                 #[cfg(not(feature = "cuda"))]
-                { bail!("CUDA backend not compiled (enable 'cuda' feature)") }
+                {
+                    bail!("CUDA backend not compiled (enable 'cuda' feature)")
+                }
             }
             DeviceBackend::Ze => {
                 #[cfg(feature = "xpu")]
-                { Box::new(ze::ZeContext::new(device_id)?) }
+                {
+                    Box::new(ze::ZeContext::new(device_id)?)
+                }
                 #[cfg(not(feature = "xpu"))]
-                { bail!("Level-Zero backend not compiled (enable 'xpu' feature)") }
+                {
+                    bail!("Level-Zero backend not compiled (enable 'xpu' feature)")
+                }
             }
             DeviceBackend::Hpu => {
                 #[cfg(feature = "hpu")]
-                { Box::new(hpu::HpuContext::new(device_id)?) }
+                {
+                    Box::new(hpu::HpuContext::new(device_id)?)
+                }
                 #[cfg(not(feature = "hpu"))]
-                { bail!("Synapse backend not compiled (enable 'hpu' feature)") }
+                {
+                    bail!("Synapse backend not compiled (enable 'hpu' feature)")
+                }
             }
         };
 

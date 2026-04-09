@@ -168,9 +168,7 @@ pub fn execute_device_transfer(
     // For async transfers, record an event and register it for completion tracking
     if matches!(
         strategy,
-        TransferStrategy::AsyncH2D
-            | TransferStrategy::AsyncD2H
-            | TransferStrategy::AsyncD2D
+        TransferStrategy::AsyncH2D | TransferStrategy::AsyncD2H | TransferStrategy::AsyncD2D
     ) {
         let event = device_stream.record_event()?;
         Ok(ctx.register_device_event(event))

@@ -6,7 +6,7 @@
 //! Unlike `dynamo-memory::PinnedStorage` which is CUDA-only, this implementation
 //! supports multiple backends (CUDA, HPU, XPU) via the v2 device abstraction layer.
 
-use super::{MemoryRegion, Result, StorageError, StorageKind, NixlDescriptor, NixlCompatible};
+use super::{MemoryRegion, NixlCompatible, NixlDescriptor, Result, StorageError, StorageKind};
 use crate::block_manager::v2::device::DeviceContext;
 use std::any::Any;
 use std::sync::Arc;

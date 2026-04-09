@@ -8,28 +8,29 @@
 use crate::block_manager::v2::device::traits::*;
 use anyhow::Result;
 use level_zero::{self as ze, ZE_EVENT_SCOPE_FLAG_HOST};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global initialization state for Level-Zero runtime
 fn ensure_ze_initialized() -> Result<()> {
     static INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
     // Use get_or_init to ensure ze::init() is called exactly once
-    match INIT_RESULT.get_or_init(|| {
-        match ze::init() {
-            Ok(()) => {
-                eprintln!("[XPU] ✓ Level-Zero runtime initialized successfully");
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("[XPU] ✗ Level-Zero runtime initialization FAILED: {:?}", e);
-                Err(format!("{:?}", e))
-            }
+    match INIT_RESULT.get_or_init(|| match ze::init() {
+        Ok(()) => {
+            eprintln!("[XPU] ✓ Level-Zero runtime initialized successfully");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[XPU] ✗ Level-Zero runtime initialization FAILED: {:?}", e);
+            Err(format!("{:?}", e))
         }
     }) {
         Ok(()) => Ok(()),
-        Err(err) => Err(anyhow::anyhow!("Failed to initialize Level-Zero runtime: {}", err)),
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to initialize Level-Zero runtime: {}",
+            err
+        )),
     }
 }
 
@@ -77,16 +78,19 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
     eprintln!("[XPU] Creating new context for device {}", device_id);
 
     // Get driver and devices
-    let drivers = ze::drivers()
-        .map_err(|e| anyhow::anyhow!("Failed to get Level-Zero drivers: {:?}", e))?;
+    let drivers =
+        ze::drivers().map_err(|e| anyhow::anyhow!("Failed to get Level-Zero drivers: {:?}", e))?;
 
-    let driver = drivers.get(0)
+    let driver = drivers
+        .get(0)
         .ok_or_else(|| anyhow::anyhow!("No Level-Zero drivers found"))?;
 
-    let devices = driver.devices()
+    let devices = driver
+        .devices()
         .map_err(|e| anyhow::anyhow!("Failed to enumerate devices: {:?}", e))?;
 
-    let device = devices.get(device_id as usize)
+    let device = devices
+        .get(device_id as usize)
         .ok_or_else(|| anyhow::anyhow!("Device {} not found", device_id))?;
 
     // Create context
@@ -94,7 +98,8 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
         .map_err(|e| anyhow::anyhow!("Failed to create Level-Zero context: {:?}", e))?;
 
     // Create event pool with 1024 events (similar to common CUDA patterns)
-    let event_pool = context.create_event_pool(&[device.clone()], 1024, ZE_EVENT_SCOPE_FLAG_HOST)
+    let event_pool = context
+        .create_event_pool(&[device.clone()], 1024, ZE_EVENT_SCOPE_FLAG_HOST)
         .map_err(|e| anyhow::anyhow!("Failed to create event pool: {:?}", e))?;
 
     let cache_entry = Arc::new(DeviceContextCache {
@@ -125,10 +130,7 @@ impl ZeContext {
     pub fn new(device_id: u32) -> Result<Self> {
         let cache = get_or_create_ze_context(device_id)?;
 
-        Ok(Self {
-            device_id,
-            cache,
-        })
+        Ok(Self { device_id, cache })
     }
 
     /// Get the underlying Level-Zero context
@@ -149,7 +151,10 @@ impl DeviceContextOps for ZeContext {
 
     fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
         // Use immediate command list for stream-like behavior
-        let cmd_list = self.cache.context.create_immediate_command_list(&self.cache.device.clone())
+        let cmd_list = self
+            .cache
+            .context
+            .create_immediate_command_list(&self.cache.device.clone())
             .map_err(|e| anyhow::anyhow!("Failed to create immediate command list: {:?}", e))?;
 
         Ok(Box::new(ZeStreamWrapper {
@@ -160,7 +165,10 @@ impl DeviceContextOps for ZeContext {
     }
 
     fn allocate_device(&self, size: usize) -> Result<u64> {
-        let buffer = self.cache.context.alloc_device(&self.cache.device.clone(), size, 1)
+        let buffer = self
+            .cache
+            .context
+            .alloc_device(&self.cache.device.clone(), size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero device allocation failed: {:?}", e))?;
 
         // Get pointer before moving buffer
@@ -178,7 +186,10 @@ impl DeviceContextOps for ZeContext {
     }
 
     fn allocate_pinned(&self, size: usize) -> Result<u64> {
-        let buffer = self.cache.context.alloc_host(size, 1)
+        let buffer = self
+            .cache
+            .context
+            .alloc_host(size, 1)
             .map_err(|e| anyhow::anyhow!("Level-Zero host allocation failed: {:?}", e))?;
 
         // Get pointer before moving buffer
@@ -207,7 +218,10 @@ impl DeviceContextOps for ZeContext {
 
 /// Wrapper for ze::DeviceBuffer to add Send+Sync
 /// Fields kept alive for RAII - prevents premature deallocation
-struct SendSyncDeviceBuffer(#[allow(dead_code)] ze::DeviceBuffer, #[allow(dead_code)] Arc<ze::Context>);
+struct SendSyncDeviceBuffer(
+    #[allow(dead_code)] ze::DeviceBuffer,
+    #[allow(dead_code)] Arc<ze::Context>,
+);
 unsafe impl Send for SendSyncDeviceBuffer {}
 unsafe impl Sync for SendSyncDeviceBuffer {}
 
@@ -231,7 +245,10 @@ fn remove_device_buffer(ptr: u64) {
 
 /// Wrapper for ze::HostBuffer to add Send+Sync
 /// Fields kept alive for RAII - prevents premature deallocation
-struct SendSyncHostBuffer(#[allow(dead_code)] ze::HostBuffer, #[allow(dead_code)] Arc<ze::Context>);
+struct SendSyncHostBuffer(
+    #[allow(dead_code)] ze::HostBuffer,
+    #[allow(dead_code)] Arc<ze::Context>,
+);
 unsafe impl Send for SendSyncHostBuffer {}
 unsafe impl Sync for SendSyncHostBuffer {}
 
@@ -274,34 +291,37 @@ impl std::fmt::Debug for ZeStreamWrapper {
 
 impl DeviceStreamOps for ZeStreamWrapper {
     fn copy_h2d(&self, dst_device_ptr: u64, src_host_data: &[u8]) -> Result<()> {
-        self.cmd_list.append_memcpy(
-            dst_device_ptr as *mut std::ffi::c_void,
-            src_host_data.as_ptr() as *const std::ffi::c_void,
-            src_host_data.len()
-        )
-        .map_err(|e| anyhow::anyhow!("XPU H2D copy failed: {:?}", e))?;
+        self.cmd_list
+            .append_memcpy(
+                dst_device_ptr as *mut std::ffi::c_void,
+                src_host_data.as_ptr() as *const std::ffi::c_void,
+                src_host_data.len(),
+            )
+            .map_err(|e| anyhow::anyhow!("XPU H2D copy failed: {:?}", e))?;
 
         Ok(())
     }
 
     fn copy_d2h(&self, dst_host_data: &mut [u8], src_device_ptr: u64) -> Result<()> {
-        self.cmd_list.append_memcpy(
-            dst_host_data.as_mut_ptr() as *mut std::ffi::c_void,
-            src_device_ptr as *const std::ffi::c_void,
-            dst_host_data.len()
-        )
-        .map_err(|e| anyhow::anyhow!("XPU D2H copy failed: {:?}", e))?;
+        self.cmd_list
+            .append_memcpy(
+                dst_host_data.as_mut_ptr() as *mut std::ffi::c_void,
+                src_device_ptr as *const std::ffi::c_void,
+                dst_host_data.len(),
+            )
+            .map_err(|e| anyhow::anyhow!("XPU D2H copy failed: {:?}", e))?;
 
         Ok(())
     }
 
     fn copy_d2d(&self, dst_device_ptr: u64, src_device_ptr: u64, size: usize) -> Result<()> {
-        self.cmd_list.append_memcpy(
-            dst_device_ptr as *mut std::ffi::c_void,
-            src_device_ptr as *const std::ffi::c_void,
-            size
-        )
-        .map_err(|e| anyhow::anyhow!("XPU D2D copy failed: {:?}", e))?;
+        self.cmd_list
+            .append_memcpy(
+                dst_device_ptr as *mut std::ffi::c_void,
+                src_device_ptr as *const std::ffi::c_void,
+                size,
+            )
+            .map_err(|e| anyhow::anyhow!("XPU D2D copy failed: {:?}", e))?;
 
         Ok(())
     }
@@ -309,31 +329,38 @@ impl DeviceStreamOps for ZeStreamWrapper {
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
         // Use a single global counter to allocate event indices across all streams
         // This prevents collisions when multiple streams share the same event pool
-        static GLOBAL_EVENT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static GLOBAL_EVENT_COUNTER: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
 
         // Allocate a new event index from the pool (wraps at 1024)
-        let event_idx = GLOBAL_EVENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 1024;
+        let event_idx =
+            GLOBAL_EVENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 1024;
 
-        let event = self.event_pool.create_event(
-            event_idx,
-            ZE_EVENT_SCOPE_FLAG_HOST,
-            ZE_EVENT_SCOPE_FLAG_HOST
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create event: {:?}", e))?;
+        let event = self
+            .event_pool
+            .create_event(
+                event_idx,
+                ZE_EVENT_SCOPE_FLAG_HOST,
+                ZE_EVENT_SCOPE_FLAG_HOST,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create event: {:?}", e))?;
 
         // Reset event first to ensure it's in a clean state
-        event.host_reset()
+        event
+            .host_reset()
             .map_err(|e| anyhow::anyhow!("Failed to reset event: {:?}", e))?;
 
         // Signal the event on the command list
-        self.cmd_list.append_signal_event(&event)
+        self.cmd_list
+            .append_signal_event(&event)
             .map_err(|e| anyhow::anyhow!("Failed to signal event: {:?}", e))?;
 
         Ok(Box::new(ZeEventWrapper { event }))
     }
 
     fn synchronize(&self) -> Result<()> {
-        self.cmd_list.host_synchronize(u64::MAX)
+        self.cmd_list
+            .host_synchronize(u64::MAX)
             .map_err(|e| anyhow::anyhow!("XPU stream synchronization failed: {:?}", e))?;
         Ok(())
     }
@@ -362,12 +389,14 @@ impl std::fmt::Debug for ZeEventWrapper {
 
 impl DeviceEventOps for ZeEventWrapper {
     fn is_complete(&self) -> Result<bool> {
-        self.event.is_signaled()
+        self.event
+            .is_signaled()
             .map_err(|e| anyhow::anyhow!("XPU event query failed: {:?}", e))
     }
 
     fn synchronize(&self) -> Result<()> {
-        self.event.host_synchronize(u64::MAX)
+        self.event
+            .host_synchronize(u64::MAX)
             .map_err(|e| anyhow::anyhow!("XPU event synchronization failed: {:?}", e))?;
         Ok(())
     }
@@ -469,26 +498,36 @@ mod tests {
 
         // Allocate device memory
         let size = 1024;
-        let dev_ptr = ctx.allocate_device(size).expect("Failed to allocate device memory");
+        let dev_ptr = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory");
 
         // Prepare host data
         let host_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let mut host_result = vec![0u8; size];
 
         // Copy H2D
-        stream.copy_h2d(dev_ptr, &host_data).expect("H2D copy failed");
+        stream
+            .copy_h2d(dev_ptr, &host_data)
+            .expect("H2D copy failed");
 
         // Copy D2H
-        stream.copy_d2h(&mut host_result, dev_ptr).expect("D2H copy failed");
+        stream
+            .copy_d2h(&mut host_result, dev_ptr)
+            .expect("D2H copy failed");
 
         // Synchronize
         stream.synchronize().expect("Failed to synchronize");
 
         // Verify data
-        assert_eq!(host_data, host_result, "Data mismatch after H2D->D2H roundtrip");
+        assert_eq!(
+            host_data, host_result,
+            "Data mismatch after H2D->D2H roundtrip"
+        );
 
         // Cleanup
-        ctx.free_device(dev_ptr).expect("Failed to free device memory");
+        ctx.free_device(dev_ptr)
+            .expect("Failed to free device memory");
     }
 
     #[test]
@@ -503,21 +542,31 @@ mod tests {
         let stream = ctx.create_stream().expect("Failed to create stream");
 
         let size = 1024;
-        let dev_ptr1 = ctx.allocate_device(size).expect("Failed to allocate device memory 1");
-        let dev_ptr2 = ctx.allocate_device(size).expect("Failed to allocate device memory 2");
+        let dev_ptr1 = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory 1");
+        let dev_ptr2 = ctx
+            .allocate_device(size)
+            .expect("Failed to allocate device memory 2");
 
         // Prepare host data
         let host_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let mut host_result = vec![0u8; size];
 
         // Copy H2D to first buffer
-        stream.copy_h2d(dev_ptr1, &host_data).expect("H2D copy failed");
+        stream
+            .copy_h2d(dev_ptr1, &host_data)
+            .expect("H2D copy failed");
 
         // Copy D2D
-        stream.copy_d2d(dev_ptr2, dev_ptr1, size).expect("D2D copy failed");
+        stream
+            .copy_d2d(dev_ptr2, dev_ptr1, size)
+            .expect("D2D copy failed");
 
         // Copy D2H from second buffer
-        stream.copy_d2h(&mut host_result, dev_ptr2).expect("D2H copy failed");
+        stream
+            .copy_d2h(&mut host_result, dev_ptr2)
+            .expect("D2H copy failed");
 
         // Synchronize
         stream.synchronize().expect("Failed to synchronize");
@@ -526,8 +575,10 @@ mod tests {
         assert_eq!(host_data, host_result, "Data mismatch after H2D->D2D->D2H");
 
         // Cleanup
-        ctx.free_device(dev_ptr1).expect("Failed to free device memory 1");
-        ctx.free_device(dev_ptr2).expect("Failed to free device memory 2");
+        ctx.free_device(dev_ptr1)
+            .expect("Failed to free device memory 1");
+        ctx.free_device(dev_ptr2)
+            .expect("Failed to free device memory 2");
     }
 
     #[test]
@@ -541,7 +592,9 @@ mod tests {
         let ctx = ZeContext::new(0).expect("Failed to create XPU context");
 
         let size = 4096;
-        let pinned_ptr = ctx.allocate_pinned(size).expect("Failed to allocate pinned memory");
+        let pinned_ptr = ctx
+            .allocate_pinned(size)
+            .expect("Failed to allocate pinned memory");
 
         // Verify we can write to it
         unsafe {
@@ -550,6 +603,7 @@ mod tests {
             assert_eq!(slice[0], 42);
         }
 
-        ctx.free_pinned(pinned_ptr).expect("Failed to free pinned memory");
+        ctx.free_pinned(pinned_ptr)
+            .expect("Failed to free pinned memory");
     }
 }

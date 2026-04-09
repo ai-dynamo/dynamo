@@ -69,17 +69,16 @@ impl Deref for LocalLayout {
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
+    use crate::block_manager::v2::device::DeviceBackend;
     use crate::block_manager::v2::physical::layout::{LayoutConfig, PhysicalLayout};
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
-    use crate::block_manager::v2::device::DeviceBackend;
 
     fn create_test_agent(name: &str) -> NixlAgent {
         NixlAgent::require_backends(name, &[]).expect("failed to create wrapped agent")
     }
 
     fn get_test_backend() -> (DeviceBackend, u32) {
-        let backend = DeviceBackend::auto_detect()
-            .expect("No device backend available for test");
+        let backend = DeviceBackend::auto_detect().expect("No device backend available for test");
         (backend, 0)
     }
 

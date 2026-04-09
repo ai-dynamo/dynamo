@@ -73,7 +73,11 @@ impl PhysicalLayout {
     /// * `agent` - NIXL agent for memory registration
     /// * `device_backend` - Device backend (CUDA, HPU, XPU) for device/pinned allocations
     /// * `device_id` - Device ID for device/pinned allocations
-    pub fn builder(agent: NixlAgent, device_backend: DeviceBackend, device_id: u32) -> PhysicalLayoutBuilderDefault {
+    pub fn builder(
+        agent: NixlAgent,
+        device_backend: DeviceBackend,
+        device_id: u32,
+    ) -> PhysicalLayoutBuilderDefault {
         PhysicalLayoutBuilder::new(agent, device_backend, device_id)
     }
 

@@ -7,20 +7,19 @@
 //! ensuring that layouts can be transmitted to remote nodes and reconstructed
 //! with all necessary metadata intact.
 
+use crate::block_manager::v2::device::DeviceBackend;
 use crate::block_manager::v2::memory::{
     MemoryRegion, NixlDescriptor, OwnedMemoryRegion, StorageKind,
 };
 use crate::block_manager::v2::physical::layout::physical::PhysicalLayout;
 use crate::block_manager::v2::physical::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
-use crate::block_manager::v2::device::DeviceBackend;
 use std::any::Any;
 use std::sync::Arc;
 
 // Helper for tests: auto-detect backend or use CUDA as fallback
 fn get_test_backend() -> (DeviceBackend, u32) {
-    let backend = DeviceBackend::auto_detect()
-        .expect("No device backend available for test");
+    let backend = DeviceBackend::auto_detect().expect("No device backend available for test");
     (backend, 0)
 }
 

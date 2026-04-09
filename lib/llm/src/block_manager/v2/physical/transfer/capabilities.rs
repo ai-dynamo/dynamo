@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+use crate::block_manager::v2::device::DeviceBackend;
 use crate::block_manager::v2::physical::{
     layout::LayoutConfig,
     transfer::{
@@ -21,7 +22,6 @@ use crate::block_manager::v2::physical::{
         nixl_agent::NixlAgent,
     },
 };
-use crate::block_manager::v2::device::DeviceBackend;
 
 /// Transfer capability flags controlling which direct paths are enabled.
 ///
@@ -98,8 +98,8 @@ impl TransferCapabilities {
 
     fn test_gds_transfer(&self) -> anyhow::Result<()> {
         let agent = NixlAgent::require_backends("agent", &["GDS_MT"])?;
-        let device_backend = DeviceBackend::auto_detect()
-            .expect("No device backend available for test");
+        let device_backend =
+            DeviceBackend::auto_detect().expect("No device backend available for test");
         let device_id = 0;
 
         // Try a little test transfer and see if it works.

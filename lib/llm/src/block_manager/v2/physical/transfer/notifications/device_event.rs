@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 
-use crate::block_manager::v2::device::DeviceEvent;
 use super::CompletionChecker;
+use crate::block_manager::v2::device::DeviceEvent;
 
 /// Completion checker that polls device event status (supports CUDA, HPU, XPU).
 pub struct DeviceEventChecker {

@@ -6,8 +6,8 @@
 
 #[cfg(all(test, feature = "hpu"))]
 mod hpu_minimal_test {
-    use synapse::{Context, Device};
     use synapse::synapse_sys;
+    use synapse::{Context, Device};
 
     #[test]
     fn test_minimal_hpu_allocation() {
@@ -31,24 +31,31 @@ mod hpu_minimal_test {
             synapse_sys::runtime::synDeviceMalloc(
                 device.id(),
                 size,
-                0,  // reqAddr
-                0,  // flags
+                0, // reqAddr
+                0, // flags
                 &mut addr as *mut _,
             )
         };
 
-        assert_eq!(status, synapse_sys::synStatus_synSuccess,
-            "Device allocation failed with status: {:?} (decimal: {})", status, status);
+        assert_eq!(
+            status,
+            synapse_sys::synStatus_synSuccess,
+            "Device allocation failed with status: {:?} (decimal: {})",
+            status,
+            status
+        );
 
         println!("   ✓ Successfully allocated {} bytes at 0x{:x}", size, addr);
 
         // Free it
-        let free_status = unsafe {
-            synapse_sys::runtime::synDeviceFree(device.id(), addr, 0)
-        };
+        let free_status = unsafe { synapse_sys::runtime::synDeviceFree(device.id(), addr, 0) };
 
-        assert_eq!(free_status, synapse_sys::synStatus_synSuccess,
-            "Device free failed with status: {:?}", free_status);
+        assert_eq!(
+            free_status,
+            synapse_sys::synStatus_synSuccess,
+            "Device free failed with status: {:?}",
+            free_status
+        );
 
         println!("   ✓ Successfully freed memory");
         println!("=== ✅ All tests passed! ===\n");
@@ -69,13 +76,7 @@ mod hpu_minimal_test {
         let mut addr: u64 = 0;
         let size = 4096u64;
         let status = unsafe {
-            synapse_sys::runtime::synDeviceMalloc(
-                device.id(),
-                size,
-                0,
-                0,
-                &mut addr as *mut _,
-            )
+            synapse_sys::runtime::synDeviceMalloc(device.id(), size, 0, 0, &mut addr as *mut _)
         };
 
         if status == synapse_sys::synStatus_synSuccess {
@@ -84,7 +85,10 @@ mod hpu_minimal_test {
                 synapse_sys::runtime::synDeviceFree(device.id(), addr, 0);
             }
         } else {
-            println!("✗ Unowned device CANNOT allocate memory (status: {})", status);
+            println!(
+                "✗ Unowned device CANNOT allocate memory (status: {})",
+                status
+            );
             println!("This explains the benchmark failure!");
         }
     }

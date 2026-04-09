@@ -103,7 +103,10 @@ pub async fn main() -> Result<()> {
     match args.mode.to_lowercase().as_str() {
         "disk-device" => benchmark_disk(&args).await?,
         "host-device" => benchmark_memory(&args).await?,
-        _ => anyhow::bail!("Invalid mode: '{}'. Use 'disk-device' or 'host-device'", args.mode),
+        _ => anyhow::bail!(
+            "Invalid mode: '{}'. Use 'disk-device' or 'host-device'",
+            args.mode
+        ),
     }
 
     Ok(())
@@ -162,10 +165,7 @@ async fn benchmark_disk(args: &Args) -> Result<()> {
         }
         _ => {
             let available_backends = DeviceBackend::list_available();
-            let available_names: Vec<_> = available_backends
-                .iter()
-                .map(|b| b.name())
-                .collect();
+            let available_names: Vec<_> = available_backends.iter().map(|b| b.name()).collect();
             if available_names.is_empty() {
                 anyhow::bail!(
                     "Invalid backend: '{}'. No device backends are available on this system.",
@@ -308,10 +308,7 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
         }
         _ => {
             let available_backends = DeviceBackend::list_available();
-            let available_names: Vec<_> = available_backends
-                .iter()
-                .map(|b| b.name())
-                .collect();
+            let available_names: Vec<_> = available_backends.iter().map(|b| b.name()).collect();
             if available_names.is_empty() {
                 anyhow::bail!(
                     "Invalid backend: '{}'. No device backends are available on this system.",
@@ -330,7 +327,11 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
     println!("=== Memory Transfer Benchmark ===");
     println!("Backend: {}", device_backend.name());
     println!("Device ID: {}", args.device_id);
-    println!("Transfer size: {} bytes ({:.2} MB)", args.transfer_size, args.transfer_size as f64 / 1_048_576.0);
+    println!(
+        "Transfer size: {} bytes ({:.2} MB)",
+        args.transfer_size,
+        args.transfer_size as f64 / 1_048_576.0
+    );
     println!("Iterations: {}", args.iterations);
     println!();
 
@@ -344,16 +345,21 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
 
     // Allocate pinned host memory (for H2D source)
     let host_src_ptr = ctx.allocate_pinned(args.transfer_size)?;
-    println!("✓ Allocated pinned host memory (source): 0x{:x}", host_src_ptr);
+    println!(
+        "✓ Allocated pinned host memory (source): 0x{:x}",
+        host_src_ptr
+    );
 
     // Allocate pinned host memory (for D2H destination)
     let host_dst_ptr = ctx.allocate_pinned(args.transfer_size)?;
-    println!("✓ Allocated pinned host memory (destination): 0x{:x}", host_dst_ptr);
+    println!(
+        "✓ Allocated pinned host memory (destination): 0x{:x}",
+        host_dst_ptr
+    );
 
     // Initialize source host data with test pattern directly in pinned memory
-    let host_src_slice = unsafe {
-        std::slice::from_raw_parts_mut(host_src_ptr as *mut u8, args.transfer_size)
-    };
+    let host_src_slice =
+        unsafe { std::slice::from_raw_parts_mut(host_src_ptr as *mut u8, args.transfer_size) };
     for i in 0..args.transfer_size {
         host_src_slice[i] = (i % 256) as u8;
     }
@@ -366,9 +372,8 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
     for _ in (0..args.iterations).progress() {
         let start = Instant::now();
         // Create slice view from pinned host memory
-        let src_slice = unsafe {
-            std::slice::from_raw_parts(host_src_ptr as *const u8, args.transfer_size)
-        };
+        let src_slice =
+            unsafe { std::slice::from_raw_parts(host_src_ptr as *const u8, args.transfer_size) };
         stream.copy_h2d(dev_ptr, src_slice)?;
         stream.synchronize()?;
         let end = Instant::now();
@@ -377,7 +382,10 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
 
     let h2d_bandwidth = get_memory_bandwidth_gbs(&h2d_latencies, args.transfer_size);
     println!("host_to_device bandwidth: {:.2} GB/s", h2d_bandwidth);
-    println!("  Mean latency: {:.2} µs", get_mean_latency_us(&h2d_latencies));
+    println!(
+        "  Mean latency: {:.2} µs",
+        get_mean_latency_us(&h2d_latencies)
+    );
     println!();
 
     // Benchmark D2H (Device-to-Host) - using pinned host buffer
@@ -386,9 +394,8 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
     for _ in (0..args.iterations).progress() {
         let start = Instant::now();
         // Create mutable slice view from pinned host memory
-        let dst_slice = unsafe {
-            std::slice::from_raw_parts_mut(host_dst_ptr as *mut u8, args.transfer_size)
-        };
+        let dst_slice =
+            unsafe { std::slice::from_raw_parts_mut(host_dst_ptr as *mut u8, args.transfer_size) };
         stream.copy_d2h(dst_slice, dev_ptr)?;
         stream.synchronize()?;
         let end = Instant::now();
@@ -397,25 +404,30 @@ async fn benchmark_memory(args: &Args) -> Result<()> {
 
     let d2h_bandwidth = get_memory_bandwidth_gbs(&d2h_latencies, args.transfer_size);
     println!("device_to_host bandwidth: {:.2} GB/s", d2h_bandwidth);
-    println!("  Mean latency: {:.2} µs", get_mean_latency_us(&d2h_latencies));
+    println!(
+        "  Mean latency: {:.2} µs",
+        get_mean_latency_us(&d2h_latencies)
+    );
     println!();
 
     // Verify data integrity
     println!("Verifying data integrity...");
-    let src_slice = unsafe {
-        std::slice::from_raw_parts(host_src_ptr as *const u8, args.transfer_size)
-    };
-    let dst_slice = unsafe {
-        std::slice::from_raw_parts(host_dst_ptr as *const u8, args.transfer_size)
-    };
+    let src_slice =
+        unsafe { std::slice::from_raw_parts(host_src_ptr as *const u8, args.transfer_size) };
+    let dst_slice =
+        unsafe { std::slice::from_raw_parts(host_dst_ptr as *const u8, args.transfer_size) };
     if src_slice == dst_slice {
         println!("✓ Data verification PASSED");
     } else {
-        let mismatches: usize = src_slice.iter()
+        let mismatches: usize = src_slice
+            .iter()
             .zip(dst_slice.iter())
             .filter(|(a, b)| a != b)
             .count();
-        println!("✗ Data verification FAILED: {} / {} bytes mismatch", mismatches, args.transfer_size);
+        println!(
+            "✗ Data verification FAILED: {} / {} bytes mismatch",
+            mismatches, args.transfer_size
+        );
         anyhow::bail!("Data integrity check failed");
     }
 

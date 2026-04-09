@@ -257,7 +257,8 @@ impl TransportManager {
         );
 
         unsafe {
-            let trait_ptr = &*stream.ops as *const dyn crate::block_manager::v2::device::DeviceStreamOps;
+            let trait_ptr =
+                &*stream.ops as *const dyn crate::block_manager::v2::device::DeviceStreamOps;
             let concrete_ptr = trait_ptr as *const CudaStreamWrapper;
             (*concrete_ptr).inner()
         }
@@ -282,7 +283,8 @@ impl TransportManager {
         );
 
         unsafe {
-            let trait_ptr = &*ctx.ops as *const dyn crate::block_manager::v2::device::DeviceContextOps;
+            let trait_ptr =
+                &*ctx.ops as *const dyn crate::block_manager::v2::device::DeviceContextOps;
             let concrete_ptr = trait_ptr as *const CudaContext;
             (*concrete_ptr).inner()
         }
@@ -296,7 +298,9 @@ impl TransportManager {
         &self,
         event: cudarc::driver::CudaEvent,
     ) -> TransferCompleteNotification {
-        use crate::block_manager::v2::device::{DeviceEvent, DeviceBackend, cuda::CudaEventWrapper};
+        use crate::block_manager::v2::device::{
+            DeviceBackend, DeviceEvent, cuda::CudaEventWrapper,
+        };
 
         // Wrap CUDA event in backend-agnostic DeviceEvent
         let device_event = DeviceEvent {
@@ -553,17 +557,16 @@ impl LayoutRegistry {
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
+    use crate::block_manager::v2::device::DeviceBackend;
     use crate::block_manager::v2::physical::layout::LayoutConfig;
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
-    use crate::block_manager::v2::device::DeviceBackend;
 
     fn make_test_agent(name: &str) -> NixlAgent {
         NixlAgent::require_backends(name, &[]).expect("failed to create wrapped agent")
     }
 
     fn get_test_backend() -> (DeviceBackend, u32) {
-        let backend = DeviceBackend::auto_detect()
-            .expect("No device backend available for test");
+        let backend = DeviceBackend::auto_detect().expect("No device backend available for test");
         (backend, 0)
     }
 

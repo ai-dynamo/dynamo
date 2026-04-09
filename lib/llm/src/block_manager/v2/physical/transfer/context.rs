@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::block_manager::v2::device::{DeviceBackend, DeviceContext, DeviceEvent, DeviceStream};
 use crate::block_manager::v2::kernels::OperationalCopyBackend;
-use crate::block_manager::v2::device::{DeviceBackend, DeviceContext, DeviceStream, DeviceEvent};
 use anyhow::Result;
 use derive_builder::Builder;
 use nixl_sys::XferRequest;
@@ -253,7 +253,9 @@ impl TransferContext {
         handle.spawn(notifications::process_polling_notifications(rx_nixl_status));
 
         // Spawn device event polling handler (supports CUDA/HPU/XPU)
-        handle.spawn(notifications::process_polling_notifications(rx_device_event));
+        handle.spawn(notifications::process_polling_notifications(
+            rx_device_event,
+        ));
 
         // Spawn NIXL notification events handler
         handle.spawn(notifications::process_nixl_notification_events(
