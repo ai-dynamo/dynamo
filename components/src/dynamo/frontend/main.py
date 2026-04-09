@@ -205,9 +205,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = config.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(
-        loop, config.discovery_backend, config.request_plane
-    )
+    runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
