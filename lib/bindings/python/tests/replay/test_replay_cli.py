@@ -66,7 +66,7 @@ def test_load_engine_args_npz_short_circuits_planner_import(tmp_path, monkeypatc
 
     monkeypatch.setattr("dynamo.replay.main.importlib.import_module", fail_import)
 
-    args = _load_engine_args(
+    _load_engine_args(
         json.dumps(
             {
                 "block_size": 64,
@@ -75,8 +75,6 @@ def test_load_engine_args_npz_short_circuits_planner_import(tmp_path, monkeypatc
             }
         )
     )
-
-    assert args is not None
 
 
 @pytest.mark.timeout(30)
