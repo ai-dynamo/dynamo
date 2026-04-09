@@ -235,11 +235,7 @@ class VllmPDWorker(VllmBaseWorker):
                 f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
             ).client()
 
-        if "video" in self.engine_args.model.lower():
-            self.EMBEDDINGS_DTYPE = torch.uint8
-        else:
-            self.EMBEDDINGS_DTYPE = torch.float16
-
+        self.EMBEDDINGS_DTYPE = torch.float16
         self.EMBEDDINGS_DEVICE = "cpu"
 
         # Create and initialize a dynamo connector for this worker.
@@ -283,14 +279,7 @@ class VllmPDWorker(VllmBaseWorker):
                 request.serialized_request, descriptor
             )
             await read_op.wait_for_completion()
-            if "video" in self.engine_args.model.lower():
-                video_numpy = embeddings.numpy()
-                multi_modal_data = construct_mm_data(
-                    self.engine_args.model,
-                    self.EMBEDDINGS_DTYPE,
-                    video_numpy=video_numpy,
-                )
-            elif "audio" in self.engine_args.model.lower():
+            if "audio" in self.engine_args.model.lower():
                 multi_modal_data = construct_mm_data(
                     self.engine_args.model,
                     self.EMBEDDINGS_DTYPE,

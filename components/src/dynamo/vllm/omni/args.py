@@ -231,6 +231,31 @@ class OmniArgGroup(ArgGroup):
             help="Number of GPUs used for classifier free guidance parallelism.",
         )
 
+        # Disaggregated stage worker flags
+        add_argument(
+            g,
+            flag_name="--stage-id",
+            env_var="DYN_OMNI_STAGE_ID",
+            default=None,
+            arg_type=int,
+            help=(
+                "Stage ID for disaggregated omni mode. "
+                "Run a single stage as an independent Dynamo worker. "
+                "Requires --stage-configs-path."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-router",
+            env_var="DYN_OMNI_ROUTER",
+            default=False,
+            help=(
+                "Run as the stage router, orchestrating the multi-stage DAG. "
+                "Requires --stage-configs-path. Mutually exclusive with --stage-id."
+            ),
+        )
+
 
 class OmniConfig(DynamoRuntimeConfig):
     """Configuration for Dynamo vLLM-Omni worker."""
@@ -270,6 +295,10 @@ class OmniConfig(DynamoRuntimeConfig):
     tts_ref_audio_timeout: int = 15
     tts_ref_audio_max_bytes: int = 50 * 1024 * 1024
 
+    # Disaggregated stage worker fields
+    stage_id: Optional[int] = None
+    omni_router: bool = False
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         if self.default_video_fps <= 0:
@@ -280,6 +309,15 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ring-degree must be > 0")
         if not (0 < self.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
+        if self.stage_configs_path is None:
+            if self.stage_id is not None:
+                raise ValueError("--stage-id requires --stage-configs-path")
+            if self.omni_router:
+                raise ValueError("--omni-router requires --stage-configs-path")
+        if self.stage_id is not None and self.stage_id < 0:
+            raise ValueError("--stage-id must be >= 0")
+        if self.stage_id is not None and self.omni_router:
+            raise ValueError("--stage-id and --omni-router are mutually exclusive")
 
 
 def parse_omni_args() -> OmniConfig:

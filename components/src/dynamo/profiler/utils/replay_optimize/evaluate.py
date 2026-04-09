@@ -24,6 +24,13 @@ from .engine_args import (
     _build_candidate_engine_args,
     _build_router_config,
 )
+from .logging import (
+    ensure_dynamo_logging,
+    log_agg_state_finish,
+    log_agg_state_start,
+    log_dense_state_finish,
+    log_dense_state_start,
+)
 from .models import (
     DenseAggReplayState,
     DenseReplayState,
@@ -123,9 +130,12 @@ def _evaluate_state(
     constraints: Mapping[str, float],
     cache: dict[DenseReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
+    ensure_dynamo_logging()
     cached = cache.get(state)
     if cached is not None:
         return cached
+
+    log_dense_state_start(state)
 
     prefill_args = _build_candidate_engine_args(
         base_args=base_prefill_engine_args,
@@ -170,6 +180,14 @@ def _evaluate_state(
         "feasible": feasible,
         "violation_penalty": penalty,
     }
+    log_dense_state_finish(
+        state=state,
+        report=report,
+        constraints=constraints,
+        score=score,
+        feasible=feasible,
+        violation_penalty=penalty,
+    )
     cache[state] = record
     return record
 
@@ -186,9 +204,12 @@ def _evaluate_agg_state(
     constraints: Mapping[str, float],
     cache: dict[DenseAggReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
+    ensure_dynamo_logging()
     cached = cache.get(state)
     if cached is not None:
         return cached
+
+    log_agg_state_start(state)
 
     engine_args = _build_agg_candidate_engine_args(
         base_args=base_engine_args,
@@ -223,6 +244,14 @@ def _evaluate_agg_state(
         "feasible": feasible,
         "violation_penalty": penalty,
     }
+    log_agg_state_finish(
+        state=state,
+        report=report,
+        constraints=constraints,
+        score=score,
+        feasible=feasible,
+        violation_penalty=penalty,
+    )
     cache[state] = record
     return record
 

@@ -94,26 +94,23 @@ class DisaggPlanner:
         self.decode_planner.decode_worker_info = self.prefill_planner.decode_worker_info
         self.decode_planner.model_name = self.prefill_planner.model_name
 
-        # Start FPM tracking for both planners. DisaggPlanner bypasses each
-        # sub-planner's _async_init(), so we init subscribers explicitly here.
-        if self.enable_load:
-            if self.prefill_planner.runtime is not None:
-                await self.prefill_planner._init_fpm_subscriber()
-            if self.decode_planner.runtime is not None:
-                await self.decode_planner._init_fpm_subscriber()
+        if self.prefill_planner.runtime is not None:
+            await self.prefill_planner._init_fpm_subscriber()
+        if self.decode_planner.runtime is not None:
+            await self.decode_planner._init_fpm_subscriber()
+
+        await self.prefill_planner._bootstrap_regression()
+        await self.decode_planner._bootstrap_regression()
 
     async def run(self):
         """Main scaling loop. Call _async_init() before this."""
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_load_adjustment_time = time.time()
 
-        # FPM tracking (started in _async_init) replaces the former
-        # DirectRouterMetricsClient.run_sampling_loop().
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop())
-        if self.enable_load:
-            loops.append(self._load_loop())
+        loops.append(self._load_and_fpm_update_loop())
 
         await asyncio.gather(*loops)
 
@@ -175,11 +172,15 @@ class DisaggPlanner:
 
             await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
 
-    async def _load_loop(self) -> None:
-        """FPM-driven load-based scaling loop for disagg mode."""
+    async def _load_and_fpm_update_loop(self) -> None:
+        """FPM observation and (optionally) load-based scaling for disagg mode.
+
+        Always updates regression models with live FPM. When load-based
+        scaling is enabled, makes scaling decisions immediately after.
+        """
         while True:
             await asyncio.sleep(self.config.load_adjustment_interval)
-            logger.info("New load-based adjustment interval started!")
+            logger.info("New load/FPM update interval started!")
 
             num_p, num_d, _ = await self.prefill_planner.get_workers_info(
                 require_prefill=True, require_decode=True
@@ -187,9 +188,11 @@ class DisaggPlanner:
             self.shared_state.num_p_workers = num_p
             self.shared_state.num_d_workers = num_d
 
-            # Observe FPM stats and feed into regression models
             p_stats = self.prefill_planner.observe_fpm_load_stats()
             d_stats = self.decode_planner.observe_fpm_load_stats()
+
+            if not self.enable_load:
+                continue
 
             if not p_stats and not d_stats:
                 logger.warning("No FPM data for either prefill or decode, skipping")
@@ -221,16 +224,13 @@ class DisaggPlanner:
                 logger.info("Load-based scaling: no scaling needed")
                 continue
 
-            # Enforce lower bounds from throughput-based
             if self.enable_throughput:
                 final_p = max(final_p, self.shared_state.throughput_lower_bound_p)
                 final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
 
-            # Enforce minimum endpoints
             final_p = max(final_p, self.config.min_endpoint)
             final_d = max(final_d, self.config.min_endpoint)
 
-            # Apply GPU budget
             final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.config)
 
             logger.info(

@@ -87,3 +87,36 @@ def test_throughput_metrics_source_invalid():
     """throughput_metrics_source rejects invalid values."""
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
+
+
+@pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])
+def test_fpm_sample_bucket_size_accepts_perfect_squares(bucket_size):
+    """fpm_sample_bucket_size must be a perfect square (valid values)."""
+    config = PlannerConfig(namespace="test-ns", fpm_sample_bucket_size=bucket_size)
+    assert config.fpm_sample_bucket_size == bucket_size
+
+
+@pytest.mark.parametrize("bucket_size", [2, 3, 5, 7, 10])
+def test_fpm_sample_bucket_size_rejects_non_squares(bucket_size):
+    """fpm_sample_bucket_size rejects values that are not perfect squares."""
+    with pytest.raises(ValidationError, match="perfect square"):
+        PlannerConfig(namespace="test-ns", fpm_sample_bucket_size=bucket_size)
+
+
+def test_max_num_fpm_samples_field():
+    """max_num_fpm_samples configures the FPM sample retention (formerly load_learning_window)."""
+    config = PlannerConfig(namespace="test-ns", max_num_fpm_samples=100)
+    assert config.max_num_fpm_samples == 100
+
+
+def test_agg_mode_supports_throughput_scaling():
+    """Agg mode supports throughput-based scaling."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        enable_throughput_scaling=True,
+        enable_load_scaling=False,
+    )
+    assert config.mode == "agg"
+    assert config.enable_throughput_scaling is True
+    assert config.scaling_enabled() is True

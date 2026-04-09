@@ -234,12 +234,12 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Tester
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -291,6 +291,7 @@ jobs:
           docker buildx build --push ${NO_CACHE_FLAG} \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-context snapshot=../snapshot \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -438,7 +439,7 @@ jobs:
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
 
   deploy-status-check:
     runs-on: ubuntu-latest

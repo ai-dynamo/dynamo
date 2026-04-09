@@ -88,22 +88,138 @@ impl LoadThresholdConfig {
 }
 
 /// Worker load monitoring state per dp_rank
+#[derive(Clone, Debug)]
+struct DecodeBusyLatchState {
+    latched_busy: bool,
+    kv_used_blocks_cleared: bool,
+    active_decode_blocks_cleared: bool,
+}
+
+impl Default for DecodeBusyLatchState {
+    fn default() -> Self {
+        Self {
+            latched_busy: false,
+            kv_used_blocks_cleared: true,
+            active_decode_blocks_cleared: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
     pub active_decode_blocks: HashMap<u32, u64>,
+    pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
+    decode_busy_latches: HashMap<u32, DecodeBusyLatchState>,
 }
 
 impl WorkerLoadState {
+    fn is_decode_signal_busy(
+        used_blocks: u64,
+        total_blocks: u64,
+        active_decode_blocks_threshold: f64,
+    ) -> bool {
+        total_blocks > 0
+            && (used_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
+    }
+
+    fn current_decode_busy(&self, dp_rank: u32, active_decode_blocks_threshold: f64) -> bool {
+        let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
+            return false;
+        };
+
+        self.kv_used_blocks
+            .get(&dp_rank)
+            .is_some_and(|&used_blocks| {
+                Self::is_decode_signal_busy(
+                    used_blocks,
+                    total_blocks,
+                    active_decode_blocks_threshold,
+                )
+            })
+            || self
+                .active_decode_blocks
+                .get(&dp_rank)
+                .is_some_and(|&active_blocks| {
+                    Self::is_decode_signal_busy(
+                        active_blocks,
+                        total_blocks,
+                        active_decode_blocks_threshold,
+                    )
+                })
+    }
+
+    fn update_decode_busy_latch(
+        &mut self,
+        dp_rank: u32,
+        active_decode_blocks: Option<u64>,
+        kv_used_blocks: Option<u64>,
+        active_decode_blocks_threshold: f64,
+    ) {
+        let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
+            return;
+        };
+        if total_blocks == 0 {
+            return;
+        }
+
+        let active_decode_busy = active_decode_blocks.is_some_and(|value| {
+            Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold)
+        });
+        let kv_used_busy = kv_used_blocks.is_some_and(|value| {
+            Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold)
+        });
+
+        let latch = self.decode_busy_latches.entry(dp_rank).or_default();
+        if active_decode_busy || kv_used_busy {
+            latch.latched_busy = true;
+        }
+        if let Some(value) = active_decode_blocks {
+            latch.active_decode_blocks_cleared =
+                !Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold);
+        }
+        if let Some(value) = kv_used_blocks {
+            latch.kv_used_blocks_cleared =
+                !Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold);
+        }
+        if latch.latched_busy && latch.kv_used_blocks_cleared && latch.active_decode_blocks_cleared
+        {
+            latch.latched_busy = false;
+        }
+    }
+
+    fn update_from_active_load(
+        &mut self,
+        active_load: &ActiveLoad,
+        active_decode_blocks_threshold: f64,
+    ) {
+        let dp_rank = active_load.dp_rank;
+        if let Some(active_blocks) = active_load.active_decode_blocks {
+            self.active_decode_blocks.insert(dp_rank, active_blocks);
+        }
+        if let Some(kv_used_blocks) = active_load.kv_used_blocks {
+            self.kv_used_blocks.insert(dp_rank, kv_used_blocks);
+        }
+        if let Some(active_tokens) = active_load.active_prefill_tokens {
+            self.active_prefill_tokens.insert(dp_rank, active_tokens);
+        }
+        self.update_decode_busy_latch(
+            dp_rank,
+            active_load.active_decode_blocks,
+            active_load.kv_used_blocks,
+            active_decode_blocks_threshold,
+        );
+    }
+
     /// Returns true if ALL dp_ranks are considered busy based on the threshold logic.
     ///
     /// For each dp_rank, a dp_rank is busy if ANY of these conditions is met (OR logic):
     /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute threshold)
     /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fraction-based threshold)
-    /// 3. `active_decode_blocks / total_blocks > active_decode_blocks_threshold` (blocks threshold)
+    /// 3. decode busy latch set by either `kv_used_blocks` or `active_decode_blocks`
     ///
     /// If none of these checks can be performed (missing data), that dp_rank is considered free.
     ///
@@ -118,6 +234,8 @@ impl WorkerLoadState {
         let all_dp_ranks: std::collections::HashSet<_> = self
             .active_decode_blocks
             .keys()
+            .chain(self.kv_used_blocks.keys())
+            .chain(self.decode_busy_latches.keys())
             .chain(self.active_prefill_tokens.keys())
             .copied()
             .collect();
@@ -148,15 +266,13 @@ impl WorkerLoadState {
                 }
             }
 
-            // Check 3: blocks threshold
-            // Skip if total_blocks is 0 (no capacity means threshold check is meaningless)
-            if let (Some(&active_blocks), Some(&total_blocks)) = (
-                self.active_decode_blocks.get(&dp_rank),
-                self.kv_total_blocks.get(&dp_rank),
-            ) && total_blocks > 0
-                && (active_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
-            {
-                return true; // This dp_rank is busy due to blocks
+            // Check 3: decode busy latch
+            if let Some(latch) = self.decode_busy_latches.get(&dp_rank) {
+                if latch.latched_busy {
+                    return true;
+                }
+            } else if self.current_decode_busy(dp_rank, active_decode_blocks_threshold) {
+                return true;
             }
 
             // If we can't perform any check or no threshold exceeded, this dp_rank is free
@@ -504,18 +620,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .or_default()
                             .insert(dp_rank);
 
-                        // Update worker load state per dp_rank (for busy detection only)
-                        // Note: Prometheus gauges are updated directly by sequence.rs
-                        {
-                            let mut state = worker_load_states.entry(worker_id).or_default();
-                            if let Some(active_blocks) = active_load.active_decode_blocks {
-                                state.active_decode_blocks.insert(dp_rank, active_blocks);
-                            }
-                            if let Some(active_tokens) = active_load.active_prefill_tokens {
-                                state.active_prefill_tokens.insert(dp_rank, active_tokens);
-                            }
-                        }
-
                         // Load thresholds dynamically - allows runtime updates
                         let current_active_decode_blocks_threshold =
                             Self::scaled_to_f64(active_decode_blocks_threshold.load(Ordering::Relaxed));
@@ -523,6 +627,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             active_prefill_tokens_threshold.load(Ordering::Relaxed);
                         let current_active_prefill_tokens_threshold_frac =
                             Self::scaled_to_f64(active_prefill_tokens_threshold_frac.load(Ordering::Relaxed));
+
+                        // Update worker load state per dp_rank (for busy detection only)
+                        // Note: Prometheus gauges are updated directly by sequence.rs
+                        {
+                            let mut state = worker_load_states.entry(worker_id).or_default();
+                            state.update_from_active_load(
+                                &active_load,
+                                current_active_decode_blocks_threshold,
+                            );
+                        }
 
                         // Recalculate all busy instances and update
                         let busy_instances: Vec<u64> = worker_load_states
@@ -646,5 +760,189 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkerLoadState;
+    use dynamo_kv_router::protocols::ActiveLoad;
+
+    #[test]
+    fn is_busy_prefers_kv_used_blocks_over_active_decode_blocks() {
+        let mut state = WorkerLoadState::default();
+        state.active_decode_blocks.insert(0, 10);
+        state.kv_used_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn is_busy_falls_back_to_active_decode_blocks_when_kv_used_missing() {
+        let mut state = WorkerLoadState::default();
+        state.active_decode_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn is_busy_recognizes_dp_rank_known_only_from_kv_used_blocks() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 90);
+        state.kv_total_blocks.insert(0, 100);
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_sets_busy_if_any_signal_is_busy() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            0.6,
+        );
+
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_only_clears_after_both_signals_report_nonbusy() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_clears_with_only_kv_used_blocks_signal() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_clears_with_only_active_decode_blocks_signal() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(90),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn decode_busy_latch_clears_when_both_signals_are_nonbusy_in_same_event() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(90),
+                active_prefill_tokens: None,
+                kv_used_blocks: None,
+            },
+            0.6,
+        );
+        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            0.6,
+        );
+        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
     }
 }

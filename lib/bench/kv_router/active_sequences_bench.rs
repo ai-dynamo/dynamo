@@ -366,6 +366,7 @@ async fn apply_entry(
     worker: WorkerWithDpRank,
     entry: SequenceTraceEntry,
 ) {
+    let decay_now = tokio::time::Instant::now();
     match entry {
         SequenceTraceEntry::Add {
             request_id,
@@ -377,23 +378,28 @@ async fn apply_entry(
                 Some(&block_hashes),
                 isl,
                 OverlapScores::default(),
+                decay_now,
             );
-            let _ = multi.add_request(SequenceRequest {
-                request_id,
-                token_sequence: Some(block_hashes),
-                isl,
-                overlap: 0,
-                track_prefill_tokens: true,
-                expected_output_tokens: Some(output_length as u32),
-                worker,
-                lora_name: None,
-            });
+            let _ = multi.add_request(
+                SequenceRequest {
+                    request_id,
+                    token_sequence: Some(block_hashes),
+                    isl,
+                    overlap: 0,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: Some(output_length as u32),
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            );
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
-            let _ = multi.mark_prefill_completed(&request_id);
+            let _ = multi.mark_prefill_completed(&request_id, decay_now);
         }
         SequenceTraceEntry::Free { request_id } => {
-            let _ = multi.free(&request_id);
+            let _ = multi.free(&request_id, decay_now);
         }
     }
 }

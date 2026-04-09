@@ -25,8 +25,8 @@ The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It 
 
 The Planner supports two scaling modes that can run independently or together:
 
-- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
-- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No profiling data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+- **Throughput-based scaling**: Uses pre-deployment engine performance data (from self-benchmark or profiler) and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
@@ -36,12 +36,12 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 |---------|:----------------:|:-------------------------:|
 | **Deployment** | | |
 | Disaggregated | Supported | Supported |
-| Aggregated | Unsupported | Supported |
+| Aggregated | Supported | Supported |
 | **LLM Framework** | | |
 | SGLang | Supported | Supported |
 | TensorRT-LLM | Supported | Supported |
 | vLLM | Supported | Supported |
-| **Requires Profiling Data** | Yes | No |
+| **Requires Pre-deployment Data** | Yes (self-benchmark or profiler) | No |
 | **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
 | **Router** | | |
 | Any (round-robin, random, etc.) | Supported | Not supported |
@@ -52,8 +52,8 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 ## When to Use Which Mode
 
-- **Throughput-based scaling** should be enabled whenever engine profiling data is available (through pre-deployment profiling). It provides stable, prediction-based capacity planning.
-- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring profiling data.
+- **Throughput-based scaling** should be enabled whenever engine performance data is available (through self-benchmark or pre-deployment profiling). It provides stable, prediction-based capacity planning.
+- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
 - **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
 
 ## Quick Start
@@ -63,7 +63,7 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../kubernetes/installation-guide.md))
 - kube-prometheus-stack installed ([Metrics Setup](../../kubernetes/observability/metrics.md))
 
-For throughput-based scaling, pre-deployment profiling is also required ([Profiling Guide](../profiler/profiler-guide.md)).
+For throughput-based scaling, pre-deployment engine performance data is also required (via self-benchmark mode or [Profiling Guide](../profiler/profiler-guide.md)).
 
 ### Throughput-Based Scaling (with DGDR)
 
@@ -141,13 +141,11 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
 | `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
 | `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
-| `--no-correction` | `true` | Disable correction factors (auto-disabled when load-based scaling is on) |
 | **Load-based scaling** | | |
 | `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
-| `--disable-throughput-scaling` | `false` | Disable throughput-based scaling (required for `agg` mode) |
-| `--loadbased-router-metrics-url` | auto-discovered | URL to router's `/metrics` endpoint |
-| `--loadbased-adjustment-interval` | `5` | Seconds between load-based scaling decisions |
-| `--loadbased-learning-window` | `50` | Sliding window size for regression model |
+| `--loadbased-adjustment-interval` | `5` | Seconds between FPM regression updates and load-based scaling decisions |
+| `--max-num-fpm-samples` | `64` | Maximum retained FPM observations for regression |
+| `--fpm-sample-bucket-size` | `16` | Number of buckets for observation retirement (must be perfect square) |
 | `--loadbased-scaling-down-sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
 | `--loadbased-metric-samples` | `10` | Number of metric samples per adjustment interval |
 | `--loadbased-min-observations` | `5` | Minimum observations before regression activates |
@@ -175,7 +173,7 @@ The dashboard shows:
 - Worker counts and GPU usage over time
 - Observed TTFT, ITL, request rate, sequence lengths
 - Predicted load and recommended replica counts
-- Correction factors (actual vs. expected performance)
+- FPM regression model status
 
 ### Prometheus Metrics
 

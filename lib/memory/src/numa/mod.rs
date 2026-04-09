@@ -25,10 +25,11 @@
 //! places pages on the correct node. If the GPU's NUMA node cannot be
 //! determined, allocation falls back to the non-NUMA path transparently.
 
+pub(crate) mod nvml;
 pub mod topology;
 pub mod worker_pool;
 
-use cudarc::driver::sys::CUdevice_attribute_enum;
+use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,8 +45,13 @@ static NUMA_NODE_CACHE: OnceLock<Mutex<HashMap<String, Option<NumaNode>>>> = Onc
 ///
 /// NUMA-aware allocation is enabled by default. Set `DYN_MEMORY_DISABLE_NUMA=1`
 /// (or any truthy value) to disable it.
+pub fn is_numa_enabled() -> bool {
+    !crate::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
+}
+
+/// Convenience inverse of [`is_numa_enabled`].
 pub fn is_numa_disabled() -> bool {
-    dynamo_config::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
+    !is_numa_enabled()
 }
 
 /// Represents a NUMA node identifier.
@@ -97,32 +103,6 @@ pub fn get_current_cpu_numa_node() -> NumaNode {
             NumaNode::UNKNOWN
         }
     }
-}
-
-/// Format a PCI bus address from domain, bus, and device IDs.
-///
-/// Returns a string in the format `"DDDD:BB:DD.0"` suitable for sysfs lookups.
-fn format_pci_bus_address(domain: i32, bus: i32, device: i32) -> String {
-    format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device)
-}
-
-/// Query the PCI bus address for a CUDA device from the CUDA driver API.
-///
-/// Uses `CudaContext::attribute()` to read PCI domain, bus, and device IDs.
-/// This transparently handles `CUDA_VISIBLE_DEVICES` remapping since
-/// `CudaContext::new(ordinal)` operates on the process-local device index.
-fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
-    let ctx = crate::device::cuda_context(device_id).ok()?;
-    let domain = ctx
-        .attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID)
-        .ok()?;
-    let bus = ctx
-        .attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID)
-        .ok()?;
-    let device = ctx
-        .attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID)
-        .ok()?;
-    Some(format_pci_bus_address(domain, bus, device))
 }
 
 /// Read the NUMA node for a PCI device from sysfs.
@@ -274,6 +254,210 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     Ok(())
 }
 
+/// Get PCI bus address for a CUDA device via the CUDA driver API.
+///
+/// Returns a normalized PCI address string like "0000:3b:00.0".
+/// The device_id here is a CUDA ordinal (affected by CUDA_VISIBLE_DEVICES).
+fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
+    // SAFETY: We're calling CUDA driver API functions with valid device ordinals.
+    // cuDeviceGet and get_attribute are safe as long as CUDA is initialized
+    // (which CudaContext::new handles).
+    unsafe {
+        let mut dev = std::mem::MaybeUninit::uninit();
+        if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
+            .result()
+            .is_err()
+        {
+            return None;
+        }
+        let dev = dev.assume_init();
+
+        let domain = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+        )
+        .ok()?;
+        let bus = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+        )
+        .ok()?;
+        let device = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+        )
+        .ok()?;
+
+        Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
+    }
+}
+
+/// GPU info with PCI address and NUMA node, used for CPU set subdivision.
+#[derive(Debug, Clone)]
+struct GpuTopoInfo {
+    pci_address: String,
+    numa_node: Option<u32>,
+}
+
+/// Enumerate all GPUs visible to CUDA with their PCI addresses and NUMA nodes.
+fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
+    let count = match cuda_device::get_count() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    (0..count as u32)
+        .filter_map(|i| {
+            let pci = get_pci_bus_address_from_cuda(i)?;
+            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
+            Some(GpuTopoInfo {
+                pci_address: pci,
+                numa_node: numa,
+            })
+        })
+        .collect()
+}
+
+/// Enumerate all GPUs on the system, preferring NVML (sees all GPUs)
+/// over CUDA driver (only sees CUDA_VISIBLE_DEVICES).
+fn enumerate_all_gpus() -> Vec<GpuTopoInfo> {
+    // Try NVML first — it sees all GPUs regardless of CUDA_VISIBLE_DEVICES
+    if let Some(nvml) = nvml::try_nvml() {
+        let nvml_gpus = nvml.enumerate_gpus();
+        if !nvml_gpus.is_empty() {
+            tracing::debug!(
+                "NVML enumerated {} GPUs (ignoring CUDA_VISIBLE_DEVICES)",
+                nvml_gpus.len()
+            );
+            return nvml_gpus
+                .into_iter()
+                .map(|g| {
+                    let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
+                    GpuTopoInfo {
+                        pci_address: g.pci_address,
+                        numa_node: numa,
+                    }
+                })
+                .collect();
+        }
+    }
+
+    // Fallback: enumerate via CUDA driver (may miss hidden devices)
+    tracing::debug!("Falling back to CUDA driver GPU enumeration");
+    enumerate_cuda_gpus()
+}
+
+/// Cached CPU set results per CUDA device ordinal.
+static DEVICE_CPU_SETS: OnceLock<HashMap<u32, Option<Vec<usize>>>> = OnceLock::new();
+
+/// Get a deterministic CPU subset for a CUDA device, subdivided among ALL GPUs
+/// sharing the same NUMA node (including those hidden by CUDA_VISIBLE_DEVICES).
+///
+/// # Algorithm
+/// 1. Get PCI address + NUMA node for target device (CUDA driver API)
+/// 2. Enumerate ALL GPUs on the system:
+///    - Try NVML first (sees all GPUs, ignores CUDA_VISIBLE_DEVICES)
+///    - Fall back to CUDA driver API (only sees visible devices)
+/// 3. For each GPU, get its NUMA node via sysfs (PCI address → /sys/.../numa_node)
+/// 4. Group GPUs by NUMA node
+/// 5. Sort by PCI address within each group (deterministic)
+/// 6. Get full CPU set for the node via topology
+/// 7. Divide into N equal slices (N = GPUs on same node)
+/// 8. Return the slice for the target device's position
+///
+/// # Example
+/// System: 8 GPUs, 2 NUMA nodes, 4 GPUs per node.
+/// CUDA_VISIBLE_DEVICES=0,1 (only 2 visible).
+/// NVML sees all 8 → correctly subdivides into 4 slices per node.
+///
+/// Returns None if NUMA node can't be determined.
+pub fn get_device_cpu_set(device_id: u32) -> Option<Vec<usize>> {
+    DEVICE_CPU_SETS
+        .get_or_init(compute_all_device_cpu_sets)
+        .get(&device_id)
+        .cloned()
+        .flatten()
+}
+
+fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
+    let topology = match topology::get_numa_topology() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Cannot subdivide CPU sets: {e}");
+            return HashMap::new();
+        }
+    };
+
+    // Get the target device's PCI address and NUMA node
+    let cuda_count = cuda_device::get_count().unwrap_or(0);
+    if cuda_count == 0 {
+        return HashMap::new();
+    }
+
+    // Build info for each visible CUDA device
+    let mut cuda_devices: Vec<(u32, String, Option<u32>)> = Vec::new();
+    for i in 0..cuda_count as u32 {
+        if let Some(pci) = get_pci_bus_address_from_cuda(i) {
+            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
+            cuda_devices.push((i, pci, numa));
+        }
+    }
+
+    // Enumerate ALL GPUs on the system (NVML preferred)
+    let all_gpus = enumerate_all_gpus();
+
+    // Group all GPUs by NUMA node
+    let mut node_groups: HashMap<u32, Vec<String>> = HashMap::new();
+    for gpu in &all_gpus {
+        if let Some(node) = gpu.numa_node {
+            node_groups
+                .entry(node)
+                .or_default()
+                .push(gpu.pci_address.clone());
+        }
+    }
+
+    // Sort each group by PCI address for deterministic ordering
+    for group in node_groups.values_mut() {
+        group.sort();
+    }
+
+    // For each CUDA device, find its position in its NUMA group and subdivide
+    let mut results = HashMap::new();
+    for (device_id, pci_addr, numa_node) in &cuda_devices {
+        let cpu_set = numa_node.and_then(|node| {
+            let group = node_groups.get(&node)?;
+            let position = group.iter().position(|addr| addr == pci_addr)?;
+            let all_cpus = topology.cpus_for_node(node)?;
+
+            if all_cpus.is_empty() || group.is_empty() {
+                return None;
+            }
+
+            // Divide CPUs into N equal slices
+            let n = group.len();
+            let chunk_size = all_cpus.len() / n;
+            if chunk_size == 0 {
+                // More GPUs than CPUs on this node — give all CPUs to everyone
+                return Some(all_cpus.to_vec());
+            }
+
+            let start = position * chunk_size;
+            let end = if position == n - 1 {
+                all_cpus.len() // last slice gets remainder
+            } else {
+                start + chunk_size
+            };
+
+            Some(all_cpus[start..end].to_vec())
+        });
+
+        results.insert(*device_id, cpu_set);
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,14 +527,6 @@ mod tests {
         assert_eq!(node1, node2);
         assert_eq!(node1, node3);
         assert_eq!(node2, node3);
-    }
-
-    #[test]
-    fn test_format_pci_bus_address() {
-        assert_eq!(format_pci_bus_address(0, 0, 0), "0000:00:00.0");
-        assert_eq!(format_pci_bus_address(0, 0x3b, 0), "0000:3b:00.0");
-        assert_eq!(format_pci_bus_address(0, 0xaf, 0), "0000:af:00.0");
-        assert_eq!(format_pci_bus_address(0x10, 0x1a, 0x03), "0010:1a:03.0");
     }
 
     #[test]

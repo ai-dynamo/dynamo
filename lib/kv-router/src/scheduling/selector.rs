@@ -145,7 +145,12 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
             let overlap = *overlaps.get(&worker).unwrap_or(&0);
-            let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
+            // Use 0 for unregistered decode workers (track_prefill_tokens=false)
+            // to match registered idle workers; use isl otherwise.
+            let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
+            let prefill_token = *prefill_tokens
+                .get(&worker)
+                .unwrap_or(&default_prefill_token);
             let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
             let decode_block = *decode_blocks
                 .get(&worker)

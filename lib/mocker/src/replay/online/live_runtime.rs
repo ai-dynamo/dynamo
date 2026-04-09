@@ -13,10 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::router::ReplayRouter;
-use crate::replay::{ReplayRouterMode, TraceSimulationReport};
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport};
 use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
 
+use super::ReplayRouter;
 use super::demux::run_demux;
 use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
@@ -41,6 +41,7 @@ impl LiveRuntime {
     pub(super) fn new(
         args: MockEngineArgs,
         router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: std::collections::VecDeque<DirectRequest>,
         num_workers: usize,
         mode: LiveReplayMode,
@@ -53,6 +54,7 @@ impl LiveRuntime {
             router_mode,
             &args,
             router_config,
+            prefill_load_estimator,
             num_workers,
         ));
         let mut schedulers = Vec::with_capacity(num_workers);

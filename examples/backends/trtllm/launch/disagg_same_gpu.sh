@@ -4,13 +4,13 @@
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
 # Per-worker VRAM is controlled via env vars (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS).
-# TODO: unify with build_gpu_mem_args once trtllm --override-engine-args JSON
+# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
 # merging is supported.
 #
 # NOTE — trtllm fraction semantics differ from vllm/sglang:
 #   vllm/sglang:  fraction of TOTAL VRAM  (weights + KV + activations all inside)
 #   trtllm:       fraction of FREE  VRAM  (KV cache only, after model load)
-# build_gpu_mem_args handles this — see gpu_utils.sh / gpu_utils.md.
+# build_vllm_gpu_mem_args / build_sglang_gpu_mem_args handle this — see gpu_utils.sh / gpu_utils.md.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-seq-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~8.0 GiB per worker (~16.0 GiB total)
@@ -30,7 +30,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-# TODO: unify with build_gpu_mem_args once trtllm --override-engine-args JSON
+# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
 # merging is supported.
 GPU_MEM_FRACTION="${GPU_MEM_FRACTION:-}"
 

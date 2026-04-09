@@ -27,6 +27,7 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
@@ -47,6 +48,7 @@ pub struct NvCreateCompletionRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,

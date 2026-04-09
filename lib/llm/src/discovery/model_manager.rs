@@ -4,7 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{config::KvRouterConfig, protocols::WorkerId};
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -568,6 +568,7 @@ impl ModelManager {
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
@@ -604,6 +605,7 @@ impl ModelManager {
             kv_cache_block_size,
             selector,
             kv_router_config,
+            prefill_load_estimator,
             worker_type,
             model_name,
             is_eagle,

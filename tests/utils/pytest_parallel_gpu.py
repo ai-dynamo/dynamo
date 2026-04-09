@@ -59,6 +59,8 @@ class _TestEntry:
     timeout: float
     requested_vllm_kv_cache_bytes: int | None = None
     requested_sglang_kv_tokens: int | None = None
+    requested_trtllm_kv_tokens: int | None = None
+    requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
     w_id: int = 0
     assigned_gpu: int | None = None
@@ -117,6 +119,10 @@ def _fmt_req(test: _TestEntry) -> str:
     """Format the resource request value for display."""
     if test.requested_sglang_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_sglang_kv_tokens)}"
+    if test.requested_trtllm_kv_tokens is not None:
+        return f"req_kv_tokens={int(test.requested_trtllm_kv_tokens)}"
+    if test.requested_trtllm_vram_gib is not None:
+        return f"req_vram={test.requested_trtllm_vram_gib:.1f} GiB"
     if test.requested_vllm_kv_cache_bytes is not None:
         gib = int(test.requested_vllm_kv_cache_bytes) / (1024**3)
         return f"req_kv={gib:.2f} GiB"
@@ -194,8 +200,17 @@ def _aggregate_junit_xml(junit_dir: str) -> str | None:
 
 def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
     """Run pytest --collect-only to get test IDs, filtered by --max-vram-gib."""
-    _strip_flags = {"-v", "-vv", "-vvv", "--verbose", "-s", "--capture=no"}
-    collect_args = [a for a in pytest_args if a not in _strip_flags]
+    _strip_exact = {"-v", "-vv", "-vvv", "--verbose", "-s", "--capture=no"}
+    collect_args = []
+    for a in pytest_args:
+        if a in _strip_exact:
+            continue
+        if a.startswith("-") and not a.startswith("--") and "v" in a:
+            stripped = a.replace("v", "")
+            if stripped != "-":
+                collect_args.append(stripped)
+            continue
+        collect_args.append(a)
     cmd = [
         sys.executable,
         "-m",
@@ -209,7 +224,7 @@ def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
     test_ids = []
     for line in result.stdout.strip().split("\n"):
         line = line.strip()
-        if "::" in line and not line.startswith(" "):
+        if ".py::" in line and not line.startswith(" "):
             test_ids.append(line)
     return test_ids
 
@@ -251,24 +266,37 @@ def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> Non
     pipe.close()
 
 
-def _parse_gpu_indices(raw: str, available: list[dict]) -> list[int]:
-    """Parse --gpus value into a list of GPU indices.
+def _parse_cuda_visible(raw: str | None, available: list[dict]) -> list[int]:
+    """Parse CUDA_VISIBLE_DEVICES value into a list of physical GPU indices.
 
-    Accepts 'all' or comma-separated indices (e.g. '0,1').
+    Semantics match CUDA:
+      None (unset)   → all GPUs visible
+      ""  (empty)    → no GPUs visible
+      "0,1"          → those specific GPUs
+
+    Raises ValueError on UUID/MIG tokens (not supported by the scheduler).
     """
     avail_indices = [g["index"] for g in available]
-    if raw.strip().lower() == "all":
+    if raw is None:
         return avail_indices
+    if raw.strip() == "":
+        return []
     indices = []
     for part in raw.split(","):
         part = part.strip()
         if not part:
             continue
-        idx = int(part)
+        try:
+            idx = int(part)
+        except ValueError:
+            raise ValueError(
+                f"Unsupported CUDA_VISIBLE_DEVICES token {part!r}; "
+                "only integer GPU indices are supported by the scheduler"
+            )
         if idx not in avail_indices:
             raise ValueError(f"GPU {idx} not found (available: {avail_indices})")
         indices.append(idx)
-    return indices or avail_indices
+    return indices
 
 
 def run_parallel(
@@ -325,6 +353,8 @@ def run_parallel(
                 requested_vllm_kv_cache_bytes=m.get("requested_vllm_kv_cache_bytes"),
                 timeout=m.get("timeout", 600),
                 requested_sglang_kv_tokens=m.get("requested_sglang_kv_tokens"),
+                requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
+                requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
             )
         )
@@ -345,19 +375,19 @@ def run_parallel(
         for t in tests
         if t.requested_vllm_kv_cache_bytes is None
         and t.requested_sglang_kv_tokens is None
+        and t.requested_trtllm_kv_tokens is None
+        and t.requested_trtllm_vram_gib is None
         and t.profiled_gib > 0
     ]
     if no_kv:
         _print(
-            f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes "
-            f"or requested_sglang_kv_tokens marker and cannot run in parallel:"
+            f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes, "
+            f"requested_sglang_kv_tokens, requested_trtllm_kv_tokens, "
+            f"or requested_trtllm_vram_gib marker and cannot run in parallel:"
         )
         for t in no_kv:
             _print(f"  {t.name}")
-        _print(
-            "\nAdd the appropriate marker via profile_pytest.py --kv-bytes, "
-            "then rerun."
-        )
+        _print("\nAdd the appropriate marker via profile_pytest.py, " "then rerun.")
         return 1
 
     # Identify tests in metadata that exceed the VRAM budget
@@ -453,10 +483,10 @@ def run_parallel(
     _VLLM_LAUNCH_STAGGER_S = 5.0
     last_vllm_launch: dict[int, float] = {}  # gpu_index -> monotonic timestamp
 
-    def _build_status(now: float) -> str:
-        """Build multi-GPU status string for periodic output."""
+    def _build_status_lines(now: float) -> list[str]:
+        """Build per-GPU status lines for periodic output."""
         elapsed = int(now - t0)
-        gpu_parts = []
+        lines = []
         for gi in sorted(gpu_states):
             gs = gpu_states[gi]
             actual = _get_gpu_used_gib(gi)
@@ -469,8 +499,8 @@ def run_parallel(
             part = f"GPU{gi}: {actual:.1f}/{gs.total_gib:.0f} GiB"
             if wstr:
                 part += f" [{wstr}]"
-            gpu_parts.append(part)
-        return f"[elapsed {elapsed}s] {', '.join(gpu_parts)}"
+            lines.append(f"[elapsed {elapsed}s] {part}")
+        return lines
 
     def _launch_test(test: _TestEntry, env_base: dict) -> _RunningTest:
         """Build env, spawn subprocess, start output streamer thread."""
@@ -480,6 +510,13 @@ def run_parallel(
             env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(
                 int(test.requested_sglang_kv_tokens)
             )
+        elif test.requested_trtllm_kv_tokens is not None:
+            env["_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"] = str(
+                int(test.requested_trtllm_kv_tokens)
+            )
+        elif test.requested_trtllm_vram_gib is not None:
+            gib_to_bytes = int(test.requested_trtllm_vram_gib * 1024**3)
+            env["_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES"] = str(gib_to_bytes)
         elif test.requested_vllm_kv_cache_bytes is not None:
             env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(
                 int(test.requested_vllm_kv_cache_bytes)
@@ -617,11 +654,12 @@ def run_parallel(
                 del running[w_id]
 
                 # Print status immediately after completion
-                parts = [_build_status(now)]
+                lines = _build_status_lines(now)
                 if pending:
                     queued_str = ", ".join(f"w{t.w_id}" for t in pending)
-                    parts.append(f"[queued: {queued_str}]")
-                _print(" ".join(parts))
+                    lines[-1] += f" [queued: {queued_str}]"
+                for ln in lines:
+                    _print(ln)
                 next_status = now + 10
 
         # --- Launch pending tests ---
@@ -682,7 +720,8 @@ def run_parallel(
                 gi = entry.assigned_gpu
                 assert gi is not None
                 is_vllm = (
-                    entry.requested_sglang_kv_tokens is None and entry.profiled_gib > 0
+                    entry.requested_vllm_kv_cache_bytes is not None
+                    and entry.profiled_gib > 0
                 )
 
                 # Per-GPU vLLM stagger — only between vLLM tests on the
@@ -710,23 +749,25 @@ def run_parallel(
 
                 now = time.monotonic()
                 if now >= next_status and (running or pending):
-                    parts = [_build_status(now)]
+                    lines = _build_status_lines(now)
                     if pending:
                         queued_str = ", ".join(f"w{t.w_id}" for t in pending)
-                        parts.append(f"[queued: {queued_str}]")
-                    _print(" ".join(parts))
+                        lines[-1] += f" [queued: {queued_str}]"
+                    for ln in lines:
+                        _print(ln)
                     next_status = now + 10
 
         # Periodic status (print even when waiting for VRAM to free up)
         if now >= next_status and (running or pending):
-            parts = [_build_status(now)]
+            lines = _build_status_lines(now)
             if pending:
                 queued_str = ", ".join(f"w{t.w_id}" for t in pending)
                 if not running:
                     next_needed = pending[0].profiled_gib
-                    parts.append(f"[waiting for {next_needed:.1f} GiB free]")
-                parts.append(f"[queued: {queued_str}]")
-            _print(" ".join(parts))
+                    lines[-1] += f" [waiting for {next_needed:.1f} GiB free]"
+                lines[-1] += f" [queued: {queued_str}]"
+            for ln in lines:
+                _print(ln)
             next_status = now + 10
 
         if running or pending:
@@ -807,7 +848,7 @@ def run_parallel(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run GPU tests in parallel with VRAM-aware scheduling.",
-        usage="%(prog)s --max-vram-gib=N [-n SLOTS] [--gpu=0,1] [pytest-args...]",
+        usage="%(prog)s --max-vram-gib=N [-n SLOTS] [pytest-args...]",
     )
     parser.add_argument(
         "--max-vram-gib",
@@ -820,13 +861,6 @@ def main() -> int:
         type=str,
         default="auto",
         help="Number of concurrent slots. 'auto' = gpu_usable / max_vram_gib.",
-    )
-    parser.add_argument(
-        "--gpu",
-        "--gpus",
-        type=str,
-        default="all",
-        help="Comma-separated GPU indices or 'all' (default: all).",
     )
 
     raw = sys.argv[1:]
@@ -847,7 +881,11 @@ def main() -> int:
         _print("ERROR: No GPUs detected")
         return 1
 
-    gpu_indices = _parse_gpu_indices(args.gpus, gpus)
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    gpu_indices = _parse_cuda_visible(cvd, gpus)
+    if not gpu_indices:
+        _print("ERROR: CUDA_VISIBLE_DEVICES hides all GPUs")
+        return 1
 
     _print(f"Collecting tests with --max-vram-gib={args.max_vram_gib}...")
     test_ids = _collect_tests(pytest_args, args.max_vram_gib)

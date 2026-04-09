@@ -41,6 +41,14 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
   - deployments
   verbs:
   - create

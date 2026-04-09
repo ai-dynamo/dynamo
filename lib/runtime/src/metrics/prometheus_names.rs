@@ -235,6 +235,9 @@ pub mod frontend_service {
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
 
+    /// Total number of requests rejected due to resource exhaustion
+    pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
@@ -502,6 +505,14 @@ pub mod routing_overhead {
 pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
+
+    /// Total number of remote indexer overlap queries that failed
+    pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
+        "router_remote_indexer_query_failures_total";
+
+    /// Total number of remote indexer routing-decision writes that failed
+    pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
+        "router_remote_indexer_write_failures_total";
 
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";

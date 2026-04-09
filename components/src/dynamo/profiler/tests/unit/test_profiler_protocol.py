@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -27,6 +28,31 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+
+def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
+    """build_dgd_config applies per-node GPU shaping when topology is provided."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--data-parallel-size", "16"],
+        decode_replicas=1,
+        decode_gpus=16,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
+    assert decode_service["multinode"] == {"nodeCount": 2}
 
 
 def test_apply_dgd_overrides_strips_envelope() -> None:

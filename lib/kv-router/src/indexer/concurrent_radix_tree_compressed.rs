@@ -31,6 +31,7 @@
 //! - If `i < current_cutoff`: new_cutoff = `i`
 //!   - If new_cutoff == 0: remove worker entirely from this node
 //!   - Else: move worker to `worker_cutoffs[w] = new_cutoff`
+//! - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly
 //!
 //! Removal does NOT perform structural splits. Multiple workers can independently reduce
 //! their match indices without fragmenting the tree, accurately tracking each worker's
@@ -97,10 +98,10 @@ struct Node {
     edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
     /// Reverse index: `ExternalSequenceBlockHash` → position in `edge`.
     /// Provides O(1) position lookup during removal, avoiding a linear scan.
-    edge_index: FxHashMap<ExternalSequenceBlockHash, u16>,
+    edge_index: FxHashMap<ExternalSequenceBlockHash, usize>,
     /// Workers with partial edge coverage. `worker_cutoffs[w] = k` means worker `w`
     /// has cached `edge[0..k]`, where `0 < k < edge.len()`.
-    worker_cutoffs: FxHashMap<WorkerWithDpRank, u16>,
+    worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
     /// Workers with full edge coverage (match index == edge.len()).
     full_edge_workers: FxHashSet<WorkerWithDpRank>,
     /// Child nodes, keyed by the first `LocalBlockHash` of the child's edge.
@@ -121,6 +122,105 @@ impl Node {
     fn has_any_workers(&self) -> bool {
         !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
     }
+
+    #[inline]
+    fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
+        if self.full_edge_workers.contains(&worker) {
+            self.edge.len()
+        } else {
+            self.worker_cutoffs.get(&worker).copied().unwrap_or(0)
+        }
+    }
+
+    #[inline]
+    fn covers_pos(&self, worker: WorkerWithDpRank, pos: usize) -> bool {
+        self.full_edge_workers.contains(&worker)
+            || matches!(self.worker_cutoffs.get(&worker), Some(&cutoff) if pos < cutoff)
+    }
+
+    // Descendants are only reachable through full-edge coverage; partial workers stop in this node.
+    fn clear_children_if_unreachable(&mut self) {
+        if self.full_edge_workers.is_empty() {
+            self.children.clear();
+        }
+    }
+
+    // These hashes are no longer covered after a cutoff shrink and must be scrubbed from lookup.
+    fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<ExternalSequenceBlockHash> {
+        debug_assert!(cutoff <= self.edge.len());
+        self.edge[cutoff..].iter().map(|&(_, hash)| hash).collect()
+    }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.full_edge_workers.remove(&worker);
+        self.worker_cutoffs.remove(&worker);
+        self.clear_children_if_unreachable();
+    }
+
+    #[inline]
+    fn promote_to_full(&mut self, worker: WorkerWithDpRank) {
+        if !self.full_edge_workers.contains(&worker) {
+            self.worker_cutoffs.remove(&worker);
+            self.full_edge_workers.insert(worker);
+        }
+    }
+
+    #[inline]
+    fn remove_worker_at_pos(
+        &mut self,
+        worker: WorkerWithDpRank,
+        pos: usize,
+        removed_hash: ExternalSequenceBlockHash,
+    ) -> RemoveOutcome {
+        let current_cutoff = self.current_cutoff(worker);
+        if pos >= current_cutoff {
+            // Duplicate remove for an already-uncovered hash: just scrub this lookup entry.
+            return RemoveOutcome {
+                removed: 0,
+                stale_hashes: vec![removed_hash],
+            };
+        }
+
+        let new_cutoff = pos;
+        let removed = current_cutoff - new_cutoff;
+        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
+
+        if new_cutoff == 0 {
+            self.drop_worker(worker);
+        } else {
+            self.full_edge_workers.remove(&worker);
+            self.worker_cutoffs.insert(worker, new_cutoff);
+            self.clear_children_if_unreachable();
+        }
+
+        RemoveOutcome {
+            removed,
+            stale_hashes,
+        }
+    }
+
+    // Used by dump/restore to ignore dead child pointers that may still exist in the live tree.
+    fn live_children(&self) -> Vec<SharedNode> {
+        self.children
+            .values()
+            .filter(|child| {
+                let guard = child.read();
+                guard.has_any_workers() || !guard.children.is_empty()
+            })
+            .cloned()
+            .collect()
+    }
+
+    // Dump-time merge for passthrough nodes with identical full-coverage worker sets.
+    fn can_merge_with_only_child(&self, live_children: &[SharedNode]) -> bool {
+        self.worker_cutoffs.is_empty() && live_children.len() == 1 && {
+            let child_guard = live_children[0].read();
+            child_guard.full_edge_workers == self.full_edge_workers
+                && child_guard.worker_cutoffs.is_empty()
+                && child_guard.has_any_workers()
+        }
+    }
 }
 
 /// Data returned by [`ConcurrentRadixTreeCompressed::split_node`] for deferred lookup updates.
@@ -130,6 +230,11 @@ impl Node {
 /// HashMap insertions.
 struct SplitLookupData {
     suffix: SharedNode,
+}
+
+struct RemoveOutcome {
+    removed: usize,
+    stale_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.
@@ -247,13 +352,13 @@ impl ConcurrentRadixTreeCompressed {
 
         let suffix_edge = node.edge.split_off(pos);
         let suffix_first_local = suffix_edge[0].0;
-        let prefix_len = pos as u16;
+        let prefix_len = pos;
 
         // Build suffix edge_index (positions reindexed from 0).
         let mut suffix_edge_index =
             FxHashMap::with_capacity_and_hasher(suffix_edge.len(), FxBuildHasher);
         for (i, &(_, h)) in suffix_edge.iter().enumerate() {
-            suffix_edge_index.insert(h, i as u16);
+            suffix_edge_index.insert(h, i);
         }
         // Remove suffix hashes from the prefix edge_index.
         for &(_, h) in &suffix_edge {
@@ -318,7 +423,7 @@ impl ConcurrentRadixTreeCompressed {
         }
         for (&w, &k) in &guard.worker_cutoffs {
             if let Some(wl) = lookup.get_mut(&w) {
-                for &(_, h) in &guard.edge[..k as usize] {
+                for &(_, h) in &guard.edge[..k] {
                     wl.insert(h, split.suffix.clone());
                 }
             }
@@ -390,7 +495,7 @@ impl ConcurrentRadixTreeCompressed {
                     active = guard.full_edge_workers.clone();
                     active_count = active.len();
                     for (&w, &k) in &guard.worker_cutoffs {
-                        let contribution = (k as usize).min(edge_match_len) as u32;
+                        let contribution = k.min(edge_match_len) as u32;
                         if contribution > 0 {
                             scores.scores.insert(w, contribution);
                         }
@@ -404,7 +509,7 @@ impl ConcurrentRadixTreeCompressed {
                             if guard.full_edge_workers.contains(w) {
                                 true
                             } else if let Some(&k) = guard.worker_cutoffs.get(w) {
-                                let effective = (k as usize).min(edge_match_len) as u32;
+                                let effective = k.min(edge_match_len) as u32;
                                 scores.scores.insert(*w, prev_depth + effective);
                                 false
                             } else {
@@ -535,34 +640,23 @@ impl ConcurrentRadixTreeCompressed {
                     // stale entry in the lookup map.
                     {
                         let guard = node.read();
-                        if let Some(&pos_u16) = guard.edge_index.get(&parent_hash) {
-                            let pos = pos_u16 as usize;
-                            let is_full = guard.full_edge_workers.contains(&worker);
-                            let cutoff = if is_full {
-                                guard.edge.len()
-                            } else {
-                                guard
-                                    .worker_cutoffs
-                                    .get(&worker)
-                                    .copied()
-                                    .map(|k| k as usize)
-                                    .unwrap_or(0)
-                            };
-                            if pos >= cutoff {
-                                tracing::warn!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    parent_hash = ?parent_hash,
-                                    pos,
-                                    cutoff,
-                                    "Stale parent: worker no longer covers parent_hash; rejecting store"
-                                );
-                                drop(guard);
-                                let wl = lookup.get_mut(&worker).unwrap();
-                                wl.remove(&parent_hash);
-                                return Err(KvCacheEventError::ParentBlockNotFound);
-                            }
+                        if let Some(&pos) = guard.edge_index.get(&parent_hash)
+                            && !guard.covers_pos(worker, pos)
+                        {
+                            let cutoff = guard.current_cutoff(worker);
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?parent_hash,
+                                pos,
+                                cutoff,
+                                "Stale parent: worker no longer covers parent_hash; rejecting store"
+                            );
+                            drop(guard);
+                            let wl = lookup.get_mut(&worker).unwrap();
+                            wl.remove(&parent_hash);
+                            return Err(KvCacheEventError::ParentBlockNotFound);
                         }
                     }
 
@@ -665,7 +759,7 @@ impl ConcurrentRadixTreeCompressed {
                         let mut edge_index =
                             FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
                         for (i, &(_, h)) in edge.iter().enumerate() {
-                            edge_index.insert(h, i as u16);
+                            edge_index.insert(h, i);
                         }
                         let mut full_edge_workers =
                             FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
@@ -721,10 +815,7 @@ impl ConcurrentRadixTreeCompressed {
                     let split = Self::split_node(&mut child_guard, match_len);
 
                     // Ensure worker has full coverage of the prefix.
-                    if !child_guard.full_edge_workers.contains(&worker) {
-                        child_guard.worker_cutoffs.remove(&worker);
-                        child_guard.full_edge_workers.insert(worker);
-                    }
+                    child_guard.promote_to_full(worker);
 
                     let tail = &remaining[match_len..];
                     if !tail.is_empty() {
@@ -734,7 +825,7 @@ impl ConcurrentRadixTreeCompressed {
                         let mut edge_index =
                             FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
                         for (i, &(_, h)) in edge.iter().enumerate() {
-                            edge_index.insert(h, i as u16);
+                            edge_index.insert(h, i);
                         }
                         let mut full_edge_workers =
                             FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
@@ -781,10 +872,7 @@ impl ConcurrentRadixTreeCompressed {
                 }
 
                 // Full edge match: upgrade worker to full coverage if necessary.
-                if !child_guard.full_edge_workers.contains(&worker) {
-                    child_guard.worker_cutoffs.remove(&worker);
-                    child_guard.full_edge_workers.insert(worker);
-                }
+                child_guard.promote_to_full(worker);
                 drop(child_guard);
 
                 let wl = lookup.get_mut(&worker).unwrap();
@@ -814,6 +902,9 @@ impl ConcurrentRadixTreeCompressed {
     /// - `pos >= current_cutoff`: no-op (already beyond coverage)
     /// - `pos < current_cutoff`: `new_cutoff = pos`; moves worker to `worker_cutoffs`
     ///   or removes entirely if `new_cutoff == 0`.
+    ///
+    /// Lookup entries for the newly uncovered suffix are removed eagerly so
+    /// later duplicate remove events fast-path through the missing-hash case.
     fn apply_removed(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
@@ -848,70 +939,25 @@ impl ConcurrentRadixTreeCompressed {
             };
 
             loop {
-                // Returns Some(removed_count) on success, None if the node is stale
+                // Returns Some(remove_outcome) on success, None if the node is stale
                 // (hash was moved to a descendant by a concurrent split).
-                let update: Option<usize> = {
+                let update: Option<RemoveOutcome> = {
                     let mut guard = cur_node.write();
 
-                    match guard.edge_index.get(&block_hash).copied() {
-                        None => None, // stale: hash moved to a child
-                        Some(pos_u16) => {
-                            let pos = pos_u16 as usize;
-
-                            // Determine the worker's current match index.
-                            // Use 0 as sentinel for "not tracked" → pos >= 0 is always true → no-op.
-                            let is_full = guard.full_edge_workers.contains(&worker);
-                            let current_cutoff = if is_full {
-                                guard.edge.len()
-                            } else {
-                                guard
-                                    .worker_cutoffs
-                                    .get(&worker)
-                                    .copied()
-                                    .map(|k| k as usize)
-                                    .unwrap_or(0)
-                            };
-
-                            if pos >= current_cutoff {
-                                // Block is at or beyond current coverage — no-op.
-                                Some(0)
-                            } else {
-                                let new_cutoff = pos;
-                                let removed = current_cutoff - new_cutoff;
-
-                                if new_cutoff == 0 {
-                                    // Worker loses all coverage in this node.
-                                    if is_full {
-                                        guard.full_edge_workers.remove(&worker);
-                                    } else {
-                                        guard.worker_cutoffs.remove(&worker);
-                                    }
-                                } else {
-                                    // Worker retains coverage of edge[0..new_cutoff].
-                                    if is_full {
-                                        guard.full_edge_workers.remove(&worker);
-                                    }
-                                    guard.worker_cutoffs.insert(worker, new_cutoff as u16);
-                                }
-
-                                if !guard.has_any_workers() {
-                                    guard.children.clear();
-                                }
-
-                                Some(removed)
-                            }
-                        }
-                    }
+                    guard
+                        .edge_index
+                        .get(&block_hash)
+                        .copied()
+                        .map(|pos| guard.remove_worker_at_pos(worker, pos, block_hash))
                 };
 
                 match update {
-                    Some(removed) => {
-                        total_removed += removed;
-                        // Remove this specific hash from the lookup. Other hashes at
-                        // positions > new_cutoff remain and are cleaned up lazily when
-                        // their own remove events arrive (they will be no-ops).
+                    Some(outcome) => {
+                        total_removed += outcome.removed;
                         if let Some(wl) = lookup.get_mut(&worker) {
-                            wl.remove(&block_hash);
+                            for hash in outcome.stale_hashes {
+                                wl.remove(&hash);
+                            }
                         }
                         continue 'outer;
                     }
@@ -985,11 +1031,7 @@ impl ConcurrentRadixTreeCompressed {
                         continue;
                     }
                     let mut guard = node.write();
-                    guard.full_edge_workers.remove(&worker);
-                    guard.worker_cutoffs.remove(&worker);
-                    if !guard.has_any_workers() {
-                        guard.children.clear();
-                    }
+                    guard.drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -1019,11 +1061,7 @@ impl ConcurrentRadixTreeCompressed {
                     continue;
                 }
                 let mut guard = node.write();
-                guard.full_edge_workers.remove(&key);
-                guard.worker_cutoffs.remove(&key);
-                if !guard.has_any_workers() {
-                    guard.children.clear();
-                }
+                guard.drop_worker(key);
             }
             self.tree_sizes.remove(&key);
         }
@@ -1083,25 +1121,12 @@ impl ConcurrentRadixTreeCompressed {
 
                 merged_edge.extend_from_slice(&guard.edge);
 
-                let live_children: Vec<SharedNode> = guard
-                    .children
-                    .values()
-                    .filter(|child| {
-                        let cg = child.read();
-                        cg.has_any_workers() || !cg.children.is_empty()
-                    })
-                    .cloned()
-                    .collect();
+                let live_children = guard.live_children();
 
                 // Merge condition: this node is a pure passthrough that can be
                 // collapsed with its single child. Requires identical worker sets
                 // and no partial-coverage cutoffs on either side.
-                let can_merge = guard.worker_cutoffs.is_empty() && live_children.len() == 1 && {
-                    let cg = live_children[0].read();
-                    cg.full_edge_workers == guard.full_edge_workers
-                        && cg.worker_cutoffs.is_empty()
-                        && cg.has_any_workers()
-                };
+                let can_merge = guard.can_merge_with_only_child(&live_children);
 
                 if can_merge {
                     let next = live_children[0].clone();
@@ -1146,7 +1171,7 @@ impl ConcurrentRadixTreeCompressed {
                             event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
-                                blocks: full_blocks[..k as usize].to_vec(),
+                                blocks: full_blocks[..k].to_vec(),
                             }),
                             dp_rank: worker.dp_rank,
                         },

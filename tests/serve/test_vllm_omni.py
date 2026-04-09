@@ -144,6 +144,32 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
+    "omni_disagg_t2i": VLLMOmniConfig(
+        name="omni_disagg_t2i",
+        directory=vllm_dir,
+        script_name="disagg_omni_glm_image.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="zai-org/GLM-Image requires ~23GB per GPU across 2 GPUs, exceeds CI capacity"
+            ),
+        ],
+        model="zai-org/GLM-Image",
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A red apple on a white table",
+                    "size": "1024x1024",
+                    "response_format": "url",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_text": VLLMOmniConfig(
         name="omni_text",
         directory=vllm_dir,

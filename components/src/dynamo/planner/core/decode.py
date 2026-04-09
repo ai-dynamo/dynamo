@@ -66,67 +66,29 @@ class DecodePlanner(BasePlanner):
             label="decode ITL",
         )
 
-    def _update_correction_factor(self) -> bool:
-        if self.shared_state.num_d_workers == 0:
-            logger.warning(
-                "No decode workers found for correction factor, skipping correction update"
-            )
-            return True
-        assert self.last_metrics.num_req is not None
-        assert self.last_metrics.request_duration is not None
-        assert self.last_metrics.isl is not None
-        assert self.last_metrics.osl is not None
-        assert self.last_metrics.itl is not None
-        expect_itl = self.decode_interpolator.interpolate_itl(
-            concurrency=self.last_metrics.num_req
-            / self.shared_state.num_d_workers
-            * self.last_metrics.request_duration
-            / self.config.throughput_adjustment_interval,
-            context_length=self.last_metrics.isl + self.last_metrics.osl / 2,
-        )
-        self.d_correction_factor = self.last_metrics.itl / expect_itl
-        logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
-        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.d_correction_factor.set(self.d_correction_factor)
-        return True
-
     def _compute_replica_requirements(
         self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
-        if self.d_correction_factor <= 0:
+    ) -> Optional[int]:
+        demand_rps = next_num_req / self.config.throughput_adjustment_interval
+        engine_rps, actual_itl_ms = self.itl_regression.find_best_engine_decode_rps(
+            itl=self.config.itl,
+            context_length=next_isl + next_osl / 2,
+            osl=next_osl,
+        )
+        if engine_rps <= 0:
+            logger.warning("Decode perf model not ready, skipping throughput scaling")
+            return None
+        if actual_itl_ms > self.config.itl:
             logger.warning(
-                f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
+                f"Decode ITL SLA not met: {actual_itl_ms:.1f}ms > "
+                f"{self.config.itl:.1f}ms, scaling with best achievable rate"
             )
-            corrected_itl = self.config.itl
-        else:
-            corrected_itl = self.config.itl / self.d_correction_factor
-        (
-            pred_decode_thpt_per_gpu,
-            _,
-            _,
-        ) = self.decode_interpolator.find_best_throughput_per_gpu(
-            itl=corrected_itl, context_length=next_isl + next_osl / 2
-        )
-        if pred_decode_thpt_per_gpu <= 0:
-            logger.warning(
-                f"pred_decode_thpt_per_gpu is {pred_decode_thpt_per_gpu} "
-                "(no throughput satisfies ITL target), falling back to min_endpoint"
-            )
-            return self.config.min_endpoint
-        assert self.config.decode_engine_num_gpu is not None
-        pred_decode_throughput = (
-            next_num_req * next_osl / self.config.throughput_adjustment_interval
-        )
-        next_num_d = math.ceil(
-            pred_decode_throughput
-            / pred_decode_thpt_per_gpu
-            / self.config.decode_engine_num_gpu
-        )
+        next_num_d = math.ceil(demand_rps / engine_rps)
         next_num_d = max(next_num_d, self.config.min_endpoint)
         logger.info(
-            f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
-            f"{pred_decode_thpt_per_gpu * self.config.decode_engine_num_gpu:.2f}(d_engine_cap) = "
-            f"{next_num_d}(num_d)"
+            f"Decode: {demand_rps:.2f}(demand rps) / "
+            f"{engine_rps:.2f}(engine rps) = {next_num_d}(num_d), "
+            f"est_itl={actual_itl_ms:.1f}ms"
         )
         return next_num_d
 

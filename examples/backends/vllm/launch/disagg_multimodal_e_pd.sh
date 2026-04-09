@@ -7,6 +7,9 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
+export DYN_REQUEST_PLANE=tcp
+
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
@@ -76,7 +79,7 @@ python -m dynamo.frontend &
 EXTRA_ARGS=""
 
 # GPU assignments (override via environment variables)
-# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}

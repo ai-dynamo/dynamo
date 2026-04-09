@@ -300,6 +300,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Only affects AIC performance model lookups, not mocker scheduling.",
     )
     parser.add_argument(
+        "--aic-moe-tp-size",
+        type=int,
+        default=None,
+        help="MoE tensor-parallel size for AIC latency prediction. "
+        "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--aic-moe-ep-size",
+        type=int,
+        default=None,
+        help="MoE expert-parallel size for AIC latency prediction. "
+        "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--aic-attention-dp-size",
+        type=int,
+        default=None,
+        help="Attention data-parallel size for AIC latency prediction (default: 1). "
+        "Corresponds to the 'dp' dimension in AIC CLI output.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,

@@ -17,16 +17,18 @@
 #   4. On code change Tilt recompiles the binary and live-updates it into the
 #      running container — no full image rebuild needed.
 #
-# Prerequisites (must be in PATH):
+# Prerequisites:
 #   - Go >= 1.25        — compiles the manager binary locally
 #   - tilt              — live-reload orchestrator (https://docs.tilt.dev/install.html)
-#   - helm v3           — renders the platform Helm chart
-#   - kubectl >= 1.29   — applies CRDs and creates the namespace
 #   - docker            — builds the live-update container image
 #   - A Kubernetes cluster reachable via your current kubeconfig context
 #
+# Auto-downloaded into ./bin/ on first run (via `make kubectl helm`):
+#   - helm v3           — renders the platform Helm chart
+#   - kubectl >= 1.29   — applies CRDs and creates the namespace
+#
 # Conditional (only when skip_codegen is false, the default):
-#   - yq v4+            — post-processes generated CRD YAML (run `make ensure-yq`)
+#   - yq v4+            — post-processes generated CRD YAML (run `make yq`)
 #   - python3 + pydantic — generates Pydantic models from Go types
 #
 # The tilt restart_process extension is auto-fetched on first `tilt up`.
@@ -99,6 +101,18 @@ OPERATOR_DIR = os.getcwd()                                     # deploy/operator
 HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
 CRD_DIR      = os.path.join(HELM_CHART, 'components', 'operator', 'crds')
 
+# ---------------------------------------------------------------------------
+# Local tool binaries — ensure kubectl and helm are downloaded via `make`
+# so that all invocations use the pinned, version-suffixed copies in ./bin/.
+# The Makefile download targets create unversioned symlinks (e.g. bin/kubectl)
+# so we can reference them by their short names here.
+# ---------------------------------------------------------------------------
+TOOLS_BIN_DIR = os.path.join(OPERATOR_DIR, 'bin')
+local('make --directory="%s" kubectl helm' % OPERATOR_DIR, quiet=True)
+
+kubectl_cmd = os.path.join(TOOLS_BIN_DIR, 'kubectl')
+helm_cmd    = os.path.join(TOOLS_BIN_DIR, 'helm')
+
 IMG_NAME = 'controller'
 IMG_TAG  = 'tilt-dev'
 IMG      = (REGISTRY + '/' + IMG_NAME) if REGISTRY else IMG_NAME
@@ -128,7 +142,7 @@ local_resource(
 # CRDs — regenerate & apply via server-side apply on change
 # ---------------------------------------------------------------------------
 SKIP_CODEGEN = settings['skip_codegen']
-_crd_cmd = 'kubectl apply --server-side --force-conflicts -f ' + CRD_DIR
+_crd_cmd = kubectl_cmd + ' apply --server-side --force-conflicts -f ' + CRD_DIR
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
 
@@ -156,8 +170,8 @@ local_resource(
 def render_helm():
     """Render the platform Helm chart with only the operator subchart enabled."""
 
-    helm_cmd = [
-        'helm', 'template', 'dynamo', HELM_CHART,
+    helm_template_cmd = [
+        helm_cmd, 'template', 'dynamo', HELM_CHART,
         '--namespace', NAMESPACE,
         '--set', 'dynamo-operator.enabled=true',
         # Subcharts — NATS is on by default (workers need it)
@@ -177,13 +191,13 @@ def render_helm():
 
     # Wire in imagePullSecrets when a pull secret is configured
     if IMAGE_PULL_SECRET:
-        helm_cmd += ['--set', 'dynamo-operator.imagePullSecrets[0].name=' + IMAGE_PULL_SECRET]
+        helm_template_cmd += ['--set', 'dynamo-operator.imagePullSecrets[0].name=' + IMAGE_PULL_SECRET]
 
     # Append user-provided Helm overrides from tilt-settings
     for k, v in HELM_VALUES.items():
-        helm_cmd += ['--set', '%s=%s' % (k, v)]
+        helm_template_cmd += ['--set', '%s=%s' % (k, v)]
 
-    data = local(helm_cmd, quiet=True)
+    data = local(helm_template_cmd, quiet=True)
 
     # Decode the YAML stream so we can patch individual documents
     decoded = decode_yaml_stream(data)
@@ -217,7 +231,7 @@ def render_helm():
     return encode_yaml_stream(patched)
 
 # Create the namespace before applying anything else
-local('kubectl create namespace %s || true' % NAMESPACE, quiet=True)
+local(kubectl_cmd + ' create namespace %s || true' % NAMESPACE, quiet=True)
 
 k8s_yaml(render_helm())
 

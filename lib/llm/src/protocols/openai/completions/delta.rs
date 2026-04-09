@@ -284,6 +284,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
 
+            // Propagate completion token details if provided
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
+            }
+
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());

@@ -82,7 +82,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment": "kubernetes", "backend": "vllm", "ttft": 200, "itl": 10, "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/", "throughput_adjustment_interval": 60, "metric_reporting_prometheus_port": 9085, "no_correction": true}'
+            - '{"environment": "kubernetes", "backend": "vllm", "ttft": 200, "itl": 10, "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/", "throughput_adjustment_interval": 60, "metric_reporting_prometheus_port": 9085}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

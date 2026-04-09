@@ -326,6 +326,25 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_model_path: Option<String>,
 
+    /// MoE tensor-parallel size for AIC latency prediction (e.g., 4 for pure MoE-TP).
+    /// Required for MoE models; must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_moe_tp_size: Option<usize>,
+
+    /// MoE expert-parallel size for AIC latency prediction (e.g., 4 for pure EP).
+    /// Required for MoE models; must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_moe_ep_size: Option<usize>,
+
+    /// Attention data-parallel size for AIC latency prediction (default: 1).
+    /// Corresponds to the `dp` dimension in AIC CLI output.
+    /// Must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_attention_dp_size: Option<usize>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -493,6 +512,9 @@ impl MockEngineArgs {
             "aic_backend_version",
             "aic_tp_size",
             "aic_model_path",
+            "aic_moe_tp_size",
+            "aic_moe_ep_size",
+            "aic_attention_dp_size",
             "enable_local_indexer",
             "bootstrap_port",
             "kv_bytes_per_token",
@@ -770,6 +792,21 @@ impl MockEngineArgs {
             && let Some(s) = mp.as_str()
         {
             builder = builder.aic_model_path(Some(s.to_string()));
+        }
+        if let Some(v) = extra_args.get("aic_moe_tp_size")
+            && let Some(n) = v.as_u64()
+        {
+            builder = builder.aic_moe_tp_size(Some(n as usize));
+        }
+        if let Some(v) = extra_args.get("aic_moe_ep_size")
+            && let Some(n) = v.as_u64()
+        {
+            builder = builder.aic_moe_ep_size(Some(n as usize));
+        }
+        if let Some(v) = extra_args.get("aic_attention_dp_size")
+            && let Some(n) = v.as_u64()
+        {
+            builder = builder.aic_attention_dp_size(Some(n as usize));
         }
         // Build the MockEngineArgs with either defaults or overridden values
         builder

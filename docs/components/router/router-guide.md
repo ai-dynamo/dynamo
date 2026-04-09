@@ -42,7 +42,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
 | **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
-| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; standalone indexer aggregates events |
+| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology
@@ -89,12 +89,62 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
 | `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
+| `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
 | `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
+| `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
 
 For all available options: `python -m dynamo.frontend --help`
 
 For detailed configuration options and tuning parameters, see [Advanced Router Usage](#advanced-router-usage).
+
+#### AIC Prefill Load Model
+
+The KV router can use AIC to estimate the expected duration of the selected worker's prompt-side prefill work. When enabled, the router:
+
+- computes `prefix = overlap_blocks * block_size` for the chosen worker
+- computes `effective_isl = input_tokens - prefix`
+- stores one prompt-load hint for the admitted request
+- decays only the **oldest** active prefill request on each worker over time
+
+This affects router-side prompt load accounting only. It does not change backend execution or decode-side accounting.
+
+Enable it on the frontend like this:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+The standalone router uses the same AIC flags:
+
+```bash
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+Required when `--router-prefill-load-model=aic` is enabled:
+
+- `--router-mode kv` on the frontend
+- `--router-track-prefill-tokens`
+- `--aic-backend`
+- `--aic-system`
+- `--aic-model-path`
+
+Optional AIC knobs:
+
+- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
+- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
 
 ### Kubernetes Deployment
 
@@ -235,6 +285,10 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
+- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
+
+- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
+
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch (not rejection) so that routing decisions use the most up-to-date load metrics at the moment the request is actually sent to a worker. It also enables **priority scheduling** via `priority` hints in `nvext.agent_hints` — higher values shift a request's effective arrival time earlier in the queue, giving it priority over lower-valued requests. Must be > 0. Set to None to disable queueing (requests are dispatched immediately).
 
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`). Three policies are available:
@@ -291,6 +345,8 @@ Use `--no-router-track-prefill-tokens` when a router is serving decode-only traf
 Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
 The `--router-queue-threshold` (default: 4.0) controls when incoming requests are held in a priority queue. The router holds requests while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.priority`. Set to None to disable queueing entirely.
+
+Use `--router-prefill-load-model aic` **(experimental)** when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config (`--aic-backend`, `--aic-system`, and `--aic-model-path`; `--aic-tp-size` defaults to `1`, and `--aic-backend-version` is optional). This path is still experimental because the decay model is based on expected prefill duration rather than observed worker-side progress.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize **average** TTFT. WSPT (Smith's rule) schedules short or high-priority requests first, reducing mean latency across the batch. Use the default `fcfs` when you want to minimize **tail** TTFT — no request waits longer than necessary, since ordering is purely by (adjusted) arrival time.
 
@@ -389,6 +445,63 @@ graph TD
 ## Serving Multiple Router Replicas
 
 For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
+
+### Dynamo-Native Remote Indexer
+
+For Dynamo-native deployments, the remote indexer is served by `dynamo.frontend` or `dynamo.router`, not by `dynamo.indexer`.
+
+- Use `--serve-indexer` on router/frontend replicas that should expose `kv_indexer_query` from the worker component.
+- Use `--use-remote-indexer` on consumer routers/frontends that should query that served endpoint instead of maintaining a local overlap indexer.
+- `dynamo.indexer` remains the standalone HTTP + ZMQ microservice for non-Dynamo / direct-ZMQ deployments.
+
+Frontend example:
+
+```bash
+# Serving anchors
+python -m dynamo.frontend --router-mode kv --serve-indexer
+
+# Consumer frontend
+python -m dynamo.frontend --router-mode kv --use-remote-indexer
+```
+
+The served service is request-plane only. Each serving router/frontend keeps its normal local KV event ingestion, gap detection, and worker-query recovery path; remote consumers only issue hash-based overlap queries.
+
+Approximate mode (`--no-router-kv-events`) is singleton-only for remote serving: only one `--serve-indexer` replica may exist for a given worker component. Event-driven mode allows multiple serving replicas behind the same worker component.
+
+```mermaid
+graph TD
+    subgraph "Workers"
+        W1["Worker 1"]
+        W2["Worker 2"]
+    end
+
+    subgraph "Event Plane"
+        EP["KV Events"]
+    end
+
+    subgraph "Serving Routers / Frontends"
+        S1["Router / Frontend A<br/>--serve-indexer"]
+        S2["Router / Frontend B<br/>--serve-indexer"]
+        I1["Local Indexer"]
+        I2["Local Indexer"]
+    end
+
+    subgraph "Request Plane"
+        RP["backend.kv_indexer_query"]
+    end
+
+    C["Consumer Router / Frontend<br/>--use-remote-indexer"]
+
+    W1 --> EP
+    W2 --> EP
+    EP --> S1
+    EP --> S2
+    S1 --> I1
+    S2 --> I2
+    C --> RP
+    RP --> S1
+    RP --> S2
+```
 
 ### Router State Management
 

@@ -176,6 +176,66 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_execute_pass_batches_two_ready_requests_together() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let r1 = Uuid::from_u128(101);
+        let r2 = Uuid::from_u128(202);
+        for (uuid, tokens) in [(r1, vec![1; 4]), (r2, vec![2; 4])] {
+            core.receive(DirectRequest {
+                tokens,
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        collector.on_arrival(r1, 0.0, 4, 1);
+        collector.on_arrival(r2, 0.0, 4, 1);
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let admitted = pass
+            .admissions
+            .iter()
+            .map(|admission| admission.uuid)
+            .collect::<Vec<_>>();
+        let first = collector.snapshot(r1).unwrap();
+        let second = collector.snapshot(r2).unwrap();
+
+        assert_eq!(pass.admissions.len(), 2);
+        assert!(admitted.contains(&r1));
+        assert!(admitted.contains(&r2));
+        assert!(
+            first.first_admit_ms.is_some(),
+            "r1 should have been admitted"
+        );
+        assert!(
+            second.first_admit_ms.is_some(),
+            "r2 should have been admitted"
+        );
+        assert!(
+            first.first_token_ms.is_some(),
+            "r1 should have emitted a token"
+        );
+        assert!(
+            second.first_token_ms.is_some(),
+            "r2 should have emitted a token"
+        );
+        assert_eq!(first.first_admit_ms, second.first_admit_ms);
+        assert_eq!(first.first_token_ms, second.first_token_ms);
+    }
+
+    #[test]
     fn test_prefill_completion_emits_handoff_delay() {
         let args = MockEngineArgs::builder()
             .block_size(4)

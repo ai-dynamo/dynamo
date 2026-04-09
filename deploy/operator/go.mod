@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.6
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.3
@@ -15,6 +16,8 @@ require (
 	github.com/open-policy-agent/cert-controller v0.14.0
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.71.2
 	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/common v0.67.5
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.48.0
 	istio.io/api v1.23.1
@@ -30,6 +33,8 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 	volcano.sh/apis v1.12.2
 )
+
+replace github.com/ai-dynamo/dynamo/deploy/snapshot => ../snapshot
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -68,8 +73,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/spf13/cobra v1.9.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

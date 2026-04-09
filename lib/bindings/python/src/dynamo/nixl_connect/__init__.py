@@ -21,6 +21,7 @@ import ctypes
 import logging
 import socket
 import threading
+import time
 import uuid
 import zlib
 from abc import ABC, abstractmethod
@@ -447,12 +448,15 @@ class ActiveOperation(AbstractOperation):
     ) -> None:
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
-        iteration_count = 0
+        start = time.monotonic()
+        next_log_time = start
         sleep_time = min_poll_ms
         while True:
-            if iteration_count & 10 == 0:
+            now = time.monotonic()
+            if now >= next_log_time:
+                next_log_time = now + 10.0
                 logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}."
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={now - start:.1f}s }}."
                 )
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.

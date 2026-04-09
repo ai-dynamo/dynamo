@@ -113,12 +113,12 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Tester
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -163,6 +163,7 @@ jobs:
           docker buildx build --push ${NO_CACHE_FLAG} \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-context snapshot=../snapshot \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -421,6 +422,25 @@ jobs:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
+    if: false
+    # if: ${{ !cancelled() }}
+    uses: ./.github/workflows/generate-allure-report.yml
+    with:
+      run_id: ${{ github.run_id }}
+      subdir: pr
+      workflow_label: PR
+    permissions:
+      contents: write
+      actions: read
 
   # ============================================================================
   # CLEANUP JOBS

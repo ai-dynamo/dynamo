@@ -182,7 +182,7 @@ pub fn final_response_to_one_chunk_stream(
         // Convert FunctionCall to FunctionCallStream if present
         #[allow(deprecated)]
         let function_call = ch.message.function_call.as_ref().map(|fc| {
-            dynamo_protocols::types::FunctionCallStream {
+            dynamo_protocols::types::ChatCompletionStreamResponseDeltaFunctionCall {
                 name: Some(fc.name.clone()),
                 arguments: Some(fc.arguments.clone()),
             }
@@ -197,7 +197,7 @@ pub fn final_response_to_one_chunk_stream(
                     |(i, call)| dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                         index: i as u32,
                         id: Some(call.id.clone()),
-                        r#type: Some(call.r#type.clone()),
+                        r#type: Some(dynamo_protocols::types::FunctionType::Function),
                         function: Some(dynamo_protocols::types::FunctionCallStream {
                             name: Some(call.function.name.clone()),
                             arguments: Some(call.function.arguments.clone()),

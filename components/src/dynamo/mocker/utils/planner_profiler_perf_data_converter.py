@@ -2,7 +2,11 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 """
-This module converts planner profiler's results for mocker to use.
+Convert planner profiler results to mocker-compatible NPZ format.
+
+Uses the FPM-based regression models from ``dynamo.planner.core.perf_model``
+to evaluate prefill TTFT and decode ITL on a regular grid, producing the
+lookup tables that the mocker uses for latency simulation.
 
 Example prefill query:
     input:
@@ -10,8 +14,6 @@ Example prefill query:
 
     1. binary search prefill_isl to find isl_idx
     2. predicted TTFT is prefill_ttft_ms[isl_idx]
-For chunked prefill, can ignore the KV cache read time and use ISL=prefill_tokens in this iteration.
-This ignores the KV read time, which might leads to slightly lower latency..
 
 Example decode query:
     input:
@@ -22,20 +24,18 @@ Example decode query:
     2. binary search decode_active_kv_tokens to find kv_idx
     3. binary search decode_context_length to find context_idx
     4. predicted ITL is decode_itl[kv_idx, context_idx]
-
-For aggregated engines, can separately query prefill and decode and use their sum as the total latency.
-This ignores the fact that active tokens' up/down projection is usually combine in one kernel,
-and might leads to slightly higher latency.
 """
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-from dynamo.planner.core.throughput.interpolation import (
-    DecodeInterpolator,
-    PrefillInterpolator,
+from dynamo.planner.core.perf_model import DecodeRegressionModel, PrefillRegressionModel
+from dynamo.planner.monitoring.perf_metrics import (
+    _convert_decode_profiling,
+    _convert_prefill_profiling,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,14 +46,17 @@ def convert_profile_results_to_npz(
     output_path: str | Path,
     resolution: int = 100,
 ) -> Path:
-    """
-    Convert planner profiler results directory to mocker-compatible NPZ format.
+    """Convert planner profiler results to mocker-compatible NPZ format.
+
+    Loads the profiler's raw data (npz or JSON), fits FPM regression
+    models, and evaluates them on a regular grid to produce the lookup
+    tables the mocker expects.
 
     Args:
-        profile_results_dir: Path to directory containing selected_prefill_interpolation
-            and selected_decode_interpolation subdirectories with raw_data.npz files.
+        profile_results_dir: Path containing selected_prefill_interpolation
+            and selected_decode_interpolation subdirectories with raw_data.
         output_path: Full path where the output perf_data.npz will be written.
-        resolution: Resolution for the interpolation grid (default: 100).
+        resolution: Resolution for the evaluation grid (default: 100).
 
     Returns:
         Path to the generated NPZ file.
@@ -63,27 +66,68 @@ def convert_profile_results_to_npz(
 
     logger.info(f"Converting profile results from {profile_results_dir}...")
 
-    # Convert prefill data
-    prefill_interpolator = PrefillInterpolator(profile_results_dir)
+    result: dict[str, Any] = {}
 
-    prefill_x = np.linspace(
-        prefill_interpolator.ttft_interpolator.x.min(),
-        prefill_interpolator.ttft_interpolator.x.max(),
-        resolution,
+    # --- Prefill: fit 1D model, evaluate TTFT on ISL grid ---
+    prefill_fpms = _convert_prefill_profiling(profile_results_dir)
+    if not prefill_fpms:
+        raise FileNotFoundError(
+            f"No prefill profiling data found in {profile_results_dir}"
+        )
+
+    prefill_model = PrefillRegressionModel(
+        max_num_fpm_samples=len(prefill_fpms) + 10,
+        min_observations=1,
     )
-    prefill_y = prefill_interpolator.ttft_interpolator(prefill_x)
+    prefill_model.load_benchmark_fpms(prefill_fpms)
+    if not prefill_model._ensure_fitted():
+        raise RuntimeError("Failed to fit prefill regression from profiling data")
 
-    result = {
-        "prefill_isl": prefill_x.tolist(),
-        "prefill_ttft_ms": prefill_y.tolist(),
-    }
+    isl_values = [
+        float(fpm.scheduled_requests.sum_prefill_tokens) for fpm in prefill_fpms
+    ]
+    prefill_x = np.linspace(min(isl_values), max(isl_values), resolution)
+    prefill_y = np.array(
+        [prefill_model._predict_wall_time(isl) * 1000.0 for isl in prefill_x]
+    )
 
-    # Convert decode data
-    decode_interpolator = DecodeInterpolator(profile_results_dir, resolution=resolution)
+    result["prefill_isl"] = prefill_x.tolist()
+    result["prefill_ttft_ms"] = prefill_y.tolist()
 
-    decode_active_kv_tokens = decode_interpolator.xi * decode_interpolator.max_kv_tokens
-    decode_context_length = decode_interpolator.yi
-    decode_itl = decode_interpolator.itl_interpolator.transpose()
+    # --- Decode: fit 2D model, evaluate ITL on (kv_tokens, context_length) grid ---
+    decode_fpms = _convert_decode_profiling(profile_results_dir)
+    if not decode_fpms:
+        raise FileNotFoundError(
+            f"No decode profiling data found in {profile_results_dir}"
+        )
+
+    decode_model = DecodeRegressionModel(
+        max_num_fpm_samples=len(decode_fpms) + 10,
+        min_observations=1,
+    )
+    decode_model.load_benchmark_fpms(decode_fpms)
+    if not decode_model._ensure_fitted():
+        raise RuntimeError("Failed to fit decode regression from profiling data")
+
+    max_kv = max(
+        float(fpm.scheduled_requests.sum_decode_kv_tokens) for fpm in decode_fpms
+    )
+    ctx_values = [
+        float(fpm.scheduled_requests.sum_decode_kv_tokens)
+        / max(1, fpm.scheduled_requests.num_decode_requests)
+        for fpm in decode_fpms
+        if fpm.scheduled_requests.num_decode_requests > 0
+    ]
+    max_ctx = max(ctx_values) if ctx_values else 8192.0
+
+    decode_active_kv_tokens = np.linspace(0, max_kv, resolution)
+    decode_context_length = np.linspace(1, max_ctx, resolution)
+
+    decode_itl = np.zeros((resolution, resolution))
+    for i, kv in enumerate(decode_active_kv_tokens):
+        for j, ctx in enumerate(decode_context_length):
+            bs = max(1, kv / ctx) if ctx > 0 else 1
+            decode_itl[i, j] = decode_model._predict_2d(bs, kv) * 1000.0
 
     result["decode_active_kv_tokens"] = decode_active_kv_tokens.tolist()
     result["decode_context_length"] = decode_context_length.tolist()
@@ -96,18 +140,11 @@ def convert_profile_results_to_npz(
 
 
 def is_profile_results_dir(path: Path) -> bool:
-    """
-    Check if the given path is a profile results directory (profiler-style format).
+    """Check if the given path is a profile results directory.
 
     A profile results directory contains:
     - selected_prefill_interpolation/raw_data.npz (or prefill_raw_data.json)
     - selected_decode_interpolation/raw_data.npz (or decode_raw_data.json)
-
-    Args:
-        path: Path to check.
-
-    Returns:
-        True if path is a profile results directory, False otherwise.
     """
     if not path.is_dir():
         return False
@@ -124,18 +161,11 @@ def is_profile_results_dir(path: Path) -> bool:
 
 
 def is_mocker_format_npz(path: Path) -> bool:
-    """
-    Check if the given path is a mocker-format NPZ file.
+    """Check if the given path is a mocker-format NPZ file.
 
     A mocker-format NPZ file contains:
     - prefill_isl, prefill_ttft_ms
     - decode_active_kv_tokens, decode_context_length, decode_itl
-
-    Args:
-        path: Path to check.
-
-    Returns:
-        True if path is a valid mocker-format NPZ file, False otherwise.
     """
     if not path.is_file():
         return False

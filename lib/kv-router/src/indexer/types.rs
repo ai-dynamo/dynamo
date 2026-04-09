@@ -110,14 +110,14 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for WorkerKvQueryRespons
 
 /// Endpoint name for the standalone KV indexer query service.
 pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+/// Endpoint name for recording approximate-mode routing decisions on a remote indexer.
+pub const KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT: &str = "kv_indexer_record_routing_decision";
 
-/// Request to query the standalone KV indexer for overlap scores.
+/// Request to query a served KV indexer for overlap scores.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexerQueryRequest {
     /// Model name to query the indexer for.
     pub model_name: String,
-    /// Dynamo namespace (used as tenant_id for indexer lookup).
-    pub namespace: String,
     /// Block hashes to find matches for in the radix tree.
     pub block_hashes: Vec<LocalBlockHash>,
 }
@@ -153,7 +153,7 @@ impl From<WireOverlapScores> for OverlapScores {
     }
 }
 
-/// Response from the standalone KV indexer.
+/// Response from a served KV indexer query.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerQueryResponse {
     /// Overlap scores per worker.
@@ -184,6 +184,57 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerQueryResponse
     fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
         match self {
             IndexerQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Request to record a routing decision on a served approximate-mode indexer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IndexerRecordRoutingDecisionRequest {
+    /// Model name to update.
+    pub model_name: String,
+    /// Selected worker for this routing decision.
+    pub worker: WorkerWithDpRank,
+    /// Locally-computed block hashes for the routed request.
+    pub local_hashes: Vec<LocalBlockHash>,
+    /// Locally-computed rolling sequence hashes for the routed request.
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+/// Response from a served approximate-mode routing-decision endpoint.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IndexerRecordRoutingDecisionResponse {
+    Recorded,
+    Error(String),
+}
+
+impl MaybeError for IndexerRecordRoutingDecisionResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            IndexerRecordRoutingDecisionResponse::Error(msg) => {
+                Some(Box::new(std::io::Error::other(msg.clone())))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerRecordRoutingDecisionResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            IndexerRecordRoutingDecisionResponse::Error(msg) => {
                 Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
             }
             _ => None,

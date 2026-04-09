@@ -70,19 +70,41 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "With -n auto: calculates max concurrent slots from GPU VRAM / max_vram_gib.",
     )
     parser.addoption(
-        "--gpus",
-        "--gpu",
-        type=str,
-        default="all",
-        help="Comma-separated GPU indices or 'all' (default: all). "
-        "Controls which GPUs the parallel test runner distributes tests across.",
-    )
-    parser.addoption(
         "--dry-run",
         action="store_true",
         default=False,
         help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
     )
+
+
+def pytest_runtest_setup(item):
+    """Add Allure labels and parameters from CI environment."""
+    try:
+        import allure
+    except ImportError:
+        return
+
+    env_params = {
+        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "test_type": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_params.items():
+        if value:
+            allure.dynamic.parameter(name, value)
+
+    # Labels used by allurerc.mjs plugin filters for the unified dashboard.
+    # Use "dynamo_" prefix to avoid collision with allure-pytest's built-in
+    # "framework" label (which is always set to "pytest").
+    env_labels = {
+        "dynamo_workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
+        "dynamo_framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "dynamo_platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "dynamo_testType": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_labels.items():
+        if value:
+            allure.dynamic.label(name, value)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -108,19 +130,22 @@ def pytest_configure(config: pytest.Config) -> None:
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
         return
+    if config.option.collectonly:
+        return
     # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
     # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
-    from tests.utils.pytest_parallel_gpu import _parse_gpu_indices
+    from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
     from tests.utils.vram_utils import auto_worker_count, detect_gpus
 
     gpus = detect_gpus()
     if gpus:
         config.stash[_gpu_parallel_gpus_key] = gpus
 
-    # Parse --gpus into a list of indices (or None for all)
-    gpus_raw = config.getoption("gpus", default="all")
-    if gpus_raw and gpus_raw.strip().lower() != "all":
-        config.stash[_gpu_indices_key] = _parse_gpu_indices(gpus_raw, gpus)
+    # Honour CUDA_VISIBLE_DEVICES to restrict which GPUs the scheduler uses.
+    # NVML always sees all physical GPUs, so we filter here.
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None:
+        config.stash[_gpu_indices_key] = _parse_cuda_visible(cvd, gpus)
         selected_gpus = [
             g for g in gpus if g["index"] in config.stash[_gpu_indices_key]
         ]
@@ -489,8 +514,9 @@ def pytest_collection_modifyitems(config, items):
     #   - Tests whose profiled VRAM exceeds the limit are removed
     #   - Tests WITHOUT a VRAM marker are also removed (unknown VRAM = unsafe)
     # Using deselect (not skip) so they never reach the xdist scheduler.
+    # Skip all VRAM logic during --collect-only (just listing tests).
     vram_limit = config.getoption("--max-vram-gib", default=None)
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         keep = []
         deselected = []
         for item in items:
@@ -504,7 +530,7 @@ def pytest_collection_modifyitems(config, items):
             items[:] = keep
 
     # Write test metadata for the GPU orchestrator to read.
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         # Delayed: see vram_utils pynvml note in pytest_configure
         from tests.utils.vram_utils import print_gpu_plan, write_test_meta
 
@@ -548,8 +574,14 @@ def pytest_collection_modifyitems(config, items):
                 print(f"  {name}{vram_str}  -- {'; '.join(reasons)}")
 
         gpus = config.stash.get(_gpu_parallel_gpus_key, None)
+        gpu_indices = config.stash.get(_gpu_indices_key, None)
         if gpus and vram_limit is not None:
-            print_gpu_plan(gpus, vram_limit, would_run)
+            visible = (
+                [g for g in gpus if g["index"] in gpu_indices]
+                if gpu_indices is not None
+                else gpus
+            )
+            print_gpu_plan(visible, vram_limit, would_run)
         print()
         items.clear()
         return

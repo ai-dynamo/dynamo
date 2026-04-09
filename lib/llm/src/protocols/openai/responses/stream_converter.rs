@@ -9,6 +9,7 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed` -> `[DONE]`
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
@@ -121,17 +122,8 @@ impl ResponseStreamConverter {
             output,
             // Echo request params with spec-required defaults for omitted fields
             background: Some(false),
-            frequency_penalty: Some(0.0),
-            metadata: Some(serde_json::Value::Object(Default::default())),
-            parallel_tool_calls: Some(true),
-            presence_penalty: Some(0.0),
-            // store: false because this branch does not persist responses.
-            store: self
-                .api_context
-                .as_ref()
-                .map(|ctx| ctx.store)
-                .or(self.params.store)
-                .or(Some(false)),
+            metadata: Some(HashMap::new()),
+            parallel_tool_calls: self.params.parallel_tool_calls.or(Some(true)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
@@ -158,7 +150,6 @@ impl ResponseStreamConverter {
             incomplete_details: None,
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
-            max_tool_calls: None,
             previous_response_id: self
                 .api_context
                 .as_ref()
@@ -250,10 +241,11 @@ impl ResponseStreamConverter {
                             sequence_number: self.next_seq(),
                             output_index,
                             item: OutputItem::Message(OutputMessage {
-                                id: Some(self.message_item_id.clone()),
+                                id: self.message_item_id.clone(),
                                 content: vec![],
                                 role: AssistantRole::Assistant,
-                                status: Some(OutputStatus::InProgress),
+                                phase: None,
+                                status: OutputStatus::InProgress,
                             }),
                         },
                     );
@@ -333,6 +325,7 @@ impl ResponseStreamConverter {
                                         item: OutputItem::FunctionCall(FunctionToolCall {
                                             id: Some(item_id),
                                             call_id,
+                                            namespace: None,
                                             name: fc_name,
                                             arguments: String::new(),
                                             status: Some(OutputStatus::InProgress),
@@ -398,6 +391,7 @@ impl ResponseStreamConverter {
                                         item: OutputItem::FunctionCall(FunctionToolCall {
                                             id: Some(fc_item_id),
                                             call_id: fc_call_id,
+                                            namespace: None,
                                             name: fc_name,
                                             arguments: fc_args,
                                             status: Some(OutputStatus::Completed),
@@ -450,14 +444,15 @@ impl ResponseStreamConverter {
                     sequence_number: self.next_seq(),
                     output_index: self.message_output_index,
                     item: OutputItem::Message(OutputMessage {
-                        id: Some(self.message_item_id.clone()),
+                        id: self.message_item_id.clone(),
                         content: vec![OutputMessageContent::OutputText(OutputTextContent {
                             text: self.accumulated_text.clone(),
                             annotations: vec![],
                             logprobs: Some(vec![]),
                         })],
                         role: AssistantRole::Assistant,
-                        status: Some(OutputStatus::Completed),
+                        phase: None,
+                        status: OutputStatus::Completed,
                     }),
                 });
             events.push(make_sse_event(&item_done));
@@ -497,6 +492,7 @@ impl ResponseStreamConverter {
                     item: OutputItem::FunctionCall(FunctionToolCall {
                         id: Some(item_id),
                         call_id,
+                        namespace: None,
                         name: fc_name,
                         arguments: accumulated_args,
                         status: Some(OutputStatus::Completed),
@@ -509,14 +505,15 @@ impl ResponseStreamConverter {
         let mut output = Vec::new();
         if self.message_started {
             output.push(OutputItem::Message(OutputMessage {
-                id: Some(self.message_item_id.clone()),
+                id: self.message_item_id.clone(),
                 content: vec![OutputMessageContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
                     logprobs: Some(vec![]),
                 })],
                 role: AssistantRole::Assistant,
-                status: Some(OutputStatus::Completed),
+                phase: None,
+                status: OutputStatus::Completed,
             }));
         }
         for fc in &self.function_call_items {
@@ -524,6 +521,7 @@ impl ResponseStreamConverter {
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
                     id: Some(fc.item_id.clone()),
                     call_id: fc.call_id.clone(),
+                    namespace: None,
                     name: fc.name.clone(),
                     arguments: fc.accumulated_args.clone(),
                     status: Some(OutputStatus::Completed),
@@ -675,7 +673,7 @@ mod tests {
     use crate::protocols::unified::ResponsesContext;
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
+        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
     };
 
     fn default_params() -> ResponseParams {
@@ -684,6 +682,7 @@ mod tests {
             temperature: None,
             top_p: None,
             max_output_tokens: None,
+            parallel_tool_calls: None,
             store: None,
             tools: None,
             tool_choice: None,
@@ -714,7 +713,7 @@ mod tests {
                         tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
                             index: tc_index,
                             id: id.map(String::from),
-                            r#type: Some(ChatCompletionToolType::Function),
+                            r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
                                 name: name.map(String::from),
                                 arguments: args.map(String::from),
@@ -932,7 +931,7 @@ mod tests {
         );
     }
 
-    /// Verify that `with_context` populates `previous_response_id` and `store`
+    /// Verify that `with_context` populates `previous_response_id`
     /// in the generated Response objects.
     #[test]
     fn test_with_context_enriches_response() {
@@ -949,16 +948,14 @@ mod tests {
         let _ = conv.process_chunk(&text_chunk("Hello"));
         let _end_events = conv.emit_end_events();
 
-        // Verify the Response object carries the context values through
         let response = conv.make_response(Status::Completed, vec![]);
         assert_eq!(
             response.previous_response_id.as_deref(),
             Some("resp_prev_123")
         );
-        assert_eq!(response.store, Some(true));
     }
 
-    /// Without context, previous_response_id is None and store defaults to false.
+    /// Without context, previous_response_id is None.
     #[test]
     fn test_without_context_defaults() {
         let params = ResponseParams::default();
@@ -966,6 +963,17 @@ mod tests {
 
         let response = conv.make_response(Status::Completed, vec![]);
         assert_eq!(response.previous_response_id, None);
-        assert_eq!(response.store, Some(false));
+    }
+
+    #[test]
+    fn test_stream_response_echoes_parallel_tool_calls() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+        let conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(response.parallel_tool_calls, Some(false));
     }
 }

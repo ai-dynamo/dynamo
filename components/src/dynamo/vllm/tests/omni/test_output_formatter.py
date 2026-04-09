@@ -221,7 +221,7 @@ class TestDiffusionFormatterVideo:
 
         f = _make_diffusion_formatter()
         with patch(
-            "dynamo.common.utils.video_utils.normalize_video_frames",
+            "dynamo.vllm.omni.output_formatter.normalize_video_frames",
             side_effect=RuntimeError("boom"),
         ):
             chunk = await f._encode_video([MagicMock()], "req-1", fps=16)

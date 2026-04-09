@@ -12,9 +12,9 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/controller"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/controller"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 		fatal(agentLog, err, "Invalid configuration")
 	}
 
-	ctrd, err := containerd.New(common.ContainerdSocket)
+	ctrd, err := containerd.New(snapshotruntime.ContainerdSocket)
 	if err != nil {
 		fatal(agentLog, err, "Failed to connect to containerd")
 	}

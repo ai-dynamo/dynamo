@@ -44,7 +44,7 @@ use std::time::Duration;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, labels, name_prefix, router_request, routing_overhead,
+    frontend_service, labels, name_prefix, router, router_request, routing_overhead,
 };
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
@@ -403,6 +403,54 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
+    }
+}
+
+pub struct RemoteIndexerMetrics {
+    pub query_failures_total: prometheus::IntCounter,
+    pub write_failures_total: prometheus::IntCounter,
+}
+
+static REMOTE_INDEXER_METRICS: OnceLock<Arc<RemoteIndexerMetrics>> = OnceLock::new();
+
+impl RemoteIndexerMetrics {
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        REMOTE_INDEXER_METRICS
+            .get_or_init(|| {
+                let instance_id = component.drt().discovery().instance_id();
+                let router_id = instance_id.to_string();
+                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+
+                let metrics = component.metrics();
+                let query_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_QUERY_FAILURES_TOTAL,
+                        "Total number of remote indexer overlap queries that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_query_failures_total");
+                let write_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_WRITE_FAILURES_TOTAL,
+                        "Total number of remote indexer routing-decision writes that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_write_failures_total");
+
+                Arc::new(Self {
+                    query_failures_total,
+                    write_failures_total,
+                })
+            })
+            .clone()
+    }
+
+    pub fn increment_query_failures(&self) {
+        self.query_failures_total.inc();
+    }
+
+    pub fn increment_write_failures(&self) {
+        self.write_failures_total.inc();
     }
 }
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     pipeline::{PushRouter, RouterMode},
@@ -37,6 +37,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
@@ -50,6 +51,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         enforce_disagg: bool,
         model_name: String,
         namespace: String,
@@ -65,6 +67,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            prefill_load_estimator,
             model_name,
             namespace,
             is_eagle,
@@ -85,6 +88,7 @@ impl PrefillRouter {
                         model_manager,
                         kv_cache_block_size,
                         kv_router_config,
+                        router_clone.prefill_load_estimator.clone(),
                     ).await {
                         tracing::error!(error = %e, "Failed to activate prefill router");
                     }
@@ -105,6 +109,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> Result<()> {
         tracing::info!(
             router_mode = ?self.router_mode,
@@ -127,6 +132,7 @@ impl PrefillRouter {
                     &endpoint,
                     kv_cache_block_size,
                     kv_router_config,
+                    prefill_load_estimator,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
                     self.is_eagle,

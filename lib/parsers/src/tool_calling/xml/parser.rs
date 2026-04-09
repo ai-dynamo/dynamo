@@ -47,16 +47,43 @@ pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool
     false
 }
 
-/// Find the end position of a Qwen3Coder tool call.
-/// Returns the position after </tool_call> or the length of the chunk if not found.
+/// Find the end position of all consecutive XML-style tool calls.
+/// When a model emits multiple parallel tool calls in one chunk
+/// (e.g. `<tool_call>...</tool_call><tool_call>...</tool_call>`), this function
+/// advances past every consecutive start→end pair so the entire group is captured
+/// as a single jailed region.  Returns the position after the last `</tool_call>`
+/// found, or the length of the chunk when no end token is present.
 pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) -> usize {
+    let start_token = &config.tool_call_start_token;
     let end_token = &config.tool_call_end_token;
 
-    if let Some(pos) = chunk.find(end_token.as_str()) {
-        pos + end_token.len()
-    } else {
-        chunk.len()
+    // Find the first end token — if there isn't one, the call is incomplete.
+    let Some(first_end) = chunk.find(end_token.as_str()) else {
+        return chunk.len();
+    };
+
+    let mut cursor = first_end + end_token.len();
+
+    // Keep consuming additional consecutive <tool_call>…</tool_call> blocks that
+    // follow immediately (possibly separated by whitespace).
+    loop {
+        let rest = &chunk[cursor..];
+        let trimmed = rest.trim_start();
+        if !trimmed.starts_with(start_token.as_str()) {
+            break;
+        }
+        // Compute where the trimmed slice starts in the original chunk.
+        let trim_offset = rest.len() - trimmed.len();
+        let search_from = cursor + trim_offset + start_token.len();
+        if let Some(end_pos) = chunk[search_from..].find(end_token.as_str()) {
+            cursor = search_from + end_pos + end_token.len();
+        } else {
+            // Next block is incomplete — stop here; the jail will wait for more data.
+            break;
+        }
     }
+
+    cursor
 }
 
 /// Try to parse Qwen3Coder formatted tool calls from a message.
@@ -341,13 +368,25 @@ fn convert_param_value(
         return Value::String(param_value);
     }
 
-    // Get the type from schema
-    let param_type = param_config
-        .get(param_name)
+    // Get the type from schema.
+    // If a parameter uses "anyOf"/"oneOf" instead of a direct "type", there is no
+    // top-level "type" key. Treat it as "object" so the value goes through JSON
+    // parsing rather than being returned as a double-encoded string.
+    let param_schema = param_config.get(param_name);
+    let param_type = param_schema
         .and_then(|v| v.get("type"))
         .and_then(|t| t.as_str())
-        .unwrap_or("string")
-        .to_lowercase();
+        .map(|t| t.to_lowercase())
+        .unwrap_or_else(|| {
+            if param_schema
+                .map(|v| v.get("anyOf").is_some() || v.get("oneOf").is_some())
+                .unwrap_or(false)
+            {
+                "object".to_string()
+            } else {
+                "string".to_string()
+            }
+        });
 
     // The follow `match` block follows this rough pattern for each block:
     // 1. Match `param_type` against predefined string representations of each type,
@@ -572,6 +611,51 @@ mod tests {
         let text_no_end = "<tool_call><function=test>";
         let pos = find_tool_call_end_position_xml(text_no_end, &config);
         assert_eq!(pos, text_no_end.len());
+    }
+
+    /// Regression test for issue #6822: parallel tool calls in a single chunk must
+    /// all be captured by find_tool_call_end_position_xml so that the jail passes the
+    /// entire group to extract_tool_calls rather than emitting the second (and later)
+    /// calls as raw trailing text.
+    #[test]
+    fn test_find_tool_call_end_position_parallel_calls() {
+        let config = XmlParserConfig::default();
+
+        // Two parallel calls with no whitespace between them.
+        let two_calls = "<tool_call><function=foo><parameter=x>1</parameter></function></tool_call>\
+                         <tool_call><function=bar><parameter=y>2</parameter></function></tool_call>\
+                         trailing";
+        let pos = find_tool_call_end_position_xml(two_calls, &config);
+        // Everything up to (but not including) "trailing" should be captured.
+        assert!(
+            &two_calls[..pos].ends_with("</tool_call>"),
+            "should end at last </tool_call>, got: {:?}",
+            &two_calls[..pos]
+        );
+        assert_eq!(&two_calls[pos..], "trailing");
+
+        // Three parallel calls separated by whitespace / newlines.
+        let three_calls = "<tool_call><function=a></function></tool_call>\n\
+                           <tool_call><function=b></function></tool_call>\n\
+                           <tool_call><function=c></function></tool_call> done";
+        let pos3 = find_tool_call_end_position_xml(three_calls, &config);
+        assert!(
+            &three_calls[..pos3].ends_with("</tool_call>"),
+            "should end at last </tool_call>, got: {:?}",
+            &three_calls[..pos3]
+        );
+        assert_eq!(three_calls[pos3..].trim(), "done");
+
+        // Incomplete second call — should stop after the first complete one.
+        let incomplete = "<tool_call><function=a></function></tool_call>\
+                          <tool_call><function=b>"; // no </tool_call>
+        let pos_inc = find_tool_call_end_position_xml(incomplete, &config);
+        // The first complete call ends at position 46 (length of first block).
+        let first_end = "<tool_call><function=a></function></tool_call>".len();
+        assert_eq!(
+            pos_inc, first_end,
+            "should stop at end of first complete call when second is incomplete"
+        );
     }
 
     #[rstest]
@@ -922,6 +1006,60 @@ rust programming
         assert_eq!(args["float_param"], "not_a_float");
         // bool_param with invalid value defaults to false
         assert_eq!(args["bool_param"], false);
+    }
+
+    #[test]
+    fn test_anyof_param_parsed_as_object_not_string() {
+        // When a tool parameter uses "anyOf" instead of a direct "type", the value
+        // should be JSON-parsed (treated as object), not double-encoded as a string.
+        // Regression test for: https://github.com/vllm-project/vllm/pull/36032
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "required": ["location"],
+                "properties": {
+                    "location": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "lat": {"type": "number"},
+                                    "lon": {"type": "number"}
+                                },
+                                "required": ["lat", "lon"]
+                            }
+                        ]
+                    }
+                }
+            })),
+        }];
+
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=location>
+{"city": "Paris"}
+</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, _) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        // Must be a proper object, not a double-encoded string like "{\"city\": \"Paris\"}"
+        assert!(
+            args["location"].is_object(),
+            "Expected location to be an object, got: {}",
+            args["location"]
+        );
+        assert_eq!(args["location"]["city"], "Paris");
     }
 
     #[test]

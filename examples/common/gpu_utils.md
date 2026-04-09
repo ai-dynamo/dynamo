@@ -24,7 +24,7 @@ Instead, we use **absolute KV cache caps**:
 |--------|----------------------|---------|
 | vLLM | `--kv-cache-memory-bytes N` | `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` |
 | SGLang | `--max-total-tokens N` | `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` |
-| TensorRT-LLM | *(future TODO)* | — |
+| TensorRT-LLM | `--override-engine-args '{"kv_cache_config":{"max_tokens":N}}'` | `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` |
 
 ---
 
@@ -36,7 +36,7 @@ Instead, we use **absolute KV cache caps**:
 | Fraction base | Total VRAM | Total VRAM | Free VRAM (post-load) |
 | Default | 0.90 | 0.90 | 0.90 |
 | Max seq len | `--max-model-len` | `--context-length` | `max_seq_len` |
-| KV cache override | `--kv-cache-memory-bytes` | `--max-total-tokens` | *(broken in 1.3.0rc5)* |
+| KV cache override | `--kv-cache-memory-bytes` | `--max-total-tokens` | `KvCacheConfig.max_tokens` via `--override-engine-args` |
 
 ---
 
@@ -76,40 +76,55 @@ only — they do **not** change KV cache allocation.
 `free_gpu_memory_fraction` is a fraction of **free** VRAM after model load.
 Set via YAML or `--override-engine-args '{"kv_cache_config":{"free_gpu_memory_fraction": 0.24}}'`.
 
-Deterministic KV cache control via `build_gpu_mem_args` is a future TODO.
+Deterministic KV cache control uses `build_trtllm_override_args_with_mem` in
+`gpu_utils.sh`, which builds JSON for `--override-engine-args`. Token-based
+(`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`) or byte-based
+(`_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`) caps are supported. If the
+launch script already passes `--override-engine-args`, the function merges
+the GPU config into the existing JSON via `--merge-with-json`.
 
 ---
 
-## `build_gpu_mem_args` and Env Vars
+## Engine-Specific GPU Memory Functions
 
-Launch scripts source `gpu_utils.sh` and call `build_gpu_mem_args` to pick
+Launch scripts source `gpu_utils.sh` and call engine-specific functions to pick
 up env-var overrides during profiling and parallel execution:
 
 ```bash
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+# vLLM
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 python -m dynamo.vllm --model "$MODEL" $GPU_MEM_ARGS &
 
-GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
+# SGLang
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
+
+# TRT-LLM (JSON merging, separate function)
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+python -m dynamo.trtllm --model-path "$MODEL" ${OVERRIDE_JSON:+--override-engine-args "$OVERRIDE_JSON"} &
 ```
 
-When the env var is set, `build_gpu_mem_args` returns the corresponding flag.
+When the env var is set, the function returns the corresponding flag.
 Otherwise it returns empty and the engine uses its default allocation.
 
-| Env var | Engine | CLI flag produced |
-|---------|--------|-------------------|
-| `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` | vLLM | `--kv-cache-memory-bytes N --gpu-memory-utilization 0.01` |
-| `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` | SGLang | `--max-total-tokens N` |
+| Env var | Function | Output |
+|---------|----------|--------|
+| `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` | `build_vllm_gpu_mem_args` | `--kv-cache-memory-bytes N --gpu-memory-utilization 0.01` |
+| `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` | `build_sglang_gpu_mem_args` | `--max-total-tokens N` |
+| `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` | `build_trtllm_override_args_with_mem` | `{"kv_cache_config": {"max_tokens": N}}` (JSON) |
+| `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` | `build_trtllm_override_args_with_mem` | `{"kv_cache_config": {"max_gpu_total_bytes": N}}` (JSON) |
 
-For multi-worker single-GPU scripts, pass `--workers-per-gpu N` to divide
-the allocation: `build_gpu_mem_args vllm --workers-per-gpu 2`.
+All functions return per-process args. In multi-worker-per-GPU setups
+(e.g. `disagg_same_gpu.sh`), each worker gets the same override value.
+The profiler finds the per-worker budget directly.
 
 **Profiler** (`profile_pytest.py`): binary-searches the KV cap to find the
 minimum passing value, applies a 2x safety factor, outputs pytest markers
-(`@pytest.mark.requested_vllm_kv_cache_bytes(N)` or
-`@pytest.mark.requested_sglang_kv_tokens(N)`).
+(`@pytest.mark.requested_vllm_kv_cache_bytes(N)`,
+`@pytest.mark.requested_sglang_kv_tokens(N)`, or
+`@pytest.mark.requested_trtllm_kv_tokens(N)`).
 
 **Scheduler** (`pytest_parallel_gpu.py`): reads the markers at runtime and
 sets the env var per-test. See `tests/README.md` for details.

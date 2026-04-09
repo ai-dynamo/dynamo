@@ -9,9 +9,10 @@ from typing import Any
 from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
+    _test_router_decisions_disagg,
     _test_router_indexers_sync,
 )
-from tests.router.helper import get_runtime
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
@@ -229,6 +230,57 @@ def run_router_decisions_test(
         )
 
 
+def run_disagg_router_decisions_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    num_prefill_workers: int,
+    num_decode_workers: int,
+    prefill_process_kwargs: dict[str, Any] | None = None,
+    decode_process_kwargs: dict[str, Any] | None = None,
+):
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+
+    prefill_kwargs = {
+        "namespace": shared_namespace,
+        **(prefill_process_kwargs or {}),
+    }
+    decode_kwargs = {
+        "namespace": shared_namespace,
+        **(decode_process_kwargs or {}),
+    }
+
+    with engine_process_cls(
+        request,
+        num_workers=num_prefill_workers,
+        request_plane=request_plane,
+        **{engine_args_name: engine_args},
+        **prefill_kwargs,
+    ) as prefill_workers:
+        with engine_process_cls(
+            request,
+            num_workers=num_decode_workers,
+            request_plane=request_plane,
+            **{engine_args_name: engine_args},
+            **decode_kwargs,
+        ) as decode_workers:
+            _test_router_decisions_disagg(
+                prefill_workers=prefill_workers,
+                decode_workers=decode_workers,
+                block_size=block_size,
+                request=request,
+                frontend_port=frontend_port,
+                test_payload=build_test_payload(model_name),
+                request_plane=request_plane,
+            )
+
+
 def run_indexers_sync_test(
     *,
     engine_process_cls,
@@ -242,8 +294,10 @@ def run_indexers_sync_test(
     block_size: int,
     model_name: str,
     num_workers: int,
+    extra_process_kwargs: dict[str, Any] | None = None,
 ):
     nats_process, _etcd_process = runtime_services_dynamic_ports
+    process_kwargs = extra_process_kwargs or {}
 
     with engine_process_cls(
         request,
@@ -253,6 +307,7 @@ def run_indexers_sync_test(
         store_backend=store_backend,
         durable_kv_events=durable_kv_events,
         **{engine_args_name: engine_args},
+        **process_kwargs,
     ) as engine_workers:
         _test_router_indexers_sync(
             engine_workers=engine_workers,
@@ -264,4 +319,13 @@ def run_indexers_sync_test(
             test_nats_interruption=not durable_kv_events,
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
+            standalone_indexer_url=getattr(
+                engine_workers, "standalone_indexer_url", None
+            ),
+            standalone_indexer_b_url=getattr(
+                engine_workers, "standalone_indexer_b_url", None
+            ),
+            test_zmq_replay=bool(
+                getattr(engine_workers, "standalone_indexer_url", None)
+            ),
         )

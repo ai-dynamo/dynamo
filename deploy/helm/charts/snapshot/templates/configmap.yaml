@@ -3,6 +3,9 @@
 
 apiVersion: v1
 kind: ConfigMap
+{{- if ne .Values.storage.type "pvc" }}
+{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -10,6 +13,12 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    storage:
+      type: {{ .Values.storage.type | quote }}
+      {{- if eq .Values.storage.type "pvc" }}
+      basePath: {{ .Values.storage.pvc.basePath | quote }}
+      {{- end }}
+
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 

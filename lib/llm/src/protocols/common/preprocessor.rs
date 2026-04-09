@@ -34,9 +34,13 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Data parallel rank for the request
+    /// Data parallel rank for the decode worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
 
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.

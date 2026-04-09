@@ -29,8 +29,7 @@ anyhow = { workspace = true }
 async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-async_zmq = { workspace = true }
-zmq = { workspace = true }
+tmq = { workspace = true }
 lru = { version = "0.12" }
 axum = { workspace = true }
 blake3 = { workspace = true }

@@ -51,7 +51,6 @@ class SupportedModels:
     QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
     QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
     QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
-    LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -198,10 +197,7 @@ def construct_mm_data(
 ) -> Dict[str, Any]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
 
-    # Handle video models
-    if is_model_supported(model, SupportedModels.LLAVA_NEXT_VIDEO_7B):
-        if video_numpy is None:
-            raise ValueError("No video frames provided.")
+    if video_numpy is not None:
         return {"video": video_numpy}
 
     # Handle image models - validate image embeddings first

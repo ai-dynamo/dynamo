@@ -14,6 +14,7 @@ def run_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
+    aic_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -21,6 +22,7 @@ def run_trace_replay(
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
+    trace_block_size=512,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -28,6 +30,7 @@ def run_trace_replay(
         prefill_engine_args=prefill_engine_args,
         decode_engine_args=decode_engine_args,
         router_config=router_config,
+        aic_perf_config=aic_perf_config,
         num_workers=num_workers,
         num_prefill_workers=num_prefill_workers,
         num_decode_workers=num_decode_workers,
@@ -35,6 +38,7 @@ def run_trace_replay(
         replay_mode=replay_mode,
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
+        trace_block_size=trace_block_size,
     )
 
 
@@ -47,6 +51,7 @@ def run_synthetic_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
+    aic_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -68,6 +73,7 @@ def run_synthetic_trace_replay(
         prefill_engine_args=prefill_engine_args,
         decode_engine_args=decode_engine_args,
         router_config=router_config,
+        aic_perf_config=aic_perf_config,
         num_workers=num_workers,
         num_prefill_workers=num_prefill_workers,
         num_decode_workers=num_decode_workers,

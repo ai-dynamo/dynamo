@@ -82,16 +82,16 @@ pub struct WorkloadDriver {
 }
 
 impl WorkloadDriver {
-    pub(crate) fn new_trace(trace: Trace) -> Result<Self> {
-        Self::new(trace, DriverMode::Trace)
+    pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
+        Self::new(trace, engine_block_size, DriverMode::Trace)
     }
 
-    pub(crate) fn new_concurrency(trace: Trace) -> Result<Self> {
-        Self::new(trace, DriverMode::Concurrency)
+    pub(crate) fn new_concurrency(trace: Trace, engine_block_size: usize) -> Result<Self> {
+        Self::new(trace, engine_block_size, DriverMode::Concurrency)
     }
 
-    fn new(trace: Trace, mode: DriverMode) -> Result<Self> {
-        let block_size = trace.block_size;
+    fn new(trace: Trace, engine_block_size: usize, mode: DriverMode) -> Result<Self> {
+        let trace_block_size = trace.block_size;
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -105,10 +105,11 @@ impl WorkloadDriver {
                     .into_iter()
                     .map(|turn| -> Result<TurnRuntime> {
                         Ok(TurnRuntime {
-                            tokens: turn.synthesize_tokens(block_size)?,
+                            tokens: turn.synthesize_tokens(trace_block_size)?,
                             max_output_tokens: turn.max_output_tokens,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
-                            replay_hashes: turn.to_replay_hashes(block_size)?,
+                            replay_hashes: turn
+                                .to_replay_hashes(trace_block_size, engine_block_size)?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -259,5 +260,12 @@ impl WorkloadDriver {
                 .sessions
                 .iter()
                 .all(|session| session.next_turn_index >= session.turns.len())
+    }
+
+    pub fn total_turns(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|session| session.turns.len())
+            .sum()
     }
 }

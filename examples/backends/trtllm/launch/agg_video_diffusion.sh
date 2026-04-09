@@ -10,6 +10,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -36,6 +37,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Build GPU memory JSON (returns bare JSON, no flag)
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+
+# Add --override-engine-args if we have JSON
+TRTLLM_OVERRIDE_ARGS=()
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Video Diffusion Serving (1 GPU)" "$MODEL_PATH" "$HTTP_PORT" \
     "Media URL:   $MEDIA_OUTPUT_FS_URL"
@@ -61,6 +71,7 @@ python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality video_diffusion \
   --media-output-fs-url "$MEDIA_OUTPUT_FS_URL" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

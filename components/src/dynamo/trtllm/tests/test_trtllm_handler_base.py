@@ -440,3 +440,80 @@ class TestMultimodalGuard:
         assert result["prompt"] == "describe image"
         assert result["prompt_token_ids"] == [1, 2, 3]
         assert result["multi_modal_data"] is None
+
+
+class TestDisaggRequestId:
+    """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
+
+    def _make_prefill_handler(self, machine_id: int = 42) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disagg_machine_id = machine_id
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        return handler
+
+    def test_disagg_request_id_populated_in_prefill_mode(self):
+        """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
+        handler = self._make_prefill_handler()
+        disagg_params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=None
+        )
+        assert disagg_params is not None
+        assert disagg_params.disagg_request_id is not None
+        assert isinstance(disagg_params.disagg_request_id, int)
+
+    def test_disagg_request_id_unique_across_calls(self):
+        """Multiple calls should produce different IDs."""
+        handler = self._make_prefill_handler()
+        ids = set()
+        for _ in range(10):
+            params, _, _ = handler._setup_disaggregated_params_for_mode(
+                request={}, ep_disaggregated_params=None
+            )
+            ids.add(params.disagg_request_id)
+        assert len(ids) == 10, f"Expected 10 unique IDs, got {len(ids)}"
+
+    def test_disagg_request_id_set_on_ep_params_with_none(self):
+        """When ep_disaggregated_params has disagg_request_id=None, it gets populated."""
+        handler = self._make_prefill_handler()
+        ep_params = MagicMock()
+        ep_params.disagg_request_id = None
+        # Make bool(ep_params) truthy so the if-branch is taken
+        ep_params.__bool__ = lambda self: True
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=ep_params
+        )
+        assert params.disagg_request_id is not None
+        assert isinstance(params.disagg_request_id, int)
+
+    def test_disagg_request_id_not_overwritten_when_set(self):
+        """When ep_disaggregated_params already has a disagg_request_id, keep it."""
+        handler = self._make_prefill_handler()
+        existing_id = 12345678
+        ep_params = MagicMock()
+        ep_params.disagg_request_id = existing_id
+        ep_params.__bool__ = lambda self: True
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=ep_params
+        )
+        assert params.disagg_request_id == existing_id
+
+    def test_machine_id_from_config(self):
+        """disagg_machine_id is taken from the handler config."""
+        handler = self._make_prefill_handler(machine_id=123)
+        assert handler.disagg_machine_id == 123
+
+    def test_different_machine_ids_produce_different_id_ranges(self):
+        """Handlers with different machine_ids produce non-overlapping snowflake IDs."""
+        handler_a = self._make_prefill_handler(machine_id=1)
+        handler_b = self._make_prefill_handler(machine_id=2)
+        params_a, _, _ = handler_a._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=None
+        )
+        params_b, _, _ = handler_b._setup_disaggregated_params_for_mode(
+            request={}, ep_disaggregated_params=None
+        )
+        assert params_a.disagg_request_id != params_b.disagg_request_id

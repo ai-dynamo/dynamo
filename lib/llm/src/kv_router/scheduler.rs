@@ -16,6 +16,7 @@ use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_kv_router::{
+    PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{OverlapScores, WorkerId},
 };
@@ -45,6 +46,7 @@ where
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
         kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -81,6 +83,8 @@ where
             block_size,
             selector,
             policy,
+            prefill_load_estimator,
+            kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),
             worker_type,

@@ -29,6 +29,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
@@ -112,6 +113,17 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
     vllm_flags = None
     sglang_flags = None
+
+    # --trust-remote-code is only meaningful with --dyn-chat-processor vllm.
+    # Warn and strip it when a different (or no) chat processor is active so
+    # it does not propagate as an unknown-argument error below.
+    if "--trust-remote-code" in unknown and config.chat_processor != "vllm":
+        logger.warning(
+            "--trust-remote-code has no effect without '--dyn-chat-processor vllm'. "
+            "It is only supported by the vLLM chat processor. "
+            "Pass '--dyn-chat-processor vllm' to enable trust_remote_code."
+        )
+        unknown = [arg for arg in unknown if arg != "--trust-remote-code"]
 
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
@@ -301,6 +313,9 @@ async def async_main():
             runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

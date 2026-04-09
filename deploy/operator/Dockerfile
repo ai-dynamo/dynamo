@@ -21,10 +21,12 @@ WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
+COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
 # Copy source code
 COPY . .
+COPY --from=snapshot . /snapshot/
 
 # Lint stage
 FROM base AS linter

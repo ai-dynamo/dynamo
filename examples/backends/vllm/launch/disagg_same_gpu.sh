@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is controlled via build_gpu_mem_args (see gpu_utils.sh).
+# Per-worker VRAM is controlled via build_vllm_gpu_mem_args (see gpu_utils.sh).
 # Override individual knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-model-len 4096, RTX 6000 Ada 48 GiB):
@@ -25,7 +25,7 @@ MODEL="Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm --workers-per-gpu 2)
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
