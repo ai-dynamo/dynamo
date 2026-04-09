@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package checkpointjob
+package protocol
 
 import (
 	"testing"
 
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestObserve(t *testing.T) {
+func TestObserveCheckpointJob(t *testing.T) {
 	makeJob := func(annotation string, conditions ...batchv1.JobCondition) *batchv1.Job {
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -23,7 +22,7 @@ func TestObserve(t *testing.T) {
 			},
 		}
 		if annotation != "" {
-			job.Annotations[snapshotprotocol.CheckpointStatusAnnotation] = annotation
+			job.Annotations[CheckpointStatusAnnotation] = annotation
 		}
 		return job
 	}
@@ -32,22 +31,22 @@ func TestObserve(t *testing.T) {
 		name                   string
 		job                    *batchv1.Job
 		checkpointWorkerActive bool
-		wantPhase              ObservationPhase
+		wantPhase              CheckpointObservationPhase
 		wantReason             string
 		wantMessage            string
 	}{
 		{
 			name:      "running job stays running",
 			job:       makeJob(""),
-			wantPhase: ObservationPhaseRunning,
+			wantPhase: CheckpointObservationPhaseRunning,
 		},
 		{
 			name: "completed job with completion annotation is ready",
 			job: makeJob(
-				snapshotprotocol.CheckpointStatusCompleted,
+				CheckpointStatusCompleted,
 				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
 			),
-			wantPhase:   ObservationPhaseReady,
+			wantPhase:   CheckpointObservationPhaseReady,
 			wantReason:  "JobSucceeded",
 			wantMessage: "Checkpoint job completed successfully",
 		},
@@ -58,7 +57,7 @@ func TestObserve(t *testing.T) {
 				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
 			),
 			checkpointWorkerActive: true,
-			wantPhase:              ObservationPhaseWaitingForConfirmation,
+			wantPhase:              CheckpointObservationPhaseWaitingForConfirmation,
 		},
 		{
 			name: "completed job fails without confirmation once worker is inactive",
@@ -66,18 +65,18 @@ func TestObserve(t *testing.T) {
 				"",
 				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
 			),
-			wantPhase:   ObservationPhaseFailed,
+			wantPhase:   CheckpointObservationPhaseFailed,
 			wantReason:  "CheckpointVerificationFailed",
 			wantMessage: "Checkpoint job completed without snapshot-agent completion confirmation",
 		},
 		{
 			name: "failed checkpoint annotation wins over completed job",
 			job: makeJob(
-				snapshotprotocol.CheckpointStatusFailed,
+				CheckpointStatusFailed,
 				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
 			),
 			checkpointWorkerActive: true,
-			wantPhase:              ObservationPhaseFailed,
+			wantPhase:              CheckpointObservationPhaseFailed,
 			wantReason:             "CheckpointVerificationFailed",
 			wantMessage:            "Checkpoint job completed but snapshot-agent reported checkpoint failure",
 		},
@@ -85,7 +84,7 @@ func TestObserve(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			observation := Observe(tc.job, tc.checkpointWorkerActive)
+			observation := ObserveCheckpointJob(tc.job, tc.checkpointWorkerActive)
 			if observation.Phase != tc.wantPhase {
 				t.Fatalf("phase = %q, want %q", observation.Phase, tc.wantPhase)
 			}
