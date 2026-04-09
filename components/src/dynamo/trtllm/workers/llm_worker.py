@@ -229,6 +229,20 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    # Propagate MDC-relevant fields from arg_map back to config, since
+    # extra_engine_args / override_engine_args may have overridden them.
+    # Without this, the MDC registers stale values (e.g. the model's native
+    # context length instead of the engine's actual max_seq_len).
+    for field in ("max_seq_len", "max_batch_size", "max_num_tokens"):
+        if field in arg_map and arg_map[field] != getattr(config, field):
+            logging.info(
+                "Propagating %s from engine args to config: %r -> %r",
+                field,
+                getattr(config, field),
+                arg_map[field],
+            )
+            setattr(config, field, arg_map[field])
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML

@@ -170,8 +170,51 @@ def test_deep_update_adds_new_keys():
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
 
 
+class _StopExecution(Exception):
+    """Sentinel exception to halt init_llm_worker at a controlled point."""
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
+
+
+@pytest.mark.asyncio
+async def test_extra_engine_args_propagated_to_config():
+    """max_seq_len set via --extra-engine-args must propagate back to config.
+
+    Regression test for DGH-643: without propagation, the MDC registers the
+    model's native context length instead of the engine's actual max_seq_len.
+    """
+    config = parse_args(["--model", "fake-model", "--max-seq-len", "131072"])
+    assert config.max_seq_len == 131072
+
+    config.extra_engine_args = "/fake/path.yaml"
+
+    def mock_update(arg_map, _path):
+        arg_map["max_seq_len"] = 32768
+        arg_map["max_batch_size"] = 64
+        return arg_map
+
+    with mock.patch(
+        "dynamo.trtllm.workers.llm_worker.update_llm_args_with_extra_options",
+        side_effect=mock_update,
+    ), mock.patch(
+        "dynamo.trtllm.workers.llm_worker.tokenizer_factory",
+        side_effect=_StopExecution,
+    ):
+        with pytest.raises(_StopExecution):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert (
+        config.max_seq_len == 32768
+    ), "max_seq_len from extra-engine-args was not propagated to config"
+    assert (
+        config.max_batch_size == 64
+    ), "max_batch_size from extra-engine-args was not propagated to config"
 
 
 @pytest.mark.asyncio
