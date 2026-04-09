@@ -443,13 +443,6 @@ ignore_missing_imports = true
 module = ["dynamo.profiler.*"]
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-# Planner scaling mixins access attributes defined by PlannerStateMachine
-# via cooperative inheritance.  mypy cannot resolve cross-class attrs in
-# mixin patterns without a Protocol, which adds boilerplate for no gain.
-module = ["dynamo.planner.core.load_scaling", "dynamo.planner.core.throughput_scaling"]
-disable_error_code = ["attr-defined"]
-
 [tool.sphinx]
 
 # extra-content-head

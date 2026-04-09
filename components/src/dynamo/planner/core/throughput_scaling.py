@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# mypy: disable-error-code="attr-defined"
 
 """Throughput-based scaling logic (Prometheus traffic-driven, predictive).
 
