@@ -12,7 +12,7 @@ A hierarchical routing service that sits between the Dynamo frontend and local r
 The Global Router supports two modes:
 
 - **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (context_length, ITL) to separate pool types.
-- **Agg mode**: Registers as a single generate worker. Routes all requests based on (ISL, ITL) to unified pools that handle both prefill and decode via chunked prefill.
+- **Agg mode**: Registers as a single generate worker. Routes all requests based on (TTFT target, ITL target) to unified pools that handle both prefill and decode.
 
 Both modes support priority-based pool overrides from agent hints.
 
@@ -266,7 +266,7 @@ Clients can pass TTFT and ITL targets via `extra_args` in the request:
 }
 ```
 
-If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, `itl_target` drives pool selection.
+If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, both `ttft_target` and `itl_target` drive pool selection.
 
 ## Request Flow
 
