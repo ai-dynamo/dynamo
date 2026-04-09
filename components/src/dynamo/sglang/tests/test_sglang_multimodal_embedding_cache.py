@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
-from sglang.srt.managers.schedule_batch import Modality
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
@@ -43,6 +42,8 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
     """Partial-hit should encode only misses and preserve URL order in output."""
+    from sglang.srt.managers.schedule_batch import Modality
+
     urls = [
         "http://example.com/a.jpg",
         "http://example.com/b.jpg",

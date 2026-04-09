@@ -117,22 +117,20 @@ except ImportError:
 async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
     """Version-safe wrapper around MMEncoder._encode().
 
-    Always returns (grid_dim, embedding, aux_data). On sglang 0.5.9 where
-    _encode returns only 2 values and ignores modality, aux_data is None.
-
-    Probes the encoder's signature on first call (cached on the function).
+    Always returns (grid_dim, embedding, aux_data). On sglang 0.5.9
+    _encode takes no modality arg and returns a 2-tuple; on 0.5.10+ it
+    takes modality and returns a 3-tuple. We try the new signature first
+    and fall back to the old one.
     """
-    if not hasattr(mm_encode, "_needs_modality"):
-        import inspect
+    try:
+        result = await encoder._encode(mm_items, modality)
+    except TypeError:
+        # sglang 0.5.9: _encode(mm_items) -> (grid_dim, embedding)
+        result = await encoder._encode(mm_items)
 
-        mm_encode._needs_modality = (
-            "modality" in inspect.signature(type(encoder)._encode).parameters
-        )
-
-    if mm_encode._needs_modality:
-        return await encoder._encode(mm_items, modality)
-    grid_dim, embedding = await encoder._encode(mm_items)
-    return grid_dim, embedding, None
+    if len(result) == 2:
+        return (*result, None)
+    return result
 
 
 def enable_disjoint_streaming_output(server_args: Any) -> None:
