@@ -11,6 +11,8 @@
 //! [`crate::kv_router::publisher::KvEventPublisher`], but is much simpler:
 //! no event transformation, no batching, no local indexer — just raw byte relay.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use futures::StreamExt;
 use serde::Serialize;
@@ -26,6 +28,8 @@ use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 const FPM_VERSION: i32 = 1;
+/// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
+const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 /// to the Dynamo event plane.
@@ -246,7 +250,11 @@ impl FpmDirectPublisher {
             tracing::info!("FPM direct publisher: shutting down");
         });
 
-        // Per-dp_rank serialization tasks
+        // Per-dp_rank serialization tasks.
+        //
+        // Each task forwards active-pass snapshots and emits periodic idle
+        // heartbeats (zeroed snapshot, wall_time=0.0) when the scheduler is
+        // idle, matching the Python `_FpmPublisherThread` contract.
         for (dp_rank, mut fpm_rx) in fpm_receivers.into_iter().enumerate() {
             let pub_tx = pub_tx.clone();
             let worker_id = worker_id.clone();
@@ -255,25 +263,45 @@ impl FpmDirectPublisher {
 
             rt.spawn(async move {
                 let mut counter: i64 = 0;
+                let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
+                tokio::pin!(heartbeat_sleep);
+
                 loop {
-                    tokio::select! {
+                    let snapshot = tokio::select! {
                         biased;
                         _ = cancel_ser.cancelled() => break,
                         result = fpm_rx.recv() => {
                             match result {
                                 Some(snapshot) => {
-                                    counter += 1;
-                                    match serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
-                                        Ok(bytes) => {
-                                            let _ = pub_tx.send(bytes);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("FPM serialization failed for dp_rank {dp_rank}: {e}");
-                                        }
-                                    }
+                                    // Active pass — reset the heartbeat timer.
+                                    heartbeat_sleep
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                                    snapshot
                                 }
                                 None => break,
                             }
+                        }
+                        _ = &mut heartbeat_sleep => {
+                            // No snapshot for IDLE_HEARTBEAT_INTERVAL — emit
+                            // zeroed idle heartbeat, then reset for the next
+                            // interval.
+                            heartbeat_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                            ForwardPassSnapshot::default()
+                        }
+                    };
+
+                    counter += 1;
+                    match serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
+                        Ok(bytes) => {
+                            let _ = pub_tx.send(bytes);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "FPM serialization failed for dp_rank {dp_rank}: {e}"
+                            );
                         }
                     }
                 }

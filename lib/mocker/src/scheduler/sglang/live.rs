@@ -39,7 +39,7 @@ impl SglangScheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        _fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,
@@ -48,6 +48,7 @@ impl SglangScheduler {
             kv_event_publishers,
             cancellation_token,
             None,
+            fpm_tx,
         )
     }
 
@@ -58,7 +59,7 @@ impl SglangScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        _fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,
@@ -67,6 +68,7 @@ impl SglangScheduler {
             kv_event_publishers,
             cancellation_token,
             admission_tx,
+            fpm_tx,
         )
     }
 
@@ -77,6 +79,7 @@ impl SglangScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
@@ -122,6 +125,11 @@ impl SglangScheduler {
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                }
+                if let Some(fpm) = pass.fpm
+                    && let Some(fpm_tx) = &fpm_tx
+                {
+                    let _ = fpm_tx.send(fpm);
                 }
                 let active_decode_blocks = pass.active_decode_blocks;
                 flush_output_signals(&output_tx, pass.output_signals);
