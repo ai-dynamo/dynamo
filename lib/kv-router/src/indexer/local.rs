@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -63,7 +64,7 @@ enum DumpPlan {
 enum CacheReuseDecision {
     ReturnExact(CachedRecoverySnapshot),
     ReturnExtended(WorkerKvQueryResponse),
-    WaitForBuilder(Arc<Notify>),
+    WaitForBuilder(OwnedNotified),
     BuildFresh {
         build: InFlightRecoveryBuild,
         last_event_id: u64,
@@ -325,7 +326,7 @@ impl LocalKvIndexer {
             match decision {
                 CacheReuseDecision::ReturnExact(snapshot) => return snapshot.into_response(),
                 CacheReuseDecision::ReturnExtended(response) => return response,
-                CacheReuseDecision::WaitForBuilder(notify) => notify.notified().await,
+                CacheReuseDecision::WaitForBuilder(waiter) => waiter.await,
                 CacheReuseDecision::BuildFresh {
                     build,
                     last_event_id,
@@ -389,13 +390,14 @@ impl LocalKvIndexer {
                 } => {
                     let mut events = cached.events.as_ref().clone();
                     events.extend(tail);
+                    let shared_events = Arc::new(events);
                     cache_state.cached = Some(CachedRecoverySnapshot {
-                        events: Arc::new(events.clone()),
+                        events: shared_events.clone(),
                         last_event_id,
                         last_used_at: now,
                     });
                     return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
-                        events,
+                        events: shared_events.as_ref().clone(),
                         last_event_id,
                     });
                 }
@@ -406,7 +408,7 @@ impl LocalKvIndexer {
         }
 
         if let Some(build) = cache_state.building.clone() {
-            return CacheReuseDecision::WaitForBuilder(build.notify);
+            return CacheReuseDecision::WaitForBuilder(build.notify.notified_owned());
         }
 
         let build = InFlightRecoveryBuild {
