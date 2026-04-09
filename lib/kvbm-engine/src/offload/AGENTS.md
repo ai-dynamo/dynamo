@@ -4,9 +4,9 @@ This document provides governance rules for AI agents (LLMs, copilots, etc.) tha
 
 ## Before Making Any Changes
 
-1. **Read [README.md](README.md)** - Understand the documented policies
+1. **Read [README.md](../../../docs/offload.md)** - Understand the documented policies
 2. **Evaluate alignment** - Does your proposed change align with the policies?
-3. **Consult [DEVELOPER.md](DEVELOPER.md)** - Understand implementation details
+3. **Consult [DEVELOPER.md](../../../docs/offload-developer.md)** - Understand implementation details
 
 ## Policy Alignment Check
 

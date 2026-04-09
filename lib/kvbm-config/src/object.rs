@@ -106,9 +106,6 @@ impl S3ObjectConfig {
 ///
 /// Selects the NIXL OBJ plugin backend. Parameters are forwarded to
 /// `nixl_sys::Agent::create_backend("OBJ", params)` at runtime.
-///
-/// Currently only the S3/MinIO backend is supported. Future variants (GCS,
-/// Azure) can be added as NIXL adds them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum NixlObjectConfig {
