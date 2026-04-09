@@ -324,7 +324,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:                  false,
 		},
 		{
-			name:                  "already in progress for same container",
+			name:                  "in progress for same container retries after restart",
 			nodeName:              testNodeName,
 			phase:                 corev1.PodRunning,
 			ready:                 false,
@@ -332,7 +332,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			annotationStatus:      "in_progress",
 			annotationContainerID: testContainerID,
 			createDir:             true,
-			want:                  false,
+			want:                  true,
 		},
 		{
 			name:                  "already failed for same container",
