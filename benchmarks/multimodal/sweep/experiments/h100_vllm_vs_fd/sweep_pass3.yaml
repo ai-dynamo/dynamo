@@ -1,23 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Pass 1: vllm baseline vs dynamo frontend-decoding on H100.
-# No nsys profiling — pure TTFT/latency measurement.
-# OSL=1 for pure TTFT measurement. Request-rate sweep.
-# Synthetic 512x512 images, 4/request, 20% reuse (192 pool), base64.
+# Pass 3: dynamo-fd tracing overhead investigation.
+# Rate=8, 240 requests, 4 images/request, 960 unique images (no reuse).
+# OSL=1 for pure TTFT measurement.
+# Two configs: default logging vs DYN_LOG=warn (quiet) to measure logging overhead.
+#
+# Dataset must be generated at runtime (see run_pass3.sh).
 #
 # Usage:
 #   python -m benchmarks.multimodal.sweep \
-#     --config benchmarks/multimodal/sweep/experiments/h100_vllm_vs_fd/sweep_pass1.yaml
+#     --config benchmarks/multimodal/sweep/experiments/h100_vllm_vs_fd/sweep_pass3.yaml
 
 model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
-request_rates: [4, 8]
+request_rates: [8]
 osl: 1
-request_count: 60
+request_count: 240
 warmup_count: 3
 port: 8000
 timeout: 600
-output_dir: logs/04-08/h100-vllm-vs-fd-pass1
+output_dir: logs/04-09/h100-fd-pass3
 
 env:
   CUDA_VISIBLE_DEVICES: "0"
@@ -26,15 +28,14 @@ env:
   DYN_PERF_PATCHES: "1"
 
 input_files:
-  - benchmarks/multimodal/jsonl/60req_4img_192pool_400word_base64.jsonl
+  - benchmarks/multimodal/jsonl/240req_4img_960pool_400word_base64.jsonl
 
 configs:
-  - label: vllm-baseline
-    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+  - label: fd-default
+    workflow: examples/backends/vllm/launch/agg_multimodal.sh
     extra_args:
       - --no-enable-prefix-caching
-      - --multimodal-embedding-cache-capacity-gb
-      - "0"
+      - --frontend-decoding
       - --max-model-len
       - "16384"
       - --max-num-seqs
@@ -42,8 +43,8 @@ configs:
       - --gpu-memory-utilization
       - ".9"
 
-  - label: dynamo-fd
-    workflow: examples/backends/vllm/launch/agg_multimodal.sh
+  - label: fd-quiet
+    workflow: benchmarks/multimodal/sweep/workflows/agg_multimodal_quiet.sh
     extra_args:
       - --no-enable-prefix-caching
       - --frontend-decoding
