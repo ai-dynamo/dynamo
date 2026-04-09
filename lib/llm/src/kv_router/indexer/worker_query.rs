@@ -727,8 +727,6 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
         let _maybe_permit = if !likely_buffer_read {
             // Acquire semaphore permit before processing tree dump.
             // This prevents multiple heavy tree dump operations from running concurrently
-            // and overwhelming the worker's indexing capacity.
-            // Handle cancellation (stopped or killed) while waiting for the semaphore.
             let engine_ctx = ctx.context();
             let permit = tokio::select! {
                 result = self.processing_semaphore.acquire() => {
@@ -737,6 +735,8 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
                     tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
                     return Ok(ResponseStream::new(
+                        // this response will be dropped on the router side since the request was cancelled, 
+                        // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
                         Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
                             "Request cancelled by client".to_string(),
                         )])),
