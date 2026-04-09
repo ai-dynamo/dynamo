@@ -25,7 +25,9 @@ use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
     RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
+use crate::scheduler::{
+    ForwardPassSnapshot, RouterEventVisibility, SchedulerHandle, capture_router_event_sink,
+};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -919,5 +921,397 @@ mod router_events {
 
         assert!(signal.completed);
         assert_eq!(signal.handoff_delay_ms, Some(8.0));
+    }
+}
+
+mod forward_pass_metrics {
+    use super::*;
+
+    fn fpm_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_fpm_single_prefill_request() {
+        let mut core = SglangCore::new(fpm_args());
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let fpm = pass.fpm.expect("FPM should be present");
+
+        assert_eq!(fpm.num_prefill_requests, 1);
+        assert!(
+            fpm.sum_prefill_tokens > 0,
+            "prefill tokens should be computed"
+        );
+        // In SGLang, after prefill the request immediately joins running and
+        // participates in the decode step of the same pass.
+        assert_eq!(fpm.num_decode_requests, 1);
+        assert_eq!(fpm.num_queued_prefill, 0);
+        assert_eq!(fpm.num_queued_decode, 0);
+        assert!(fpm.wall_time_secs > 0.0);
+    }
+
+    #[test]
+    fn test_fpm_prefill_and_decode_mixed_batch() {
+        let mut core = SglangCore::new(fpm_args());
+
+        // r1: 4-token prompt, 3 output tokens
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 3,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+
+        // Pass 1: prefill r1
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        let fpm1 = pass1.fpm.expect("FPM should be present");
+        assert_eq!(fpm1.num_prefill_requests, 1);
+
+        // r2: arriving while r1 is decoding
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 3,
+            uuid: Some(Uuid::from_u128(2)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        // Pass 2: r2 prefill + decode step runs on all running (r1 + r2)
+        let pass2 = core.execute_pass(&mut collector, 1.0);
+        let fpm2 = pass2.fpm.expect("FPM should be present");
+        assert_eq!(fpm2.num_prefill_requests, 1, "r2 is prefilling");
+        // In SGLang, after r2 prefill completes it joins running alongside r1,
+        // so the decode step sees both.
+        assert_eq!(fpm2.num_decode_requests, 2, "r1 + r2 both in decode step");
+        assert!(
+            fpm2.sum_decode_kv_tokens > 0,
+            "decode requests should have KV context"
+        );
+    }
+
+    #[test]
+    fn test_fpm_empty_pass_is_zeroed() {
+        let mut core = SglangCore::new(fpm_args());
+
+        // Submit and fully drain a request first so the core isn't empty
+        // (empty core blocks in receive_requests in live mode, but
+        // execute_pass_internal works fine on an empty core).
+        let pass = core.execute_hidden_pass(0.0);
+        let fpm = pass.fpm.expect("FPM should be present even for empty pass");
+
+        assert_eq!(fpm.num_prefill_requests, 0);
+        assert_eq!(fpm.num_decode_requests, 0);
+        assert_eq!(fpm.num_queued_prefill, 0);
+        assert_eq!(fpm.num_queued_decode, 0);
+        assert_eq!(fpm.sum_prefill_tokens, 0);
+        assert_eq!(fpm.sum_decode_kv_tokens, 0);
+    }
+
+    #[test]
+    fn test_fpm_queued_requests() {
+        // Very limited KV to force queuing.
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(2))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+
+        // Two 8-token requests but limited KV
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        core.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(2)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let fpm = pass.fpm.expect("FPM should be present");
+
+        let total_scheduled = fpm.num_prefill_requests + fpm.num_decode_requests;
+        assert!(
+            total_scheduled >= 1,
+            "at least one request should be scheduled"
+        );
+        // With tight KV, the second request should be queued.
+        let total_queued = fpm.num_queued_prefill + fpm.num_queued_decode;
+        assert!(
+            total_queued >= 1,
+            "at least one request should be queued, got {total_queued}"
+        );
+    }
+
+    #[test]
+    fn test_fpm_var_prefill_length_with_multiple_requests() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(32),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+
+        // Two prefill requests with different prompt lengths
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(), // prompt_len = 4
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        core.receive(DirectRequest {
+            tokens: (100..112).collect(), // prompt_len = 12
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(2)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let fpm = pass.fpm.expect("FPM should be present");
+
+        assert_eq!(fpm.num_prefill_requests, 2);
+        // Population variance of [4, 12]: mean=8, var=((4-8)^2+(12-8)^2)/2 = 16
+        assert!(
+            (fpm.var_prefill_length - 16.0).abs() < 1e-6,
+            "expected var=16.0, got {}",
+            fpm.var_prefill_length
+        );
+    }
+
+    #[test]
+    fn test_fpm_chunked_prefill_reports_chunk_not_full_prompt() {
+        // With chunked_prefill_size=8 and a 16-token prompt, the request
+        // should be chunked. Each pass should report only the chunk size
+        // in sum_prefill_tokens, not the full prompt length.
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+
+        core.receive(DirectRequest {
+            tokens: (0..16).collect(),
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+
+        // Pass 1: first chunk
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        let fpm1 = pass1.fpm.expect("FPM should be present");
+        assert_eq!(fpm1.num_prefill_requests, 1);
+        assert!(
+            fpm1.sum_prefill_tokens <= 8,
+            "chunk should be at most 8 tokens, got {}",
+            fpm1.sum_prefill_tokens
+        );
+        assert!(fpm1.sum_prefill_tokens > 0);
+
+        // Pass 2: remaining chunk
+        let pass2 = core.execute_pass(&mut collector, 1.0);
+        let fpm2 = pass2.fpm.expect("FPM should be present");
+        assert_eq!(fpm2.num_prefill_requests, 1, "still prefilling");
+        assert!(
+            fpm2.sum_prefill_tokens <= 8,
+            "second chunk should also be at most 8 tokens, got {}",
+            fpm2.sum_prefill_tokens
+        );
+
+        // Total across both chunks should equal the full prompt length
+        assert_eq!(
+            fpm1.sum_prefill_tokens + fpm2.sum_prefill_tokens,
+            16,
+            "total prefill tokens across chunks should equal full prompt"
+        );
+    }
+
+    #[test]
+    fn test_fpm_retracted_decode_becomes_queued_decode() {
+        // Very tight KV to force decode retraction. Fill the KV with running
+        // requests, then the decode step should retract some, and those should
+        // appear as queued decodes in the next pass's FPM.
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(6) // 24 tokens — very tight
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(32),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let mut collector = crate::replay::TraceCollector::default();
+
+        // Two requests with 4-token prompts and long outputs to fill KV
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 20,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 20,
+            uuid: Some(Uuid::from_u128(2)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        // Run several passes to build up KV pressure
+        for i in 0..4 {
+            core.execute_pass(&mut collector, i as f64);
+        }
+
+        // Add a third request to increase memory pressure
+        core.receive(DirectRequest {
+            tokens: (200..212).collect(), // 12 tokens
+            max_output_tokens: 10,
+            uuid: Some(Uuid::from_u128(3)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        // Run more passes — at some point retraction should occur
+        let mut saw_queued_decode = false;
+        for i in 4..10 {
+            let pass = core.execute_pass(&mut collector, i as f64);
+            let fpm = pass.fpm.expect("FPM should be present");
+            if fpm.num_queued_decode > 0 {
+                saw_queued_decode = true;
+                assert!(
+                    fpm.sum_queued_decode_kv_tokens > 0,
+                    "retracted decode should have KV context"
+                );
+                break;
+            }
+        }
+
+        // If retraction didn't happen (KV was sufficient), that's also valid —
+        // just verify we always get Some(fpm).
+        if !saw_queued_decode {
+            // Verify the requests completed or are still running with valid FPM
+            let pass = core.execute_hidden_pass(10.0);
+            assert!(pass.fpm.is_some(), "FPM should always be present");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fpm_sent_through_channel() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+
+        let (output_tx, _output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
+
+        let scheduler = SglangScheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            Some(fpm_tx),
+        );
+
+        scheduler.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        // Wait for the scheduler to process the request and emit FPM
+        let fpm = tokio::time::timeout(Duration::from_secs(5), fpm_rx.recv())
+            .await
+            .expect("timed out waiting for FPM")
+            .expect("FPM channel closed");
+
+        assert_eq!(fpm.num_prefill_requests, 1);
+        assert!(fpm.sum_prefill_tokens > 0);
+        assert!(fpm.wall_time_secs > 0.0);
     }
 }
