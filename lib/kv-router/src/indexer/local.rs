@@ -9,7 +9,6 @@ use std::{
 use async_trait::async_trait;
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
-use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -20,18 +19,18 @@ use crate::protocols::*;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use tokio::time::Duration;
 
 // -------------------------------------------------
 // Decentralized router: LocalKvIndexer for workers
 // -------------------------------------------------
 
-const RECOVERY_CACHE_TTL: Duration = Duration::from_secs(1);
-
 #[derive(Clone)]
 struct CachedRecoverySnapshot {
     events: Arc<Vec<RouterEvent>>,
+    base_last_event_id: u64,
     last_event_id: u64,
-    last_used_at: Instant,
 }
 
 impl CachedRecoverySnapshot {
@@ -108,29 +107,13 @@ impl RecoverySnapshotCache {
         assess_tail_append_safety: F,
     ) -> CacheReuseDecision
     where
-        F: FnOnce(u64) -> TailAppendSafety,
+        F: FnOnce(&CachedRecoverySnapshot) -> TailAppendSafety,
     {
         let mut cache_state = self.state.lock().await;
-        let now = Instant::now();
-
-        if cache_state
-            .cached
-            .as_ref()
-            .is_some_and(|cached| now.duration_since(cached.last_used_at) > RECOVERY_CACHE_TTL)
-        {
-            cache_state.cached = None;
-        }
 
         if let Some(cached) = cache_state.cached.clone() {
-            match assess_tail_append_safety(cached.last_event_id) {
-                TailAppendSafety::ExactHit => {
-                    let exact = CachedRecoverySnapshot {
-                        last_used_at: now,
-                        ..cached
-                    };
-                    cache_state.cached = Some(exact.clone());
-                    return CacheReuseDecision::ReturnExact(exact);
-                }
+            match assess_tail_append_safety(&cached) {
+                TailAppendSafety::ExactHit => return CacheReuseDecision::ReturnExact(cached),
                 TailAppendSafety::Safe {
                     last_event_id,
                     tail,
@@ -140,8 +123,8 @@ impl RecoverySnapshotCache {
                     let shared_events = Arc::new(events);
                     cache_state.cached = Some(CachedRecoverySnapshot {
                         events: shared_events.clone(),
+                        base_last_event_id: cached.base_last_event_id,
                         last_event_id,
-                        last_used_at: now,
                     });
                     return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
                         events: shared_events.as_ref().clone(),
@@ -222,7 +205,7 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Circular buffer of recent events
     pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
-    /// Coordinates single-flight tree dumps and the short-lived cached snapshot.
+    /// Coordinates single-flight tree dumps and the cached recovery snapshot.
     /// This stays separate from `event_buffer` so dump wait/build state can be
     /// managed on the async path without holding the buffer lock across `.await`.
     recovery_cache: Arc<RecoverySnapshotCache>,
@@ -432,7 +415,7 @@ impl LocalKvIndexer {
                 .decide_reuse_or_build(
                     fallback_last_event_id,
                     self.current_buffer_last_event_id(),
-                    |cached_last_event_id| self.assess_tail_append_safety(cached_last_event_id),
+                    |cached| self.assess_tail_append_safety(cached),
                 )
                 .await;
 
@@ -465,10 +448,11 @@ impl LocalKvIndexer {
         }
     }
 
-    fn assess_tail_append_safety(&self, cached_last_event_id: u64) -> TailAppendSafety {
+    fn assess_tail_append_safety(&self, cached: &CachedRecoverySnapshot) -> TailAppendSafety {
+        let append_budget = self.recovery_cache_append_budget();
         let buffer = self.event_buffer.lock().unwrap();
         let Some(first_buffered) = buffer.front().map(|event| event.event.event_id) else {
-            return if cached_last_event_id == 0 {
+            return if cached.last_event_id == 0 {
                 TailAppendSafety::ExactHit
             } else {
                 TailAppendSafety::Invalidate
@@ -476,11 +460,16 @@ impl LocalKvIndexer {
         };
         let last_buffered = buffer.back().unwrap().event.event_id;
 
-        if last_buffered <= cached_last_event_id {
+        if last_buffered <= cached.last_event_id {
             return TailAppendSafety::ExactHit;
         }
 
-        let next_event_id = cached_last_event_id.saturating_add(1);
+        let appended_since_base = last_buffered.saturating_sub(cached.base_last_event_id);
+        if appended_since_base > append_budget {
+            return TailAppendSafety::Invalidate;
+        }
+
+        let next_event_id = cached.last_event_id.saturating_add(1);
         if next_event_id < first_buffered {
             return TailAppendSafety::Invalidate;
         }
@@ -507,6 +496,10 @@ impl LocalKvIndexer {
             last_event_id: last_buffered,
             tail,
         }
+    }
+
+    fn recovery_cache_append_budget(&self) -> u64 {
+        (self.max_buffer_size / 2) as u64
     }
 
     fn current_buffer_last_event_id(&self) -> Option<u64> {
@@ -553,8 +546,8 @@ impl LocalKvIndexer {
                 },
                 snapshot: Some(CachedRecoverySnapshot {
                     events: Arc::new(events),
+                    base_last_event_id: last_event_id,
                     last_event_id,
-                    last_used_at: Instant::now(),
                 }),
             },
             Err(error) => {

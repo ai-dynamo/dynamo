@@ -2513,7 +2513,7 @@ mod local_indexer_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_local_indexer_reuses_cached_tree_dump_within_ttl() {
+    async fn test_local_indexer_reuses_cached_tree_dump_without_time_expiry() {
         let indexer = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
@@ -2527,6 +2527,7 @@ mod local_indexer_tests {
         indexer.flush().await;
 
         let first = indexer.get_events_in_id_range(None, None).await;
+        time::advance(Duration::from_secs(60)).await;
         let second = indexer.get_events_in_id_range(None, None).await;
 
         assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
@@ -2534,8 +2535,8 @@ mod local_indexer_tests {
         assert_eq!(indexer.dump_build_count(), 1);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_local_indexer_expires_cached_tree_dump_lazily() {
+    #[tokio::test]
+    async fn test_local_indexer_rebuilds_when_cumulative_append_budget_exceeded() {
         let indexer = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
@@ -2551,7 +2552,24 @@ mod local_indexer_tests {
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        time::advance(Duration::from_secs(2)).await;
+        indexer
+            .apply_event_with_buffer(make_local_store_event(2, 202))
+            .await
+            .unwrap();
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(4, 404))
+            .await
+            .unwrap();
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 2);
     }
