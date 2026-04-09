@@ -342,6 +342,12 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
         } else if !delta.text.is_empty() {
             // Text-only response (backward compatible)
             Some(ChatCompletionMessageContent::Text(delta.text))
+        } else if delta.reasoning_content.is_some() {
+            // When reasoning_content is present, always include the content
+            // field (even as empty text) so it is not omitted from the
+            // serialized JSON response. The OpenAI API convention is to
+            // return `"content": ""` rather than dropping the key entirely.
+            Some(ChatCompletionMessageContent::Text(String::new()))
         } else {
             None
         };
@@ -1149,6 +1155,154 @@ mod tests {
         );
         assert_eq!(tool_calls[0].function.name, "get_weather");
         assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"SF\"}");
+    }
+
+    /// Helper to create a delta with reasoning_content and optional text content.
+    #[allow(deprecated)]
+    fn create_reasoning_delta(
+        index: u32,
+        text: &str,
+        reasoning_content: Option<&str>,
+        role: Option<dynamo_protocols::types::Role>,
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let content = if text.is_empty() {
+            None
+        } else {
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
+        };
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content,
+            function_call: None,
+            tool_calls: None,
+            role,
+            refusal: None,
+            reasoning_content: reasoning_content.map(|s| s.to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta,
+            finish_reason,
+            stop_reason: None,
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "gpt-oss-120b".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+        };
+        Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_only_response_includes_content_field() {
+        // Reproduce DGH-651: when the model produces only reasoning_content
+        // with no final content, the aggregated response must still include
+        // the `content` field so it is not dropped during serialization.
+        let deltas = vec![
+            create_reasoning_delta(
+                0,
+                "",
+                Some("Analyzing the question carefully."),
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+            ),
+            create_reasoning_delta(
+                0,
+                "",
+                Some(" The answer is Brasília."),
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+            ),
+        ];
+
+        let stream = Box::pin(stream::iter(deltas));
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
+
+        // reasoning_content must be present with the accumulated text
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Analyzing the question carefully. The answer is Brasília.")
+        );
+
+        // content must be present (not None) so it serializes into the JSON
+        assert!(
+            choice.message.content.is_some(),
+            "content field must be Some when reasoning_content is present"
+        );
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text(String::new())
+        );
+
+        // Verify the JSON output includes the content key
+        let json = serde_json::to_value(&choice.message).unwrap();
+        assert!(
+            json.get("content").is_some(),
+            "Serialized JSON must contain the 'content' key when reasoning_content is present"
+        );
+        assert!(
+            json.get("reasoning_content").is_some(),
+            "Serialized JSON must contain 'reasoning_content'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_with_content_response() {
+        // When the model produces both reasoning and final content,
+        // both fields must be correctly populated.
+        let deltas = vec![
+            create_reasoning_delta(
+                0,
+                "",
+                Some("Let me think about this."),
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+            ),
+            create_reasoning_delta(0, "The capital is Brasília.", None, None, None),
+            create_reasoning_delta(
+                0,
+                "",
+                None,
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+            ),
+        ];
+
+        let stream = Box::pin(stream::iter(deltas));
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Let me think about this.")
+        );
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("The capital is Brasília.".to_string())
+        );
     }
 
     #[tokio::test]
