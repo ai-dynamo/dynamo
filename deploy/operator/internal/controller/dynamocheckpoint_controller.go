@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +41,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -175,6 +177,11 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if err := r.reconcileK8sDiscoveryResources(ctx, ckpt); err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources for checkpoint")
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile K8s discovery resources for checkpoint: %w", err)
+	}
+
 	hash := ckpt.Status.IdentityHash
 	if hash == "" {
 		var err error
@@ -221,6 +228,38 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Status update will trigger next reconcile via watch
 	return ctrl.Result{}, nil
+}
+
+func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	logger := log.FromContext(ctx)
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(ckpt.Name, ckpt.Namespace)
+	_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync checkpoint k8s discovery service account")
+		return fmt.Errorf("failed to sync checkpoint k8s discovery service account: %w", err)
+	}
+
+	role := discovery.GetK8sDiscoveryRole(ckpt.Name, ckpt.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.Role, bool, error) {
+		return role, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync checkpoint k8s discovery role")
+		return fmt.Errorf("failed to sync checkpoint k8s discovery role: %w", err)
+	}
+
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(ckpt.Name, ckpt.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
+		return roleBinding, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync checkpoint k8s discovery role binding")
+		return fmt.Errorf("failed to sync checkpoint k8s discovery role binding: %w", err)
+	}
+
+	return nil
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
