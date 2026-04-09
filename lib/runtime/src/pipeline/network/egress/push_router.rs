@@ -3,17 +3,6 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
-
-/// Check if an error chain indicates the worker should be reported as down.
-fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    const INHIBITED: &[ErrorType] = &[
-        ErrorType::CannotConnect,
-        ErrorType::Disconnected,
-        ErrorType::ConnectionTimeout,
-        ErrorType::Backend(BackendError::EngineShutdown),
-    ];
-    match_error_chain(err, INHIBITED, &[])
-}
 use crate::{
     component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
     dynamo_nvtx_range,
