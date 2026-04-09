@@ -4,6 +4,7 @@
 """Dynamo Snapshot integration for SGLang workers."""
 
 
+import gc
 import logging
 import time
 
@@ -12,7 +13,6 @@ import sglang as sgl
 from dynamo.common.utils.snapshot import (
     CheckpointConfig,
     EngineSnapshotController,
-    _try_release_memory,
 )
 
 from .request_handlers.handler_base import SGLangEngineQuiesceController
@@ -61,7 +61,7 @@ async def prepare_snapshot_engine(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
     )
 
-    _try_release_memory("after_engine_load")
+    gc.collect()
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
