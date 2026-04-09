@@ -735,7 +735,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
                     tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
                     return Ok(ResponseStream::new(
-                        // this response will be dropped on the router side since the request was cancelled, 
+                        // this response will be dropped on the router side since the request was cancelled,
                         // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
                         Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
                             "Request cancelled by client".to_string(),
