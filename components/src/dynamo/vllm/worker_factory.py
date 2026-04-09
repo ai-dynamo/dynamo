@@ -321,10 +321,11 @@ class WorkerFactory:
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        if getattr(handler, "embedding_cache_manager", None) is not None:
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
-                cache=handler.embedding_cache_manager,
+                cache=embedding_cache,
                 model_name=config.served_model_name or config.model,
                 component_name=config.component,
             )
@@ -554,10 +555,11 @@ class WorkerFactory:
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        if getattr(handler, "embedding_cache_manager", None) is not None:
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
-                cache=handler.embedding_cache_manager,
+                cache=embedding_cache,
                 model_name=config.served_model_name or config.model,
                 component_name=config.component,
             )

@@ -566,10 +566,11 @@ async def init_llm_worker(
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
 
-                if getattr(handler, "_encoder_cache", None) is not None:
+                encoder_cache = getattr(handler, "_encoder_cache", None)
+                if encoder_cache is not None:
                     register_embedding_cache_metrics(
                         endpoint=endpoint,
-                        cache=handler._encoder_cache,
+                        cache=encoder_cache,
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
@@ -586,10 +587,11 @@ async def init_llm_worker(
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
 
-            if getattr(handler, "_encoder_cache", None) is not None:
+            encoder_cache = getattr(handler, "_encoder_cache", None)
+            if encoder_cache is not None:
                 register_embedding_cache_metrics(
                     endpoint=endpoint,
-                    cache=handler._encoder_cache,
+                    cache=encoder_cache,
                     model_name=model_name_for_metrics,
                     component_name=config.component,
                 )
