@@ -19,13 +19,16 @@ import (
 )
 
 type restoreOptions struct {
-	ManifestPath string
-	PodName      string
-	Namespace    string
-	KubeContext  string
-	CheckpointID string
-	Timeout      time.Duration
+	ManifestPath  string
+	PodName       string
+	Namespace     string
+	KubeContext   string
+	CheckpointID  string
+	ManualTrigger bool
+	Timeout       time.Duration
 }
+
+const restoreStatusPendingTrigger = "pending_trigger"
 
 func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	createPodFromManifest := strings.TrimSpace(opts.ManifestPath) != ""
@@ -94,6 +97,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
 			Storage:         resolvedStorage,
 			SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
+			ManualTrigger:   opts.ManualTrigger,
 		})
 		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
@@ -122,7 +126,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		for key, value := range pod.Annotations {
 			annotations[key] = value
 		}
-		snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotprotocol.DefaultCheckpointArtifactVersion)
+		snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, true, opts.ManualTrigger, checkpointID, snapshotprotocol.DefaultCheckpointArtifactVersion)
 		patch, err := json.Marshal(map[string]any{
 			"metadata": map[string]any{
 				"labels":      labels,
@@ -135,6 +139,17 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if _, err := clientset.CoreV1().Pods(namespace).Patch(ctx, podName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 			return nil, fmt.Errorf("patch restore target pod %s/%s: %w", namespace, podName, err)
 		}
+	}
+
+	if opts.ManualTrigger {
+		return &result{
+			Name:               podName,
+			Namespace:          namespace,
+			CheckpointID:       checkpointID,
+			CheckpointLocation: resolvedStorage.Location,
+			RestorePod:         podName,
+			Status:             restoreStatusPendingTrigger,
+		}, nil
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)

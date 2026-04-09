@@ -16,6 +16,9 @@ const (
 	CheckpointStatusAnnotation          = "nvidia.com/snapshot-checkpoint-status"
 	RestoreStatusAnnotation             = "nvidia.com/snapshot-restore-status"
 	RestoreContainerIDAnnotation        = "nvidia.com/snapshot-restore-container-id"
+	RestoreModeAnnotation               = "nvidia.com/snapshot-restore-mode"
+	RestoreTriggerAnnotation            = "nvidia.com/snapshot-restore-trigger"
+	RestoreProcessedTriggerAnnotation   = "nvidia.com/snapshot-restore-processed-trigger"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
@@ -27,6 +30,7 @@ const (
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"
+	RestoreModeManual         = "manual"
 )
 
 type Storage struct {
@@ -66,7 +70,7 @@ func ResolveRestoreStorage(checkpointID string, version string, location string,
 	return resolved, nil
 }
 
-func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
+func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, manualTrigger bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
@@ -74,6 +78,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(annotations, CheckpointStatusAnnotation)
 	delete(annotations, RestoreStatusAnnotation)
 	delete(annotations, RestoreContainerIDAnnotation)
+	delete(annotations, RestoreModeAnnotation)
+	delete(annotations, RestoreTriggerAnnotation)
+	delete(annotations, RestoreProcessedTriggerAnnotation)
 
 	if !enabled {
 		return
@@ -84,6 +91,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		labels[CheckpointIDLabel] = checkpointID
 	}
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
+	if manualTrigger {
+		annotations[RestoreModeAnnotation] = RestoreModeManual
+	}
 }
 
 func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {

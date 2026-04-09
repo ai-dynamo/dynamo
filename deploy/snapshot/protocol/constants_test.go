@@ -17,7 +17,7 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		RestoreContainerIDAnnotation:        "dead-container",
 	}
 
-	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
+	ApplyRestoreTargetMetadata(labels, annotations, true, false, "hash", "2")
 
 	if labels[RestoreTargetLabel] != "true" {
 		t.Fatalf("expected restore target label, got %#v", labels)
@@ -40,6 +40,15 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
 	}
+	if _, ok := annotations[RestoreModeAnnotation]; ok {
+		t.Fatalf("restore mode annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreProcessedTriggerAnnotation]; ok {
+		t.Fatalf("restore processed trigger annotation was not cleared: %#v", annotations)
+	}
 }
 
 func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
@@ -54,7 +63,7 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 		RestoreContainerIDAnnotation:        "dead-container",
 	}
 
-	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
+	ApplyRestoreTargetMetadata(labels, annotations, false, false, "", "")
 
 	if _, ok := labels[RestoreTargetLabel]; ok {
 		t.Fatalf("restore target label was not cleared: %#v", labels)
@@ -73,5 +82,22 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
+	}
+}
+
+func TestApplyRestoreTargetMetadataManualTrigger(t *testing.T) {
+	labels := map[string]string{}
+	annotations := map[string]string{}
+
+	ApplyRestoreTargetMetadata(labels, annotations, true, true, "hash", "2")
+
+	if annotations[RestoreModeAnnotation] != RestoreModeManual {
+		t.Fatalf("expected manual restore mode, got %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger should start empty: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreProcessedTriggerAnnotation]; ok {
+		t.Fatalf("restore processed trigger should start empty: %#v", annotations)
 	}
 }
