@@ -35,6 +35,7 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]

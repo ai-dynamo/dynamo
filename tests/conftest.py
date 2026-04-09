@@ -1143,3 +1143,92 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         )
     finally:
         deallocate_ports(all_ports)
+
+
+# ---------------------------------------------------------------------------
+# SGLang zombie process cleanup
+#
+# sglang 0.5.10+ subprocess workers (sglang::scheduler, sglang::detokenizer)
+# call setproctitle() and can escape process group teardown via setsid().
+# They hold GPU memory and inherited pipe FDs, causing subsequent tests to
+# OOM or hang on pipe close. This fixture runs after every sglang-marked
+# GPU test to kill any orphaned sglang subprocesses.
+#
+# Process name note: setproctitle sets /proc/pid/comm which is truncated to
+# 15 chars. psutil.name() returns the full name for live processes but the
+# truncated name for zombies. We match both forms.
+# ---------------------------------------------------------------------------
+_SGLANG_PROC_PREFIXES = ("sglang::",)
+
+
+def _snapshot_sglang_procs() -> dict[int, str]:
+    """Return {pid: name} for all sglang-related processes."""
+    import psutil
+
+    result = {}
+    for p in psutil.process_iter(["name", "pid"]):
+        try:
+            name = p.info["name"]
+            if any(name.startswith(pfx) for pfx in _SGLANG_PROC_PREFIXES):
+                result[p.info["pid"]] = name
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return result
+
+
+def _kill_sglang_orphans(before: dict[int, str], logger: logging.Logger) -> None:
+    """Kill any sglang processes that appeared since the 'before' snapshot."""
+    import signal
+    import subprocess
+
+    after = _snapshot_sglang_procs()
+    new_pids = set(after) - set(before)
+    if new_pids:
+        for pid in new_pids:
+            name = after[pid]
+            logger.warning(
+                "Killing orphaned sglang process: pid=%d name='%s'", pid, name
+            )
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        # Fallback: pkill by truncated comm name (catches any we missed)
+        for prefix in _SGLANG_PROC_PREFIXES:
+            truncated = prefix[:15]
+            try:
+                subprocess.run(
+                    ["pkill", "-9", truncated],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+    else:
+        logger.debug("No orphaned sglang processes after test")
+
+
+@pytest.fixture(autouse=True)
+def _sglang_zombie_cleanup(request):
+    """Kill orphaned sglang subprocesses between tests.
+
+    Only active for tests marked with 'sglang'. Takes a snapshot of sglang
+    processes before the test, then kills any new ones after teardown.
+    """
+    markers = {m.name for m in request.node.iter_markers()}
+    if "sglang" not in markers:
+        yield
+        return
+
+    logger = logging.getLogger(f"sglang_cleanup:{request.node.name}")
+    before = _snapshot_sglang_procs()
+    if before:
+        logger.info(
+            "Pre-existing sglang processes before test: %s",
+            {pid: name for pid, name in before.items()},
+        )
+
+    yield
+
+    _kill_sglang_orphans(before, logger)

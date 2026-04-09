@@ -36,13 +36,7 @@ logger = logging.getLogger(__name__)
 class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
 
-    stragglers: list[str] = field(
-        default_factory=lambda: [
-            "SGLANG:EngineCore",
-            "sglang::scheduler",
-            "sglang::detokenizer",
-        ]
-    )
+    stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
