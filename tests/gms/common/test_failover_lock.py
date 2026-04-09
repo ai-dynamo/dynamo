@@ -20,6 +20,7 @@ from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.none,
     pytest.mark.gpu_0,
 ]
 

@@ -37,6 +37,7 @@ jobs:
     outputs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}
+      frontend: ${{ steps.changes.outputs.frontend }}
       operator: ${{ steps.changes.outputs.operator }}
       deploy: ${{ steps.changes.outputs.deploy }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -60,7 +61,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs: [changed-files, planner-pipeline, dynamo-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -197,6 +198,30 @@ jobs:
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
       run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
+  # DYNAMO PIPELINE
+  # ============================================================================
+  dynamo-pipeline:
+    name: dynamo
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor.yml
+    with:
+      framework: dynamo
+      builder_flavor: general
+      target: runtime
+      platform: 'linux/amd64'
+      cuda_version: '12.9'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      run_cpu_only_tests: false
+      run_single_gpu_tests: true
+      single_gpu_test_markers: 'pre_merge and none and gpu_1'
+      single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: false
       copy_to_acr: false
     secrets: inherit
