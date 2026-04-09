@@ -286,16 +286,16 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 # trtllm
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 # fastvideo
-pytest tests/serve/test_fastvideo.py::test_fastvideo_deployment[aggregated] -v --tb=short
+python3 -m pytest tests/serve/test_fastvideo.py::test_fastvideo_deployment[aggregated] -v --tb=short
 ```
 
 **Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
-pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short
+python3 -m pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short
 
 # Sequential pre-merge tests (CPU-only; typically <10min)
-pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short
+python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short
 ```
 
 > **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). Tests not marked `parallel`, and all GPU tests (`gpu_1`, `gpu_2`, etc.), run sequentially (no `-n` flag). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
@@ -305,7 +305,7 @@ pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastv
 pytest -m "vllm and e2e and gpu_1" -v --tb=short
 pytest -m "sglang and e2e and gpu_1" -v --tb=short
 pytest -m "trtllm and e2e and gpu_1" -v --tb=short
-pytest -m "fastvideo and e2e and gpu_1" -v --tb=short
+python3 -m pytest -m "fastvideo and e2e and gpu_1" -v --tb=short
 ```
 
 **Post-merge equivalent** -- CI runs `(pre_merge or post_merge)` after merge, which adds slower tests on top of the pre_merge set. **Running the full post-merge suite locally can take several hours per framework** (model downloads, GPU inference, multi-GPU coordination). For day-to-day development, before you submit to CI, use the `pre_merge` commands above for quicker feedback. See [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) for exact markers:
@@ -360,8 +360,8 @@ Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-me
 
 | Stage | Marker expression | Local equivalent |
 |-------|------------------|-----------------|
-| Parallel (xdist, 4 workers) | `pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short` |
-| Sequential | `pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short` |
+| Parallel (xdist, 4 workers) | `pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `python3 -m pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short` |
+| Sequential | `pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short` |
 
 ### Post-merge (push to release branches)
 
