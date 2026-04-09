@@ -14,7 +14,10 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.inputs import TokensPrompt
+try:
+    from vllm.inputs import TokensPrompt
+except ImportError:
+    from vllm.inputs.data import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
