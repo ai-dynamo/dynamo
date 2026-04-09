@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""This script is to create docker container for xpu device"""
+
 set -e
 
 RUN_PREFIX=
