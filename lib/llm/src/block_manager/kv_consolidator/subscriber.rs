@@ -6,18 +6,17 @@
 //! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_kv_router::zmq_wire::RawKvEvent;
 
 use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
-use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 /// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
@@ -74,10 +73,15 @@ async fn run_listener_loop(
         endpoint
     );
 
-    let socket = connect_sub_socket(&endpoint, None)
+    let mut socket = SubSocket::new();
+    socket
+        .connect(&endpoint)
         .await
         .with_context(|| format!("Failed to connect to ZMQ endpoint {endpoint}"))?;
-    let mut socket = socket;
+    socket
+        .subscribe("")
+        .await
+        .context("Failed to subscribe to ZMQ topics")?;
 
     tracing::info!(
         "KV event consolidator ZMQ listener successfully connected to {}",
@@ -93,19 +97,18 @@ async fn run_listener_loop(
                 break;
             }
 
-            msg_result = socket.next() => {
-                let frames = match msg_result {
-                    Some(Ok(frames)) => multipart_message(frames),
-                    Some(Err(error)) => {
-                        tracing::error!("Error receiving ZMQ message: {error}");
-                        break;
-                    }
-                    None => break,
+            msg_result = socket.recv() => {
+                let Ok(msg) = msg_result else {
+                    tracing::warn!("Error receiving ZMQ message: {:?}", msg_result.unwrap_err());
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    continue;
                 };
 
                 // Parse multipart message: supports both formats
                 // - 2 frames: [topic, payload]
                 // - 3 frames: [topic, sequence, payload]
+                let frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
+
                 let payload = match frames.len() {
                     2 => &frames[1],  // [topic, payload]
                     3 => &frames[2],  // [topic, sequence, payload]

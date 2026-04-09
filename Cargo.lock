@@ -309,6 +309,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2061,6 +2074,19 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -2354,7 +2380,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "dynamo-runtime",
@@ -2406,7 +2432,7 @@ dependencies = [
  "clap 4.6.0",
  "criterion 0.3.6",
  "cudarc",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "dialoguer",
@@ -2479,6 +2505,7 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+ "zeromq",
 ]
 
 [[package]]
@@ -2504,7 +2531,7 @@ name = "dynamo-mocker"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
@@ -2581,7 +2608,7 @@ dependencies = [
  "console-subscriber",
  "criterion 0.5.1",
  "cudarc",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "dynamo-config",
@@ -2643,7 +2670,7 @@ version = "1.0.0"
 dependencies = [
  "bs58",
  "bytemuck",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "serde",
  "thiserror 2.0.18",
@@ -4493,7 +4520,7 @@ dependencies = [
  "clap 4.6.0",
  "crossbeam-queue",
  "cudarc",
- "dashmap",
+ "dashmap 6.1.0",
  "derive_builder",
  "dynamo-memory",
  "figment",
@@ -8584,6 +8611,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",
@@ -9442,7 +9470,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2504e857f1ed52ad96ce73792a724be880ba75f3579a27050395e81d38cb42d0"
 dependencies = [
  "anyhow",
- "dashmap",
+ "dashmap 6.1.0",
  "futures",
  "parking_lot",
  "serde",
@@ -9462,7 +9490,7 @@ dependencies = [
  "anyhow",
  "bs58",
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "flume 0.12.0",
@@ -9501,7 +9529,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7bcce33f5710d87e33e1eacc5472300cbe6acdfb5f2cd6929c12f2e4908ef38"
 dependencies = [
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "flume 0.12.0",
  "futures",
  "rmp-serde",
@@ -9519,7 +9547,7 @@ checksum = "d1eac77f329b0c3dba1b36114c969e0a7d680bb4a6436720754bef14a24fedde"
 dependencies = [
  "anyhow",
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "futures",
  "serde",
  "serde_json",
@@ -9537,7 +9565,7 @@ checksum = "cd6dc0d71f73c6f369302bb94b05341a807a5693f6c321fc208d9c9a974d918a"
 dependencies = [
  "anyhow",
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "derive_builder",
  "flume 0.12.0",
  "futures",
@@ -9568,7 +9596,7 @@ dependencies = [
  "axum 0.8.4",
  "bs58",
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "flume 0.12.0",
  "futures",
  "http 1.4.0",
@@ -10392,6 +10420,33 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+
+[[package]]
+name = "zeromq"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a4528179201f6eecf211961a7d3276faa61554c82651ecc66387f68fc3004bd"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "bytes",
+ "crossbeam-queue",
+ "dashmap 5.5.3",
+ "futures-channel",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "num-traits",
+ "once_cell",
+ "parking_lot",
+ "rand 0.8.5",
+ "regex",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "zeromq-src"

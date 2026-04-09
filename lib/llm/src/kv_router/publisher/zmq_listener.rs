@@ -8,16 +8,83 @@ use std::time::Duration;
 use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
-
-use crate::utils::zmq::{connect_sub_socket_with_retry, recv_multipart};
 
 const INITIAL_BACKOFF_MS: u64 = 10;
 const MAX_BACKOFF_MS: u64 = 5000;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MAX_BACKOFF_EXPONENT: u32 = 8;
+const INITIAL_SETUP_BACKOFF_MS: u64 = 10;
+const MAX_SETUP_BACKOFF_MS: u64 = 5000;
+const MAX_SETUP_BACKOFF_EXPONENT: u32 = 8;
+
+fn calculate_setup_backoff_ms(consecutive_errors: u32) -> u64 {
+    std::cmp::min(
+        INITIAL_SETUP_BACKOFF_MS * 2_u64.pow(consecutive_errors.min(MAX_SETUP_BACKOFF_EXPONENT)),
+        MAX_SETUP_BACKOFF_MS,
+    )
+}
+
+async fn connect_sub_socket_with_retry(
+    endpoint: &str,
+    topic: Option<&str>,
+    cancellation_token: &CancellationToken,
+    log_prefix: &str,
+) -> Option<SubSocket> {
+    let mut consecutive_errors = 0u32;
+    let topic = topic.unwrap_or("");
+
+    loop {
+        if cancellation_token.is_cancelled() {
+            tracing::debug!("{log_prefix}: cancelled before connecting to {endpoint}");
+            return None;
+        }
+
+        let mut socket = SubSocket::new();
+
+        match socket.subscribe(topic).await {
+            Ok(()) => {}
+            Err(error) => {
+                consecutive_errors += 1;
+                let backoff_ms = calculate_setup_backoff_ms(consecutive_errors);
+                tracing::warn!(
+                    error = %error,
+                    consecutive_errors = consecutive_errors,
+                    backoff_ms = backoff_ms,
+                    "{log_prefix}: failed to subscribe on ZMQ socket during setup, retrying"
+                );
+                tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => return None,
+                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                }
+                continue;
+            }
+        }
+
+        match socket.connect(endpoint).await {
+            Ok(()) => return Some(socket),
+            Err(error) => {
+                consecutive_errors += 1;
+                let backoff_ms = calculate_setup_backoff_ms(consecutive_errors);
+                tracing::warn!(
+                    error = %error,
+                    consecutive_errors = consecutive_errors,
+                    backoff_ms = backoff_ms,
+                    "{log_prefix}: failed to connect ZMQ SUB during setup, retrying"
+                );
+                tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => return None,
+                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                }
+            }
+        }
+    }
+}
 
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     std::cmp::min(
@@ -67,39 +134,38 @@ pub(super) async fn start_zmq_listener(
                 break 'main;
             }
 
-            msg_result = recv_multipart(&mut socket) => {
-                let mut frames = match msg_result {
-                    Ok(frames) => {
-                        consecutive_errors = 0;
-                        frames
-                    }
-                    Err(error) => {
-                        consecutive_errors += 1;
+            msg_result = socket.recv() => {
+                let Ok(msg) = msg_result else {
+                    let error = msg_result.unwrap_err();
+                    consecutive_errors += 1;
 
-                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            tracing::error!(
-                                endpoint = %zmq_endpoint,
-                                error = %error,
-                                consecutive_errors = consecutive_errors,
-                                "Too many consecutive ZMQ errors, terminating listener"
-                            );
-                            exit_reason = "too many consecutive errors";
-                            break 'main;
-                        }
-
-                        let backoff_ms = calculate_backoff_ms(consecutive_errors);
-                        tracing::warn!(
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        tracing::error!(
                             endpoint = %zmq_endpoint,
                             error = %error,
                             consecutive_errors = consecutive_errors,
-                            backoff_ms = backoff_ms,
-                            "Error reading from ZMQ socket, applying exponential backoff"
+                            "Too many consecutive ZMQ errors, terminating listener"
                         );
-
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        continue;
+                        exit_reason = "too many consecutive errors";
+                        break 'main;
                     }
+
+                    let backoff_ms = calculate_backoff_ms(consecutive_errors);
+                    tracing::warn!(
+                        endpoint = %zmq_endpoint,
+                        error = %error,
+                        consecutive_errors = consecutive_errors,
+                        backoff_ms = backoff_ms,
+                        "Error reading from ZMQ socket, applying exponential backoff"
+                    );
+
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
                 };
+                consecutive_errors = 0;
+
+                let mut frames: Vec<Vec<u8>> =
+                    msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
 
                 if frames.len() != 3 {
                     tracing::warn!(
