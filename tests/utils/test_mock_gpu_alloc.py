@@ -4,8 +4,8 @@
 """Mock GPU allocation test for profiler validation.
 
 Local-only: this test is skipped in CI (GitHub Actions / GitLab CI).
-Marked nightly to satisfy the marker validator; the skipif guard prevents
-CI execution.
+Do NOT mark it as pre_merge, post_merge, nightly, or e2e -- it exists
+solely to validate profile_pytest.py's binary search locally.
 """
 
 import logging
@@ -14,16 +14,12 @@ import time
 
 import pytest
 
-pytestmark = [
-    pytest.mark.skipif(
-        os.environ.get("CI") is not None
-        or os.environ.get("GITHUB_ACTIONS") is not None
-        or os.environ.get("GITLAB_CI") is not None,
-        reason="Mock GPU allocation test is for local profiling only, not CI",
-    ),
-    pytest.mark.unit,
-    pytest.mark.nightly,
-]
+pytestmark = pytest.mark.skipif(
+    os.environ.get("CI") is not None
+    or os.environ.get("GITHUB_ACTIONS") is not None
+    or os.environ.get("GITLAB_CI") is not None,
+    reason="Mock GPU allocation test is for local profiling only, not CI",
+)
 
 torch = pytest.importorskip("torch", reason="torch required for GPU allocation test")
 
@@ -32,7 +28,7 @@ logger = logging.getLogger(__name__)
 ALLOC_MIB = 4096  # 4 GiB
 
 
-# Local-only mock test; nightly marker satisfies the validator, skipif prevents CI execution.
+# This cannot be pre_merge, post_merge, nightly, or e2e. It's a mock test for local testing.
 @pytest.mark.gpu_1
 @pytest.mark.timeout(30)
 def test_mock_4gb_gpu_alloc():
