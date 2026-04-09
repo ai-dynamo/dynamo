@@ -718,30 +718,44 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             ));
         }
 
-        // Acquire semaphore permit before processing - only one request at a time.
-        // This prevents multiple heavy tree dump operations from running concurrently
-        // and overwhelming the worker's indexing capacity.
-        // Handle cancellation (stopped or killed) while waiting for the semaphore.
-        let engine_ctx = ctx.context();
-        let _permit = tokio::select! {
-            result = self.processing_semaphore.acquire() => {
-                result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
-            }
-            _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
-                // this should rarely happen, as routers typically do not give up their request.
-                tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
-                return Ok(ResponseStream::new(
-                    Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                        "Request cancelled by client".to_string(),
-                    )])),
-                    ctx.context(),
-                ));
-            }
+        // Check if this request can likely be served from buffer (fast path).
+        // If not, acquire semaphore for tree dump (heavy operation).
+        let likely_buffer_read = self
+            .local_indexer
+            .likely_served_from_buffer(request.start_event_id);
+
+        // Slow query logging only for potential tree dumps
+        let _slow_query_guard = if !likely_buffer_read {
+            Some(SlowQueryGuard::spawn(self.worker_id))
+        } else {
+            None
         };
 
-        // Process the query with slow operation logging
-        // RAII guard ensures the logger is aborted even if request is cancelled
-        let _slow_query_guard = SlowQueryGuard::spawn(self.worker_id);
+        let _maybe_permit = if !likely_buffer_read {
+            // Acquire semaphore permit before processing tree dump.
+            // This prevents multiple heavy tree dump operations from running concurrently
+            // and overwhelming the worker's indexing capacity.
+            // Handle cancellation (stopped or killed) while waiting for the semaphore.
+            let engine_ctx = ctx.context();
+            let permit = tokio::select! {
+                result = self.processing_semaphore.acquire() => {
+                    result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
+                }
+                _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
+                    tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
+                    return Ok(ResponseStream::new(
+                        Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
+                            "Request cancelled by client".to_string(),
+                        )])),
+                        ctx.context(),
+                    ));
+                }
+            };
+            Some(permit)
+        } else {
+            // Fast buffer read - no semaphore needed
+            None
+        };
 
         let response = self
             .local_indexer
