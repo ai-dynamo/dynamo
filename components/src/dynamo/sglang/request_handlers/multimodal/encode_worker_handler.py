@@ -12,8 +12,10 @@ import torch
 # MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
 try:
     from sglang.srt.disaggregation.encode_server import MMEncoder
+    from sglang.srt.managers.schedule_batch import Modality
 except (ImportError, OSError):
     MMEncoder = None  # type: ignore[assignment]
+    Modality = None  # type: ignore[assignment]
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
@@ -24,7 +26,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.sglang._compat import Modality, mm_encode
+from dynamo.sglang._compat import mm_encode
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
