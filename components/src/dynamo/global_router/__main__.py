@@ -91,6 +91,7 @@ async def _serve_disagg(
     handler: GlobalRouterHandler,
 ) -> None:
     """Register and serve disagg-mode endpoints (prefill + decode)."""
+    assert config.model_name is not None
     prefill_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component_name}.prefill_generate"
     )
@@ -156,6 +157,7 @@ async def _serve_agg(
     handler: GlobalRouterHandler,
 ) -> None:
     """Register and serve agg-mode endpoint (single generate)."""
+    assert config.model_name is not None
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component_name}.generate"
     )
