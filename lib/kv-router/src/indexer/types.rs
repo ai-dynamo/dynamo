@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
@@ -306,29 +306,4 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShardedMatchRequest {
-    pub(super) sequence: Vec<LocalBlockHash>,
-    pub(super) early_exit: bool,
-    pub(super) resp: mpsc::Sender<OverlapScores>,
-    #[cfg(feature = "bench")]
-    pub(super) created_at: Instant,
-}
-
-impl ShardedMatchRequest {
-    pub(super) fn new(
-        sequence: Vec<LocalBlockHash>,
-        early_exit: bool,
-        resp: mpsc::Sender<OverlapScores>,
-    ) -> Self {
-        Self {
-            sequence,
-            early_exit,
-            resp,
-            #[cfg(feature = "bench")]
-            created_at: Instant::now(),
-        }
-    }
 }

@@ -207,14 +207,14 @@ fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
 #[template]
 #[rstest]
 fn indexer_template(
-    #[values("single", "sharded", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 fn tree_size_indexer_template(
-    #[values("single", "sharded", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -225,7 +225,6 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
 
     match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
-        "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
         "flat" => Box::new(ThreadPoolIndexer::new(
             PositionalIndexer::new(32),
             4,
@@ -330,7 +329,7 @@ mod interface_tests {
         // tree-size accounting gap after mid-chain removes because descendant
         // lookup entries are cleaned up lazily. That means "store -> partial
         // remove -> restore continuation" can still miscount restored coverage
-        // in single, sharded, and concurrent. This test is intentionally scoped
+        // in single and concurrent. This test is intentionally scoped
         // to duplicate store/remove replay so all tree-size variants share the
         // same stable baseline.
 
@@ -1854,13 +1853,13 @@ mod long_sequence_tests {
 }
 
 // ============================================================================
-// Tests specific to tree-based implementations (KvIndexer, KvIndexerSharded)
+// Tests specific to tree-based implementations with frequency/pruning support.
 // These use features not available in PositionalIndexer
 // ============================================================================
 
 #[template]
 #[rstest]
-fn tree_indexer_template(#[values("single", "sharded")] variant: &str) {}
+fn tree_indexer_template(#[values("single")] variant: &str) {}
 
 fn make_tree_indexer_with_frequency(
     variant: &str,
@@ -1878,25 +1877,16 @@ fn make_tree_indexer_with_frequency(
             metrics,
             None,
         )),
-        "sharded" => Box::new(KvIndexerSharded::new_with_frequency(
-            token,
-            4,
-            Some(expiration),
-            kv_block_size,
-            metrics,
-            None,
-        )),
         _ => panic!("Unknown variant: {}", variant),
     }
 }
 
 #[tokio::test]
-async fn test_sharded_routing_decision_assigns_first_seen_worker() {
+async fn test_routing_decision_assigns_first_seen_worker() {
     let token = CancellationToken::new();
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let index = KvIndexerSharded::new_with_frequency(
+    let index = KvIndexer::new_with_frequency(
         token,
-        4,
         Some(Duration::from_secs(60)),
         32,
         metrics,
