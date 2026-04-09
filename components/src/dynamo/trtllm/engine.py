@@ -3,6 +3,7 @@
 
 import enum
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ class TensorRTLLMEngine:
         self,
         engine_args: dict[str, Any],
         disaggregation_mode: Optional[DisaggregationMode] = None,
+        model_express_url: Optional[str] = None,
     ) -> None:
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = (
@@ -58,6 +60,7 @@ class TensorRTLLMEngine:
             )
 
         self.engine_args = engine_args
+        self._model_express_url = model_express_url
 
     @property
     def encoder_available(self) -> bool:
@@ -66,6 +69,20 @@ class TensorRTLLMEngine:
 
     async def initialize(self) -> None:
         if not self._llm:
+            if self._model_express_url:
+                if self._has_existing_sources():
+                    self._setup_modelexpress_loader()
+                    os.environ["MODEL_EXPRESS_TARGET"] = "1"
+                else:
+                    os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
+                    os.environ.setdefault(
+                        "MODEL_NAME",
+                        self.engine_args.get("model", "unknown"),
+                    )
+                    logger.info(
+                        "ModelExpress auto-detect: no sources found, this worker will load from disk and publish",
+                    )
+
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
@@ -119,6 +136,45 @@ class TensorRTLLMEngine:
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
 
+    def _has_existing_sources(self) -> bool:
+        try:
+            from modelexpress.client import MxClient
+
+            mx_client = MxClient(self._model_express_url)
+            try:
+                resp = mx_client.list_sources()
+                return len(resp.instances) > 0
+            finally:
+                mx_client.close()
+        except Exception:
+            return False
+
+    def _setup_modelexpress_loader(self) -> None:
+        """Configure ModelExpress for P2P weight transfer.
+
+        Uses TRT-LLM's MxCheckpointLoader (registered as checkpoint_format="MX")
+        which auto-detects source/target by probing the MX server.
+        """
+        os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
+        os.environ.setdefault(
+            "MODEL_NAME",
+            self.engine_args.get("model", "unknown"),
+        )
+
+        try:
+            from tensorrt_llm._torch.models.checkpoints.mx import MxCheckpointLoader
+
+            self.engine_args["checkpoint_loader"] = MxCheckpointLoader(
+                mx_server_url=self._model_express_url
+            )
+        except ImportError:
+            self.engine_args["checkpoint_format"] = "MX"
+
+        logger.info(
+            "ModelExpress P2P enabled: server=%s",
+            self._model_express_url,
+        )
+
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
         """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
@@ -170,6 +226,7 @@ async def get_llm_engine(
     engine_args: dict[str, Any],
     disaggregation_mode: Optional[DisaggregationMode] = None,
     component_gauges: Any = None,
+    model_express_url: Optional[str] = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 
@@ -177,11 +234,11 @@ async def get_llm_engine(
         engine_args: Engine configuration arguments.
         disaggregation_mode: Optional disaggregation mode configuration.
         component_gauges: Optional LLMBackendGauges instance for recording load time.
+        model_express_url: Optional ModelExpress P2P server URL for RDMA weight transfer.
     """
-    # Time engine initialization
     start_time = time.time()
 
-    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
+    engine = TensorRTLLMEngine(engine_args, disaggregation_mode, model_express_url)
     try:
         await engine.initialize()
         load_time = time.time() - start_time
