@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# DEPRECATED: This module is part of the legacy test framework.
+# New tests should use the event-based framework in test_deployment_scenario.py.
+# See tests/fault_tolerance/deploy/TESTING.md for the reference guide.
+
 import asyncio
 import logging
 import re
@@ -1265,17 +1269,11 @@ def add_token_overflow_scenarios():
         # Add arguments to appropriate workers
         if is_agg:
             # For aggregated, add only to decode worker
-            deployment_spec.add_arg_to_service(
-                decode_worker, arg_name, str(MAX_SEQ_LEN)
-            )
+            deployment_spec[decode_worker].set_arg(arg_name, str(MAX_SEQ_LEN))
         else:
             # For disaggregated, add to both prefill and decode workers
-            deployment_spec.add_arg_to_service(
-                prefill_worker, arg_name, str(MAX_SEQ_LEN)
-            )
-            deployment_spec.add_arg_to_service(
-                decode_worker, arg_name, str(MAX_SEQ_LEN)
-            )
+            deployment_spec[prefill_worker].set_arg(arg_name, str(MAX_SEQ_LEN))
+            deployment_spec[decode_worker].set_arg(arg_name, str(MAX_SEQ_LEN))
 
         # Create overflow failure
         overflow_failure = TokenOverflowFailure(

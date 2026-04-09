@@ -8,7 +8,7 @@ This module provides a simplified load testing framework that:
 1. Uses a YAML template for the Job spec (instead of generating dynamically)
 2. Modifies only the aiperf command as needed
 3. Uses shared PVC with ManagedDeployment for storing results
-4. Uses a dedicated download job for extracting results
+4. Uses PvcExtractor for extracting results from shared PVC
 """
 
 import asyncio
@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import secrets
-import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +23,7 @@ from typing import Any, Dict, Optional
 
 import kr8s
 import yaml
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
 from kubernetes_asyncio.client import exceptions
 
 
@@ -104,7 +103,6 @@ class ManagedLoad:
     _job_created: bool = False
     _terminated: bool = False
     _load_completed: bool = False
-    _download_job_name: Optional[str] = None
     _unique_suffix: str = field(default_factory=lambda: secrets.token_hex(4))
 
     def __post_init__(self):
@@ -127,15 +125,10 @@ class ManagedLoad:
             self.local_output_dir = None
 
     async def _init_kubernetes(self):
-        """Initialize kubernetes client."""
-        try:
-            config.load_incluster_config()
-        except Exception:
-            await config.load_kube_config()
+        """Initialize kubernetes clients."""
+        from tests.utils.k8s_helpers import init_kubernetes_clients
 
-        k8s_client = client.ApiClient()
-        self._core_api = client.CoreV1Api(k8s_client)
-        self._batch_api = client.BatchV1Api(k8s_client)
+        self._core_api, self._batch_api, _, _, _ = await init_kubernetes_clients()
 
     def _load_template(self) -> dict:
         """Load and parse YAML template."""
@@ -526,296 +519,6 @@ class ManagedLoad:
             self._logger.warning(f"Error checking job status: {e}")
             return False
 
-    async def _check_pvc_exists(self) -> bool:
-        """Check if the PVC exists in the namespace."""
-        try:
-            assert self._core_api is not None
-            await self._core_api.read_namespaced_persistent_volume_claim(
-                name=self.pvc_name, namespace=self.namespace
-            )
-            return True
-        except exceptions.ApiException as e:
-            if e.status == 404:
-                return False
-            self._logger.warning(f"Error checking PVC {self.pvc_name}: {e}")
-            return False
-
-    async def create_results_download_job(self) -> str:
-        """Create dedicated download job for results extraction."""
-        # Check if PVC exists before creating download job
-        if not await self._check_pvc_exists():
-            raise RuntimeError(
-                f"PVC {self.pvc_name} does not exist - cannot create download job"
-            )
-
-        job_name = f"load-results-download-{self._unique_suffix}"
-
-        download_script = f"""#!/bin/sh
-set -e
-
-echo "=== LOAD RESULTS DOWNLOAD JOB STARTED ==="
-echo "PVC: {self.pvc_name}"
-echo "Results dir: {self.container_results_dir}"
-
-mkdir -p /tmp/download
-
-if [ ! -d "{self.container_results_dir}" ]; then
-    echo "Results directory does not exist yet"
-fi
-
-echo "ready" > /tmp/download/job_ready.txt
-echo "=== DOWNLOAD JOB READY ==="
-
-while true; do
-    FILE_COUNT=$(find {self.container_results_dir} -type f 2>/dev/null | wc -l)
-    echo "[$(date '+%H:%M:%S')] Download job alive - $FILE_COUNT files available"
-    sleep 60
-done
-"""
-
-        job_spec = {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
-            "metadata": {
-                "name": job_name,
-                "namespace": self.namespace,
-                "labels": {
-                    "app": "load-results-download",
-                    "managed-by": "managed-load",
-                },
-            },
-            "spec": {
-                "backoffLimit": 0,
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "app": "load-results-download",
-                            "job-name": job_name,
-                        }
-                    },
-                    "spec": {
-                        "restartPolicy": "Never",
-                        "containers": [
-                            {
-                                "name": "download",
-                                "image": "busybox:1.35",
-                                "command": ["/bin/sh", "-c", download_script],
-                                "volumeMounts": [
-                                    {
-                                        "name": "results-volume",
-                                        "mountPath": self.container_results_dir,
-                                        "subPath": "aiperf",  # Match load_job.yaml subPath
-                                        "readOnly": True,
-                                    }
-                                ],
-                                "resources": {
-                                    "requests": {"cpu": "100m", "memory": "128Mi"},
-                                    "limits": {"cpu": "500m", "memory": "512Mi"},
-                                },
-                            }
-                        ],
-                        "volumes": [
-                            {
-                                "name": "results-volume",
-                                "persistentVolumeClaim": {
-                                    "claimName": self.pvc_name,
-                                },
-                            }
-                        ],
-                    },
-                },
-            },
-        }
-
-        try:
-            assert self._batch_api is not None
-            await self._batch_api.create_namespaced_job(
-                namespace=self.namespace, body=job_spec
-            )
-            self._download_job_name = job_name
-            self._logger.info(f"Results download job created: {job_name}")
-            return job_name
-
-        except exceptions.ApiException as e:
-            if e.status == 409:
-                self._logger.warning(f"Download job {job_name} already exists")
-                self._download_job_name = job_name
-                return job_name
-            raise
-
-    async def extract_results(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
-        """Extract results from PVC via download job."""
-        # Skip if main job was never created (PVC may not exist)
-        if not self._job_created:
-            self._logger.warning(
-                "Skipping result extraction - main job was never created"
-            )
-            return {
-                "success": False,
-                "error": "Main job was never created",
-                "output_dir": output_dir,
-            }
-
-        output_dir = output_dir or self.local_output_dir
-        if output_dir is None:
-            output_dir = "load"
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        try:
-            # Create download job if not exists
-            if self._download_job_name is None:
-                await self.create_results_download_job()
-
-            # Wait for download job to be ready
-            self._logger.info("Waiting for download job to be ready...")
-            for attempt in range(60):
-                try:
-                    pods = []
-                    pod_generator = kr8s.get(
-                        "pods",
-                        namespace=self.namespace,
-                        label_selector=f"job-name={self._download_job_name}",
-                    )
-                    for pod in pod_generator:
-                        pods.append(pod)
-
-                    if pods:
-                        pod = pods[0]
-                        result = await asyncio.wait_for(
-                            asyncio.create_task(
-                                asyncio.to_thread(
-                                    pod.exec,
-                                    ["test", "-f", "/tmp/download/job_ready.txt"],
-                                )
-                            ),
-                            timeout=5.0,
-                        )
-                        if result.returncode == 0:
-                            break
-                except Exception:
-                    pass
-
-                self._logger.info(
-                    f"Waiting for download job... (attempt {attempt + 1}/60)"
-                )
-                await asyncio.sleep(1)
-            else:
-                self._logger.warning("Download job did not become ready in time")
-
-            # Find the download job pod
-            pods = []
-            pod_generator = kr8s.get(
-                "pods",
-                namespace=self.namespace,
-                label_selector=f"job-name={self._download_job_name}",
-            )
-            for pod in pod_generator:
-                pods.append(pod)
-
-            if not pods:
-                raise Exception(
-                    f"No pods found for download job {self._download_job_name}"
-                )
-
-            pod = pods[0]
-
-            # Create tar archive on-demand
-            self._logger.info("Creating tar archive of results on-demand...")
-            create_tar_script = f"""
-cd {self.container_results_dir} 2>/dev/null || exit 1
-echo "FILES_IN_DIR:"
-ls -la
-FILE_LIST=$(find . -type f \\( -name "*.json" -o -name "*.jsonl" -o -name "*.csv" -o -name "*.log" \\) | sort)
-FILE_COUNT=$(echo "$FILE_LIST" | grep -c . || echo 0)
-echo "FILE_COUNT:$FILE_COUNT"
-echo "FILE_NAMES:$FILE_LIST"
-if [ "$FILE_COUNT" -gt 0 ]; then
-    echo "$FILE_LIST" | tar -czf /tmp/download/results.tar.gz -T -
-    echo "TAR_CREATED:true"
-else
-    echo "TAR_CREATED:false"
-fi
-"""
-            tar_result = await asyncio.wait_for(
-                asyncio.create_task(
-                    asyncio.to_thread(pod.exec, ["sh", "-c", create_tar_script])
-                ),
-                timeout=30.0,
-            )
-
-            # Parse output
-            output = tar_result.stdout.decode() if tar_result.stdout else ""
-            file_count = 0
-            tar_created = False
-            file_names = []
-            for line in output.split("\n"):
-                if line.startswith("FILE_COUNT:"):
-                    file_count = int(line.split(":")[1].strip())
-                elif line.startswith("TAR_CREATED:"):
-                    tar_created = line.split(":")[1].strip() == "true"
-                elif line.startswith("FILE_NAMES:"):
-                    file_names = [
-                        f.strip() for f in line.split(":", 1)[1].split() if f.strip()
-                    ]
-
-            self._logger.info(
-                f"Found {file_count} result files: {file_names}, tar_created={tar_created}"
-            )
-
-            extracted_files = []
-
-            if file_count > 0 and tar_created:
-                # Extract the tar archive
-                self._logger.info("Extracting results archive...")
-                cat_result = await asyncio.wait_for(
-                    asyncio.create_task(
-                        asyncio.to_thread(
-                            pod.exec, ["cat", "/tmp/download/results.tar.gz"]
-                        )
-                    ),
-                    timeout=60.0,
-                )
-
-                if cat_result.returncode != 0:
-                    raise Exception(
-                        f"Archive extraction failed with return code {cat_result.returncode}"
-                    )
-
-                # Save and extract locally
-                local_archive = Path(output_dir) / "results.tar.gz"
-                local_archive.write_bytes(cat_result.stdout)
-
-                with tarfile.open(local_archive, "r:gz") as tar:
-                    tar.extractall(path=output_dir, filter="data")
-                    extracted_files = tar.getnames()
-
-                local_archive.unlink()
-
-                self._logger.info(
-                    f"Extracted {len(extracted_files)} files to {output_dir}"
-                )
-            else:
-                self._logger.info("No result files were available for download")
-
-            # Cleanup download job
-            await self._cleanup_download_job()
-
-            return {
-                "success": True,
-                "output_dir": output_dir,
-                "file_count": file_count,
-                "extracted_files": extracted_files,
-            }
-
-        except Exception as e:
-            self._logger.error(f"Failed to extract results: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "output_dir": output_dir,
-            }
-
     async def _delete_pod(self) -> None:
         """Delete the load test pod."""
         try:
@@ -894,10 +597,7 @@ fi
             self._logger.warning(f"DEBUG: Failed to list files: {e}")
 
     async def get_results(self) -> Optional[Dict[str, Any]]:
-        """Get parsed results JSON from PVC.
-
-        Extracts results from the shared PVC after aiperf completes.
-        """
+        """Get parsed results JSON from PVC via PvcExtractor."""
         try:
             # Debug: Show what files are in the pod before deletion
             await self._debug_pod_files()
@@ -905,26 +605,38 @@ fi
             # Delete the pod (results are already in PVC)
             await self._delete_pod()
 
-            # Extract from PVC
-            extract_result = await self.extract_results()
-            if extract_result.get("success"):
-                output_dir = Path(extract_result["output_dir"])
+            # Extract from PVC using PvcExtractor
+            from tests.utils.pvc_extractor import PvcExtractor
 
+            extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
+            await extractor.init()
+
+            output_dir = self.local_output_dir or "load"
+            result = await extractor.extract(
+                pvc_name=self.pvc_name,
+                sub_path="aiperf",
+                container_path=self.container_results_dir,
+                file_patterns=["*.json", "*.jsonl", "*.csv", "*.log"],
+                local_output_dir=output_dir,
+            )
+
+            if result.get("success"):
+                output_path = Path(result["output_dir"])
                 available_files = (
-                    list(output_dir.iterdir()) if output_dir.exists() else []
+                    list(output_path.iterdir()) if output_path.exists() else []
                 )
                 self._logger.info(
                     f"Available result files: {[f.name for f in available_files]}"
                 )
 
-                json_file = output_dir / "profile_export_aiperf.json"
+                json_file = output_path / "profile_export_aiperf.json"
                 if json_file.exists():
                     self._logger.info(f"Using aiperf summary: {json_file}")
                     with open(json_file) as f:
                         return json.load(f)
 
                 self._logger.warning(
-                    f"No profile_export_aiperf.json found in {output_dir}. "
+                    f"No profile_export_aiperf.json found in {output_path}. "
                     f"Available files: {[f.name for f in available_files]}"
                 )
 
@@ -934,48 +646,19 @@ fi
             self._logger.exception("Failed to get results")
             return None
 
-    async def _cleanup_download_job(self):
-        """Clean up the download job."""
-        if self._download_job_name is None:
-            return
-
-        try:
-            from kubernetes_asyncio.client.models import V1DeleteOptions
-
-            delete_options = V1DeleteOptions(propagation_policy="Foreground")
-
-            assert self._batch_api is not None
-            await self._batch_api.delete_namespaced_job(
-                name=self._download_job_name,
-                namespace=self.namespace,
-                body=delete_options,
-            )
-            self._logger.info(f"Download job {self._download_job_name} deleted")
-            self._download_job_name = None
-
-        except exceptions.ApiException as e:
-            if e.status != 404:
-                self._logger.warning(f"Failed to delete download job: {e}")
-
     async def _cleanup(self):
-        """Clean up the load test job and associated resources."""
-        # Cleanup download job first
-        await self._cleanup_download_job()
-
-        # Cleanup main job
+        """Clean up the load test job."""
         if self._job_created and self._batch_api:
             try:
                 from kubernetes_asyncio.client.models import V1DeleteOptions
 
                 delete_options = V1DeleteOptions(propagation_policy="Foreground")
-
                 await self._batch_api.delete_namespaced_job(
                     name=self.job_name,
                     namespace=self.namespace,
                     body=delete_options,
                 )
                 self._logger.info(f"Load test job {self.job_name} deleted")
-
             except exceptions.ApiException as e:
                 if e.status != 404:
                     self._logger.warning(f"Failed to delete job {self.job_name}: {e}")
@@ -996,7 +679,7 @@ fi
             # Only try to extract results if we're not exiting due to an exception
             if self._job_created and self.local_output_dir:
                 try:
-                    await self.extract_results()
+                    await self.get_results()
                 except Exception as e:
                     self._logger.warning(
                         f"Failed to extract results during cleanup: {e}"

@@ -14,7 +14,7 @@ import kr8s
 import requests
 import yaml
 from kr8s.objects import Pod, Service
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
 from kubernetes_asyncio.client import exceptions
 
 from tests.utils.test_output import resolve_test_output_path
@@ -44,6 +44,15 @@ class ServiceSpec:
         self._name = service_name
         self._spec = service_spec
 
+    def _ensure_path(self, *keys):
+        """Ensure a nested dict path exists, returning the innermost dict."""
+        d = self._spec
+        for key in keys:
+            if key not in d:
+                d[key] = {}
+            d = d[key]
+        return d
+
     @property
     def name(self) -> str:
         """The service name (read-only)"""
@@ -60,11 +69,7 @@ class ServiceSpec:
 
     @image.setter
     def image(self, value: str):
-        if "extraPodSpec" not in self._spec:
-            self._spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            self._spec["extraPodSpec"]["mainContainer"] = {}
-        self._spec["extraPodSpec"]["mainContainer"]["image"] = value
+        self._ensure_path("extraPodSpec", "mainContainer")["image"] = value
 
     @property
     def component_type(self):
@@ -80,9 +85,7 @@ class ServiceSpec:
 
     @frontend_sidecar_image.setter
     def frontend_sidecar_image(self, value: str):
-        if "frontendSidecar" not in self._spec:
-            self._spec["frontendSidecar"] = {}
-        self._spec["frontendSidecar"]["image"] = value
+        self._ensure_path("frontendSidecar")["image"] = value
 
     @property
     def envs(self) -> list[dict[str, str]]:
@@ -150,11 +153,7 @@ class ServiceSpec:
 
     @gpus.setter
     def gpus(self, value: int):
-        if "resources" not in self._spec:
-            self._spec["resources"] = {}
-        if "limits" not in self._spec["resources"]:
-            self._spec["resources"]["limits"] = {}
-        self._spec["resources"]["limits"]["gpu"] = str(value)
+        self._ensure_path("resources", "limits")["gpu"] = str(value)
 
     @property
     def tensor_parallel_size(self) -> int:
@@ -180,6 +179,42 @@ class ServiceSpec:
                 return
         args.extend(["--tensor-parallel-size", str(value)])
         self.gpus = value
+
+    # ----- Args -----
+    def set_arg(self, arg_name: str, arg_value: str):
+        """Set or override a command-line argument for this service.
+
+        If the argument already exists, its value is updated.
+        Otherwise, the argument is appended.
+
+        Args:
+            arg_name: Argument name (e.g., "--max-model-len", "--kv-cache-dtype")
+            arg_value: Argument value (e.g., "1024", "fp8")
+
+        Example:
+            service.set_arg("--max-model-len", "4096")
+        """
+        container = self._ensure_path("extraPodSpec", "mainContainer")
+        if "args" not in container:
+            container["args"] = []
+        args = container["args"]
+
+        # Normalize string to list
+        if isinstance(args, str):
+            import shlex
+
+            args = shlex.split(args)
+            container["args"] = args
+
+        # Find and update existing arg, or append
+        for i, arg in enumerate(args):
+            if arg == arg_name:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = arg_value
+                else:
+                    args.insert(i + 1, arg_value)
+                return
+        args.extend([arg_name, arg_value])
 
     # ----- Readiness Probe -----
     def set_readiness_probe(
@@ -219,9 +254,27 @@ class ServiceSpec:
         Args:
             seconds: Grace period in seconds (default: 60)
         """
-        if "extraPodSpec" not in self._spec:
-            self._spec["extraPodSpec"] = {}
-        self._spec["extraPodSpec"]["terminationGracePeriodSeconds"] = seconds
+        self._ensure_path("extraPodSpec")["terminationGracePeriodSeconds"] = seconds
+
+    # ----- Helpers for spec mutation -----
+    def _add_volume_mount(self, name: str, mount_point: str):
+        """Add a volume mount if not already present."""
+        if "volumeMounts" not in self._spec:
+            self._spec["volumeMounts"] = []
+        if not any(m.get("name") == name for m in self._spec["volumeMounts"]):
+            self._spec["volumeMounts"].append({"name": name, "mountPoint": mount_point})
+
+    def _add_env_var(self, name: str, value=None, value_from=None):
+        """Add an env var if not already present."""
+        if "envs" not in self._spec:
+            self._spec["envs"] = []
+        if not any(e.get("name") == name for e in self._spec["envs"]):
+            env = {"name": name}
+            if value_from:
+                env["valueFrom"] = value_from
+            elif value is not None:
+                env["value"] = value
+            self._spec["envs"].append(env)
 
     # ----- Log Collection -----
     def enable_log_collection(self, log_dir: str, pvc_name: str):
@@ -241,91 +294,43 @@ class ServiceSpec:
         ):
             return  # Already wrapped
 
-        # Ensure extraPodSpec exists
-        if "extraPodSpec" not in self._spec:
-            self._spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            self._spec["extraPodSpec"]["mainContainer"] = {}
+        main_container = self._ensure_path("extraPodSpec", "mainContainer")
 
-        main_container = self._spec["extraPodSpec"]["mainContainer"]
-
-        # Get original command and args
+        # Get original command and args (with defaults)
         original_command = main_container.get("command", [])
         original_args = main_container.get("args", [])
-
-        # Use defaults if not explicitly set
         if not original_command and not original_args:
-            if self.component_type == "frontend":
-                original_command = ["python3"]
-                original_args = ["-m", "dynamo.frontend"]
-            else:
-                original_command = ["python3"]
-                original_args = []
+            original_command = ["python3"]
+            original_args = (
+                ["-m", "dynamo.frontend"] if self.component_type == "frontend" else []
+            )
 
-        # Build the full command string
         full_command = " ".join(original_command + original_args)
+        service_log_dir = f"{log_dir}/service_logs/{self._name.lower()}"
 
-        # Create service subdirectory (lowercase service name)
-        # Note: CRD doesn't support subPath in volumeMounts, so we create the
-        # service_logs/ prefix in the wrapper script to match the download job's subPath
-        service_subdir = self._name.lower()
-        service_log_dir = f"{log_dir}/service_logs/{service_subdir}"
+        # Load wrapper script template
+        template_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "templates", "log_wrapper.sh"
+        )
+        with open(template_path) as f:
+            wrapper_script = f.read()
+        wrapper_script = wrapper_script.replace("{{SERVICE_LOG_DIR}}", service_log_dir)
+        wrapper_script = wrapper_script.replace("{{FULL_COMMAND}}", full_command)
 
-        # Create simplified wrapper script (no header)
-        # Capture timestamp once and write to /tmp for ResourceMonitor to read
-        wrapper_script = f"""#!/bin/bash
-set -e
-TIMESTAMP=$(date +%s)
-echo $TIMESTAMP > /tmp/.${{POD_NAME}}.start_time
-mkdir -p {service_log_dir}
-LOG_FILE="{service_log_dir}/${{POD_NAME}}_${{TIMESTAMP}}.log"
-exec {full_command} > >(tee -a "$LOG_FILE") 2>&1"""
-
-        # Set the wrapped command
+        # Set the wrapped command (replaces original command + args)
         main_container["command"] = ["/bin/bash", "-c", wrapper_script]
-
-        # Remove args since we're now using a shell script
         if "args" in main_container:
             del main_container["args"]
 
-        # Add volume mount at service level (no subPath - CRD doesn't support it)
-        # The wrapper script creates service_logs/{service}/ structure on the PVC
-        if "volumeMounts" not in self._spec:
-            self._spec["volumeMounts"] = []
-
-        # Check if mount already exists
-        mount_exists = any(
-            mount.get("name") == pvc_name for mount in self._spec["volumeMounts"]
+        # Add volume mount and env vars for log file naming
+        self._add_volume_mount(pvc_name, log_dir)
+        self._add_env_var(
+            "POD_NAME", value_from={"fieldRef": {"fieldPath": "metadata.name"}}
         )
-        if not mount_exists:
-            self._spec["volumeMounts"].append({"name": pvc_name, "mountPoint": log_dir})
-
-        # Add POD_NAME env var (for log file naming via downward API)
-        if "envs" not in self._spec:
-            self._spec["envs"] = []
-
-        pod_name_exists = any(
-            env.get("name") == "POD_NAME" for env in self._spec["envs"]
+        self._add_env_var(
+            "POD_NAMESPACE",
+            value_from={"fieldRef": {"fieldPath": "metadata.namespace"}},
         )
-        if not pod_name_exists:
-            self._spec["envs"].append(
-                {
-                    "name": "POD_NAME",
-                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
-                }
-            )
-
-        # Add POD_NAMESPACE env var
-        namespace_exists = any(
-            env.get("name") == "POD_NAMESPACE" for env in self._spec["envs"]
-        )
-        if not namespace_exists:
-            self._spec["envs"].append(
-                {
-                    "name": "POD_NAMESPACE",
-                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}},
-                }
-            )
 
     # ----- Environment Variables -----
     def set_env_var(self, name: str, value: str):
@@ -352,12 +357,92 @@ class DeploymentSpec:
     def __init__(
         self, base: str, endpoint="/v1/chat/completions", port=8000, system_port=9090
     ):
-        """Load the deployment YAML file"""
+        """Load the deployment YAML file.
+
+        Args:
+            base: Path to the deployment YAML file
+            endpoint: API endpoint path (default: /v1/chat/completions)
+            port: Frontend port (default: 8000)
+            system_port: System/metrics port (default: 9090)
+        """
+        self._base_path = base
         with open(base, "r") as f:
             self._deployment_spec = yaml.safe_load(f)
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
+
+    @classmethod
+    def from_backend(
+        cls,
+        backend: str,
+        deployment_type: str = "agg",
+        workspace_dir: str = "/workspace",
+        **kwargs,
+    ) -> "DeploymentSpec":
+        """Create a DeploymentSpec from backend name and deployment type.
+
+        Args:
+            backend: Backend name ("vllm", "trtllm", "sglang", "mocker")
+            deployment_type: Deployment type ("agg", "disagg", etc.)
+            workspace_dir: Workspace root directory
+            **kwargs: Additional arguments passed to DeploymentSpec.__init__
+
+        Example:
+            spec = DeploymentSpec.from_backend("vllm", "disagg")
+            spec.set_worker_replicas(2)
+        """
+        yaml_path = (
+            f"{workspace_dir}/examples/backends/{backend}/deploy/{deployment_type}.yaml"
+        )
+        return cls(yaml_path, **kwargs)
+
+    @property
+    def backend(self) -> str:
+        """Auto-detect backend from YAML path or service names.
+
+        Returns:
+            Backend name ("vllm", "trtllm", "sglang", "mocker", or "unknown")
+        """
+        # Try to infer from YAML path
+        if hasattr(self, "_base_path"):
+            path = self._base_path.lower()
+            for name in ("vllm", "trtllm", "sglang", "mocker"):
+                if f"/backends/{name}/" in path or f"/{name}/" in path:
+                    return name
+
+        # Fall back to service name inspection
+        service_names = " ".join(s.name.lower() for s in self.services)
+        if "vllm" in service_names:
+            return "vllm"
+        if "trtllm" in service_names:
+            return "trtllm"
+        if "sglang" in service_names:
+            return "sglang"
+        if "mocker" in service_names:
+            return "mocker"
+        return "unknown"
+
+    def worker_services(self) -> list[str]:
+        """Return worker service names (non-frontend services).
+
+        Example:
+            spec = DeploymentSpec.from_backend("vllm", "disagg")
+            spec.worker_services()  # ["VllmPrefillWorker", "VllmDecodeWorker"]
+        """
+        return [s.name for s in self.services if s.component_type != "frontend"]
+
+    def set_worker_replicas(self, replicas: int):
+        """Set replicas for all worker services.
+
+        Args:
+            replicas: Number of replicas for each worker service
+
+        Example:
+            spec.set_worker_replicas(2)  # Sets all workers to 2 replicas
+        """
+        for name in self.worker_services():
+            self[name].replicas = replicas
 
     @property
     def name(self) -> str:
@@ -531,96 +616,51 @@ class DeploymentSpec:
     def spec(self):
         return self._deployment_spec
 
-    def add_arg_to_service(self, service_name: str, arg_name: str, arg_value: str):
-        """
-        Add or override a command-line argument for a specific service
+    def get_service(self, service_name: str) -> ServiceSpec:
+        """Get a specific service by name.
 
         Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
-            arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
-            arg_value: Argument value (e.g., "1024")
-        """
-        service = self.get_service(service_name)
-        service_spec = service._spec
+            service_name: Name of the service (e.g., "VllmWorker", "Frontend")
 
-        # Ensure args list exists
-        if "extraPodSpec" not in service_spec:
-            service_spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service_spec["extraPodSpec"]:
-            service_spec["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
-
-        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
-
-        # Convert to list if needed (sometimes it's a single string)
-        if isinstance(args_list, str):
-            import shlex
-
-            args_list = shlex.split(args_list)
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
-
-        # Find existing argument
-        arg_index = None
-        for i, arg in enumerate(args_list):
-            if arg == arg_name:
-                arg_index = i
-                break
-
-        if arg_index is not None:
-            # Argument found, check if it has a value
-            if arg_index + 1 < len(args_list) and not args_list[
-                arg_index + 1
-            ].startswith("-"):
-                # Has a value, replace it
-                args_list[arg_index + 1] = arg_value
-            else:
-                # No value after the argument, insert the value
-                args_list.insert(arg_index + 1, arg_value)
-        else:
-            # Add new argument
-            args_list.extend([arg_name, arg_value])
-
-    def get_service(self, service_name: str) -> ServiceSpec:
-        """
-        Get a specific service from the deployment spec
+        Raises:
+            ValueError: If service not found in deployment spec
         """
         if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
+            raise ValueError(
+                f"Service '{service_name}' not found in deployment spec. "
+                f"Available: {list(self._deployment_spec['spec']['services'].keys())}"
+            )
         return ServiceSpec(
             service_name, self._deployment_spec["spec"]["services"][service_name]
         )
 
     def set_service_replicas(self, service_name: str, replicas: int):
-        """
-        Set the number of replicas for a specific service
-        """
-        service = self.get_service(service_name)
-        service.replicas = replicas
+        """Set the number of replicas for a specific service."""
+        self.get_service(service_name).replicas = replicas
 
     def set_service_readiness_probe(
-        self, service_name: str, period_seconds: int, **kwargs
+        self, service_name: str, period_seconds: int = 10, **kwargs
     ):
         """Set readiness probe for a specific service.
 
         Args:
             service_name: Name of the service (e.g., "TRTLLMDecodeWorker")
-            period_seconds: How often to perform the probe
-            **kwargs: Additional probe options (initial_delay_seconds, timeout_seconds, etc.)
+            period_seconds: How often to perform the probe (default: 10)
+            **kwargs: Additional options (initial_delay_seconds, timeout_seconds,
+                      failure_threshold, path, port)
         """
-        service = self.get_service(service_name)
-        service.set_readiness_probe(period_seconds=period_seconds, **kwargs)
+        self.get_service(service_name).set_readiness_probe(
+            period_seconds=period_seconds, **kwargs
+        )
 
     def set_service_termination_grace_period(self, service_name: str, seconds: int):
         """Set termination grace period for a specific service.
 
         Args:
-            service_name: Name of the service (e.g., "TRTLLMDecodeWorker")
+            service_name: Name of the service
             seconds: Grace period in seconds
         """
-        service = self.get_service(service_name)
-        service.set_termination_grace_period(seconds)
+        self.get_service(service_name).set_termination_grace_period(seconds)
 
     def save(self, out_file: str):
         """Save updated deployment to file"""
@@ -677,7 +717,7 @@ class DeploymentSpec:
         self._log_collection_storage_class = storage_class
         self._log_collection_container_dir = container_log_dir
 
-        self._logger.debug(f"Generated PVC name: {pvc_name}")
+        logging.getLogger(__name__).debug(f"Generated PVC name: {pvc_name}")
 
         # Add PVC at deployment level (following recipe pattern)
         if "pvcs" not in self._deployment_spec["spec"]:
@@ -753,11 +793,10 @@ class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
     namespace: str
-    skip_service_restart: bool = False
-    enable_volume_log_collection: bool = (
-        False  # PVC-based log collection (requires RWX storage class)
+    skip_service_restart: bool = (
+        True  # Default: skip restart. Pass False to restart NATS/etcd.
     )
-    container_log_dir: str = "/tmp/service_logs"  # Directory for volume logs
+    container_log_dir: str = "/tmp/service_logs"  # Directory for PVC-based logs
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -803,42 +842,16 @@ class ManagedDeployment:
         self.log_dir = resolve_test_output_path(self.log_dir)
 
     async def _init_kubernetes(self):
-        """Initialize kubernetes client.
+        """Initialize kubernetes clients."""
+        from tests.utils.k8s_helpers import init_kubernetes_clients
 
-        Priority order:
-        1. KUBECONFIG environment variable (CI scenario with proper RBAC)
-        2. In-cluster config (for pods without explicit kubeconfig)
-        3. Default kubeconfig (~/.kube/config)
-        """
-        kubeconfig_path = os.environ.get("KUBECONFIG")
-
-        if kubeconfig_path and os.path.exists(kubeconfig_path):
-            # Explicit kubeconfig provided (CI scenario) - use it first
-            self._logger.info(f"Loading kubeconfig from KUBECONFIG: {kubeconfig_path}")
-            await config.load_kube_config(config_file=kubeconfig_path)
-            self._in_cluster = False
-            self._logger.info("Successfully loaded kubeconfig from KUBECONFIG")
-        else:
-            try:
-                # Try in-cluster config (for pods without explicit kubeconfig)
-                self._logger.info("Attempting in-cluster kubernetes config")
-                config.load_incluster_config()
-                self._in_cluster = True
-                self._logger.info("Successfully loaded in-cluster kubernetes config")
-            except Exception as e:
-                # Fallback to default kube config file (for local development)
-                self._logger.warning(
-                    f"In-cluster config failed ({type(e).__name__}: {e}), "
-                    f"falling back to default kubeconfig (~/.kube/config)"
-                )
-                await config.load_kube_config()
-                self._in_cluster = False
-                self._logger.info("Successfully loaded default kubeconfig")
-
-        k8s_client = client.ApiClient()
-        self._custom_api = client.CustomObjectsApi(k8s_client)
-        self._core_api = client.CoreV1Api(k8s_client)
-        self._apps_v1 = client.AppsV1Api()
+        (
+            self._core_api,
+            _,
+            self._custom_api,
+            self._apps_v1,
+            self._in_cluster,
+        ) = await init_kubernetes_clients(need_custom_api=True, need_apps_api=True)
 
     async def _wait_for_pods(self, label, expected, timeout=300):
         for _ in range(timeout):
@@ -868,6 +881,19 @@ class ManagedDeployment:
         await self._wait_for_pods(label, replicas)
 
     async def _restart_stateful(self, name, label):
+        """Restart a StatefulSet by scaling to 0, deleting PVCs, and scaling back.
+
+        Silently skips if the StatefulSet does not exist.
+        """
+        try:
+            assert self._apps_v1 is not None, "Kubernetes API not initialized"
+            await self._apps_v1.read_namespaced_stateful_set(name, self.namespace)
+        except exceptions.ApiException as e:
+            if e.status == 404:
+                self._logger.info(f"StatefulSet {name} not found, skipping restart")
+                return
+            raise
+
         self._logger.info(f"Restarting {name} {label}")
 
         await self._scale_statfulset(name, label, 0)
@@ -1205,17 +1231,6 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.debug(e)
 
-    async def _get_service_logs(self, service_name=None, suffix=""):
-        """Collect manifest, logs, and metrics for all pods."""
-        service_names = [service_name] if service_name else None
-        service_pods = self.get_pods(service_names)
-
-        for service, pods in service_pods.items():
-            for pod in pods:
-                self._get_pod_manifest(pod, service, suffix)
-                self._get_pod_logs(pod, service, suffix)
-                await self._get_pod_metrics(pod, service, suffix)
-
     async def _get_pod_metrics(
         self, pod: Pod, service_name: str, suffix="", use_services_dir: bool = False
     ):
@@ -1447,13 +1462,8 @@ class ManagedDeployment:
 
     async def _cleanup(self):
         try:
-            # Collect logs via K8s API only if PVC-based collection is not enabled
-            if not self.enable_volume_log_collection:
-                await self._get_service_logs()
-            else:
-                # When using PVC-based collection, still collect metrics
-                # (metrics are fetched via HTTP, not from PVC)
-                await self._collect_service_metrics(use_services_dir=True)
+            # Collect metrics via HTTP (logs are collected from PVC during resource cleanup)
+            await self._collect_service_metrics(use_services_dir=True)
 
             # Stop port forwards
             self._logger.info(
@@ -1495,27 +1505,20 @@ class ManagedDeployment:
             # the new deployment spec is never applied
             await self._wait_for_deletion()
 
-            # Enable PVC-based log collection before deployment creation
-            if self.enable_volume_log_collection:
-                # Check if PVC-based logging is already configured (by enable_log_collection)
-                pvc_configured = hasattr(
-                    self.deployment_spec, "_log_collection_pvc_name"
+            # Set up PVC-based log collection before deployment creation
+            pvc_configured = hasattr(self.deployment_spec, "_log_collection_pvc_name")
+            if pvc_configured:
+                self._logger.info(
+                    f"PVC-based log collection configured: {self.deployment_spec._log_collection_pvc_name}"
                 )
-
-                if pvc_configured:
-                    self._logger.info(
-                        f"PVC-based log collection configured: {self.deployment_spec._log_collection_pvc_name}"
-                    )
-                    # Validate RWX support and create PVC
-                    await self._create_log_collection_pvc()
-                else:
-                    # Auto-configure PVC-based logging with defaults
-                    self._logger.info("Auto-configuring PVC-based log collection")
-                    self.deployment_spec.enable_log_collection(
-                        container_log_dir=self.container_log_dir,
-                        enable_all_services=True,
-                    )
-                    await self._create_log_collection_pvc()
+            else:
+                # Auto-configure PVC-based logging with defaults
+                self._logger.info("Auto-configuring PVC-based log collection")
+                self.deployment_spec.enable_log_collection(
+                    container_log_dir=self.container_log_dir,
+                    enable_all_services=True,
+                )
+            await self._create_log_collection_pvc()
 
             await self._create_deployment()
             await self.wait_for_ready()
@@ -1538,387 +1541,36 @@ class ManagedDeployment:
         except Exception as cleanup_error:
             self._logger.error(f"Error during cleanup: {cleanup_error}")
 
-    async def create_log_download_job(
-        self,
-        local_output_dir: str,
-        container_log_dir="/tmp/service_logs",
-        job_name=None,
-        download_timeout=300,
-    ):
-        """
-        Create a Kubernetes job to download log files from the PVC-based service-logs volume.
-
-        This job will:
-        1. Mount the same PVC as the deployment services
-        2. Create a tar archive of all log files
-        3. Keep the job pod alive for extraction (similar to ManagedAIPerfDeployment pattern)
-
-        Args:
-            local_output_dir: Local directory to save the downloaded logs
-            container_log_dir: Container directory where logs are stored (should match enable_log_collection)
-            job_name: Optional custom job name (defaults to deployment-name-log-download)
-            download_timeout: Timeout in seconds for the download job
-
-        Returns:
-            dict: Information about the created job
-        """
-        if not self._custom_api:
-            raise RuntimeError(
-                "Kubernetes API not initialized. Call _init_kubernetes() first."
-            )
-
-        # Generate job name
-        if not job_name:
-            job_name = (
-                f"{self.deployment_spec.name}-log-download-{secrets.token_hex(4)}"
-            )
-
-        os.makedirs(local_output_dir, exist_ok=True)
-
-        # Get PVC name
-        pvc_name = self._get_download_job_volume_config()["persistentVolumeClaim"][
-            "claimName"
-        ]
-
-        # Check if PVC exists and has RWX access mode before creating download job
-        self._logger.info(
-            f"Checking if PVC {pvc_name} exists before creating download job..."
-        )
-        try:
-            pvc = await self._core_api.read_namespaced_persistent_volume_claim(
-                name=pvc_name, namespace=self.namespace
-            )
-            access_modes = pvc.spec.access_modes or []
-            storage_class = pvc.spec.storage_class_name
-            capacity = (
-                pvc.status.capacity.get("storage", "unknown")
-                if pvc.status.capacity
-                else "unknown"
-            )
-            phase = pvc.status.phase
-
-            self._logger.info(
-                f"PVC {pvc_name} found: phase={phase}, access_modes={access_modes}, "
-                f"storage_class={storage_class}, capacity={capacity}"
-            )
-
-            # Check for ReadWriteMany (RWX) access mode
-            has_rwx = "ReadWriteMany" in access_modes
-            if not has_rwx:
-                self._logger.warning(
-                    f"PVC {pvc_name} does not have ReadWriteMany access mode "
-                    f"(has: {access_modes}). Download job may fail if other pods are using the PVC."
-                )
-
-            self._logger.info(
-                f"PVC {pvc_name} exists, proceeding with download job creation"
-            )
-        except exceptions.ApiException as e:
-            if e.status == 404:
-                self._logger.warning(
-                    f"PVC {pvc_name} does not exist - skipping download job creation"
-                )
-                return {
-                    "success": False,
-                    "error": f"PVC {pvc_name} does not exist",
-                    "job_name": None,
-                }
-            else:
-                self._logger.warning(f"Error checking PVC {pvc_name}: {e}")
-
-        # Load and render template
-        template = self._load_template("log_download_job.yaml")
-        template = template.replace("TEMPLATE_JOB_NAME", job_name)
-        template = template.replace("TEMPLATE_NAMESPACE", self.namespace)
-        template = template.replace(
-            "TEMPLATE_DEPLOYMENT_NAME", self.deployment_spec.name
-        )
-        template = template.replace("TEMPLATE_CONTAINER_LOG_DIR", container_log_dir)
-        template = template.replace("TEMPLATE_PVC_NAME", pvc_name)
-
-        # Parse the rendered template
-        job_spec = yaml.safe_load(template)
-
-        # Create the job using BatchV1Api
-        try:
-            batch_api = client.BatchV1Api()
-            await batch_api.create_namespaced_job(
-                namespace=self.namespace, body=job_spec
-            )
-            self._logger.info(f"Log download job created: {job_name}")
-
-            return {
-                "success": True,
-                "job_name": job_name,
-                "namespace": self.namespace,
-                "local_output_dir": local_output_dir,
-            }
-
-        except exceptions.ApiException as e:
-            if e.status == 409:  # Already exists
-                self._logger.warning(f"Job {job_name} already exists")
-                return {
-                    "success": True,
-                    "job_name": job_name,
-                    "namespace": self.namespace,
-                    "local_output_dir": local_output_dir,
-                    "note": "job_already_existed",
-                }
-            else:
-                self._logger.error(f"Failed to create job {job_name}: {e}")
-                raise
-
-    async def extract_logs_from_download_job(
-        self, job_name: str, local_output_dir: str
-    ):
-        """
-        Extract logs from a log download job pod by creating tar on-demand.
-
-        This method creates the tar archive at extraction time (not at job start),
-        ensuring all logs up to this point are captured.
-
-        Args:
-            job_name: Name of the log download job
-            local_output_dir: Local directory to save the extracted logs
-
-        Returns:
-            dict: Extraction results including file count and paths
-        """
-        container_log_dir = self.container_log_dir
-
-        try:
-            # Find the job pod
-            pods = []
-            job_label = f"job-name={job_name}"
-            pod_generator = kr8s.get(
-                "pods",
-                namespace=self.namespace,
-                label_selector=job_label,
-            )
-            for pod in pod_generator:
-                pods.append(pod)
-
-            if not pods:
-                raise Exception(f"No pods found for job {job_name}")
-
-            pod = pods[0]
-
-            # Wait for job to be ready
-            self._logger.info("Waiting for log download job to be ready...")
-            for attempt in range(60):  # Wait up to 60 seconds
-                try:
-                    result = await asyncio.wait_for(
-                        asyncio.create_task(
-                            asyncio.to_thread(
-                                pod.exec,
-                                ["test", "-f", "/tmp/log_archive/job_ready.txt"],
-                            )
-                        ),
-                        timeout=5.0,
-                    )
-                    if result.returncode == 0:
-                        break
-                except Exception:
-                    pass
-
-                self._logger.info(
-                    f"Waiting for download job to be ready... (attempt {attempt + 1}/60)"
-                )
-                await asyncio.sleep(1)
-            else:
-                self._logger.warning(
-                    "Download job did not become ready in expected time, proceeding anyway..."
-                )
-
-            # Create tar archive ON-DEMAND (captures all logs up to this point)
-            # Logs are in service subdirectories: {container_log_dir}/{service_name}/*.log
-            # Note: Download job uses subPath: service_logs, so only service logs are visible
-            self._logger.info("Creating tar archive of logs on-demand...")
-            create_tar_script = f"""
-cd {container_log_dir} 2>/dev/null || exit 1
-LOG_COUNT=$(find . -name "*.log" -type f | wc -l)
-echo "LOG_COUNT:$LOG_COUNT"
-if [ "$LOG_COUNT" -gt 0 ]; then
-    # Archive preserving directory structure (service subdirs)
-    tar -czf /tmp/log_archive/service_logs.tar.gz . 2>/dev/null
-    echo "TAR_CREATED:true"
-else
-    echo "TAR_CREATED:false"
-fi
-"""
-            tar_result = await asyncio.wait_for(
-                asyncio.create_task(
-                    asyncio.to_thread(pod.exec, ["sh", "-c", create_tar_script])
-                ),
-                timeout=30.0,
-            )
-
-            # Parse the output to get log count
-            output = tar_result.stdout.decode() if tar_result.stdout else ""
-            log_count = 0
-            tar_created = False
-            for line in output.split("\n"):
-                if line.startswith("LOG_COUNT:"):
-                    log_count = int(line.split(":")[1])
-                elif line.startswith("TAR_CREATED:"):
-                    tar_created = line.split(":")[1] == "true"
-
-            self._logger.info(f"Found {log_count} log files, tar_created={tar_created}")
-
-            extracted_files = []
-
-            if log_count > 0 and tar_created:
-                # Extract the tar archive
-                self._logger.info("Extracting service logs archive...")
-                cat_result = await asyncio.wait_for(
-                    asyncio.create_task(
-                        asyncio.to_thread(
-                            pod.exec, ["cat", "/tmp/log_archive/service_logs.tar.gz"]
-                        )
-                    ),
-                    timeout=60.0,
-                )
-
-                if cat_result.returncode != 0:
-                    raise Exception(
-                        f"Archive extraction failed with return code {cat_result.returncode}"
-                    )
-
-                # Save the archive locally
-                local_archive = os.path.join(local_output_dir, "service_logs.tar.gz")
-                with open(local_archive, "wb") as f:
-                    f.write(cat_result.stdout)
-
-                # Extract the archive locally
-                import tarfile
-
-                self._logger.debug(f"Extracting archive: {local_archive}")
-
-                with tarfile.open(local_archive, "r:gz") as tar:
-                    tar.extractall(path=local_output_dir, filter="data")
-                    extracted_files = tar.getnames()
-
-                # Remove the temporary archive file
-                os.remove(local_archive)
-
-                self._logger.info(
-                    f"Extracted {len(extracted_files)} log files to {local_output_dir}"
-                )
-
-            else:
-                self._logger.info("No log files were available for download")
-
-            # Create metadata file locally
-            import json
-
-            metadata = {
-                "deployment_name": self.deployment_spec.name,
-                "namespace": self.namespace,
-                "extraction_timestamp": asyncio.get_event_loop().time(),
-                "job_name": job_name,
-                "log_count": log_count,
-                "container_log_dir": container_log_dir,
-            }
-            metadata_path = os.path.join(local_output_dir, "download_metadata.json")
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-            extracted_files.append("download_metadata.json")
-
-            return {
-                "success": True,
-                "extracted_files": extracted_files,
-                "log_count": log_count,
-                "local_output_dir": local_output_dir,
-            }
-
-        except Exception as e:
-            self._logger.error(
-                f"Failed to extract logs from download job {job_name}: {e}"
-            )
-            return {
-                "success": False,
-                "error": str(e),
-                "local_output_dir": local_output_dir,
-            }
-
-    async def cleanup_log_download_job(self, job_name: str):
-        """
-        Clean up a log download job and its associated pods.
-
-        Args:
-            job_name: Name of the job to clean up
-        """
-        try:
-            # Delete the job with foreground propagation to cascade to pods
-            from kubernetes_asyncio.client.models import V1DeleteOptions
-
-            delete_options = V1DeleteOptions(propagation_policy="Foreground")
-
-            batch_api = client.BatchV1Api()
-            await batch_api.delete_namespaced_job(
-                name=job_name,
-                namespace=self.namespace,
-                body=delete_options,
-            )
-            self._logger.info(f"Log download job {job_name} deleted")
-
-        except exceptions.ApiException as e:
-            if e.status != 404:  # Ignore if already deleted
-                self._logger.warning(
-                    f"Failed to delete log download job {job_name}: {e}"
-                )
-
     async def download_volume_logs_now(self, local_output_dir=None):
-        """
-        Download logs from volume-based collection immediately.
+        """Download service logs from PVC immediately.
 
-        This creates a temporary download job, extracts logs, and cleans up the job.
-        Useful for downloading logs during test execution (not just at cleanup time).
+        Creates a temporary extraction job, downloads logs, and cleans up.
 
         Args:
-            local_output_dir: Optional local directory to save logs (defaults to log_dir/services_manual)
+            local_output_dir: Local directory to save logs (defaults to log_dir/services_manual)
 
         Returns:
-            dict: Download results
+            dict: Extraction results
         """
-        if not self.enable_volume_log_collection:
-            return {"success": False, "error": "Volume log collection is not enabled"}
-
         if local_output_dir is None:
             local_output_dir = os.path.join(self.log_dir, "services_manual")
 
-        self._logger.info("Downloading volume logs on demand...")
+        pvc_name = getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+        if not pvc_name:
+            return {"success": False, "error": "No PVC configured for log collection"}
 
-        try:
-            # Create a temporary download job
-            download_job_result = await self.create_log_download_job(
-                local_output_dir=local_output_dir,
-                container_log_dir=self.container_log_dir,
-            )
+        from tests.utils.pvc_extractor import PvcExtractor
 
-            if not download_job_result.get("success"):
-                return {"success": False, "error": "Failed to create download job"}
+        extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
+        await extractor.init()
 
-            job_name = download_job_result["job_name"]
-
-            # Extract logs
-            result = await self.extract_logs_from_download_job(
-                job_name, local_output_dir
-            )
-
-            if result["success"]:
-                self._logger.info(
-                    f"Successfully downloaded {result['log_count']} log files to {local_output_dir}"
-                )
-
-            # Cleanup the temporary job
-            await self.cleanup_log_download_job(job_name)
-
-            return result
-
-        except Exception as e:
-            self._logger.error(f"Failed to download volume logs: {e}")
-            return {"success": False, "error": str(e)}
+        return await extractor.extract(
+            pvc_name=pvc_name,
+            sub_path="service_logs",
+            container_path=self.container_log_dir,
+            file_patterns=["*.log"],
+            local_output_dir=local_output_dir,
+        )
 
     async def _create_log_collection_pvc(self) -> str:
         """
@@ -2205,25 +1857,6 @@ fi
             if e.status != 404:  # Not found is acceptable during cleanup
                 self._logger.warning(f"Failed to cleanup PVC {pvc_name}: {e}")
 
-    def _get_download_job_volume_config(self) -> dict:
-        """
-        Get the PVC volume configuration for the log download job.
-
-        Returns:
-            dict: Volume configuration for the download job using PVC
-
-        Raises:
-            RuntimeError: If PVC-based logging is not configured
-        """
-        if hasattr(self.deployment_spec, "_log_collection_pvc_name"):
-            pvc_name = self.deployment_spec._log_collection_pvc_name
-            return {"persistentVolumeClaim": {"claimName": pvc_name}}
-        else:
-            raise RuntimeError(
-                "PVC-based log collection is not configured. "
-                "Call deployment_spec.enable_log_collection() before using ManagedDeployment."
-            )
-
     async def _cleanup_all_resources(self):
         """
         Comprehensive cleanup of all resources created by this deployment.
@@ -2241,16 +1874,11 @@ fi
             self._logger.info("Deleting deployment...")
             await self._delete_deployment()
 
-            # Wait for pods to fully terminate before extracting logs
-            if self.enable_volume_log_collection:
-                self._logger.info("Waiting for pods to terminate...")
-                await self._wait_for_pods_terminated()
-
-                # Now create download job to extract logs from PVC (after pods are gone)
-                await self._extract_logs_from_pvc()
-
-                # Clean up PVC
-                await self._cleanup_log_collection_pvc()
+            # Wait for pods to terminate, then extract logs from PVC
+            self._logger.info("Waiting for pods to terminate...")
+            await self._wait_for_pods_terminated()
+            await self._extract_logs_from_pvc()
+            await self._cleanup_log_collection_pvc()
 
             # Clean up any orphaned jobs related to this deployment
             await self._cleanup_orphaned_jobs()
@@ -2286,8 +1914,7 @@ fi
         self._logger.warning(f"Timeout waiting for pods to terminate after {timeout}s")
 
     async def _extract_logs_from_pvc(self):
-        """Create download job, extract logs, and cleanup job."""
-        # Skip if PVC was never successfully verified/bound
+        """Extract service logs from PVC using PvcExtractor."""
         if not self._log_collection_pvc_verified:
             self._logger.info(
                 "Skipping log extraction - PVC was not successfully bound"
@@ -2295,37 +1922,35 @@ fi
             return
 
         try:
+            from tests.utils.pvc_extractor import PvcExtractor
+
+            pvc_name = getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+            if not pvc_name:
+                self._logger.warning("No PVC name found for log extraction")
+                return
+
             services_dir = os.path.join(self.log_dir, "services")
             os.makedirs(services_dir, exist_ok=True)
 
-            # Create download job
-            self._logger.info("Creating log download job...")
-            download_job_result = await self.create_log_download_job(
+            extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
+            await extractor.init()
+
+            result = await extractor.extract(
+                pvc_name=pvc_name,
+                sub_path="service_logs",
+                container_path=self.container_log_dir,
+                file_patterns=["*.log"],
                 local_output_dir=services_dir,
-                container_log_dir=self.container_log_dir,
             )
 
-            if not download_job_result.get("success"):
-                self._logger.warning("Failed to create log download job")
-                return
-
-            job_name = download_job_result["job_name"]
-
-            # Extract logs
-            extraction_result = await self.extract_logs_from_download_job(
-                job_name, services_dir
-            )
-            if extraction_result.get("success"):
+            if result.get("success"):
                 self._logger.info(
-                    f"Successfully extracted {extraction_result.get('log_count', 0)} log files"
+                    f"Extracted {result.get('file_count', 0)} log files to {services_dir}"
                 )
             else:
                 self._logger.warning(
-                    f"Log extraction failed: {extraction_result.get('error', 'Unknown error')}"
+                    f"Log extraction failed: {result.get('error', 'Unknown error')}"
                 )
-
-            # Cleanup download job
-            await self.cleanup_log_download_job(job_name)
 
         except Exception as e:
             self._logger.warning(f"Error extracting logs from PVC: {e}")
