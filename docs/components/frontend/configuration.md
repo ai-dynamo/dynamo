@@ -110,7 +110,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer backend: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer Backends](tokenizer-backends.md) |
+| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer](tokenizer-backends.md) |
 
 ## Experimental
 
