@@ -27,12 +27,22 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
+use dynamo_runtime::error::ErrorType as DynamoErrorType;
+
+/// Check whether an error chain indicates the request was rejected.
+pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    const NON_REJECTION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -257,6 +267,7 @@ pub struct Metrics {
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
+    model_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -284,6 +295,7 @@ pub struct InflightGuard {
     error_type: ErrorType,
     timer: Instant,
     request_id: String,
+    span: tracing::Span,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -681,6 +693,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
+                "Total number of requests rejected due to resource exhaustion",
+            ),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -702,6 +723,7 @@ impl Metrics {
             model_migration_limit,
             model_migration_total,
             model_cancellation_total,
+            model_rejection_total,
         }
     }
 
@@ -807,6 +829,7 @@ impl Metrics {
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
+        registry.register(Box::new(self.model_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -904,6 +927,20 @@ impl Metrics {
             .get()
     }
 
+    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current rejection count for a model and endpoint
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .get()
+    }
+
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
     /// and the kind of endpoint that was hit
     ///
@@ -998,6 +1035,7 @@ impl InflightGuard {
             error_type: ErrorType::Internal,
             timer,
             request_id,
+            span: tracing::Span::current(),
         }
     }
 
@@ -1033,6 +1071,7 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let _enter = self.span.enter();
         let duration = self.timer.elapsed().as_secs_f64();
         self.metrics.dec_inflight_gauge(&self.model);
         self.metrics.inc_request_counter(
@@ -1047,7 +1086,7 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
-        let elapsed_ms = self.timer.elapsed().as_millis();
+        let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
         match self.status {
             Status::Error => {
@@ -1308,7 +1347,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
@@ -1351,7 +1390,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()

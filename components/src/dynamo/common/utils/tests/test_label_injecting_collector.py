@@ -11,6 +11,13 @@ modifying the source metrics.
 import pytest
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Summary
 
+# Total runtime ~0.05s — no need for parallel marker.
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
+
 
 class TestLabelInjectingCollector:
     """Test suite for LabelInjectingCollector"""

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated multimodal (vision + LLM) serving.
+# Aggregated multimodal (image/video + LLM) serving.
 # GPUs: 1
 
 set -e
@@ -12,7 +12,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
-MODEL="Qwen/Qwen3-VL-8B-Instruct"
+# TODO: Update default to Qwen3-VL-2B-Instruct after SGLang 0.5.10+ upgrade.
+MODEL="Qwen/Qwen2-VL-7B-Instruct"
 CHAT_TEMPLATE=""
 ENABLE_OTEL=false
 
@@ -61,7 +62,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL" "$HTTP_PORT"
+print_launch_banner --multimodal "Launching Aggregated Vision Serving" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -74,7 +75,8 @@ if [ -n "$CHAT_TEMPLATE" ]; then
     TEMPLATE_ARGS+=(--chat-template "$CHAT_TEMPLATE")
 fi
 
-# run worker with vision model (SGLang auto-detects chat template from HF tokenizer)
+# run worker with a vision model (SGLang auto-detects chat template from HF tokenizer)
+# The SGLang engine handles image/video loading and vision encoding internally.
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
