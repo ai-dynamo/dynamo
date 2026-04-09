@@ -126,6 +126,22 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                 )
 
 
+_CONFIG_PROPAGATION_KEYS = ("max_seq_len", "max_batch_size", "max_num_tokens")
+
+
+def _propagate_engine_overrides(arg_map: dict, config: Config) -> None:
+    """Write back MDC-relevant fields from arg_map to config after overrides."""
+    for key in _CONFIG_PROPAGATION_KEYS:
+        if key in arg_map and arg_map[key] != getattr(config, key):
+            logging.info(
+                "Propagating engine override %s: %r -> %r",
+                key,
+                getattr(config, key),
+                arg_map[key],
+            )
+            setattr(config, key, arg_map[key])
+
+
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -228,6 +244,10 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    # Propagate engine arg overrides back to config so MDC registration
+    # and handler config use the engine's actual limits (DGH-643).
+    _propagate_engine_overrides(arg_map, config)
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.

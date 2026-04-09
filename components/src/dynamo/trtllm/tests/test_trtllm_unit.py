@@ -22,7 +22,10 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import (
+    _propagate_engine_overrides,
+    init_llm_worker,
+)
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -168,6 +171,60 @@ def test_deep_update_adds_new_keys():
     source = {"b": 2, "c": {"nested": 3}}
     deep_update(target, source)
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
+
+
+# ---- Tests for _propagate_engine_overrides (DGH-643) ----
+
+
+def test_propagate_engine_overrides_updates_max_seq_len():
+    """Overridden max_seq_len in arg_map is propagated back to config."""
+    config = parse_args(["--model", "fake-model", "--max-seq-len", "131072"])
+    arg_map = {
+        "max_seq_len": 32768,
+        "max_batch_size": config.max_batch_size,
+        "max_num_tokens": config.max_num_tokens,
+    }
+    _propagate_engine_overrides(arg_map, config)
+    assert config.max_seq_len == 32768
+
+
+def test_propagate_engine_overrides_updates_all_fields():
+    """All three MDC-relevant fields are propagated when overridden."""
+    config = parse_args(["--model", "fake-model"])
+    arg_map = {"max_seq_len": 4096, "max_batch_size": 64, "max_num_tokens": 2048}
+    _propagate_engine_overrides(arg_map, config)
+    assert config.max_seq_len == 4096
+    assert config.max_batch_size == 64
+    assert config.max_num_tokens == 2048
+
+
+def test_propagate_engine_overrides_noop_when_values_match():
+    """No changes when arg_map values already match config."""
+    config = parse_args(["--model", "fake-model"])
+    arg_map = {
+        "max_seq_len": config.max_seq_len,
+        "max_batch_size": config.max_batch_size,
+        "max_num_tokens": config.max_num_tokens,
+    }
+    orig_seq = config.max_seq_len
+    orig_batch = config.max_batch_size
+    orig_tokens = config.max_num_tokens
+    _propagate_engine_overrides(arg_map, config)
+    assert config.max_seq_len == orig_seq
+    assert config.max_batch_size == orig_batch
+    assert config.max_num_tokens == orig_tokens
+
+
+def test_propagate_engine_overrides_ignores_missing_keys():
+    """Keys not present in arg_map are left unchanged on config."""
+    config = parse_args(["--model", "fake-model"])
+    orig_seq = config.max_seq_len
+    orig_batch = config.max_batch_size
+    arg_map = {"max_num_tokens": 999}
+    _propagate_engine_overrides(arg_map, config)
+    assert config.max_seq_len == orig_seq
+    assert config.max_batch_size == orig_batch
+    assert config.max_num_tokens == 999
 
 
 class MultimodalProcessorInstantiated(Exception):
