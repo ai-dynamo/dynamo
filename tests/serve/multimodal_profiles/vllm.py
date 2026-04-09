@@ -45,6 +45,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=300,
                 single_gpu=True,
             ),
+            "p_d": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=300,
+                single_gpu=True,
+            ),
         },
         request_payloads=[make_image_payload(["green"])],
     ),
