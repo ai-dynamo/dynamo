@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tokenizer Backends
+title: Tokenizer
 ---
 
 The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: both the default HuggingFace path and the `fastokens` path can serve these models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
