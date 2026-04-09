@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 from unittest.mock import Mock, patch
 
@@ -721,3 +722,67 @@ class TestDecodeFpmScaling:
 
         result = planner.load_plan_adjustment()
         assert result is None
+
+
+class TestPopulateWorkerInfoFromDiscovery:
+    """Tests for _populate_worker_info_from_discovery backfill logic."""
+
+    def test_backfill_from_model_card(self):
+        """max_num_batched_tokens is populated from a discovered model card."""
+        config = _build_load_config()
+        shared_state = PlannerSharedState()
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
+        planner.model_name = "test-model"
+        assert planner.prefill_worker_info.max_num_batched_tokens is None
+
+        card = {"runtime_config": {"max_num_batched_tokens": 8192}}
+        mock_sub = Mock()
+        mock_sub.get_model_cards.return_value = {"w1": json.dumps(card)}
+        planner.fpm_subscriber = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.prefill_worker_info.max_num_batched_tokens == 8192
+
+    def test_noop_when_already_set(self):
+        """Does not overwrite an existing max_num_batched_tokens value."""
+        config = _build_load_config()
+        shared_state = PlannerSharedState()
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
+        planner.model_name = "test-model"
+        planner.prefill_worker_info = WorkerInfo(max_num_batched_tokens=2048)
+
+        card = {"runtime_config": {"max_num_batched_tokens": 8192}}
+        mock_sub = Mock()
+        mock_sub.get_model_cards.return_value = {"w1": json.dumps(card)}
+        planner.fpm_subscriber = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.prefill_worker_info.max_num_batched_tokens == 2048
+
+    def test_noop_when_no_subscriber(self):
+        """Gracefully does nothing when there is no FPM subscriber."""
+        config = _build_load_config()
+        shared_state = PlannerSharedState()
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
+        planner.model_name = "test-model"
+        planner.fpm_subscriber = None
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.prefill_worker_info.max_num_batched_tokens is None
+
+    def test_skips_cards_without_runtime_config(self):
+        """Cards missing runtime_config are skipped."""
+        config = _build_load_config()
+        shared_state = PlannerSharedState()
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
+        planner.model_name = "test-model"
+
+        mock_sub = Mock()
+        mock_sub.get_model_cards.return_value = {
+            "w1": json.dumps({"some_other_field": 42}),
+            "w2": json.dumps({"runtime_config": {"max_num_batched_tokens": 4096}}),
+        }
+        planner.fpm_subscriber = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.prefill_worker_info.max_num_batched_tokens == 4096

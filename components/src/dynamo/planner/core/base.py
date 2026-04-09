@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
@@ -307,6 +308,53 @@ class BasePlanner:
         logger.info(
             f"FPM tracker started for {worker_info.component_name}.{worker_info.endpoint}"
         )
+
+    def _populate_worker_info_from_discovery(self) -> None:
+        """Fill missing WorkerInfo fields from model cards observed by the FPM subscriber.
+
+        The FPM subscriber's MDC discovery watch captures the full
+        ModelDeploymentCard (including runtime_config) for every engine
+        that registers.  When the connector does not provide WorkerInfo
+        fields like max_num_batched_tokens (e.g. VirtualConnector), this
+        method reads the first available model card and backfills them.
+        """
+        if self.fpm_subscriber is None:
+            return
+
+        worker_info = (
+            self.prefill_worker_info
+            if self.component_type == SubComponentType.PREFILL
+            else self.decode_worker_info
+        )
+        # Only backfill if the value is still missing.
+        if worker_info.max_num_batched_tokens:
+            return
+
+        try:
+            cards = self.fpm_subscriber.get_model_cards()
+        except RuntimeError:
+            return
+
+        for _wid, card_json_str in cards.items():
+            try:
+                card = json.loads(card_json_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            rc = card.get("runtime_config")
+            if not isinstance(rc, dict):
+                continue
+            val = rc.get("max_num_batched_tokens")
+            try:
+                parsed = int(val)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                worker_info.max_num_batched_tokens = parsed
+                logger.info(
+                    f"Populated max_num_batched_tokens={parsed} from "
+                    f"discovery model card (worker {_wid})"
+                )
+                return
 
     def _get_fpm_stats(self) -> "dict[tuple[str, int], ForwardPassMetrics]":
         """Get decoded FPM stats from the subscriber, keyed by (worker_id, dp_rank)."""
