@@ -354,7 +354,8 @@ impl DistributedRuntime {
                     advertise_host: std::env::var("DYN_TCP_RESP_ADVERTISE_HOST").ok(),
                     advertise_port: std::env::var("DYN_TCP_RESP_ADVERTISE_PORT")
                         .ok()
-                        .and_then(|p| p.parse().ok()),
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .filter(|&p| p != 0),
                 };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
