@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
@@ -334,19 +335,23 @@ class BasePlanner:
         except RuntimeError:
             return
 
-        import json
-
         for _wid, card_json_str in cards.items():
             try:
                 card = json.loads(card_json_str)
             except (json.JSONDecodeError, TypeError):
                 continue
-            rc = card.get("runtime_config") or {}
+            rc = card.get("runtime_config")
+            if not isinstance(rc, dict):
+                continue
             val = rc.get("max_num_batched_tokens")
-            if val and int(val) > 0:
-                worker_info.max_num_batched_tokens = int(val)
+            try:
+                parsed = int(val)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                worker_info.max_num_batched_tokens = parsed
                 logger.info(
-                    f"Populated max_num_batched_tokens={val} from "
+                    f"Populated max_num_batched_tokens={parsed} from "
                     f"discovery model card (worker {_wid})"
                 )
                 return
