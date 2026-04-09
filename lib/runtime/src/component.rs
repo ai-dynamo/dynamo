@@ -64,6 +64,8 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
+pub(crate) use client::RoutingOccupancyState;
+pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use endpoint::build_transport_type;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

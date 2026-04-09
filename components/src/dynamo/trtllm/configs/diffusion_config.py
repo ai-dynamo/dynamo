@@ -71,7 +71,6 @@ class DiffusionConfig:
 
     # ── Pipeline optimization config (maps to PipelineConfig) ──
     disable_torch_compile: bool = False
-    torch_compile_mode: str = "default"
     # Enable torch.compile fullgraph mode (stricter but potentially faster)
     enable_fullgraph: bool = False
     # QKV fusion for transformer attention layers
@@ -81,8 +80,8 @@ class DiffusionConfig:
     enable_cuda_graph: bool = False
     # Enable per-layer NVTX markers for profiling
     enable_layerwise_nvtx_marker: bool = False
-    # Number of denoising steps to run during warmup (0 to disable)
-    warmup_steps: int = 1
+    # Skip warmup inference during initialization (default: run warmup)
+    skip_warmup: bool = False
 
     # ── Attention config (maps to AttentionConfig) ──
     # Attention backend: "VANILLA" (PyTorch SDPA) or "TRTLLM"
@@ -135,7 +134,7 @@ class DiffusionConfig:
             f"attn_backend={self.attn_backend}, "
             f"quant_algo={self.quant_algo}, "
             f"enable_cuda_graph={self.enable_cuda_graph}, "
-            f"warmup_steps={self.warmup_steps}, "
+            f"skip_warmup={self.skip_warmup}, "
             f"dit_dp_size={self.dit_dp_size}, "
             f"dit_tp_size={self.dit_tp_size})"
         )

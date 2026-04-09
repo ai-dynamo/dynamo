@@ -7,8 +7,8 @@ import asyncio
 import logging
 
 from dynamo.planner import KubernetesConnector
-from dynamo.planner.kube import KubernetesAPI
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)

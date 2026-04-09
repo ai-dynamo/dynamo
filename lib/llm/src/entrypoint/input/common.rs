@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::{
     backend::{Backend, ExecutionContext},
@@ -28,6 +29,7 @@ use crate::{
 };
 
 use anyhow::Context as _;
+use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -43,17 +45,45 @@ pub struct PreparedEngine {
     pub service_name: String,
     pub engine: OpenAIChatCompletionsStreamingEngine,
     pub inspect_template: bool,
-    pub card: Option<ModelDeploymentCard>,
     pub request_template: Option<RequestTemplate>,
 }
 
-impl PreparedEngine {
-    pub fn has_tokenizer(&self) -> bool {
-        if let Some(card) = self.card.as_ref() {
-            card.has_tokenizer()
-        } else {
-            false
+async fn wait_for_min_initial_workers(
+    client: &Client,
+    min_initial_workers: usize,
+) -> anyhow::Result<()> {
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
+
+    if min_initial_workers == 1 {
+        client.wait_for_instances().await?;
+        return Ok(());
+    }
+
+    let mut watcher = client.instance_avail_watcher();
+    loop {
+        let available = watcher.borrow_and_update().len();
+        if available >= min_initial_workers {
+            return Ok(());
         }
+
+        tokio::time::timeout(Duration::from_secs(120), watcher.changed())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "timed out waiting for {} initial workers for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "instance watcher closed before {} workers appeared for endpoint {}",
+                    min_initial_workers,
+                    client.endpoint.id()
+                )
+            })?;
     }
 }
 
@@ -64,7 +94,9 @@ pub async fn prepare_engine(
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic {
-            model: local_model, ..
+            model: local_model,
+            prefill_load_estimator,
+            ..
         } => {
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
@@ -75,6 +107,7 @@ pub async fn prepare_engine(
                 RouterConfig::default(),
                 local_model.migration_limit(),
                 None,
+                prefill_load_estimator,
                 metrics,
             ));
             let discovery = distributed_runtime.discovery();
@@ -107,7 +140,6 @@ pub async fn prepare_engine(
                 service_name: model_service_name,
                 engine,
                 inspect_template: false,
-                card: None,
                 request_template: local_model.request_template(),
             })
         }
@@ -120,7 +152,6 @@ pub async fn prepare_engine(
                 engine,
                 inspect_template: false,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
         EngineConfig::InProcessTokens {
@@ -141,7 +172,6 @@ pub async fn prepare_engine(
                 engine: pipeline,
                 inspect_template: true,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
     }
@@ -254,6 +284,7 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -264,6 +295,8 @@ where
     } else {
         client.clone()
     };
+
+    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
     // Get threshold value and wrap monitor for PushRouter
     // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
@@ -292,9 +325,10 @@ where
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random | RouterMode::RoundRobin => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

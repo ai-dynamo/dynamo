@@ -20,17 +20,17 @@ Three gaps stand out with current workflows:
 
 ## Dynamo as an Agentic Runtime
 
-Dynamo exposes **agentic hints** and uses them at three layers: frontend API, router, and KV cache management. Together, these enable workload-aware inference instead of generic, state-of-the-moment optimization.
+Dynamo exposes **agentic hints** and uses them at the frontend API, router, and backend scheduling layers. Together, these enable workload-aware inference instead of generic, state-of-the-moment optimization.
 
 ### Agentic Hints
 
-Agentic hints are per-request metadata that the agent client (e.g. Claude Code, Codex, [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) sends to Dynamo's frontend. They are carried in the request body under [**nvext**](../components/frontend/nvext.md#agent-hints) on chat completions. The frontend parses them and passes them to the KV router and, where applicable, to the KV cache manager and backends.
+Agentic hints are per-request metadata that the agent client (e.g. Claude Code, Codex, [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) sends to Dynamo's frontend. They are carried in the request body under [**nvext**](../components/frontend/nvext.md#agent-hints) on chat completions. The frontend parses them and passes them to the KV router and, where applicable, to backends.
 
 - **Flow:** Harness sets hints in the request → Dynamo frontend parses `nvext` into routing hints → KV router uses them for queue ordering and worker selection → backends use them for priority scheduling and cache eviction.
 
 ![Agentic workflow: Harness → hints in request → Dynamo frontend → routing hints → KV router (queue order, worker choice) → backend](../assets/img/agentic-hints-workflow.svg)
 
-The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.cache_control` (TTL-based pinning); the frontend passes the former to the KV router and the latter to the KV block manager for cache pinning, prefetching, and eviction.
+The request body includes `nvext.agent_hints` for routing and scheduling metadata; the frontend passes those hints to the KV router for queue ordering and worker selection.
 
 | Hint | Description |
 |------|-------------|
@@ -40,15 +40,11 @@ The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.c
 | `program_id` | (Planned) Identifies the agentic program for program-level metrics and cache affinity. |
 | `context_type` | (Planned) Semantic type (e.g. system prompt, tool definition, reasoning branch) for context-aware eviction. |
 
-**`nvext.cache_control`** (sibling of `agent_hints`, not inside it) provides TTL-based KV cache pinning. Pinned prefixes resist eviction for the specified duration. See [SGLang for Agentic Workloads — Cache Pinning](../backends/sglang/agents.md#cache-pinning-experimental).
-
-
 ## Feature matrix
 
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|:----:|:------:|:-------------:|
 | Priority-based cache eviction | 🚧 | ✅ | 🚧 |
-| Cache pinning | | ✅ | 🚧 |
 | Cache prefetching | | 🚧 | |
 | Subagent / thinking-aware cache eviction | | 🚧 | |
 | Speculative prefill | ✅ | ✅ | ✅ |
@@ -67,11 +63,6 @@ Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints int
 ### KV cache optimizations
 
 - **Priority-based KV cache eviction:** Instead of evicting by LRU alone, the backend can evict **low-priority** cache entries first when the GPU (and, with HiCache, host) cache is full. The `priority` value in `nvext.agent_hints` is forwarded to the engine; with SGLang, enable `--enable-priority-scheduling` and `--radix-eviction-policy priority`.
-
-- **Cache pinning (experimental):** [Anthropic's v1/messages](https://docs.anthropic.com/en/docs/build-with-claude/caching) includes a `cache_control` field that tells servers how long to keep KV cache for specific blocks. Dynamo implements an OSS version with SGLang's HiCache: users can set `cache_control` via the same API as Anthropic or as an `nvext` field on chat completions. When set, the Dynamo router calls a hook in HiCache after the request completes to **pin** the blocks created by those tokens for the user-specified TTL. Pinned nodes resist eviction (demoting to host memory rather than being deleted).
-    In the Nemo Agentic toolkit and Dynamo integration, TTL is dynamically computed as the product of how many times a block is expected to be reused and the time between those requests; the NAT profiler pre-computes these expectations during agent evaluations and stores them in a data structure per agent, then injects `nvext.cache_control` with the derived TTL (see [dynamo_llm.py](https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/packages/nvidia_nat_core/src/nat/llm/dynamo_llm.py)).
-
-    **Future work:** TTL could be determined dynamically by context type—e.g. think tokens or scratchpad content could use a lower TTL than system prompt or tool definitions, so high-value static context is retained longer while ephemeral context expires sooner.
 
 - **Cache prefetching (future work):** Using the predictable agentic lifecycle (e.g. parent-child subagents, known next turn), Dynamo could proactively prefetch or move KV cache to a different worker so that the next request hits warm cache.
 

@@ -85,10 +85,11 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in the workload namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+
+> **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
 
 **Key Configuration Notes:**
-- If your cluster uses namespace restrictions, ensure `dynamo-operator.namespaceRestriction.enabled=true` is set during installation
 - Adjust version tags to match your cluster's available Dynamo versions
 - If you encounter operator compatibility issues (e.g., unsupported MPI arguments), consult your cluster administrator or the Dynamo troubleshooting documentation
 
@@ -391,6 +392,13 @@ For this A/B comparison, we use the [**Mooncake FAST'25 Toolagent Trace**](https
 ```
 
 These two requests share blocks 46–57 (12 blocks × 512 tokens = ~6,144 tokens of shared prefix) — a tool agent continuing the same session with accumulated context. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks, preserving the pattern of prefix reuse while protecting user privacy. The **KV Smart Router** routes requests with matching hash IDs to the same worker, maximizing cache hits.
+
+If you reproduce this benchmark with `python -m dynamo.replay`, keep that dataset fact separate from
+the replay engine configuration:
+
+- use `--trace-block-size 512` for the Mooncake/toolagent trace itself
+- keep engine `block_size` in `--extra-engine-args` aligned with the runtime you want to mimic
+  (for the published vLLM deployment, that is typically `64`)
 
 **Key Dataset Properties:**
 - ✅ **Realistic timing:** Request arrival patterns from production tool-agent workloads
