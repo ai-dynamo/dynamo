@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+      - dcullinan/poc-split-shared-workflows
 
 permissions:
   contents: read

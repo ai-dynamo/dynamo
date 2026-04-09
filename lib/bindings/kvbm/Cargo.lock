@@ -1251,19 +1251,6 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
-]
-
-[[package]]
-name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -1523,7 +1510,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-runtime",
@@ -1566,10 +1553,11 @@ dependencies = [
  "bytes",
  "chrono",
  "cudarc",
- "dashmap 5.5.3",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1636,6 +1624,7 @@ dependencies = [
  "anyhow",
  "cudarc",
  "libc",
+ "libloading 0.8.9",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",
@@ -1649,7 +1638,7 @@ name = "dynamo-mocker"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
@@ -1718,7 +1707,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dynamo-config",
@@ -1775,7 +1764,7 @@ version = "1.0.0"
 dependencies = [
  "bs58",
  "bytemuck",
- "dashmap 6.1.0",
+ "dashmap",
  "derive-getters",
  "serde",
  "thiserror 2.0.18",
@@ -2014,9 +2003,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.4.0"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a043dc74da1e37d6afe657061213aa6f425f855399a11d3463c6ecccc4dfda1f"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 dependencies = [
  "getrandom 0.3.4",
 ]
