@@ -1032,18 +1032,12 @@ mod forward_pass_metrics {
         let fpm = pass.fpm.expect("FPM should be present");
 
         // At least one request should be scheduled, the other might be queued
-        // (depending on KV capacity). The total should be 2.
+        // (depending on KV capacity). Some requests may have completed and
+        // been removed from both scheduled and queued.
         let total_scheduled = fpm.num_prefill_requests + fpm.num_decode_requests;
-        let total_queued = fpm.num_queued_prefill + fpm.num_queued_decode;
         assert!(
-            total_scheduled > 0,
+            total_scheduled >= 1,
             "at least one request should be scheduled"
-        );
-        assert_eq!(
-            total_scheduled + total_queued,
-            // Some requests may have completed and been removed from both
-            // scheduled and queued; just verify we have at least one scheduled.
-            total_scheduled + total_queued,
         );
     }
 
