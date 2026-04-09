@@ -724,13 +724,6 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             .local_indexer
             .likely_served_from_buffer(request.start_event_id);
 
-        // Slow query logging only for potential tree dumps
-        let _slow_query_guard = if !likely_buffer_read {
-            Some(SlowQueryGuard::spawn(self.worker_id))
-        } else {
-            None
-        };
-
         let _maybe_permit = if !likely_buffer_read {
             // Acquire semaphore permit before processing tree dump.
             // This prevents multiple heavy tree dump operations from running concurrently
@@ -754,6 +747,14 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             Some(permit)
         } else {
             // Fast buffer read - no semaphore needed
+            None
+        };
+
+        // Start slow-query logging only once the request is actively executing the slow path.
+        // Queued requests waiting on the semaphore should remain silent.
+        let _slow_query_guard = if !likely_buffer_read {
+            Some(SlowQueryGuard::spawn(self.worker_id))
+        } else {
             None
         };
 
