@@ -60,14 +60,14 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.Containers[0].Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", restorePod.Spec.Containers[0].Args)
 	}
-	if restorePod.Spec.Containers[0].ReadinessProbe != nil {
-		t.Fatalf("expected readiness probe to be cleared: %#v", restorePod.Spec.Containers[0].ReadinessProbe)
+	if restorePod.Spec.Containers[0].ReadinessProbe == nil {
+		t.Fatalf("expected readiness probe to be preserved")
 	}
-	if restorePod.Spec.Containers[0].LivenessProbe != nil {
-		t.Fatalf("expected liveness probe to be cleared: %#v", restorePod.Spec.Containers[0].LivenessProbe)
+	if restorePod.Spec.Containers[0].LivenessProbe == nil {
+		t.Fatalf("expected liveness probe to be preserved")
 	}
-	if restorePod.Spec.Containers[0].StartupProbe != nil {
-		t.Fatalf("expected startup probe to be cleared: %#v", restorePod.Spec.Containers[0].StartupProbe)
+	if restorePod.Spec.Containers[0].StartupProbe == nil {
+		t.Fatalf("expected startup probe to be preserved")
 	}
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
@@ -113,8 +113,8 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if container.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
 	}
-	if container.ReadinessProbe != nil || container.LivenessProbe != nil || container.StartupProbe != nil {
-		t.Fatalf("expected probes to be cleared: %#v %#v %#v", container.ReadinessProbe, container.LivenessProbe, container.StartupProbe)
+	if container.ReadinessProbe == nil || container.LivenessProbe == nil || container.StartupProbe == nil {
+		t.Fatalf("expected probes to be preserved: %#v %#v %#v", container.ReadinessProbe, container.LivenessProbe, container.StartupProbe)
 	}
 }
 
