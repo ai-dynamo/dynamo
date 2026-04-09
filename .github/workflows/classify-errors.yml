@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Classify CI Errors
+
+on:
+  workflow_call:
+    inputs:
+      workflow_type:
+        description: "Workflow type (pr, nightly, post-merge, release)"
+        required: true
+        type: string
+      enable_pr_comments:
+        description: "Enable PR comments"
+        type: string
+        default: "true"
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      CI_CLASSIFIER_API_BASE_URL:
+        required: true
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "GitHub Actions run ID to classify"
+        required: true
+      workflow_type:
+        description: "Workflow type"
+        required: true
+        type: choice
+        options:
+          - pr
+          - nightly
+          - post-merge
+          - release
+      pr_number:
+        description: "PR number (optional, for posting comment)"
+        required: false
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Detect run ID and PR number
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_id=${{ inputs.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+            echo "workflow_type=${{ inputs.workflow_type }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "workflow_type=${{ inputs.workflow_type }}" >> "$GITHUB_OUTPUT"
+
+            # Extract PR number from branch name (pull-request/NNN)
+            HEAD_BRANCH="${{ github.ref_name }}"
+            PR_NUMBER=""
+            if [[ "$HEAD_BRANCH" =~ ^pull-request/([0-9]+)$ ]]; then
+              PR_NUMBER="${BASH_REMATCH[1]}"
+            fi
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Classify errors
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
+          MODEL: "nvcf/meta/llama-3.3-70b-instruct"
+        run: |
+          PR_ARGS=""
+          if [ -n "${{ steps.detect.outputs.pr_number }}" ]; then
+            PR_ARGS="--pr-number ${{ steps.detect.outputs.pr_number }}"
+          fi
+
+          python .github/scripts/classify_errors.py \
+            --run-id ${{ steps.detect.outputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --workflow-type ${{ steps.detect.outputs.workflow_type }} \
+            $PR_ARGS \
+            --output-json /tmp/classification.json \
+            || echo "::warning::Error classification failed but continuing"
+
+      - name: Upload classification artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-classification-${{ steps.detect.outputs.run_id }}
+          path: /tmp/classification.json
+          retention-days: 90
+          if-no-files-found: ignore
