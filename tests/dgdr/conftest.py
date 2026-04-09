@@ -57,13 +57,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("dgdr", "DynamoGraphDeploymentRequest e2e options")
     group.addoption(
         "--dgdr-namespace",
-        required=True,
-        help="Kubernetes namespace for DGDR resources (required)",
+        default=None,
+        help="Kubernetes namespace for DGDR resources (required to run tests)",
     )
     group.addoption(
         "--dgdr-image",
-        required=True,
-        help="Container image used for profiling and deployment workers (required)",
+        default=None,
+        help="Container image used for profiling and deployment workers (required to run tests)",
     )
     group.addoption(
         "--dgdr-model",
@@ -113,12 +113,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.fixture(scope="session")
 def dgdr_namespace(request: pytest.FixtureRequest) -> str:
-    return request.config.getoption("--dgdr-namespace")
+    value = request.config.getoption("--dgdr-namespace")
+    if not value:
+        pytest.exit("--dgdr-namespace is required to run DGDR tests", returncode=4)
+    return value
 
 
 @pytest.fixture(scope="session")
 def dgdr_image(request: pytest.FixtureRequest) -> str:
-    return request.config.getoption("--dgdr-image")
+    value = request.config.getoption("--dgdr-image")
+    if not value:
+        pytest.exit("--dgdr-image is required to run DGDR tests", returncode=4)
+    return value
 
 
 @pytest.fixture(scope="session")
