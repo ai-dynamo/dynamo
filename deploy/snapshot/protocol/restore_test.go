@@ -34,6 +34,7 @@ func TestNewRestorePod(t *testing.T) {
 		Namespace:       "test-ns",
 		CheckpointID:    "hash",
 		ArtifactVersion: "2",
+		ManualTrigger:   true,
 		Storage: Storage{
 			Type:     StorageTypePVC,
 			PVCName:  "snapshot-pvc",
@@ -53,6 +54,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if restorePod.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation: %#v", restorePod.Annotations)
+	}
+	if restorePod.Annotations[RestoreModeAnnotation] != RestoreModeManual {
+		t.Fatalf("expected manual restore mode annotation: %#v", restorePod.Annotations)
 	}
 	if restorePod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)

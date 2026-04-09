@@ -34,6 +34,7 @@ type result struct {
 	CheckpointLocation string
 	CheckpointJob      string
 	RestorePod         string
+	RestoreTrigger     string
 	Status             string
 }
 
