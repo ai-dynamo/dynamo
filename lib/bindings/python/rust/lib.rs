@@ -583,12 +583,27 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
+        enable_nats: Option<bool>,
     ) -> PyResult<Self> {
+        if enable_nats.is_some() {
+            Python::with_gil(|py| {
+                let warnings = py.import("warnings")?;
+                warnings.call_method1(
+                    "warn",
+                    (
+                        "The 'enable_nats' parameter is deprecated and will be removed in a future release. NATS enablement is now determined automatically from the event-plane configuration.",
+                        py.import("builtins")?.getattr("DeprecationWarning")?,
+                        2i32, // stacklevel
+                    ),
+                )?;
+                Ok::<(), PyErr>(())
+            })?;
+        }
         let discovery_backend_config = match discovery_backend.as_str() {
             "kubernetes" => DiscoveryBackend::Kubernetes,
             other => {
