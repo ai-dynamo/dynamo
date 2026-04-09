@@ -44,6 +44,22 @@ impl Model {
         &self.name
     }
 
+    /// Check if a given name matches this model's display name or any of its aliases.
+    /// Aliases are stored in the ModelDeploymentCard within each WorkerSet.
+    pub fn matches_name(&self, name: &str) -> bool {
+        // Fast path: exact match on display name
+        if self.name == name {
+            return true;
+        }
+        // Check aliases in all WorkerSets
+        for entry in self.worker_sets.iter() {
+            if entry.value().card().matches_name(name) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Add a WorkerSet to this model.
     pub fn add_worker_set(&self, namespace: String, worker_set: Arc<WorkerSet>) {
         tracing::info!(
