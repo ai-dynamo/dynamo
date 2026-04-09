@@ -4,6 +4,7 @@
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
 };
+use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
@@ -344,7 +345,27 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let options = tcp::server::ServerOptions::default();
+                let port = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT)
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0);
+                let interface =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST).ok();
+
+                let host_suffix = interface
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(" on host {h}"));
+                if port == 0 {
+                    tracing::info!(
+                        "TCP response stream server using OS-assigned port{host_suffix}"
+                    );
+                } else {
+                    tracing::info!(
+                        "TCP response stream server using fixed port {port}{host_suffix}"
+                    );
+                }
+
+                let options = tcp::server::ServerOptions { port, interface };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
