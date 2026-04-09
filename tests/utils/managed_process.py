@@ -247,13 +247,17 @@ class ManagedProcess:
     def _cleanup_stragglers(self):
         """Clean up straggler processes - called during exit and signal handling.
 
-        WARNING: NOT pytest-xdist safe! This does a system-wide sweep matching by
-        process name (self.stragglers) and command-line substring (self.straggler_commands),
-        similar to _terminate_all_matching_process_names. Skipped when
-        terminate_all_matching_process_names=False (i.e. xdist-safe mode) to avoid
-        killing other workers' processes.
+        Explicit stragglers (self.stragglers, self.straggler_commands) are ALWAYS
+        cleaned up regardless of terminate_all_matching_process_names, since they
+        target specific known process names (e.g., sglang::scheduler) that must be
+        killed to free GPU memory between tests.
+
+        Uses both psutil (process tree aware) and pkill -9 -f (catches processes
+        that psutil may miss due to PID namespace or name truncation issues).
         """
-        if not self.terminate_all_matching_process_names:
+        if not self.terminate_all_matching_process_names and not (
+            self.stragglers or self.straggler_commands
+        ):
             return
         try:
             if self.stragglers or self.straggler_commands:
@@ -299,6 +303,24 @@ class ManagedProcess:
                 except Exception as e:
                     # Catch any other unexpected errors to ensure cleanup continues
                     self._logger.warning("Error checking process: %s", e)
+
+            # Fallback: use pkill -9 -f for each straggler name.
+            # psutil.process_iter may miss processes due to PID namespace
+            # boundaries, name truncation (comm field is 15 chars), or
+            # race conditions. pkill -f matches the full /proc/pid/cmdline.
+            for name in self.stragglers:
+                try:
+                    result = subprocess.run(
+                        ["pkill", "-9", "-f", name],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0:
+                        self._logger.info(
+                            "pkill fallback killed straggler matching '%s'", name
+                        )
+                except Exception:
+                    pass  # pkill may not exist or may fail — best effort
         except Exception as e:
             # Ensure that any error in straggler cleanup doesn't prevent other cleanup
             self._logger.error("Error during straggler cleanup: %s", e)
@@ -308,18 +330,27 @@ class ManagedProcess:
 
         Termination Strategy:
         =====================
-        1. _stop_started_processes: calls _terminate_process_group (SIGTERM →
+        1. Clean up straggler processes FIRST (e.g., sglang::scheduler zombies
+           holding GPU memory and inherited pipe FDs).
+        2. _stop_started_processes: calls _terminate_process_group (SIGTERM →
            poll → SIGKILL all snapshotted pgids), closes pipes, waits/escalates
            per-process.
-        2. Clean up data directory if configured.
-        3. Run name-based straggler cleanup (only when not in xdist-safe mode).
+        3. Clean up data directory if configured.
         """
+        # Kill stragglers BEFORE stopping started processes. Stragglers
+        # (e.g., sglang::scheduler) can escape the process group via
+        # setsid() and inherit pipe FDs from the parent bash script.
+        # If we try to close pipes or wait on the parent first, the
+        # inherited FDs keep the pipes open and process.wait() blocks.
+        self._cleanup_stragglers()
         try:
             self._stop_started_processes()
 
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
+            # Run straggler cleanup again in case _stop_started_processes
+            # created new orphans during its teardown.
             self._cleanup_stragglers()
 
     def _stop_started_processes(self, wait_timeout: float = 10.0):

@@ -213,6 +213,11 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
+                stragglers=[
+                    "SGLANG:EngineCore",
+                    "sglang::scheduler",
+                    "sglang::detokenizer",
+                ],
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
