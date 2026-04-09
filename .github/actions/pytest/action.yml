@@ -42,6 +42,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  device:
+    description: 'Target device (cuda, xpu, cpu)'
+    required: false
+    default: 'cuda'
 
 runs:
   using: "composite"
@@ -128,17 +132,19 @@ runs:
           # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
           PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
 
-          # Detect GPU availability and conditionally add GPU flags
+          # Set GPU flags based on device type
           GPU_FLAGS=""
-          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            GPU_FLAGS="--device /dev/dri:/dev/dri"
+            if [[ -e /dev/dri/renderD128 ]]; then
+              RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+              GPU_FLAGS+=" --group-add ${RENDER_GID}"
+            fi
+            VLLM_TARGET_DEVICE="xpu"
+          elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
-          elif ls /dev/dri/renderD* &>/dev/null 2>&1; then
-            echo "✓ Intel XPU device detected, enabling /dev/dri device flags"
-            RENDER_DEVICE=$(ls /dev/dri/renderD* | head -n 1)
-            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
-            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
-            VLLM_TARGET_DEVICE="xpu"
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
@@ -160,34 +166,13 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        DOCKER_EXTRA_FLAGS=(
-          --privileged
-          --group-add render
-          --group-add video
-        )
-        if [[ -e /dev/dri/renderD128 ]]; then
-          DOCKER_EXTRA_FLAGS+=(--group-add "$(stat -c '%g' /dev/dri/renderD128)")
-        fi
-
-        # Mount optional host paths when present to support XPU/RDMA test binds.
         DOCKER_MOUNT_FLAGS=()
-        if [[ -d /dev/dri/by-path ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/dev/dri/by-path:/dev/dri/by-path" )
+        if [[ "${{ inputs.device }}" == "xpu" ]]; then
+          DOCKER_EXTRA_FLAGS=(--privileged)
+          if [[ -d /dev/dri ]]; then
+            DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
+          fi
         fi
-        if [[ -d /dev/infiniband ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/dev/infiniband:/dev/infiniband" )
-        fi
-        if [[ -d /sys/class/net ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/net:/sys/class/net" )
-        fi
-        if [[ -d /sys/class/infiniband_verbs ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/infiniband_verbs:/sys/class/infiniband_verbs" )
-        fi
-
-        # if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
-        #   PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
-        #   PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
-        # fi
 
         echo "🐳 Docker run command (runner v1):"
         echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
@@ -258,18 +243,19 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          # Detect GPU availability and conditionally add GPU flags
+          # Set GPU flags based on device type
           GPU_FLAGS=""
-          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            GPU_FLAGS="--device /dev/dri:/dev/dri"
+            if [[ -e /dev/dri/renderD128 ]]; then
+              RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+              GPU_FLAGS+=" --group-add ${RENDER_GID}"
+            fi
+            VLLM_TARGET_DEVICE="xpu"
+          elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
-          elif ls /dev/dri/renderD* &>/dev/null 2>&1; then
-            echo "✓ Intel XPU device detected, enabling /dev/dri device flags"
-            RENDER_DEVICE=$(ls /dev/dri/renderD* | head -n 1)
-            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
-            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
-            VLLM_TARGET_DEVICE="xpu"
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
@@ -313,33 +299,18 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        DOCKER_EXTRA_FLAGS=(
-          --privileged
-          --group-add render
-          --group-add video
-        )
-        if [[ -e /dev/dri/renderD128 ]]; then
-          DOCKER_EXTRA_FLAGS+=(--group-add "$(stat -c '%g' /dev/dri/renderD128)")
-        fi
-
         DOCKER_MOUNT_FLAGS=()
-        if [[ -d /dev/dri/by-path ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/dev/dri/by-path:/dev/dri/by-path" )
-        fi
-        if [[ -d /dev/infiniband ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/dev/infiniband:/dev/infiniband" )
-        fi
-        if [[ -d /sys/class/net ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/net:/sys/class/net" )
-        fi
-        if [[ -d /sys/class/infiniband_verbs ]]; then
-          DOCKER_MOUNT_FLAGS+=( -v "/sys/class/infiniband_verbs:/sys/class/infiniband_verbs" )
+        if [[ "${{ inputs.device }}" == "xpu" ]]; then
+          DOCKER_EXTRA_FLAGS=(--privileged)
+          if [[ -d /dev/dri ]]; then
+            DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
+          fi
         fi
 
-        if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
-          PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
-          PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
-        fi
+        #if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
+        #  PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
+        #  PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
+        #fi
 
         echo "🐳 Docker run command (dind sidecar):"
         echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""

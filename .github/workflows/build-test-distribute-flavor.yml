@@ -324,6 +324,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
@@ -340,6 +341,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
       # Run XPU tests sequentially on xpu runners
       - name: Run XPU tests (sequential)
@@ -355,6 +357,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
   # ============================================================================
   # MULTI-GPU TESTS
@@ -414,6 +417,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
 
   # ============================================================================
