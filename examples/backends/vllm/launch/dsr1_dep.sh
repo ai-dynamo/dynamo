@@ -114,7 +114,13 @@ mkdir -p $LOG_DIR
 # the GPU memory requires for vLLM reservation and runtime spike (not
 # reserved by vLLM) can be different and cause model fails to start,
 # adjust '--gpu-memory-utilization' as needed
-GPU_MEM_UTIL="${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-0.91}"
+GPU_MEM_UTIL="0.91"
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+else
+    GPU_MEM_ARGS="--gpu-memory-utilization $GPU_MEM_UTIL"
+fi
 
 dp_start_rank=$((NODE_RANK * GPUS_PER_NODE))
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
@@ -131,7 +137,7 @@ python3 -m dynamo.vllm \
 --max-model-len 4096 \
 --data-parallel-address $MASTER_ADDR \
 --data-parallel-rpc-port 13345 \
---gpu-memory-utilization "$GPU_MEM_UTIL" \
+$GPU_MEM_ARGS \
 --enforce-eager \
 --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_start_rank}.log &
 
