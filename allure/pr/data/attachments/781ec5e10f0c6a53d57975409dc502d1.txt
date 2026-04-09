@@ -1,1 +1,0 @@
-Correction factor clamping test: Expected=1, Got=1

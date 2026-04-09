@@ -1,5 +1,0 @@
-INFO     gpu_memory_service.integrations.sglang.memory_saver:memory_saver.py:65 [GMS] Initialized weights=READ mode, kv_cache=RW (device=0)
-INFO     gpu_memory_service.integrations.sglang.memory_saver:memory_saver.py:156 [GMS] Unmapping weights (VA-stable)
-INFO     gpu_memory_service.integrations.sglang.memory_saver:memory_saver.py:172 [GMS] Unmapping KV cache
-INFO     gpu_memory_service.integrations.sglang.memory_saver:memory_saver.py:165 [GMS] Remapping weights (VA-stable)
-INFO     gpu_memory_service.integrations.sglang.memory_saver:memory_saver.py:179 [GMS] Remapping KV cache

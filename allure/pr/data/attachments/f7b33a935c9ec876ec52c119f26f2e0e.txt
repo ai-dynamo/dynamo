@@ -1,15 +1,0 @@
-[2m2026-04-09T00:25:22.240836Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 1 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B'}
-[2m2026-04-09T00:25:22.240937Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-09T00:25:22.240985Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-[2m2026-04-09T00:25:22.677284Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:25:22.677456Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/model.safetensors
-[2m2026-04-09T00:25:22.695044Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/model.safetensors
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:25:22.695141Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-Fetching 10 files:  10%|█         | 1/10 [00:01<00:12,  1.39s/it]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.03it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  2.70it/s]
-[2m2026-04-09T00:25:26.116904Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-09T00:25:26.117398Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

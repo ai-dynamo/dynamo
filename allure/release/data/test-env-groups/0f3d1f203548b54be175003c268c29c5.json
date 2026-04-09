@@ -1,1 +1,1 @@
-{"id":"0f3d1f203548b54be175003c268c29c5","fullName":"tests.router.test_router_e2e_with_vllm#test_router_decisions_vllm_multiple_workers","name":"test_router_decisions_vllm_multiple_workers[tcp]","status":"broken","testResultsByEnv":{"vllm-amd64":"d60e586fabb1ef36dbc8f75a6768ca92"}}
+{"id":"0f3d1f203548b54be175003c268c29c5","fullName":"tests.router.test_router_e2e_with_vllm#test_router_decisions_vllm_multiple_workers","name":"test_router_decisions_vllm_multiple_workers[tcp]","status":"passed","testResultsByEnv":{"vllm-amd64":"028810b4cd1ae80ff64a77d561a74f05"}}

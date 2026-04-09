@@ -1,49 +1,0 @@
-[BASH] ==========================================
-[BASH] Launching Aggregated + KV Routing (2 GPUs)
-[BASH] ==========================================
-[BASH] Model:       Qwen/Qwen3-0.6B
-[BASH] Frontend:    http://localhost:8060
-[BASH] ==========================================
-[BASH] 
-[BASH] Example test command:
-[BASH] 
-[BASH]   curl http://localhost:8060/v1/chat/completions \
-[BASH]     -H 'Content-Type: application/json' \
-[BASH]     -d '{
-[BASH]       "model": "Qwen/Qwen3-0.6B",
-[BASH]       "messages": [{"role": "user", "content": "Hello!"}],
-[BASH]       "max_tokens": 32
-[BASH]     }'
-[BASH] 
-[BASH] ==========================================
-[BASH] [2026-04-09 02:29:31] INFO _compat.py:41: sglang.srt.utils.network not found (sglang <= 0.5.9); using compatibility shim for NetworkAddress
-[BASH] [2026-04-09 02:29:31] INFO _compat.py:41: sglang.srt.utils.network not found (sglang <= 0.5.9); using compatibility shim for NetworkAddress
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-[BASH] Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-[BASH] Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  7.16it/s]
-[BASH] Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  7.16it/s]
-[BASH] 
-[BASH] Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  7.11it/s]
-[BASH] Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  7.10it/s]
-[BASH] 
-[BASH]   0%|          | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=2.64 GB):   0%|          | 0/7 [00:00<?, ?it/s]  0%|          | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=2.64 GB):   0%|          | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=2.64 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.96it/s]Capturing batches (bs=16 avail_mem=2.59 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.96it/s]Capturing batches (bs=24 avail_mem=2.64 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.94it/s]Capturing batches (bs=16 avail_mem=2.59 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.94it/s]Capturing batches (bs=12 avail_mem=2.57 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.96it/s]Capturing batches (bs=12 avail_mem=2.57 GB):  14%|█▍        | 1/7 [00:00<00:03,  1.94it/s]Capturing batches (bs=12 avail_mem=2.57 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.43it/s]Capturing batches (bs=8 avail_mem=2.56 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.43it/s] Capturing batches (bs=12 avail_mem=2.57 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.40it/s]Capturing batches (bs=8 avail_mem=2.56 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.40it/s] Capturing batches (bs=4 avail_mem=2.54 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.43it/s]Capturing batches (bs=4 avail_mem=2.54 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.40it/s]Capturing batches (bs=2 avail_mem=2.54 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.43it/s]Capturing batches (bs=2 avail_mem=2.54 GB):  43%|████▎     | 3/7 [00:00<00:00,  5.40it/s]Capturing batches (bs=2 avail_mem=2.54 GB):  86%|████████▌ | 6/7 [00:00<00:00, 10.01it/s]Capturing batches (bs=1 avail_mem=2.51 GB):  86%|████████▌ | 6/7 [00:00<00:00, 10.01it/s]Capturing batches (bs=2 avail_mem=2.54 GB):  86%|████████▌ | 6/7 [00:00<00:00,  9.94it/s]Capturing batches (bs=1 avail_mem=2.51 GB):  86%|████████▌ | 6/7 [00:00<00:00,  9.94it/s]Capturing batches (bs=1 avail_mem=2.51 GB): 100%|██████████| 7/7 [00:00<00:00,  8.29it/s]
-[BASH] Capturing batches (bs=1 avail_mem=2.51 GB): 100%|██████████| 7/7 [00:00<00:00,  8.24it/s]
-[BASH] [2m2026-04-09T02:29:47.213063Z[0m [35mTRACE[0m [2mdynamo_llm::kv_router::publisher::worker_metrics[0m[2m:[0m Publish metrics: dp_rank=0, active_decode_blocks=None, kv_used_blocks=Some(0)
-[BASH] [2m2026-04-09T02:29:47.213849Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Initializing KvEventPublisher for worker 8916455941938973961 in component backend
-[BASH] [2m2026-04-09T02:29:47.213864Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m LocalKvIndexer enabled for worker 8916455941938973961 in component backend
-[BASH] [2m2026-04-09T02:29:47.213933Z[0m [34mDEBUG[0m [2mdynamo_llm::kv_router::publisher::zmq_listener[0m[2m:[0m KVEventPublisher connecting to ZMQ endpoint tcp://10.1.4.213:5558 (topic '')
-[BASH] [2m2026-04-09T02:29:47.213974Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Using event plane for KV event publishing (local_indexer mode)
-[BASH] [2m2026-04-09T02:29:47.252089Z[0m [35mTRACE[0m [2mdynamo_llm::kv_router::publisher::worker_metrics[0m[2m:[0m Publish metrics: dp_rank=0, active_decode_blocks=None, kv_used_blocks=Some(0)
-[BASH] [2m2026-04-09T02:29:47.252877Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Initializing KvEventPublisher for worker 8916455941938973963 in component backend
-[BASH] [2m2026-04-09T02:29:47.252893Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m LocalKvIndexer enabled for worker 8916455941938973963 in component backend
-[BASH] [2m2026-04-09T02:29:47.252948Z[0m [34mDEBUG[0m [2mdynamo_llm::kv_router::publisher::zmq_listener[0m[2m:[0m KVEventPublisher connecting to ZMQ endpoint tcp://10.1.4.213:5557 (topic '')
-[BASH] [2m2026-04-09T02:29:47.253000Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Using event plane for KV event publishing (local_indexer mode)
-[BASH] Cleaning up...
-[BASH] [2m2026-04-09T02:39:32.256845Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher::event_processor[0m[2m:[0m KV Event source received cancellation signal
-[BASH] [2m2026-04-09T02:39:32.256974Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher::event_processor[0m[2m:[0m KV Event source received cancellation signal

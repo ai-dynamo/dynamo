@@ -1,66 +1,0 @@
-[2m2026-04-09T00:18:33.366774Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 2 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B', 'llava-hf/llava-v1.6-mistral-7b-hf'}
-[2m2026-04-09T00:18:33.366887Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-09T00:18:33.366936Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-[2m2026-04-09T00:18:33.815527Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:33.815642Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE
-[2m2026-04-09T00:18:33.838738Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:33.838847Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-Fetching 10 files:  10%|█         | 1/10 [00:00<00:02,  3.11it/s]Fetching 10 files:  20%|██        | 2/10 [00:01<00:06,  1.28it/s]Fetching 10 files:  70%|███████   | 7/10 [00:02<00:01,  2.83it/s]Fetching 10 files: 100%|██████████| 10/10 [00:02<00:00,  3.72it/s]
-[2m2026-04-09T00:18:36.225380Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-09T00:18:36.225526Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: llava-hf/llava-v1.6-mistral-7b-hf
-Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/README.md
-[2m2026-04-09T00:18:36.460319Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/README.md
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.460417Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00002-of-00004.safetensors
-[2m2026-04-09T00:18:36.468937Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00002-of-00004.safetensors
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.469005Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/added_tokens.json
-[2m2026-04-09T00:18:36.473824Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/added_tokens.json
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.473953Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-Fetching 17 files:   6%|▌         | 1/17 [00:00<00:01,  8.00it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00001-of-00004.safetensors
-[2m2026-04-09T00:18:36.498898Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00001-of-00004.safetensors
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.498966Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00003-of-00004.safetensors
-[2m2026-04-09T00:18:36.592975Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00003-of-00004.safetensors
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.593034Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model.safetensors.index.json
-[2m2026-04-09T00:18:36.597805Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model.safetensors.index.json
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.597889Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/special_tokens_map.json
-[2m2026-04-09T00:18:36.893884Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/special_tokens_map.json
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:36.894054Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-Fetching 17 files:  12%|█▏        | 2/17 [00:01<00:10,  1.45it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00003-of-00004.safetensors
-[2m2026-04-09T00:18:37.689854Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model-00003-of-00004.safetensors
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T00:18:37.689968Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model.safetensors.index.json
-[2m2026-04-09T00:18:37.696763Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/model.safetensors.index.json
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T00:18:37.696861Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/tokenizer.model
-[2m2026-04-09T00:18:37.711560Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/tokenizer.model
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:37.711712Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/special_tokens_map.json
-[2m2026-04-09T00:18:37.993540Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/special_tokens_map.json
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T00:18:37.993608Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/tokenizer.model
-[2m2026-04-09T00:18:38.816574Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf/resolve/2424fdd47412fccc66d91719126b420e9fbd7065/tokenizer.model
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T00:18:38.816677Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-Fetching 17 files:  41%|████      | 7/17 [00:07<00:11,  1.16s/it]Fetching 17 files:  53%|█████▎    | 9/17 [00:08<00:07,  1.02it/s]Fetching 17 files: 100%|██████████| 17/17 [00:08<00:00,  1.94it/s]
-[2m2026-04-09T00:18:45.119507Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: llava-hf/llava-v1.6-mistral-7b-hf
-[2m2026-04-09T00:18:45.120045Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

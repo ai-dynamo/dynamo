@@ -1,7 +1,0 @@
-[2m2026-04-09T03:10:45.124786Z[0m [31mERROR[0m [2mstage_worker.generate[0m[2m:[0m Stage 0 engine error for test-req-id: engine exploded
-Traceback (most recent call last):
-  File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/omni/stage_worker.py", line 144, in generate
-    async for chunk in self.engine.generate(
-  File "/workspace/components/src/dynamo/vllm/tests/omni/test_omni_stage_worker.py", line 51, in _gen
-    raise RuntimeError("engine exploded")
-RuntimeError: engine exploded

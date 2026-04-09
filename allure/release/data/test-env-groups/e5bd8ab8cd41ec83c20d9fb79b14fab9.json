@@ -1,1 +1,1 @@
-{"id":"e5bd8ab8cd41ec83c20d9fb79b14fab9","fullName":"components.src.dynamo.planner.tests.unit.test_kube#test_kubernetes_api_init_without_namespace","name":"test_kubernetes_api_init_without_namespace","status":"passed","testResultsByEnv":{"default":"ab430cdde7593ced94c3d9bed1ae82e2"}}
+{"id":"e5bd8ab8cd41ec83c20d9fb79b14fab9","fullName":"components.src.dynamo.planner.tests.unit.test_kube#test_kubernetes_api_init_without_namespace","name":"test_kubernetes_api_init_without_namespace","status":"passed","testResultsByEnv":{"default":"cf284e7131a0a345711697bb01eb2dfe"}}

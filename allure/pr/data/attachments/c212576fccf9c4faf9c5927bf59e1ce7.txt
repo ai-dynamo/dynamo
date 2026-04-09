@@ -1,8 +1,0 @@
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
-[2m2026-04-09T00:18:35.703166Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T00:18:35.703262Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
-[2m2026-04-09T00:18:36.801765Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T00:18:36.801863Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].

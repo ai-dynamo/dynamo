@@ -1,7 +1,0 @@
-[2m2026-04-08T21:06:29.062441Z[0m [32m INFO[0m [2margs._load_disagg_config_section[0m[2m:[0m Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_preserves_b0/disagg.yaml
-[2m2026-04-08T21:06:29.063021Z[0m [32m INFO[0m [2margs._dump_disagg_config_section[0m[2m:[0m Successfully wrote config section to temp file
-[2m2026-04-08T21:06:29.063980Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
-[2m2026-04-08T21:06:29.063995Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
-[2m2026-04-08T21:06:29.184203Z[0m [32m INFO[0m [2mserver_args._handle_attention_backend_compatibility[0m[2m:[0m Attention backend not specified. Use flashinfer backend by default.
-[2m2026-04-08T21:06:29.184374Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
-[2m2026-04-08T21:06:29.184420Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Derived use_kv_events=False from kv_events_config=None

@@ -1,1 +1,0 @@
-{"id":"814388a28b8425722b0e83b459bb740a","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_handler.TestParseOmniRequest#test_nvext_params_go_into_sampling_params_not_prompt","name":"test_nvext_params_go_into_sampling_params_not_prompt","status":"passed","testResultsByEnv":{"default":"91717be63069ef83833e82c7ee6bc80b"}}

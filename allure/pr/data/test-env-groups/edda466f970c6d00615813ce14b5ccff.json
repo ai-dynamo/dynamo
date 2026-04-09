@@ -1,1 +1,0 @@
-{"id":"edda466f970c6d00615813ce14b5ccff","fullName":"components.src.dynamo.vllm.tests.test_vllm_worker_handler.TestBuildEmbeddingParams#test_pil_image_qwen_params_unavailable_returns_none","name":"test_pil_image_qwen_params_unavailable_returns_none","status":"passed","testResultsByEnv":{"default":"a193e06316f812973d2082f9e35f4767"}}

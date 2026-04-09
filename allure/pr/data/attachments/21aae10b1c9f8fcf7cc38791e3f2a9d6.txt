@@ -1,4 +1,0 @@
-[2m2026-04-08T22:21:06.175937Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=1.00, isl=100.00, osl=10.00
-[2m2026-04-08T22:21:06.176051Z[0m [32m INFO[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill: 0.02(demand rps) / 400.00(engine rps) = 2(num_p), est_ttft=75.0ms
-[2m2026-04-08T22:21:06.176165Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=1.00, isl=100.00, osl=10.00
-[2m2026-04-08T22:21:06.177850Z[0m [32m INFO[0m [2mdecode._compute_replica_requirements[0m[2m:[0m Decode: 0.02(demand rps) / 1000.00(engine rps) = 2(num_d), est_itl=9.5ms

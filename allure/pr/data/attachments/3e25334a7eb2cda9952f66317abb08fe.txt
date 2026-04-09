@@ -1,1 +1,0 @@
-WARNING  dynamo.planner.core.perf_model.agg:agg.py:176 Agg SLA unreachable at batch_size=1: TTFT=427.6ms (target 500.0ms), ITL=421.7ms (target 50.0ms)

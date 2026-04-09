@@ -1,1 +1,0 @@
-{"id":"8ab254099fd48a59b2ca44a442122bd1","fullName":"tests.frontend.test_prompt_embeds.TestPromptEmbedsE2E#test_usage_prompt_tokens_not_zero","name":"test_usage_prompt_tokens_not_zero","status":"passed","testResultsByEnv":{"vllm-amd64":"28f3d4bc5577c25f736951e79861c9dd"}}

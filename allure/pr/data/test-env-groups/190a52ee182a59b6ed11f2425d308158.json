@@ -1,1 +1,0 @@
-{"id":"190a52ee182a59b6ed11f2425d308158","fullName":"tests.frontend.test_prompt_embeds.TestPromptEmbedsE2E#test_concurrent_embeddings_requests","name":"test_concurrent_embeddings_requests","status":"passed","testResultsByEnv":{"vllm-amd64":"be2d612e32a595bafa3d226495ba1b61"}}

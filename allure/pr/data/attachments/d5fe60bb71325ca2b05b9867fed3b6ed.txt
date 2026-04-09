@@ -1,9 +1,0 @@
-INFO     root:args.py:116 Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_preserves_b0/disagg.yaml
-INFO     root:args.py:153 Successfully wrote config section to temp file
-WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
-WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
-WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
-WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
-INFO     sglang.srt.server_args:server_args.py:1835 Attention backend not specified. Use flashinfer backend by default.
-INFO     root:args.py:393 Using dynamo's built in tokenizer
-INFO     root:args.py:406 Derived use_kv_events=False from kv_events_config=None

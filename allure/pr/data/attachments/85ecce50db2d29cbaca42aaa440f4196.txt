@@ -1,1 +1,0 @@
-ERROR    root:dynamic_flags.py:69 Unrecognized argument: --unknown-flag

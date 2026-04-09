@@ -1,1 +1,0 @@
-{"id":"98f15b587c17d50310ff0434d7e59c43","fullName":"tests.frontend.test_prompt_embeds.TestPromptEmbedsE2E#test_large_embeddings_through_nats","name":"test_large_embeddings_through_nats","status":"passed","testResultsByEnv":{"vllm-amd64":"2f4d800e7927fa8ab08ecf4caf50843f"}}

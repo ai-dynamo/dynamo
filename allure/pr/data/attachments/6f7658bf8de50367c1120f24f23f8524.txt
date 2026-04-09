@@ -1,6 +1,0 @@
-[2m2026-04-09T02:59:46.964088Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m ScaleRequestHandler initialized for namespaces: ['app-ns']
-[2m2026-04-09T02:59:46.964167Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m GPU budget enforcement DISABLED (unlimited)
-[2m2026-04-09T02:59:46.965411Z[0m [32m INFO[0m [2mscale_handler.scale_request[0m[2m:[0m Processing scale request from app-ns for DGD dgd-1 in K8s namespace default
-[2m2026-04-09T02:59:46.965968Z[0m [32m INFO[0m [2mscale_handler.scale_request[0m[2m:[0m Successfully scaled dgd-1: {}
-[2m2026-04-09T02:59:46.966070Z[0m [32m INFO[0m [2mscale_handler.scale_request[0m[2m:[0m Processing scale request from app-ns for DGD dgd-2 in K8s namespace default
-[2m2026-04-09T02:59:46.966187Z[0m [32m INFO[0m [2mscale_handler.scale_request[0m[2m:[0m Successfully scaled dgd-2: {}

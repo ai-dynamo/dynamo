@@ -1,1 +1,1 @@
-{"id":"7eed47d5312aa8699f42b0a0931e76ca","fullName":"tests.mm_router.test_mm_router_e2e#test_trtllm_mm_overlap_repeated_three_images","name":"test_trtllm_mm_overlap_repeated_three_images","status":"broken","testResultsByEnv":{"trtllm-amd64":"1c80ebf073b9910363b57ce682d34868"}}
+{"id":"7eed47d5312aa8699f42b0a0931e76ca","fullName":"tests.mm_router.test_mm_router_e2e#test_trtllm_mm_overlap_repeated_three_images","name":"test_trtllm_mm_overlap_repeated_three_images","status":"passed","testResultsByEnv":{"trtllm-amd64":"5c80df4562f26f882e006d8732f26f5a"}}

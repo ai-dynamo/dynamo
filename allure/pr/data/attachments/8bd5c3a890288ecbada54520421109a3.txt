@@ -1,1 +1,0 @@
-ERROR    dynamo.vllm.handlers:handlers.py:1642 Request req-1: Prefill did not produce required multimodal embedding metadata (image_grid_thw) for Qwen VL decode. Use --route-to-encoder or the P/D launcher with grid_thw computation support

@@ -1,5 +1,0 @@
-[2m2026-04-09T01:19:02.535792Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=100.00, isl=3000.00, osl=150.00
-[2m2026-04-09T01:19:02.535926Z[0m [33m WARN[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill TTFT SLA not met: 300.0ms > 80.0ms, scaling with best achievable rate
-[2m2026-04-09T01:19:02.535999Z[0m [32m INFO[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill: 1.67(demand rps) / 3.33(engine rps) = 1(num_p), est_ttft=300.0ms
-[2m2026-04-09T01:19:02.536151Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=100.00, isl=3000.00, osl=150.00
-[2m2026-04-09T01:19:02.536259Z[0m [32m INFO[0m [2mdecode._compute_replica_requirements[0m[2m:[0m Decode: 1.67(demand rps) / 6.67(engine rps) = 1(num_d), est_itl=9.5ms

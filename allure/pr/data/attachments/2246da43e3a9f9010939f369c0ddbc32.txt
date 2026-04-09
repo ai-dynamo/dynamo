@@ -1,1 +1,0 @@
-[2m2026-04-09T03:10:45.117006Z[0m [33m WARN[0m [2mstage_worker.generate[0m[2m:[0m Stage 0: no connector found for edge (0→1), falling through to SHM

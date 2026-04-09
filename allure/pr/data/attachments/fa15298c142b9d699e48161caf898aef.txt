@@ -1,9 +1,0 @@
-INFO     dynamo.profiler.profile_sla:profile_sla.py:101 Profiler config: model=Qwen/Qwen2.5-0.5B, backend=vllm, system=l40s, total_gpus=4, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=rapid, picking=autoscale
-INFO     dynamo.profiler.rapid:rapid.py:117 AIC does not support this combo — falling back to naive config generation.
-INFO     aiconfigurator.generator.naive:naive.py:141 Estimated model weight size for Qwen/Qwen2.5-0.5B: 0.98 GiB (0.53B params)
-INFO     aiconfigurator.generator.naive:naive.py:200 TP calculation: model=0.98GiB, vram=44.99GiB, required=1.47GiB (1.5x), min_tp=1, selected_tp=1
-INFO     dynamo.profiler.profile_sla:profile_sla.py:213 Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
-INFO     dynamo.profiler.profile_sla:profile_sla.py:265 Final DGD config saved to /tmp/pytest_temp/popen-gw2/test_planner_load_scaling_rapi0/profiling_results/final_config.yaml
-INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
-INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
-INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

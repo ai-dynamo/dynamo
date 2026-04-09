@@ -1,3 +1,0 @@
-[2m2026-04-09T03:06:33.176978Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
-[2m2026-04-09T03:06:33.177163Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=1
-[2m2026-04-09T03:06:33.218570Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half

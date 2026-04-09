@@ -1,13 +1,0 @@
-[2m2026-04-08T21:09:29.780192Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 3 models needed for collected tests
-Models: {'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'deepseek-ai/DeepSeek-V2-Lite', 'Qwen/Qwen3-0.6B'}
-[2m2026-04-08T21:09:29.780300Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-08T21:09:29.780350Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:03,  2.74it/s]Fetching 10 files:  60%|██████    | 6/10 [00:04<00:03,  1.31it/s]Fetching 10 files: 100%|██████████| 10/10 [00:04<00:00,  2.23it/s]
-[2m2026-04-08T21:09:34.434869Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-[2m2026-04-08T21:09:34.434955Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: deepseek-ai/DeepSeek-V2-Lite
-Fetching 15 files:   0%|          | 0/15 [00:00<?, ?it/s]Fetching 15 files:   7%|▋         | 1/15 [00:00<00:02,  6.23it/s]Fetching 15 files:  47%|████▋     | 7/15 [00:10<00:12,  1.58s/it]Fetching 15 files:  53%|█████▎    | 8/15 [00:12<00:11,  1.69s/it]Fetching 15 files:  60%|██████    | 9/15 [00:13<00:09,  1.57s/it]Fetching 15 files: 100%|██████████| 15/15 [00:13<00:00,  1.07it/s]
-[2m2026-04-08T21:09:48.525301Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: deepseek-ai/DeepSeek-V2-Lite
-[2m2026-04-08T21:09:48.525386Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.04it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.25it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.31it/s]
-[2m2026-04-08T21:09:51.665114Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-08T21:09:51.665742Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

@@ -1,2 +1,0 @@
-Expected decode replicas: 1
-Calculated decode replicas: 1

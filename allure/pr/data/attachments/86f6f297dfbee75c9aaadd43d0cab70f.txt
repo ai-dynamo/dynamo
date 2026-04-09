@@ -1,222 +1,0 @@
-[BASH] ==========================================
-[BASH] Launching vLLM-Omni Video Generation (1 GPU)
-[BASH] ==========================================
-[BASH] Model:       Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] Frontend:    http://localhost:8061
-[BASH] ==========================================
-[BASH] 
-[BASH] Example test command:
-[BASH] 
-[BASH] curl -s http://localhost:8061/v1/videos \
-[BASH]   -H 'Content-Type: application/json' \
-[BASH]   -d '{
-[BASH]     "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-[BASH]     "prompt": "Dog running on a beach",
-[BASH]     "size": "832x480",
-[BASH]     "response_format": "url",
-[BASH]     "nvext": {
-[BASH]       "num_inference_steps": 20,
-[BASH]       "num_frames": 30
-[BASH]     }
-[BASH]   }' | jq
-[BASH] 
-[BASH] ==========================================
-[BASH] Starting Omni worker...
-[BASH] [2m2026-04-08T23:04:56.188787Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
-[BASH] [2m2026-04-08T23:04:56.190620Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2386)
-[BASH] [2m2026-04-08T23:04:56.194526Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.55.147 [3mport[0m[2m=[0mOS-assigned
-[BASH] [2m2026-04-08T23:04:56.197352Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8061"
-[BASH] [2m2026-04-08T23:04:56.608893Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:04:58.611101Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:00.613204Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:02.615392Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
-[BASH] [2m2026-04-08T23:05:04.366705Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Wan-AI/Wan2.1-T2V-1.3B-Diffusers] to model_path [/home/dynamo/.cache/huggingface/hub/models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers/snapshots/0fad780a534b6463e45facd96134c9f345acfa5b]
-[BASH] [2m2026-04-08T23:05:04.617414Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:04.688469Z[0m [33m WARN[0m [2mconfig_dumper._preprocess_for_encode[0m[2m:[0m Unknown type <class 'dynamo.vllm.omni.args.OmniConfig'>, using __dict__ or str(obj)
-[BASH] [2m2026-04-08T23:05:04.690739Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode enabled but model 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers' not found in cache, attempting download anyway
-[BASH] [2m2026-04-08T23:05:04.691373Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
-[BASH] [2m2026-04-08T23:05:04.691409Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers' using provider: Hugging Face
-[BASH] [2m2026-04-08T23:05:04.691441Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m HF_HUB_OFFLINE is set, using cached model for 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers'
-[BASH] [2m2026-04-08T23:05:04.691485Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:05:04.693211Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2386)
-[BASH] [2m2026-04-08T23:05:04.695981Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.55.147 [3mport[0m[2m=[0mOS-assigned
-[BASH] [2m2026-04-08T23:05:04.696446Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8096
-[BASH] [2m2026-04-08T23:05:04.696488Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8096
-[BASH] [2m2026-04-08T23:05:04.696514Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8096
-[BASH] [2m2026-04-08T23:05:04.696652Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
-[BASH] [2m2026-04-08T23:05:04.697637Z[0m [32m INFO[0m [2mbase_handler.__init__[0m[2m:[0m Initializing OmniHandler for multi-stage pipelines with model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:05:04.697740Z[0m [32m INFO[0m [2mweight_utils.download_weights_from_hf_specific[0m[2m:[0m Using model weights format ['*']
-[BASH] [2m2026-04-08T23:05:04.698639Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] Initializing with model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:05:04.698695Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Initializing with model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:05:04.705473Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
-[BASH] [2m2026-04-08T23:05:04.705972Z[0m [32m INFO[0m [2mstage_init_utils.prepare_engine_environment[0m[2m:[0m [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
-[BASH] [2m2026-04-08T23:05:04.706662Z[0m [32m INFO[0m [2masync_omni_engine._initialize_stages[0m[2m:[0m [AsyncOmniEngine] Initializing stage 0
-[BASH] [2m2026-04-08T23:05:04.707293Z[0m [32m INFO[0m [2mstage_init_utils.setup_stage_devices[0m[2m:[0m [stage_init] Stage-0 set runtime devices: 0
-[BASH] [2m2026-04-08T23:05:04.834162Z[0m [33mWARNING[0m [2menvs._check_flash_attn[0m[2m:[0m No Flash Attention backend found, using pytorch SDPA implementation
-[BASH] [2m2026-04-08T23:05:06.619451Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:08.621662Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:10.623624Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] WARNING 04-08 23:05:12 [envs.py:94] No Flash Attention backend found, using pytorch SDPA implementation
-[BASH] [2m2026-04-08T23:05:12.625971Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] INFO 04-08 23:05:14 [multiproc_executor.py:105] Starting server...
-[BASH] [2m2026-04-08T23:05:14.628131Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:16.630480Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:18.632630Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:20.634694Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] WARNING 04-08 23:05:21 [envs.py:94] No Flash Attention backend found, using pytorch SDPA implementation
-[BASH] [2m2026-04-08T23:05:22.636833Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] INFO 04-08 23:05:22 [diffusion_worker.py:400] Worker 0 created result MessageQueue
-[BASH] INFO 04-08 23:05:22 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=2048.
-[BASH] INFO 04-08 23:05:22 [vllm.py:790] Asynchronous scheduling is enabled.
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] INFO 04-08 23:05:22 [diffusion_worker.py:133] Worker 0: Initialized device and distributed environment.
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] INFO 04-08 23:05:22 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
-[BASH] INFO 04-08 23:05:22 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[BASH] `torch_dtype` is deprecated! Use `dtype` instead!
-[BASH] Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s][2m2026-04-08T23:05:24.639212Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:26.641413Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:28.643602Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:30.646123Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:32.648543Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:34.651049Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:36.653547Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:38.655645Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Loading checkpoint shards:  20%|██        | 1/5 [00:15<01:00, 15.24s/it][2m2026-04-08T23:05:40.657634Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:42.660529Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:44.662634Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:46.664883Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:48.667186Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:50.669718Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:52.672028Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Loading checkpoint shards:  40%|████      | 2/5 [00:30<00:45, 15.12s/it][2m2026-04-08T23:05:54.674153Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:56.676775Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:05:58.678799Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:00.680919Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:02.683019Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:04.685015Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:06.687267Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:08.689448Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Loading checkpoint shards:  60%|██████    | 3/5 [00:45<00:30, 15.12s/it][2m2026-04-08T23:06:10.691704Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:12.694117Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:14.696546Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:16.699217Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:18.701606Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:20.703908Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:22.705952Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:24.707970Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Loading checkpoint shards:  80%|████████  | 4/5 [01:00<00:15, 15.19s/it][2m2026-04-08T23:06:26.709889Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:28.712253Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:30.714200Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:32.716468Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Loading checkpoint shards: 100%|██████████| 5/5 [01:09<00:00, 12.90s/it]Loading checkpoint shards: 100%|██████████| 5/5 [01:09<00:00, 13.91s/it]
-[BASH] [2m2026-04-08T23:06:34.718537Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] INFO 04-08 23:06:35 [platform.py:80] Defaulting to diffusion attention backend SDPA
-[BASH] Multi-thread loading shards:   0% Completed | 0/2 [00:00<?, ?it/s]
-[BASH] Multi-thread loading shards:  50% Completed | 1/2 [00:00<00:00,  1.52it/s]
-[BASH] [2m2026-04-08T23:06:36.721070Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:38.723538Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:40.726273Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] Multi-thread loading shards: 100% Completed | 2/2 [00:06<00:00,  3.61s/it]
-[BASH] Multi-thread loading shards: 100% Completed | 2/2 [00:06<00:00,  3.16s/it]
-[BASH] 
-[BASH] INFO 04-08 23:06:41 [diffusers_loader.py:324] Loading weights took 6.37 seconds
-[BASH] INFO 04-08 23:06:42 [diffusion_model_runner.py:141] Model loading took 13.7161 GiB and 79.546554 seconds
-[BASH] INFO 04-08 23:06:42 [diffusion_model_runner.py:146] Model runner: Model loaded successfully.
-[BASH] INFO 04-08 23:06:42 [diffusion_model_runner.py:187] Model runner: Initialization complete.
-[BASH] INFO 04-08 23:06:42 [diffusion_worker.py:163] Worker 0: Process-scoped GPU memory after model loading: 14.17 GiB.
-[BASH] INFO 04-08 23:06:42 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
-[BASH] INFO 04-08 23:06:42 [diffusion_worker.py:98] Worker 0: Initialization complete.
-[BASH] INFO 04-08 23:06:42 [diffusion_worker.py:538] Worker 0: Scheduler loop started.
-[BASH] INFO 04-08 23:06:42 [diffusion_worker.py:461] Worker 0 ready to receive requests via shared memory
-[BASH] INFO 04-08 23:06:42 [diffusion_engine.py:402] dummy run to warm up the model
-[BASH] WARNING 04-08 23:06:42 [kv_transfer_manager.py:381] No connector available for receiving KV cache
-[BASH] WARNING 04-08 23:06:42 [pipeline_wan2_2.py:404] boundary_ratio is required for T2V generation. using default value 0.875
-[BASH] [2m2026-04-08T23:06:42.728540Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH]   0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  4.56it/s]100%|██████████| 1/1 [00:00<00:00,  4.56it/s]
-[BASH] INFO 04-08 23:06:43 [diffusion_model_runner.py:212] Peak GPU memory (this request): 14.57 GB reserved, 14.23 GB allocated, 0.33 GB pool overhead (2.3%)
-[BASH] INFO 04-08 23:06:43 [stage_diffusion_proc.py:66] StageDiffusionProc initialized with model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:06:43.741388Z[0m [32m INFO[0m [2mstage_diffusion_client.__init__[0m[2m:[0m [StageDiffusionClient] Stage-0 initialized (batch_size=1)
-[BASH] [2m2026-04-08T23:06:43.741507Z[0m [32m INFO[0m [2masync_omni_engine._initialize_stages[0m[2m:[0m [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
-[BASH] [2m2026-04-08T23:06:43.741693Z[0m [32m INFO[0m [2morchestrator.run[0m[2m:[0m [Orchestrator] Starting event loop
-[BASH] [2m2026-04-08T23:06:43.741911Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Orchestrator ready with 1 stages
-[BASH] [2m2026-04-08T23:06:43.741996Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] AsyncOmniEngine initialized in 99.04 seconds
-[BASH] [2m2026-04-08T23:06:43.742054Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] Initialized with 1 stages for model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:06:43.742162Z[0m [32m INFO[0m [2mbase_handler.__init__[0m[2m:[0m OmniHandler initialized successfully
-[BASH] [2m2026-04-08T23:06:43.743694Z[0m [33m WARN[0m [2maudio_handler._load_supported_speakers[0m[2m:[0m Could not load speakers from model config: 'NoneType' object has no attribute 'hf_config'
-[BASH] [2m2026-04-08T23:06:43.743737Z[0m [33m WARN[0m [2maudio_handler._load_supported_languages[0m[2m:[0m Could not load languages from model config: 'NoneType' object has no attribute 'hf_config'
-[BASH] [2m2026-04-08T23:06:43.743768Z[0m [32m INFO[0m [2mmain.init_omni[0m[2m:[0m Omni worker initialized for model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[BASH] [2m2026-04-08T23:06:43.746624Z[0m [32m INFO[0m [2mmain.init_omni[0m[2m:[0m Starting to serve Omni worker endpoint...
-[BASH] [2m2026-04-08T23:06:43.746736Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m videos endpoints enabled
-[BASH] [2m2026-04-08T23:06:43.746749Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mWan-AI/Wan2.1-T2V-1.3B-Diffusers [3mnamespace[0m[2m=[0mdynamo
-[BASH] [2m2026-04-08T23:06:43.746766Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Wan-AI/Wan2.1-T2V-1.3B-Diffusers" [3mnamespace[0m[2m=[0m"dynamo"
-[BASH] [2m2026-04-08T23:06:43.747399Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.55.147:0 [3mport_source[0m[2m=[0m"OS-assigned"
-[BASH] [2m2026-04-08T23:06:43.747426Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
-[BASH] [2m2026-04-08T23:06:43.747434Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
-[BASH] [2m2026-04-08T23:06:43.747440Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.55.147:0
-[BASH] [2m2026-04-08T23:06:43.747473Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.55.147:0 [3mactual[0m[2m=[0m10.1.55.147:35073
-[BASH] [2m2026-04-08T23:06:43.747486Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.55.147:35073 [3mactual_port[0m[2m=[0m35073
-[BASH] [2m2026-04-08T23:06:43.747668Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.generate' with shared TCP server on 10.1.55.147:35073
-[BASH] [2m2026-04-08T23:06:44.730967Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:45.733594Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
-[BASH] [2m2026-04-08T23:06:46.735729Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0mc7d36d5a-9020-4a84-87a5-64d04d981b29 [3mmodel[0m[2m=[0mwan-ai/wan2.1-t2v-1.3b-diffusers [3mendpoint[0m[2m=[0mvideos [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/videos [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m67d7fdf3-cbf7-4339-8ff8-edd3eade222f [3mmodel[0m[2m=[0m"wan-ai/wan2.1-t2v-1.3b-diffusers"[0m
-[BASH] [2m2026-04-08T23:06:46.736202Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0mc7d36d5a-9020-4a84-87a5-64d04d981b29 [2m[3mrequest_id[0m[2m=[0m"c7d36d5a-9020-4a84-87a5-64d04d981b29" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m8603174289718119689[0m
-[BASH] [2m2026-04-08T23:06:46.737006Z[0m [32m INFO[0m [2momni_handler._engine_inputs_from_video[0m[2m:[0m Video diffusion request: prompt='Dog running on a beach...', size=480x272, frames=17, fps=16
-[BASH] [2m2026-04-08T23:06:46.737522Z[0m [32m INFO[0m [2morchestrator._handle_add_request[0m[2m:[0m [Orchestrator] _handle_add_request: stage=0 req=c7d36d5a-9020-4a84-87a5-64d04d981b29 prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
-[BASH] INFO 04-08 23:06:46 [diffusion_engine.py:109] Pre-processing completed in 0.0000 seconds
-[BASH] WARNING 04-08 23:06:46 [kv_transfer_manager.py:381] No connector available for receiving KV cache
-[BASH] WARNING 04-08 23:06:46 [pipeline_wan2_2.py:404] boundary_ratio is required for T2V generation. using default value 0.875
-[BASH]   0%|          | 0/10 [00:00<?, ?it/s] 10%|█         | 1/10 [00:00<00:04,  2.10it/s] 20%|██        | 2/10 [00:00<00:03,  2.06it/s] 30%|███       | 3/10 [00:01<00:03,  2.04it/s] 40%|████      | 4/10 [00:01<00:02,  2.05it/s] 50%|█████     | 5/10 [00:02<00:02,  2.06it/s] 60%|██████    | 6/10 [00:02<00:01,  2.48it/s] 70%|███████   | 7/10 [00:02<00:01,  2.84it/s] 80%|████████  | 8/10 [00:03<00:00,  3.17it/s] 90%|█████████ | 9/10 [00:03<00:00,  3.42it/s]100%|██████████| 10/10 [00:03<00:00,  3.61it/s]100%|██████████| 10/10 [00:03<00:00,  2.75it/s]
-[BASH] INFO 04-08 23:06:53 [diffusion_model_runner.py:212] Peak GPU memory (this request): 15.56 GB reserved, 15.05 GB allocated, 0.51 GB pool overhead (3.3%)
-[BASH] INFO 04-08 23:06:53 [diffusion_engine.py:119] Generation completed successfully.
-[BASH] INFO 04-08 23:06:53 [diffusion_engine.py:152] Post-processing completed in 0.0146 seconds
-[BASH] INFO 04-08 23:06:53 [diffusion_engine.py:155] DiffusionEngine.step breakdown: preprocess=0.01 ms, add_req_and_wait=6547.89 ms, postprocess=14.55 ms, total=6562.83 ms
-[BASH] [2m2026-04-08T23:06:53.573132Z[0m [32m INFO[0m [2momni_base._log_summary_and_cleanup[0m[2m:[0m [Summary] {}
-[BASH] [2m2026-04-08T23:06:53.573439Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0mc7d36d5a-9020-4a84-87a5-64d04d981b29 [2m[3mrequest_id[0m[2m=[0m"c7d36d5a-9020-4a84-87a5-64d04d981b29" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m8603174289718119689[0m
-[BASH] [2m2026-04-08T23:06:53.573727Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0mc7d36d5a-9020-4a84-87a5-64d04d981b29 [3mmodel[0m[2m=[0mwan-ai/wan2.1-t2v-1.3b-diffusers [3mendpoint[0m[2m=[0mvideos [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m6837 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/videos [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m67d7fdf3-cbf7-4339-8ff8-edd3eade222f [3mmodel[0m[2m=[0m"wan-ai/wan2.1-t2v-1.3b-diffusers" [3minput_tokens[0m[2m=[0m0 [3moutput_tokens[0m[2m=[0m0[0m
-[BASH] [2m2026-04-08T23:06:53.573751Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m6838 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/videos [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m67d7fdf3-cbf7-4339-8ff8-edd3eade222f [3mmodel[0m[2m=[0m"wan-ai/wan2.1-t2v-1.3b-diffusers" [3minput_tokens[0m[2m=[0m0 [3moutput_tokens[0m[2m=[0m0[0m
-[BASH] Cleaning up...
-[BASH] [2m2026-04-08T23:06:53.576524Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
-[BASH] [2m2026-04-08T23:06:53.576567Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
-[BASH] [2m2026-04-08T23:06:53.576591Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
-[BASH] [2m2026-04-08T23:06:53.576598Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
-[BASH] [2m2026-04-08T23:06:53.576610Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
-[BASH] [2m2026-04-08T23:06:53.576622Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
-[BASH] [2m2026-04-08T23:06:53.576625Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
-[BASH] [2m2026-04-08T23:06:53.576626Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
-[BASH] [2m2026-04-08T23:06:53.576629Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
-[BASH] [2m2026-04-08T23:06:53.576630Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
-[BASH] [2m2026-04-08T23:06:53.576633Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
-[BASH] [2m2026-04-08T23:06:53.576667Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
-[BASH] [2m2026-04-08T23:06:53.580404Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m8603174289718119689
-[BASH] [2m2026-04-08T23:06:53.581265Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
-[BASH] [2m2026-04-08T23:06:55.464229Z[0m [33mWARNING[0m [2mstage_diffusion_client.get_diffusion_output_nowait[0m[2m:[0m StageDiffusionProc was killed by signal 15; treating as external shutdown.
-[BASH] [2m2026-04-08T23:06:58.578412Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
-[BASH] [2m2026-04-08T23:06:58.578508Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
-[BASH] [2m2026-04-08T23:06:58.578531Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
-[BASH] [2m2026-04-08T23:06:58.578539Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
-[BASH] [2m2026-04-08T23:06:58.578545Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
-[BASH] [2m2026-04-08T23:06:58.580704Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Initiating runtime shutdown
-[BASH] [2m2026-04-08T23:06:58.580734Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
-[BASH] [2m2026-04-08T23:06:58.580891Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
-[BASH] [2m2026-04-08T23:06:58.580931Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
-[BASH] [2m2026-04-08T23:06:58.580936Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 1
-[BASH] [2m2026-04-08T23:06:58.580965Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Unregistered TCP endpoint handler [3mendpoint_name[0m[2m=[0mgenerate [3mendpoint_path[0m[2m=[0m77649d6f576c0d09/generate
-[BASH] [2m2026-04-08T23:06:58.580999Z[0m [32m INFO[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Last endpoint completed, notifying all waiters
-[BASH] [2m2026-04-08T23:06:58.581016Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
-[BASH] [2m2026-04-08T23:06:58.581211Z[0m [32m INFO[0m [2momni_base.shutdown[0m[2m:[0m [AsyncOmni] Shutting down
-[BASH] [2m2026-04-08T23:06:58.581324Z[0m [32m INFO[0m [2masync_omni_engine.shutdown[0m[2m:[0m [AsyncOmniEngine] Shutting down Orchestrator
-[BASH] [2m2026-04-08T23:06:58.581592Z[0m [32m INFO[0m [2morchestrator._request_handler[0m[2m:[0m [Orchestrator] Received shutdown signal
-[BASH] [2m2026-04-08T23:06:58.581663Z[0m [32m INFO[0m [2morchestrator._shutdown_stages[0m[2m:[0m [Orchestrator] Shutting down all stages
-[BASH] [2m2026-04-08T23:06:58.582101Z[0m [32m INFO[0m [2morchestrator._shutdown_stages[0m[2m:[0m [Orchestrator] Stage 0 shut down
-[BASH] [2m2026-04-08T23:06:58.583676Z[0m [32m INFO[0m [2mbase_handler.cleanup[0m[2m:[0m AsyncOmni orchestrator closed
-[BASH] /usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-[BASH]   warnings.warn('resource_tracker: There appear to be %d '
-[BASH] /usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
-[BASH]   warnings.warn('resource_tracker: There appear to be %d '

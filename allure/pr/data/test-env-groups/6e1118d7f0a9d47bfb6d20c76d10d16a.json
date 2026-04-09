@@ -1,1 +1,0 @@
-{"id":"6e1118d7f0a9d47bfb6d20c76d10d16a","fullName":"tests.fault_tolerance.cancellation.test_vllm#test_request_cancellation_vllm_aggregated","name":"test_request_cancellation_vllm_aggregated[tcp]","status":"passed","testResultsByEnv":{"vllm-amd64":"946c18a8342cf194c9b6751a48227b50"}}

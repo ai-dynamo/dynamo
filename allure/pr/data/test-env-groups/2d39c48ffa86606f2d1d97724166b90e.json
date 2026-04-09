@@ -1,1 +1,0 @@
-{"id":"2d39c48ffa86606f2d1d97724166b90e","fullName":"tests.kvbm_integration.test_cuda_graph#test_kvbm_with_cuda_graph_enabled","name":"test_kvbm_with_cuda_graph_enabled","status":"passed","testResultsByEnv":{"trtllm-amd64":"1609128a6689b7c4a2da33b63c56b71e"}}

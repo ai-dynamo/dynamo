@@ -1,27 +1,0 @@
-[2m2026-04-09T10:03:52.036908Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 1 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B'}
-[2m2026-04-09T10:03:52.037008Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-09T10:03:52.037056Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-[2m2026-04-09T10:03:52.445552Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T10:03:52.445729Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-[2m2026-04-09T10:03:52.486641Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-Retrying in 1s [Retry 1/5].
-[2m2026-04-09T10:03:52.486746Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-[2m2026-04-09T10:03:53.561869Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T10:03:53.561946Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-[2m2026-04-09T10:03:53.616149Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-Retrying in 2s [Retry 2/5].
-[2m2026-04-09T10:03:53.616232Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
-HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-[2m2026-04-09T10:03:55.712864Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes
-Retrying in 4s [Retry 3/5].
-[2m2026-04-09T10:03:55.713045Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
-Fetching 10 files:  10%|█         | 1/10 [00:07<01:08,  7.62s/it]Fetching 10 files: 100%|██████████| 10/10 [00:07<00:00,  1.31it/s]
-[2m2026-04-09T10:03:59.835630Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-09T10:03:59.836120Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)
