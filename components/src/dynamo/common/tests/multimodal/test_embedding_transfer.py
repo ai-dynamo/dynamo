@@ -28,7 +28,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.multimodal,
-    pytest.mark.gpu_1,
 ]
 
 logger = logging.getLogger(__name__)
