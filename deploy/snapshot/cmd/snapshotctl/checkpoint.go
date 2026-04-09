@@ -155,41 +155,37 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 		if !errors.Is(err, context.DeadlineExceeded) {
 			return "", err
 		}
-		return "", checkpointTimeoutError(clientset, namespace, jobName, status)
+		summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
+			LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
+		})
+		summary := "no checkpoint pod created yet"
+		if err != nil {
+			summary = "unable to list checkpoint pod: " + err.Error()
+		} else if len(pods.Items) != 0 {
+			pod := pods.Items[0]
+			parts := []string{
+				fmt.Sprintf("job_status=%q", status),
+				fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
+			}
+			for _, condition := range pod.Status.Conditions {
+				if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
+					parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
+				}
+			}
+			for _, status := range pod.Status.ContainerStatuses {
+				if status.State.Waiting != nil {
+					parts = append(parts, fmt.Sprintf("container=%s waiting=%s", status.Name, status.State.Waiting.Reason))
+				}
+				if status.State.Terminated != nil {
+					parts = append(parts, fmt.Sprintf("container=%s terminated=%s", status.Name, status.State.Terminated.Reason))
+				}
+			}
+			summary = strings.Join(parts, " ")
+		}
+		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, summary)
 	}
 	return status, nil
-}
-
-func checkpointTimeoutError(clientset kubernetes.Interface, namespace string, jobName string, status string) error {
-	summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
-		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
-	})
-	summary := "no checkpoint pod created yet"
-	if err != nil {
-		summary = "unable to list checkpoint pod: " + err.Error()
-	} else if len(pods.Items) != 0 {
-		pod := pods.Items[0]
-		parts := []string{
-			fmt.Sprintf("job_status=%q", status),
-			fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
-		}
-		for _, condition := range pod.Status.Conditions {
-			if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
-				parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
-			}
-		}
-		for _, status := range pod.Status.ContainerStatuses {
-			if status.State.Waiting != nil {
-				parts = append(parts, fmt.Sprintf("container=%s waiting=%s", status.Name, status.State.Waiting.Reason))
-			}
-			if status.State.Terminated != nil {
-				parts = append(parts, fmt.Sprintf("container=%s terminated=%s", status.Name, status.State.Terminated.Reason))
-			}
-		}
-		summary = strings.Join(parts, " ")
-	}
-	return fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, summary)
 }
