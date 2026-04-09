@@ -344,6 +344,8 @@ class BasePlanner:
             if not isinstance(rc, dict):
                 continue
             val = rc.get("max_num_batched_tokens")
+            if val is None:
+                continue
             try:
                 parsed = int(val)
             except (TypeError, ValueError):
