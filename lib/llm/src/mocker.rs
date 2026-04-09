@@ -374,11 +374,8 @@ impl MockEngine {
         // Start forward pass metrics publishing to the event plane
         if !fpm_receivers.is_empty() {
             let worker_id = component.drt().connection_id().to_string();
-            match crate::fpm_publisher::FpmDirectPublisher::new(
-                component,
-                worker_id,
-                fpm_receivers,
-            ) {
+            match crate::fpm_publisher::FpmDirectPublisher::new(component, worker_id, fpm_receivers)
+            {
                 Ok(publisher) => {
                     let _ = self._fpm_publisher.set(publisher);
                 }

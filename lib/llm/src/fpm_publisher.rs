@@ -406,8 +406,7 @@ mod tests {
             worker_id: String,
             dp_rank: i64,
         }
-        let partial: PartialFpm =
-            rmp_serde::from_slice(&bytes).expect("partial decode failed");
+        let partial: PartialFpm = rmp_serde::from_slice(&bytes).expect("partial decode failed");
         assert_eq!(partial.worker_id, "my-worker-id");
         assert_eq!(partial.dp_rank, 7);
     }
