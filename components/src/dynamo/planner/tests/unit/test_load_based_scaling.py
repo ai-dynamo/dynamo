@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 from unittest.mock import Mock, patch
 
@@ -728,8 +729,6 @@ class TestPopulateWorkerInfoFromDiscovery:
 
     def test_backfill_from_model_card(self):
         """max_num_batched_tokens is populated from a discovered model card."""
-        import json
-
         config = _build_load_config()
         shared_state = PlannerSharedState()
         planner = PrefillPlanner(None, config, shared_state=shared_state)
@@ -746,8 +745,6 @@ class TestPopulateWorkerInfoFromDiscovery:
 
     def test_noop_when_already_set(self):
         """Does not overwrite an existing max_num_batched_tokens value."""
-        import json
-
         config = _build_load_config()
         shared_state = PlannerSharedState()
         planner = PrefillPlanner(None, config, shared_state=shared_state)
@@ -775,8 +772,6 @@ class TestPopulateWorkerInfoFromDiscovery:
 
     def test_skips_cards_without_runtime_config(self):
         """Cards missing runtime_config are skipped."""
-        import json
-
         config = _build_load_config()
         shared_state = PlannerSharedState()
         planner = PrefillPlanner(None, config, shared_state=shared_state)
