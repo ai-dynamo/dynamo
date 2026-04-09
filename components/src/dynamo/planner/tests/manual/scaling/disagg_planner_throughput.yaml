@@ -25,7 +25,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment": "kubernetes", "backend": "vllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D", "no_correction": true}'
+            - '{"environment": "kubernetes", "backend": "vllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

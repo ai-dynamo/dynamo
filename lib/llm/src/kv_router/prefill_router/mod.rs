@@ -141,14 +141,14 @@ impl
 
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
+                routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 let prefill_context =
                     link_child_context(&engine_ctx, prefill_req, request_id.as_str());
 
                 // Pass the phase barrier to the spawned task. It is released after routing
-                // completes so `record_worker_full` finishes before phase changes to Decode.
+                // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))

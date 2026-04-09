@@ -9,12 +9,13 @@ from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     LocalMapping,
 )
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.none,
+    pytest.mark.gpu_1,
 ]
 
 
