@@ -230,33 +230,42 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	return ctrl.Result{}, nil
 }
 
-func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (err error) {
 	logger := log.FromContext(ctx)
+	resourceName := ""
+	defer func() {
+		if err == nil {
+			return
+		}
+		logger.Error(err, "failed to sync checkpoint k8s discovery resource", "resource", resourceName)
+		err = fmt.Errorf("failed to sync checkpoint k8s discovery %s: %w", resourceName, err)
+	}()
+
+	resourceName = "service account"
 	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(ckpt.Name, ckpt.Namespace)
-	_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
 		return serviceAccount, false, nil
 	})
 	if err != nil {
-		logger.Error(err, "failed to sync checkpoint k8s discovery service account")
-		return fmt.Errorf("failed to sync checkpoint k8s discovery service account: %w", err)
+		return err
 	}
 
+	resourceName = "role"
 	role := discovery.GetK8sDiscoveryRole(ckpt.Name, ckpt.Namespace)
 	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.Role, bool, error) {
 		return role, false, nil
 	})
 	if err != nil {
-		logger.Error(err, "failed to sync checkpoint k8s discovery role")
-		return fmt.Errorf("failed to sync checkpoint k8s discovery role: %w", err)
+		return err
 	}
 
+	resourceName = "role binding"
 	roleBinding := discovery.GetK8sDiscoveryRoleBinding(ckpt.Name, ckpt.Namespace)
 	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
 		return roleBinding, false, nil
 	})
 	if err != nil {
-		logger.Error(err, "failed to sync checkpoint k8s discovery role binding")
-		return fmt.Errorf("failed to sync checkpoint k8s discovery role binding: %w", err)
+		return err
 	}
 
 	return nil
