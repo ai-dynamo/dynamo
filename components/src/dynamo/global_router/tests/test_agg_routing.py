@@ -145,23 +145,17 @@ class TestAggPoolSelection:
     def test_priority_override_takes_precedence(self):
         strategy = _make_agg_strategy(
             priority_overrides=[
-                PriorityPoolOverride(
-                    min_priority=10, max_priority=100, target_pool=0
-                )
+                PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
         # Grid: relaxed TTFT + relaxed ITL -> pool 1, but priority overrides to 0
-        result = strategy.select_pool(
-            ttft_target=2000, itl_target=150, priority=50
-        )
+        result = strategy.select_pool(ttft_target=2000, itl_target=150, priority=50)
         assert result == 0
 
     def test_no_priority_uses_grid(self):
         strategy = _make_agg_strategy(
             priority_overrides=[
-                PriorityPoolOverride(
-                    min_priority=10, max_priority=100, target_pool=0
-                )
+                PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
         result = strategy.select_pool(ttft_target=2000, itl_target=150)
@@ -170,21 +164,15 @@ class TestAggPoolSelection:
     def test_unmatched_priority_uses_grid(self):
         strategy = _make_agg_strategy(
             priority_overrides=[
-                PriorityPoolOverride(
-                    min_priority=10, max_priority=100, target_pool=0
-                )
+                PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
-        result = strategy.select_pool(
-            ttft_target=2000, itl_target=150, priority=5
-        )
+        result = strategy.select_pool(ttft_target=2000, itl_target=150, priority=5)
         assert result == 1  # priority=5 doesn't match [10, 100]
 
     def test_no_overrides_backward_compatible(self):
         strategy = _make_agg_strategy()
-        result = strategy.select_pool(
-            ttft_target=100, itl_target=10, priority=50
-        )
+        result = strategy.select_pool(ttft_target=100, itl_target=10, priority=50)
         assert result == 0  # no overrides configured, grid result
 
 
@@ -240,9 +228,7 @@ class TestAggConfigValidation:
             num_agg_pools=2,
             agg_pool_selection_strategy=_make_agg_strategy(),
         )
-        with pytest.raises(
-            ValueError, match="agg_pool_dynamo_namespaces required"
-        ):
+        with pytest.raises(ValueError, match="agg_pool_dynamo_namespaces required"):
             config.validate()
 
     def test_missing_strategy(self):
@@ -251,9 +237,7 @@ class TestAggConfigValidation:
             num_agg_pools=2,
             agg_pool_dynamo_namespaces=["a", "b"],
         )
-        with pytest.raises(
-            ValueError, match="agg_pool_selection_strategy required"
-        ):
+        with pytest.raises(ValueError, match="agg_pool_selection_strategy required"):
             config.validate()
 
     def test_namespace_count_mismatch(self):
@@ -301,9 +285,7 @@ class TestAggConfigValidation:
             agg_pool_dynamo_namespaces=["a", "b"],
             agg_pool_selection_strategy=strategy,
         )
-        with pytest.raises(
-            ValueError, match="agg_pool_mapping rows.*does not match"
-        ):
+        with pytest.raises(ValueError, match="agg_pool_mapping rows.*does not match"):
             config.validate()
 
     def test_mapping_col_count_mismatch(self):
@@ -322,17 +304,13 @@ class TestAggConfigValidation:
             agg_pool_dynamo_namespaces=["a", "b"],
             agg_pool_selection_strategy=strategy,
         )
-        with pytest.raises(
-            ValueError, match="agg_pool_mapping row.*does not match"
-        ):
+        with pytest.raises(ValueError, match="agg_pool_mapping row.*does not match"):
             config.validate()
 
     def test_priority_override_invalid_target(self):
         strategy = _make_agg_strategy(
             priority_overrides=[
-                PriorityPoolOverride(
-                    min_priority=1, max_priority=10, target_pool=5
-                )
+                PriorityPoolOverride(min_priority=1, max_priority=10, target_pool=5)
             ]
         )
         config = GlobalRouterConfig(
@@ -347,9 +325,7 @@ class TestAggConfigValidation:
     def test_priority_override_inverted_range(self):
         strategy = _make_agg_strategy(
             priority_overrides=[
-                PriorityPoolOverride(
-                    min_priority=20, max_priority=5, target_pool=1
-                )
+                PriorityPoolOverride(min_priority=20, max_priority=5, target_pool=1)
             ]
         )
         config = GlobalRouterConfig(
@@ -431,9 +407,7 @@ class TestLoadAggConfig:
         config_path = _write_config(tmp_path, config_data)
         config = load_config(config_path)
 
-        assert (
-            len(config.agg_pool_selection_strategy.priority_overrides) == 1
-        )
+        assert len(config.agg_pool_selection_strategy.priority_overrides) == 1
         override = config.agg_pool_selection_strategy.priority_overrides[0]
         assert override.min_priority == 10
         assert override.max_priority == 100
@@ -467,9 +441,4 @@ class TestLoadAggConfig:
         # Relaxed TTFT + relaxed ITL -> pool 1 from grid
         assert strategy.select_pool(ttft_target=2000, itl_target=150) == 1
         # Priority override: relaxed would be pool 1, but priority 75 -> pool 0
-        assert (
-            strategy.select_pool(
-                ttft_target=2000, itl_target=150, priority=75
-            )
-            == 0
-        )
+        assert strategy.select_pool(ttft_target=2000, itl_target=150, priority=75) == 0
