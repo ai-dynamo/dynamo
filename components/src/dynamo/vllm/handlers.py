@@ -56,6 +56,10 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.models.qwen import (
+    build_qwen_embedding_params,
+    load_qwen_grid_params,
+)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
@@ -1608,6 +1612,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id,
                     )
                 elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
+                    # Guard is on IMAGE_URL_KEY (not just has_mm_data) so
+                    # text-only requests pass through and video/audio fall
+                    # through to re-download below (TODO: proper support).
                     msg = (
                         "Decode worker received multimodal request without "
                         "prefill result"
@@ -1818,6 +1825,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             encode_worker_client,
         )
 
+        # Cache Qwen VL grid parameters for computing image_grid_thw from
+        # PIL images in the P/D path (no separate encode worker).
+        if is_qwen_vl_model(config.model):
+            self._qwen_grid_params = load_qwen_grid_params(config.model)
+            if self._qwen_grid_params is None and self.embedding_loader is None:
+                logger.error(
+                    "Qwen VL grid params failed to load and no encode worker "
+                    "is configured. P/D multimodal requests will fail because "
+                    "prefill cannot produce embedding_params for decode. "
+                    "Use --route-to-encoder or ensure the model is cached."
+                )
+        else:
+            self._qwen_grid_params = None
+
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
@@ -1948,25 +1969,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def _build_embedding_params(
         self, multi_modal_data: dict[str, Any]
     ) -> Dict[str, Any] | None:
-        """
-        Helper function to build mm embedding parameters to be consumed by the decode worker, typically
-        decode worker doesn't require any metadata for mm embedding as the content has been consumed by
-        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
-        tokens in the prompt which requires such a metadata to pass through the processor.
-        """
-        embedding_params = {}
-        if is_qwen_vl_model(self.config.model) and isinstance(
-            multi_modal_data.get("image"), dict
-        ):
-            image_data = multi_modal_data["image"]
-            image_grid_thw = image_data.get("image_grid_thw")
-            image_embeds = image_data.get("image_embeds")
-            if image_grid_thw is not None:
-                embedding_params["image_grid_thw"] = (
-                    image_grid_thw.tolist()
-                    if isinstance(image_grid_thw, torch.Tensor)
-                    else image_grid_thw
-                )
-            if image_embeds is not None:
-                embedding_params["embeddings_shape"] = list(image_embeds.shape)
-        return embedding_params if embedding_params else None
+        if not is_qwen_vl_model(self.config.model):
+            return None
+        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
