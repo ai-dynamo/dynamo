@@ -226,6 +226,14 @@ async fn handle_reader(
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
     let mut cancellation_counted = false;
+    let mut count_cancellation = || {
+        if let Some(counter) = &cancellation_counter
+            && !cancellation_counted
+        {
+            counter.inc();
+            cancellation_counted = true;
+        }
+    };
     loop {
         tokio::select! {
             msg = framed_reader.next() => {
@@ -235,50 +243,43 @@ async fn handle_reader(
                            (Some(bytes), None) => {
                                 let msg = match serde_json::from_slice::<ControlMessage>(bytes) {
                                     Ok(msg) => msg,
-                                    Err(_) => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("fatal error - invalid control message detected");
+                                    Err(error) => {
+                                        tracing::warn!(error = %error, "invalid control message detected on response stream");
+                                        break;
                                     }
                                 };
 
                                 match msg {
                                     ControlMessage::Stop => {
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                            cancellation_counted = true;
-                                        }
+                                        count_cancellation();
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                            cancellation_counted = true;
-                                        }
+                                        count_cancellation();
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("received a sentinel message; this should never happen");
+                                        tracing::warn!("unexpected sentinel message received on response stream");
+                                        break;
                                     }
                                 }
                            }
                            _ => {
-                                panic!("received a non-control message; this should never happen");
+                                tracing::warn!("received a non-control message on response stream");
+                                break;
                            }
                         }
                     }
-                    Some(Err(e)) => {
-                        // TODO(#171) - address fatal errors
-                        // in this case the binary representation of the message is invalid
-                        panic!("fatal error - failed to decode message from stream; invalid line protocol: {e:?}");
+                    Some(Err(error)) => {
+                        tracing::warn!(error = ?error, "failed to decode message from stream; closing response reader");
+                        count_cancellation();
+                        break;
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
                         // If no Stop/Kill was received, this is a cancellation where frontend
                         // dropped the connection
-                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                            counter.inc();
-                        }
+                        count_cancellation();
                         break;
                     }
                 }
@@ -356,7 +357,7 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use std::sync::Arc;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::codec::FramedRead;
@@ -778,6 +779,38 @@ mod tests {
         TwoPartMessage::from_header(Bytes::from(msg_bytes))
     }
 
+    async fn run_reader_with_truncated_frame() -> Result<(), tokio::task::JoinError> {
+        let ReaderHarness {
+            framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+
+        let reader_handle =
+            tokio::spawn(
+                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
+            );
+
+        let encoded = TwoPartCodec::default()
+            .encode_message(TwoPartMessage::from_parts(
+                Bytes::from_static(b"header"),
+                Bytes::from_static(b"body"),
+            ))
+            .unwrap();
+        let truncated = &encoded[..encoded.len() - 1];
+
+        let mut server_write = framed_server.into_inner();
+        server_write.write_all(truncated).await.unwrap();
+        server_write.shutdown().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), reader_handle)
+            .await
+            .expect("handle_reader should finish after truncated frame")
+            .map(|_| ())
+    }
+
     /// Test that handle_reader handles Stop control message by calling context.stop()
     #[tokio::test]
     async fn test_handle_reader_stop_control_message() {
@@ -908,6 +941,17 @@ mod tests {
         );
     }
 
+    /// Test that handle_reader exits cleanly when the peer closes mid-frame.
+    #[tokio::test]
+    async fn test_handle_reader_exits_on_truncated_frame() {
+        let result = run_reader_with_truncated_frame().await;
+
+        assert!(
+            result.is_ok(),
+            "handle_reader should not panic on truncated frame: {result:?}"
+        );
+    }
+
     /// Test that handle_reader handles multiple control messages in sequence
     #[tokio::test]
     async fn test_handle_reader_multiple_control_messages() {
@@ -986,5 +1030,19 @@ mod tests {
             controller.is_killed(),
             "Controller should be killed after receiving Kill message"
         );
+    }
+
+    /// Short stress test to ensure repeated truncated frames do not take down Tokio workers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_handle_reader_many_truncated_frames() {
+        let tasks = (0..32).map(|_| tokio::spawn(run_reader_with_truncated_frame()));
+
+        for task in futures::future::join_all(tasks).await {
+            let join_result = task.expect("outer test task should not panic");
+            assert!(
+                join_result.is_ok(),
+                "handle_reader should not panic on truncated frame: {join_result:?}"
+            );
+        }
     }
 }
