@@ -39,8 +39,11 @@ def _tick_for(tick_input: TickInput) -> ScheduledTick:
         need_worker_states=True,
         need_worker_fpm=has_fpm,
         need_traffic_metrics=has_traffic,
-        traffic_metrics_duration_s=tick_input.traffic.duration_s if has_traffic else 0.0,
+        traffic_metrics_duration_s=tick_input.traffic.duration_s
+        if has_traffic
+        else 0.0,
     )
+
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -203,9 +206,7 @@ class TestFpmObservation:
         core = _make_core(mode="prefill")
         assert core.prefill_regression.num_observations == 0
 
-        fpm = _make_fpm(
-            sum_prefill_tokens=500, num_prefill_requests=1, wall_time=0.5
-        )
+        fpm = _make_fpm(sum_prefill_tokens=500, num_prefill_requests=1, wall_time=0.5)
         tick = TickInput(
             now_s=5.0,
             fpm_observations=FpmObservations(prefill={("w1", 0): fpm}),
@@ -347,9 +348,7 @@ class TestDisaggLoadScaling:
                 prefill={("w1", 0): p_fpm},
                 decode={("w1", 0): d_fpm},
             ),
-            worker_counts=WorkerCounts(
-                ready_num_prefill=1, ready_num_decode=1
-            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1, ready_num_decode=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
@@ -360,7 +359,9 @@ class TestDisaggLoadScaling:
 
 class TestThroughputScaling:
     def test_throughput_only_returns_decision(self):
-        core = _make_core(mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True)
+        core = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
         _train_prefill_regression(core)
 
         # Warm predictor with traffic
@@ -370,9 +371,7 @@ class TestThroughputScaling:
 
         tick = TickInput(
             now_s=60.0,
-            traffic=TrafficObservation(
-                duration_s=60, num_req=100, isl=1000, osl=150
-            ),
+            traffic=TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150),
             worker_counts=WorkerCounts(ready_num_prefill=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)
@@ -391,12 +390,8 @@ class TestThroughputScaling:
 
         tick = TickInput(
             now_s=60.0,
-            traffic=TrafficObservation(
-                duration_s=60, num_req=100, isl=1000, osl=150
-            ),
-            worker_counts=WorkerCounts(
-                ready_num_prefill=1, ready_num_decode=1
-            ),
+            traffic=TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150),
+            worker_counts=WorkerCounts(ready_num_prefill=1, ready_num_decode=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)
         # When both modes enabled, throughput tick returns None (just sets lower bound)
@@ -408,9 +403,7 @@ class TestThroughputScaling:
         core = _make_core(mode="prefill")
         tick = TickInput(
             now_s=60.0,
-            traffic=TrafficObservation(
-                duration_s=60, num_req=0, isl=0, osl=0
-            ),
+            traffic=TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0),
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.next_tick is not None
@@ -509,9 +502,7 @@ class TestAggPlannerStateMachine:
 
         tick = TickInput(
             now_s=60.0,
-            traffic=TrafficObservation(
-                duration_s=60, num_req=100, isl=1000, osl=150
-            ),
+            traffic=TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150),
             worker_counts=WorkerCounts(ready_num_decode=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)

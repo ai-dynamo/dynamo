@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 class ThroughputScalingMixin:
     """Traffic-driven throughput-based scaling decisions."""
 
-    def _advance_throughput(self, traffic: TrafficObservation) -> Optional[ScalingDecision]:
+    def _advance_throughput(
+        self, traffic: TrafficObservation
+    ) -> Optional[ScalingDecision]:
         if not self._config.enable_throughput_scaling:
             return None
 
@@ -46,7 +48,9 @@ class ThroughputScalingMixin:
             nr = self._num_req_predictor.predict_next()
             isl = self._isl_predictor.predict_next()
             osl = self._osl_predictor.predict_next()
-            logger.info(f"Predicted load: num_req={nr:.2f}, isl={isl:.2f}, osl={osl:.2f}")
+            logger.info(
+                f"Predicted load: num_req={nr:.2f}, isl={isl:.2f}, osl={osl:.2f}"
+            )
             return nr, isl, osl
         except Exception as e:
             logger.error(f"Failed to predict load: {e}")
@@ -72,7 +76,11 @@ class ThroughputScalingMixin:
             return None
 
         desired = self._apply_single_budget(desired, component)
-        return ScalingDecision(num_prefill=desired) if component == "prefill" else ScalingDecision(num_decode=desired)
+        return (
+            ScalingDecision(num_prefill=desired)
+            if component == "prefill"
+            else ScalingDecision(num_decode=desired)
+        )
 
     def _throughput_disagg(
         self, demand_rps: float, isl: float, osl: float
@@ -97,12 +105,21 @@ class ThroughputScalingMixin:
         d_caps = self._capabilities.decode
         max_tokens = d_caps.max_num_batched_tokens if d_caps else None
         if not max_tokens or max_tokens <= 0:
-            logger.warning("max_num_batched_tokens not available, skipping agg throughput")
+            logger.warning(
+                "max_num_batched_tokens not available, skipping agg throughput"
+            )
             return None
 
-        engine_rps, actual_ttft, actual_itl = self._agg_regression.find_best_engine_agg_rps(
-            isl=isl, osl=osl, max_num_batched_tokens=max_tokens,
-            ttft_sla=self._config.ttft, itl_sla=self._config.itl,
+        (
+            engine_rps,
+            actual_ttft,
+            actual_itl,
+        ) = self._agg_regression.find_best_engine_agg_rps(
+            isl=isl,
+            osl=osl,
+            max_num_batched_tokens=max_tokens,
+            ttft_sla=self._config.ttft,
+            itl_sla=self._config.itl,
         )
         if engine_rps <= 0:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
@@ -125,7 +142,9 @@ class ThroughputScalingMixin:
         desired = self._apply_single_budget(desired, "decode")
         return ScalingDecision(num_decode=desired)
 
-    def _compute_prefill_replicas(self, demand_rps: float, isl: float, osl: float) -> Optional[int]:
+    def _compute_prefill_replicas(
+        self, demand_rps: float, isl: float, osl: float
+    ) -> Optional[int]:
         engine_rps, ttft_ms = self._prefill_regression.find_best_engine_prefill_rps(
             ttft_sla=self._config.ttft, isl=isl
         )
@@ -133,20 +152,32 @@ class ThroughputScalingMixin:
             logger.warning("Prefill perf model not ready, skipping throughput scaling")
             return None
         if ttft_ms > self._config.ttft:
-            logger.warning(f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft:.1f}ms")
+            logger.warning(
+                f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft:.1f}ms"
+            )
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
-        logger.info(f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_ttft={ttft_ms:.1f}ms")
+        logger.info(
+            f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_ttft={ttft_ms:.1f}ms"
+        )
         return result
 
-    def _compute_decode_replicas(self, demand_rps: float, isl: float, osl: float) -> Optional[int]:
+    def _compute_decode_replicas(
+        self, demand_rps: float, isl: float, osl: float
+    ) -> Optional[int]:
         engine_rps, itl_ms = self._decode_regression.find_best_engine_decode_rps(
-            itl=self._config.itl, context_length=isl + osl / 2, osl=osl,
+            itl=self._config.itl,
+            context_length=isl + osl / 2,
+            osl=osl,
         )
         if engine_rps <= 0:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
             return None
         if itl_ms > self._config.itl:
-            logger.warning(f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl:.1f}ms")
+            logger.warning(
+                f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl:.1f}ms"
+            )
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
-        logger.info(f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms")
+        logger.info(
+            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms"
+        )
         return result

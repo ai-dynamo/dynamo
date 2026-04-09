@@ -27,7 +27,8 @@ class PrefillPlanner(NativePlannerBase):
     async def _bootstrap_regression(self) -> None:
         try:
             fpms = await fetch_pre_deployment_metrics(
-                runtime=self.runtime, namespace=self.namespace,
+                runtime=self.runtime,
+                namespace=self.namespace,
                 worker_info=self.prefill_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
@@ -44,11 +45,15 @@ class PrefillPlanner(NativePlannerBase):
         desired = effects.scale_to.num_prefill
         if self.prometheus_port != 0:
             self.prometheus_metrics.predicted_num_p.set(desired)
-        await self._apply_scaling_targets([TargetReplica(
-            sub_component_type=SubComponentType.PREFILL,
-            component_name=self.prefill_worker_info.k8s_name,
-            desired_replicas=desired,
-        )])
+        await self._apply_scaling_targets(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name=self.prefill_worker_info.k8s_name,
+                    desired_replicas=desired,
+                )
+            ]
+        )
 
 
 class DecodePlanner(NativePlannerBase):
@@ -60,7 +65,8 @@ class DecodePlanner(NativePlannerBase):
     async def _bootstrap_regression(self) -> None:
         try:
             fpms = await fetch_pre_deployment_metrics(
-                runtime=self.runtime, namespace=self.namespace,
+                runtime=self.runtime,
+                namespace=self.namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
@@ -77,11 +83,15 @@ class DecodePlanner(NativePlannerBase):
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
             self.prometheus_metrics.predicted_num_d.set(desired)
-        await self._apply_scaling_targets([TargetReplica(
-            sub_component_type=SubComponentType.DECODE,
-            component_name=self.decode_worker_info.k8s_name,
-            desired_replicas=desired,
-        )])
+        await self._apply_scaling_targets(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name=self.decode_worker_info.k8s_name,
+                    desired_replicas=desired,
+                )
+            ]
+        )
 
 
 class AggPlanner(NativePlannerBase):
@@ -93,7 +103,8 @@ class AggPlanner(NativePlannerBase):
     async def _bootstrap_regression(self) -> None:
         try:
             fpms = await fetch_pre_deployment_metrics(
-                runtime=self.runtime, namespace=self.namespace,
+                runtime=self.runtime,
+                namespace=self.namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
@@ -110,11 +121,15 @@ class AggPlanner(NativePlannerBase):
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
             self.prometheus_metrics.predicted_num_d.set(desired)
-        await self._apply_scaling_targets([TargetReplica(
-            sub_component_type=SubComponentType.DECODE,
-            component_name=self.decode_worker_info.k8s_name,
-            desired_replicas=desired,
-        )])
+        await self._apply_scaling_targets(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name=self.decode_worker_info.k8s_name,
+                    desired_replicas=desired,
+                )
+            ]
+        )
 
 
 class DisaggPlanner(NativePlannerBase):
@@ -135,7 +150,8 @@ class DisaggPlanner(NativePlannerBase):
             )
             try:
                 fpms = await fetch_pre_deployment_metrics(
-                    runtime=self.runtime, namespace=self.namespace,
+                    runtime=self.runtime,
+                    namespace=self.namespace,
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,
@@ -158,15 +174,19 @@ class DisaggPlanner(NativePlannerBase):
 
         targets = []
         if decision.num_prefill is not None:
-            targets.append(TargetReplica(
-                sub_component_type=SubComponentType.PREFILL,
-                component_name=self.prefill_worker_info.k8s_name,
-                desired_replicas=decision.num_prefill,
-            ))
+            targets.append(
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name=self.prefill_worker_info.k8s_name,
+                    desired_replicas=decision.num_prefill,
+                )
+            )
         if decision.num_decode is not None:
-            targets.append(TargetReplica(
-                sub_component_type=SubComponentType.DECODE,
-                component_name=self.decode_worker_info.k8s_name,
-                desired_replicas=decision.num_decode,
-            ))
+            targets.append(
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name=self.decode_worker_info.k8s_name,
+                    desired_replicas=decision.num_decode,
+                )
+            )
         await self._apply_scaling_targets(targets)

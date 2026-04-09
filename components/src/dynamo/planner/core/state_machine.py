@@ -109,7 +109,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     def initial_tick(self, start_s: float) -> ScheduledTick:
         self._next_load_s = start_s + self._config.load_adjustment_interval
         if self._config.enable_throughput_scaling:
-            self._next_throughput_s = start_s + self._config.throughput_adjustment_interval
+            self._next_throughput_s = (
+                start_s + self._config.throughput_adjustment_interval
+            )
         return self._next_scheduled_tick()
 
     def load_benchmark_fpms(
@@ -123,7 +125,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"Bootstrapped agg regression with {len(agg_fpms)} FPMs")
         if prefill_fpms and self._has_prefill and not self._is_agg:
             self._prefill_regression.load_benchmark_fpms(prefill_fpms)
-            logger.info(f"Bootstrapped prefill regression with {len(prefill_fpms)} FPMs")
+            logger.info(
+                f"Bootstrapped prefill regression with {len(prefill_fpms)} FPMs"
+            )
         if decode_fpms and self._has_decode and not self._is_agg:
             self._decode_regression.load_benchmark_fpms(decode_fpms)
             logger.info(f"Bootstrapped decode regression with {len(decode_fpms)} FPMs")
@@ -243,7 +247,11 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     # ------------------------------------------------------------------
 
     def _apply_single_budget(self, desired: int, component: str) -> int:
-        caps = self._capabilities.prefill if component == "prefill" else self._capabilities.decode
+        caps = (
+            self._capabilities.prefill
+            if component == "prefill"
+            else self._capabilities.decode
+        )
         gpu = caps.num_gpu if caps else None
         if gpu is None:
             return desired
@@ -251,7 +259,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
         budget = self._config.max_gpu_budget
-        p_gpu = self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
+        p_gpu = (
+            self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
+        )
         d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
         if budget < 0 or p_gpu is None or d_gpu is None:
             return num_p, num_d
@@ -260,7 +270,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             return num_p, num_d
         min_req = self._config.min_endpoint * p_gpu + self._config.min_endpoint * d_gpu
         if budget < min_req:
-            logger.warning(f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas")
+            logger.warning(
+                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+            )
             return 0, 0
         scale = budget / total
         max_p = math.floor((budget - self._config.min_endpoint * d_gpu) / p_gpu)
@@ -279,7 +291,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             return desired
         min_req = self._config.min_endpoint * engine_gpu
         if budget < min_req:
-            logger.warning(f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas")
+            logger.warning(
+                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+            )
             return 0
         result = max(self._config.min_endpoint, math.floor(budget / engine_gpu))
         logger.warning(f"GPUs ({total}) > budget ({budget}), -> {result} replicas")

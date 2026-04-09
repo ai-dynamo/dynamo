@@ -41,7 +41,9 @@ class LoadScalingMixin:
             return None
 
         fpm_stats = obs.prefill if component == "prefill" else obs.decode
-        num_workers = self._num_p_workers if component == "prefill" else self._num_d_workers
+        num_workers = (
+            self._num_p_workers if component == "prefill" else self._num_d_workers
+        )
 
         if not fpm_stats:
             return None
@@ -57,7 +59,11 @@ class LoadScalingMixin:
             return None
 
         if self._config.enable_throughput_scaling:
-            bound = self._throughput_lower_bound_p if component == "prefill" else self._throughput_lower_bound_d
+            bound = (
+                self._throughput_lower_bound_p
+                if component == "prefill"
+                else self._throughput_lower_bound_d
+            )
             desired = max(desired, bound)
 
         desired = self._apply_single_budget(desired, component)
@@ -73,13 +79,25 @@ class LoadScalingMixin:
         if not p_stats and not d_stats:
             logger.warning("No FPM data for either prefill or decode, skipping")
             return None
-        if p_stats and not self._reconcile_fpm_worker_count(p_stats, self._num_p_workers, "prefill"):
+        if p_stats and not self._reconcile_fpm_worker_count(
+            p_stats, self._num_p_workers, "prefill"
+        ):
             return None
-        if d_stats and not self._reconcile_fpm_worker_count(d_stats, self._num_d_workers, "decode"):
+        if d_stats and not self._reconcile_fpm_worker_count(
+            d_stats, self._num_d_workers, "decode"
+        ):
             return None
 
-        p_desired = self._prefill_load_decision(p_stats, self._num_p_workers) if p_stats else None
-        d_desired = self._decode_load_decision(d_stats, self._num_d_workers) if d_stats else None
+        p_desired = (
+            self._prefill_load_decision(p_stats, self._num_p_workers)
+            if p_stats
+            else None
+        )
+        d_desired = (
+            self._decode_load_decision(d_stats, self._num_d_workers)
+            if d_stats
+            else None
+        )
 
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
@@ -140,8 +158,10 @@ class LoadScalingMixin:
         elif d_desired is not None and d_desired > num_workers:
             desired = d_desired
         elif (
-            p_desired is not None and p_desired < num_workers
-            and d_desired is not None and d_desired < num_workers
+            p_desired is not None
+            and p_desired < num_workers
+            and d_desired is not None
+            and d_desired < num_workers
         ):
             desired = max(p_desired, d_desired)
         else:
@@ -175,7 +195,9 @@ class LoadScalingMixin:
         p_caps = self._capabilities.prefill
         max_tokens = p_caps.max_num_batched_tokens if p_caps else None
         if not max_tokens or max_tokens <= 0:
-            logger.warning("max_num_batched_tokens not available, skipping prefill load scaling")
+            logger.warning(
+                "max_num_batched_tokens not available, skipping prefill load scaling"
+            )
             return None
 
         estimates: list[float] = []
@@ -192,7 +214,9 @@ class LoadScalingMixin:
                     f"(queued={fpm.queued_requests.sum_prefill_tokens}, "
                     f"avg_isl={self._prefill_regression.avg_isl:.1f})"
                 )
-        return self._scale_decision(estimates, self._config.ttft, num_workers, "prefill TTFT")
+        return self._scale_decision(
+            estimates, self._config.ttft, num_workers, "prefill TTFT"
+        )
 
     def _decode_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
@@ -220,7 +244,9 @@ class LoadScalingMixin:
                     f"(sched_kv={fpm.scheduled_requests.sum_decode_kv_tokens}, "
                     f"queued_kv={fpm.queued_requests.sum_decode_kv_tokens})"
                 )
-        return self._scale_decision(estimates, self._config.itl, num_workers, "decode ITL")
+        return self._scale_decision(
+            estimates, self._config.itl, num_workers, "decode ITL"
+        )
 
     def _agg_prefill_scaling(
         self,
@@ -237,7 +263,9 @@ class LoadScalingMixin:
             )
             if est is not None:
                 estimates.append(est * 1000)
-        return self._scale_decision(estimates, self._config.ttft, num_workers, "agg TTFT")
+        return self._scale_decision(
+            estimates, self._config.ttft, num_workers, "agg TTFT"
+        )
 
     def _agg_decode_scaling(
         self,
@@ -267,14 +295,18 @@ class LoadScalingMixin:
         )
 
         if all(t > sla for t in estimates):
-            logger.info(f"Load-based {label}: ALL above SLA, scaling up to {num_workers + 1}")
+            logger.info(
+                f"Load-based {label}: ALL above SLA, scaling up to {num_workers + 1}"
+            )
             return num_workers + 1
 
         if num_workers > 1:
             threshold = sla * sensitivity
             if all(t < threshold for t in estimates):
                 desired = max(num_workers - 1, self._config.min_endpoint)
-                logger.info(f"Load-based {label}: ALL below threshold ({threshold:.1f}ms), -> {desired}")
+                logger.info(
+                    f"Load-based {label}: ALL below threshold ({threshold:.1f}ms), -> {desired}"
+                )
                 return desired
 
         return None

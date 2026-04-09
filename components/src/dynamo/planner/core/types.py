@@ -123,5 +123,3 @@ class WorkerCapabilities:
 
     prefill: Optional[EngineCapabilities] = None
     decode: Optional[EngineCapabilities] = None
-
-

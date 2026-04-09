@@ -206,13 +206,15 @@ class TestBucketedRetirement:
         )
         for i in range(3):
             fpm = _make_fpm(
-                sum_prefill_tokens=10 + i, num_prefill_requests=1,
+                sum_prefill_tokens=10 + i,
+                num_prefill_requests=1,
                 wall_time=0.001 * (10 + i),
             )
             model.add_observation(fpm)
         for i in range(3):
             fpm = _make_fpm(
-                sum_prefill_tokens=1000 + i * 100, num_prefill_requests=1,
+                sum_prefill_tokens=1000 + i * 100,
+                num_prefill_requests=1,
                 wall_time=0.001 * (1000 + i * 100),
             )
             model.add_observation(fpm)
@@ -226,32 +228,46 @@ class TestBucketedRetirement:
             max_num_fpm_samples=10, min_observations=3, bucket_count=16
         )
         for _ in range(15):
-            fpm = _make_fpm(num_decode_requests=32, sum_decode_kv_tokens=32000, wall_time=0.01)
+            fpm = _make_fpm(
+                num_decode_requests=32, sum_decode_kv_tokens=32000, wall_time=0.01
+            )
             model.add_observation(fpm)
         assert model.num_observations == 10
-        fpm = _make_fpm(num_decode_requests=4, sum_decode_kv_tokens=4000, wall_time=0.005)
+        fpm = _make_fpm(
+            num_decode_requests=4, sum_decode_kv_tokens=4000, wall_time=0.005
+        )
         model.add_observation(fpm)
         assert model.num_observations == 10
 
     def test_2d_bucketed_retirement(self):
-        model = AggRegressionModel(max_num_fpm_samples=8, min_observations=1, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=8, min_observations=1, bucket_count=16
+        )
         for p, d in [(100, 500), (200, 1000), (300, 1500), (400, 2000)]:
             fpm = _make_fpm(
-                sum_prefill_tokens=p, num_prefill_requests=1,
-                sum_decode_kv_tokens=d, num_decode_requests=5,
+                sum_prefill_tokens=p,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=d,
+                num_decode_requests=5,
                 wall_time=0.001 * p + 0.0001 * d,
             )
             model.add_observation(fpm)
         for _ in range(4):
             fpm = _make_fpm(
-                sum_prefill_tokens=100, num_prefill_requests=1,
-                sum_decode_kv_tokens=500, num_decode_requests=5, wall_time=0.15,
+                sum_prefill_tokens=100,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=500,
+                num_decode_requests=5,
+                wall_time=0.15,
             )
             model.add_observation(fpm)
         assert model.num_observations == 8
         fpm = _make_fpm(
-            sum_prefill_tokens=350, num_prefill_requests=1,
-            sum_decode_kv_tokens=1800, num_decode_requests=5, wall_time=0.5,
+            sum_prefill_tokens=350,
+            num_prefill_requests=1,
+            sum_decode_kv_tokens=1800,
+            num_decode_requests=5,
+            wall_time=0.5,
         )
         model.add_observation(fpm)
         assert model.num_observations == 8
@@ -264,60 +280,94 @@ class TestDecodeRegressionModel:
     def _train_2d(self, model):
         for n_req, kv in [(5, 1000), (10, 2000), (15, 3000), (20, 4000), (25, 5000)]:
             fpm = _make_fpm(
-                sum_decode_kv_tokens=kv, num_decode_requests=n_req,
+                sum_decode_kv_tokens=kv,
+                num_decode_requests=n_req,
                 wall_time=0.0001 * kv + 0.0005 * n_req + 0.001,
             )
             model.add_observation(fpm)
 
     def test_insufficient_data(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=5, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
         assert not model.has_sufficient_data()
         assert model.estimate_next_itl(0, 0) is None
 
     def test_heartbeat_skipped(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         fpm = _make_fpm(wall_time=0.0, sum_decode_kv_tokens=100, num_decode_requests=1)
         model.add_observation(fpm)
         assert model.num_observations == 0
 
     def test_basic_itl_estimate(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         self._train_2d(model)
         assert model.has_sufficient_data()
         est = model.estimate_next_itl(scheduled_decode_kv=3000, queued_decode_kv=0)
         assert est is not None and est > 0
 
     def test_avg_decode_length_tracking(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         for total_kv, num_req in [(1000, 10), (2000, 10), (3000, 10)]:
-            fpm = _make_fpm(sum_decode_kv_tokens=total_kv, num_decode_requests=num_req, wall_time=0.01)
+            fpm = _make_fpm(
+                sum_decode_kv_tokens=total_kv,
+                num_decode_requests=num_req,
+                wall_time=0.01,
+            )
             model.add_observation(fpm)
         assert abs(model.avg_decode_length - 200.0) < 1.0
 
     def _train_thpt_model(self, model):
-        for n_req, kv in [(5, 5000), (10, 10000), (20, 20000), (30, 30000), (40, 40000)]:
+        for n_req, kv in [
+            (5, 5000),
+            (10, 10000),
+            (20, 20000),
+            (30, 30000),
+            (40, 40000),
+        ]:
             fpm = _make_fpm(
-                sum_decode_kv_tokens=kv, num_decode_requests=n_req,
+                sum_decode_kv_tokens=kv,
+                num_decode_requests=n_req,
                 wall_time=0.00001 * kv + 0.001,
             )
             model.add_observation(fpm)
 
     def test_find_best_engine_decode_rps(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         self._train_thpt_model(model)
-        rps, actual_itl = model.find_best_engine_decode_rps(itl=50.0, context_length=1000.0, osl=150.0)
+        rps, actual_itl = model.find_best_engine_decode_rps(
+            itl=50.0, context_length=1000.0, osl=150.0
+        )
         assert rps > 0 and actual_itl > 0 and actual_itl <= 50.0
 
     def test_find_best_engine_decode_rps_zero_context(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         self._train_2d(model)
-        rps, itl_ms = model.find_best_engine_decode_rps(itl=50.0, context_length=0.0, osl=150.0)
+        rps, itl_ms = model.find_best_engine_decode_rps(
+            itl=50.0, context_length=0.0, osl=150.0
+        )
         assert rps == 0.0 and itl_ms == 0.0
 
     def test_load_benchmark_fpms(self):
-        model = DecodeRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         fpms = [
-            _make_fpm(num_decode_requests=n, sum_decode_kv_tokens=n * 1000, wall_time=0.001 * n)
+            _make_fpm(
+                num_decode_requests=n,
+                sum_decode_kv_tokens=n * 1000,
+                wall_time=0.001 * n,
+            )
             for n in [5, 10, 15, 20, 25]
         ]
         model.load_benchmark_fpms(fpms)
@@ -331,44 +381,66 @@ class TestAggRegressionModel:
     def _train_agg(self, model):
         for p, d in [(100, 1000), (200, 2000), (300, 3000), (400, 4000), (500, 5000)]:
             fpm = _make_fpm(
-                sum_prefill_tokens=p, num_prefill_requests=1,
-                sum_decode_kv_tokens=d, num_decode_requests=10,
+                sum_prefill_tokens=p,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=d,
+                num_decode_requests=10,
                 wall_time=0.001 * p + 0.0001 * d + 0.001,
             )
             model.add_observation(fpm)
 
     def test_insufficient_data(self):
-        model = AggRegressionModel(max_num_fpm_samples=50, min_observations=5, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
         assert not model.has_sufficient_data()
         assert model.estimate_next_ttft(0, 2048, 0) is None
         assert model.estimate_next_itl(0, 0) is None
 
     def test_heartbeat_skipped(self):
-        model = AggRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         fpm = _make_fpm(wall_time=0.0, sum_prefill_tokens=100, sum_decode_kv_tokens=200)
         model.add_observation(fpm)
         assert model.num_observations == 0
 
     def test_2d_regression(self):
-        model = AggRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         self._train_agg(model)
         assert model.has_sufficient_data()
-        ttft = model.estimate_next_ttft(queued_prefill_tokens=0, max_num_batched_tokens=2048, current_decode_kv=3000)
+        ttft = model.estimate_next_ttft(
+            queued_prefill_tokens=0, max_num_batched_tokens=2048, current_decode_kv=3000
+        )
         assert ttft is not None and ttft > 0
         itl = model.estimate_next_itl(scheduled_decode_kv=3000, queued_decode_kv=0)
         assert itl is not None and itl > 0
 
     def test_find_best_engine_agg_rps(self):
-        model = AggRegressionModel(max_num_fpm_samples=50, min_observations=3, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
         self._train_agg(model)
         thpt, actual_ttft, actual_itl = model.find_best_engine_agg_rps(
-            isl=2048.0, osl=150.0, max_num_batched_tokens=4096, ttft_sla=500.0, itl_sla=50.0,
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
         )
         assert thpt > 0 and actual_ttft >= 0 and actual_itl >= 0
 
     def test_find_best_engine_agg_rps_insufficient_data(self):
-        model = AggRegressionModel(max_num_fpm_samples=50, min_observations=5, bucket_count=16)
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=5, bucket_count=16
+        )
         thpt, _, _ = model.find_best_engine_agg_rps(
-            isl=2048.0, osl=150.0, max_num_batched_tokens=4096, ttft_sla=500.0, itl_sla=50.0,
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
         )
         assert thpt == 0.0
