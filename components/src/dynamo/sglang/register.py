@@ -274,7 +274,9 @@ async def register_image_diffusion_model(
         by default. When output_modalities is provided, the ModelType is derived
         from the given modality names instead.
     """
-    model_name = getattr(server_args, "served_model_name", None) or server_args.model_path
+    model_name = (
+        getattr(server_args, "served_model_name", None) or server_args.model_path
+    )
 
     model_type = ModelType.Images
     if output_modalities:
@@ -328,7 +330,9 @@ async def register_video_generation_model(
     Note:
         Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
     """
-    model_name = getattr(server_args, "served_model_name", None) or server_args.model_path
+    model_name = (
+        getattr(server_args, "served_model_name", None) or server_args.model_path
+    )
 
     try:
         await register_model(
