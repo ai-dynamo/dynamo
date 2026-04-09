@@ -17,8 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const readyForCheckpointFileEnv = "DYN_READY_FOR_CHECKPOINT_FILE"
-
 func buildCheckpointWorkerDefaultEnv(
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	podTemplate *corev1.PodTemplateSpec,
@@ -80,7 +78,7 @@ func buildCheckpointJob(
 		)
 		dynamo.AddStandardEnvVars(mainContainer, config)
 		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-			Name:  readyForCheckpointFileEnv,
+			Name:  consts.EnvReadyForCheckpointFile,
 			Value: config.Checkpoint.ReadyForCheckpointFilePath,
 		})
 		mainContainer.ReadinessProbe = &corev1.Probe{
