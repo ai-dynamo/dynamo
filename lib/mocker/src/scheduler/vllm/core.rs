@@ -433,7 +433,7 @@ impl VllmCore {
         let mut sum_prefill_tokens: u64 = 0;
         let mut sum_prefill_kv_tokens: u64 = 0;
 
-        for (_uuid, work) in scheduled {
+        for work in scheduled.values() {
             if work.prompt_tokens > 0 {
                 // Prefill request: prompt_tokens > 0 means new prompt tokens were computed.
                 sum_prefill_tokens += work.total_tokens as u64;
@@ -459,8 +459,8 @@ impl VllmCore {
             match request.status {
                 RequestStatus::Preempted => {
                     // Preempted decode: was running but got evicted.
-                    let kv_tokens = request.sequence.num_input_tokens()
-                        + request.sequence.generated_tokens();
+                    let kv_tokens =
+                        request.sequence.num_input_tokens() + request.sequence.generated_tokens();
                     queued_decode_acc.add(kv_tokens as f64);
                 }
                 RequestStatus::Waiting => {

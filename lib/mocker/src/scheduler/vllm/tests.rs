@@ -577,8 +577,14 @@ mod live_scheduler {
             .build()
             .unwrap();
 
-        let scheduler =
-            Scheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None, None);
+        let scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            None,
+        );
 
         crate::scheduler::test_utils::assert_scheduler_completes_all(
             &scheduler,
@@ -608,8 +614,14 @@ mod live_scheduler {
             .build()
             .unwrap();
 
-        let scheduler =
-            Scheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None, None);
+        let scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            None,
+        );
         let identical_tokens: Vec<u32> = (0..token_length).collect();
 
         for _ in 0..num_requests {
@@ -660,8 +672,14 @@ mod live_scheduler {
             .build()
             .unwrap();
 
-        let scheduler =
-            Scheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None, None);
+        let scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            None,
+        );
         scheduler.receive(DirectRequest {
             tokens: (0..256).collect(),
             max_output_tokens: 200,
