@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# DEPRECATED: This module is part of the legacy test framework.
+# New tests should use the event-based framework in test_deployment_scenario.py.
+# See tests/fault_tolerance/deploy/TESTING.md for the reference guide.
+
 import asyncio
 import logging
 import multiprocessing

@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# DEPRECATED: This module is part of the legacy test framework.
+# New tests should use the event-based framework in test_deployment_scenario.py.
+# See tests/fault_tolerance/deploy/TESTING.md for the reference guide.
+
 """Legacy custom client implementation for fault tolerance testing.
 
 This is the original client implementation that was used before migrating to AI-Perf.
