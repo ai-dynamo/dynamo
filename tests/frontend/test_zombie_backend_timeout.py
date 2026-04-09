@@ -196,7 +196,7 @@ def _drain_sse_stream(resp):
         if not line:
             continue
         if line.startswith("data: "):
-            payload = line[len("data: "):]
+            payload = line[len("data: ") :]
             if payload == "[DONE]":
                 saw_done = True
                 break
